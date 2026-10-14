@@ -38,7 +38,6 @@ from starlette.websockets import WebSocketClose
 from harness import __version__
 from harness.agents import build_tool_surface
 from harness.combined_mcp import build_combined_mcp, children_start_once, combined_http_app
-from harness.direct_recipes import DirectRecipes
 from harness.generative import GeminiEdit
 from harness.graph.state import AGENT_NAME
 from harness.graph.workflow import create_root_workflow
@@ -57,7 +56,12 @@ from harness.settings import (
     Settings,
 )
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import StudioStore, make_recall_part, make_remove_cards
+from harness.studio_state import (
+    StudioStore,
+    make_canvas_series,
+    make_recall_part,
+    make_remove_cards,
+)
 from harness.wiring import build_planner, handing_back_planner_failures
 
 logger = logging.getLogger(__name__)
@@ -429,8 +433,7 @@ def create_app(
     def create_workflow(recorder: Any, surface_recorder: Any) -> Any:
         # Runs are kept in the conversation's ledger session, and a run
         # completes once its derived results are published with their
-        # replay recipes. The `execute` node and the orchestrator's direct
-        # recipes run on the one ledger.
+        # replay recipes.
         run_ledger = StudioRunLedger(store)
         # The orchestrator's tools run through the same recorder and
         # recording surface as the `execute` node, so their steps and cards
@@ -446,15 +449,8 @@ def create_app(
                 dfo_faq_surface=tool_surface,
                 definition_surface=tool_surface,
                 recall_part=make_recall_part(store),
+                canvas_series=make_canvas_series(store),
                 remove_cards=make_remove_cards(store),
-                direct=DirectRecipes(
-                    recipes=tuple(resolved_settings.orchestrator_direct_recipes),
-                    run_ledger=run_ledger,
-                    publisher=executor.publish_result,
-                    tool_surface=surface_recorder,
-                    translation_surface=tool_surface,
-                    max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
-                ),
             ),
         )
         return create_root_workflow(

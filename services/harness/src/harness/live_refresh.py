@@ -71,6 +71,7 @@ from common.row_budget import RowBudget
 from common.telemetry import EventLevel, use_request_span
 from compiler.surface import McpSurface, ToolSurfaceUnavailableError
 from data_mcp.deadline import CallDeadline
+from data_mcp.tool_errors import ToolErrorCode
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from fastmcp.server.middleware.rate_limiting import TokenBucketRateLimiter
@@ -119,7 +120,6 @@ HARD_STOP_GRACE_S: Final = LIVE_REFRESH_HARD_STOP_GRACE_S
 # a second or two. One that replays runs for up to the deadline.
 IN_FLIGHT_RETRY_AFTER_S: Final = 2.0
 
-_UPSTREAM_VERSION_CHANGED = "upstream_version_changed"
 _DATASET_PREFIX, _DERIVED_PREFIX = "spec_", "ops_"
 
 
@@ -532,7 +532,10 @@ class LiveRefresh:
                 row_budget=self.row_budget,
                 populations=populations,
             )
-            if not (isinstance(outcome, Refused) and outcome.code == _UPSTREAM_VERSION_CHANGED):
+            if not (
+                isinstance(outcome, Refused)
+                and outcome.code == ToolErrorCode.UPSTREAM_VERSION_CHANGED
+            ):
                 return outcome
         return Pending(retry_after_s=BUSY_RETRY_AFTER_S, reason="busy")
 

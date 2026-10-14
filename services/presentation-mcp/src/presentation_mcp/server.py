@@ -23,8 +23,8 @@ level of `structuredContent` when that is the model vocabulary, and never in
 `_meta` or a Prefab shell. The server never asks who is calling.
 The assembler validates intents and answers with typed refusals.
 The server owns two behaviours of its own: the safety net, which turns an
-unexpected exception into an `internal_error` refusal naming the trace id
-it was logged under instead of a raw error, and the startup wiring, which
+unexpected exception into an `internal_error` refusal instead of a raw
+error, logged under the trace id, and the startup wiring, which
 fetches the platform's release, admits it, and mounts the tools before the
 server answers a request. A platform that cannot be reached is retried
 until a deadline, and startup fails past it, or at once when the release
@@ -342,15 +342,13 @@ async def _component_reply(
             meta={**meta, VIEW_STATE_META_KEY: view_state(envelope)},
         )
     except Exception:
-        trace_id = log_unexpected_error(
+        log_unexpected_error(
             logger, f"presentation-mcp rendering the resolved revision of {component_id}"
         )
         return _write_result(
             payload,
             write_token=write_token,
-            view=_notice(
-                app, f"This revision of the component could not be drawn (trace id {trace_id})."
-            ),
+            view=_notice(app, "This revision of the component could not be drawn."),
             meta=meta,
         )
 
@@ -431,15 +429,15 @@ def _payload(reply: Mapping[str, Any] | WriteReply | Refusal) -> dict[str, Any]:
 
 async def _safely(call: Awaitable[Any]) -> Any:
     """The safety net: an unexpected exception leaves as an `internal_error`
-    refusal that names the trace id it was logged under and none of its text."""
+    refusal that carries none of its text; the exception is logged."""
     try:
         return await call
     except Exception:
-        trace_id = log_unexpected_error(logger, "presentation-mcp assembler call")
+        log_unexpected_error(logger, "presentation-mcp assembler call")
         return Refusal(
             error="internal_error",
             retry=RetryMode.DO_NOT_RETRY,
-            detail=internal_error_message(subject="This call", trace_id=trace_id),
+            detail=internal_error_message(subject="This call"),
         )
 
 
@@ -471,6 +469,8 @@ async def write_component(
     Passing component_id and write_token, which the component's create
     returned, edits that component from intent as a patch holding only the
     changed fields.
+    An edit adds a revision. Earlier revisions stay stored, and
+    describe_component reads one by its number.
 
     The reply's fact_summary.change populates only for a stat_card whose
     intent authors a change object with a basis. line_chart, bar_chart,
@@ -525,6 +525,9 @@ async def describe_frame(
     frame_ref is the spec_id and content_version pair a data tool's reply
     returned. Any caller holding a frame_ref can use it, whichever caller
     minted it.
+
+    Use it before write_component, to see a frame's dimensions and values and
+    choose what to chart.
     """
     reply = await _safely(
         get_assembler().get_frame_view(frame_ref=frame_ref, dimension=dimension, query=query)

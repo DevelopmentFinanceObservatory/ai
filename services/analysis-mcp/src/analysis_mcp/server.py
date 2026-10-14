@@ -82,7 +82,7 @@ def _with_internal_error_backstop(
     becomes an `internal_error` refusal rather than escaping raw. The broad
     `except` is the point: it catches what the typed handling could not
     enumerate in advance. The exception is logged under a trace id, and the
-    refusal names that id and none of the exception's text.
+    refusal carries none of the exception's text.
 
     `functools.wraps` sets the `__wrapped__` attribute that
     `inspect.signature` follows by default, and that signature is what
@@ -96,8 +96,8 @@ def _with_internal_error_backstop(
         try:
             return await fn(*args, **kwargs)
         except Exception:
-            trace_id = log_unexpected_error(logger, f"analysis-mcp tool {wire_name}")
-            return to_tool_result(ToolRefusal.internal_error(tool=wire_name, trace_id=trace_id))
+            log_unexpected_error(logger, f"analysis-mcp tool {wire_name}")
+            return to_tool_result(ToolRefusal.internal_error(tool=wire_name))
 
     return wrapper
 

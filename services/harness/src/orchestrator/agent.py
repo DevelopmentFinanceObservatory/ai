@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -12,8 +12,6 @@ from google.adk.models.google_llm import Gemini
 from google.adk.models.llm_request import LlmRequest
 from google.adk.tools import FunctionTool
 from google.genai import types
-from harness.direct_recipes import TOOL_NAME as DIRECT_TOOL
-from harness.direct_recipes import acknowledge_deliveries
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
@@ -40,7 +38,7 @@ _DIGESTS = (
     ("conversation_digest", "Earlier turns in this conversation"),
 )
 
-_ROUTE_INSTRUCTION = """\
+INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
 chat and canvas. You answer questions about development, development finance
 and the open data DFO holds, from what your tools return. Decline any other
@@ -69,13 +67,6 @@ something precise, search for exactly that. When the question is broad or
 underspecified, search for a few likely measures to see what DFO holds. When
 it names no period, search for the latest period, which answers faster than
 every year.
-
-When the user names no period, choose the most recent year in a part's
-recent_years that appears to have complete data. A more recent year might
-have far fewer series so far. Fetch the chosen year with scope window set to
-it, or give it to the planner as a fixed year you chose. When it is not the
-newest year, say first how many series the newest year has so far, then
-answer for the year shown with its count.
 
 When the turn opens with datasets the user brought from Search, they are the
 search result for the parts they cover. Fetch them, and search only for a
@@ -164,9 +155,10 @@ part the question needs, so the answer covers everything asked.
 
 When the answer has to be constructed from the data, it needs a calculation:
 a share, ratio or per-person figure, growth or a drop over a period, a
-ranking or comparison across many places, the largest series in a frame, a
-count of places meeting a condition, or a sum across donors, sectors or
-years. Call plan for it.
+ranking or comparison across many places, a count of places meeting a
+condition, or a sum across donors, sectors or years. Call plan for it. A
+question about the largest, the most or the top is a ranking, so it goes to
+plan.
 
 Do not compute a figure yourself, in the answer or on the way to it. That
 rules out sums, differences, averages, shares or counts of values a tool
@@ -175,9 +167,6 @@ figure the user asked for only when a tool result states it. A figure only a
 calculation gives has to come from one, and when none produced it, say it
 was not calculated.
 
-"""
-
-_ANSWER_INSTRUCTION = """\
 A refusal coded capability_unavailable, from a fetch or a plan step, means
 the platform cannot do what that part of the question needs, so the part is
 unavailable. The same data fetched without the refused option, or a chart of
@@ -236,32 +225,36 @@ Then answer briefly from the tool results alone. Open with what the data
 shows in answer to the question, in a sentence the tool results support, or
 with what kept it from being answered.
 
-A card's facts give each series' first and last value with the period of
-each (first_period, last_period) and its point count, nothing else. A series
-with gaps starts or ends inside the card's window, so date a value by its
-own period and not by the window, and leave a value without one undated. The
-facts say nothing of the periods between. Compare series only at those two
-values, and claim nothing of the years between that no tool result states.
+When a fetch result carries a period_note, or a plan's result lists one
+among its totals, say it in a clause, and describe a ranking as among the
+members with data for the year served.
 
-The user sees the cards make_charts drew beside your reply, so do not
-restate a card's title, say that it exists, or repeat every value it shows.
-What the reply states of a series follows what the user asked of it: asked
-for a value, give that value with its period and no other value of the
-series; asked how it changed, grew or fell, or to show or see it over a
-named span ("since 2000", "over the past decade", "the last 20 years"), give
-its first and last values with their periods, which are the answer; asked
-only to show it, with no span named, say what it covers, the measure, places
-and years, and give at most its latest value. When the answer covers more
-than three series, say what the chart holds and state no series' value,
-range or highlight, and never pick series to name by comparing their values.
+A card's fact summary, as recall and the digest's focus card give it, holds
+each series' first and last value with the period of each (first_period,
+last_period) and its point count, nothing else. A series with gaps starts
+or ends inside the card's window, so date a value by its own period and not
+by the window, and leave a value without one undated. The facts say nothing
+of the periods between. Compare series only at those two values, and claim
+nothing of the years between that no tool result states.
+
+The user sees the cards make_charts drew beside your reply, so of a drawn
+card state only the values its reply_figures list, each with its period.
+Name in state_values_for only a series whose value the user asked to be
+told, with state_span when they asked how it changed and state_period when
+they asked for one earlier period. When a card's reply_figures are empty,
+say what the card holds, its measure, places and years, and state no value.
+Close with one
+conclusion drawn from holds, such as which series is largest or how many
+rose, and compute nothing yourself.
+
 The reply also holds any answer whose card was not drawn, and a computed
 result that answers the user's ask, such as a share the plan computed, even
-when its card is drawn. For that result, state its last value and period
-from the card's facts, which already hold them, and do not add an ask to the
-plan for a latest figure. Add no other values, apart from those figures and
-the first and last values of a loose match. Prefer prose, and use a list
-only when the user asked for one that no drawn card holds. After a plan,
-answer every ask its result lists.
+when its card is drawn. For that result, state the value its card's
+reply_figures give, and do not add an ask to the plan for a latest figure.
+Add no other values, apart from those figures and the first and last values
+of a loose match. Prefer prose, and use a list only when the user asked for
+one that no drawn card holds. After a plan, answer every ask its result
+lists.
 
 Name each source once, with the measure the search result or plan record
 gives it, and not a narrower one the user asked for. When the user asked for
@@ -293,36 +286,6 @@ tool result states no reason, give none. Say which years the data covers
 only as a search result or the plan record states them, and state a period
 the plan chose as a choice made, with its reason.
 """
-
-# The paragraph `submit_analysis` (`harness.direct_recipes`) adds after the
-# routing paragraphs, when the orchestrator has it.
-_DIRECT_INSTRUCTION = """\
-One calculation can run without a plan. submit_analysis with recipe "growth"
-computes the growth of one series between two years. Use it in place of plan
-when all three hold: a search in this conversation settled on the series (a
-definite part, or a candidate you fetched), the user named both years, and
-their words settle whether the change is relative (per cent) or absolute.
-Otherwise call plan, and call plan whenever the user or a skill you loaded
-asks for a plan or recommends one. submit_analysis and plan share one use
-per turn.
-
-On needs_fields, correct the values from the conversation and call again. On
-needs_decision, ask the user. On requires_planning, call plan with the
-question unless the reason says this turn's use is spent. On completed,
-chart its frames and answer as after a plan. On pending or failed, state
-none of its figures.
-
-"""
-
-INSTRUCTION = _ROUTE_INSTRUCTION + _ANSWER_INSTRUCTION
-
-
-def instruction_for(tool_names: Collection[str]) -> str:
-    """The system instruction for an orchestrator holding `tool_names`:
-    `INSTRUCTION`, with the direct recipes' paragraph when it holds their tool."""
-    if DIRECT_TOOL not in tool_names:
-        return INSTRUCTION
-    return _ROUTE_INSTRUCTION + _DIRECT_INSTRUCTION + _ANSWER_INSTRUCTION
 
 
 def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) -> None:
@@ -394,17 +357,15 @@ def create_orchestrator_agent(
     thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL,
 ) -> LlmAgent:
     """Build the orchestrator on `model_name` with `tools`, reading its
-    static prefix from `prefix_cache` when one is given. Its instruction
-    describes the direct recipes when `tools` holds their tool
-    (`instruction_for`). `today` is the clock whose UTC date opens each
-    request's contents. `thinking_level` caps the
+    static prefix from `prefix_cache` when one is given. `today` is the clock
+    whose UTC date opens each request's contents. `thinking_level` caps the
     model's reasoning effort. A tool that raises answers the model with an
     error (`answering_tool_failures`) and the turn goes on."""
     agent_tools = [FunctionTool(tool) for tool in tools]
     return LlmAgent(
         name=AGENT_NAME,
         model=_retrying(model_name, prefix_cache=prefix_cache),
-        instruction=instruction_for({tool.name for tool in agent_tools}),
+        instruction=INSTRUCTION,
         before_agent_callback=_stamp_today(today),
         tools=agent_tools,
         on_tool_error_callback=answering_tool_failures({tool.name for tool in agent_tools}),
@@ -414,10 +375,7 @@ def create_orchestrator_agent(
         # agent on its own branch, so "default" is the turn so far without
         # the planner's internal events.
         include_contents="default",
-        # A `submit_analysis` answer is in the session once the agent moves
-        # on from it, so its run's delivery is acknowledged then.
-        before_model_callback=[prepend_digests, acknowledge_deliveries],
-        after_agent_callback=acknowledge_deliveries,
+        before_model_callback=prepend_digests,
         # Thought summaries are requested for the traces. The studio stream
         # does not carry them.
         generate_content_config=types.GenerateContentConfig(

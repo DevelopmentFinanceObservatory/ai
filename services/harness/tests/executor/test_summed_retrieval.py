@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from compiler.sources import member_digest
 from compiler.surface import ToolSchema
-from executor.classify import FAMILY_NOT_SUMMED, Disposition, classify_refusal
+from executor.classify import Disposition, ExecutorCode, classify_refusal
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
 from planner.plan import Plan
@@ -94,7 +94,7 @@ async def test_a_summed_retrieval_declaring_several_stat_vars_is_refused(
     # The same plan draws the same unsummed frame, so the payload classifies
     # as a stop and words the refusal for the user.
     assert outcome.payload is not None
-    assert outcome.payload.code == FAMILY_NOT_SUMMED
+    assert outcome.payload.code == ExecutorCode.FAMILY_NOT_SUMMED
     assert classify_refusal(outcome.payload) is Disposition.STOP
     assert "did not add them up" in outcome.payload.message
     assert outcome.payload.fix["remedy"] not in outcome.payload.message

@@ -6,11 +6,10 @@ from google.genai import types
 from planner.settings import (
     AGENT_THINKING_CONFIG,
     AgentSettings,
-    SchemaDelivery,
     drop_thought_parts,
 )
 
-_FIELDS = ("PLANNER_MODEL_NAME", "PLANNER_SCHEMA_DELIVERY")
+_FIELDS = ("PLANNER_MODEL_NAME",)
 
 
 @pytest.fixture(autouse=True)
@@ -30,14 +29,6 @@ def test_reads_from_env(monkeypatch) -> None:
     monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-3.1-pro-preview")
 
     assert AgentSettings().planner_model_name == "gemini-3.1-pro-preview"
-
-
-def test_schema_delivery_is_eager_unless_the_environment_says_compact(monkeypatch) -> None:
-    assert AgentSettings().planner_schema_delivery is SchemaDelivery.EAGER
-
-    monkeypatch.setenv("PLANNER_SCHEMA_DELIVERY", "compact")
-
-    assert AgentSettings().planner_schema_delivery is SchemaDelivery.COMPACT
 
 
 def test_agent_thinking_config_is_low_with_thoughts_on() -> None:

@@ -21,9 +21,8 @@ from compiler.compile import compile_plan
 from compiler.rolling import RollingBound
 from compiler.surface import ToolCallResult, ToolSchema, ToolSurfaceUnavailableError
 from executor.classify import (
-    INTERNAL_ERROR,
-    ROLLING_WINDOW_OUTSIDE_DATASET,
     Disposition,
+    ExecutorCode,
     classify_refusal,
 )
 from executor.outcomes import (
@@ -384,6 +383,7 @@ async def test_a_fixed_plan_resolves_no_period_and_its_records_are_unchanged(
             "role_keys",
             "stat_var_count",
             "dropped_key_count",
+            "ranked_before_limit",
         }
 
 
@@ -574,7 +574,7 @@ async def test_a_refusal_of_the_runs_own_newest_period_is_an_internal_error(
     assert outcome.refusal is RefusalKind.STEP_REFUSED
     assert outcome.step_id == ("newest" if tool == "filter" else "change")
     assert outcome.payload is not None
-    assert outcome.payload.code == INTERNAL_ERROR
+    assert outcome.payload.code == ExecutorCode.INTERNAL_ERROR
     assert classify_refusal(outcome.payload) is Disposition.STOP
     assert served.message not in outcome.payload.message
     refused = outcome.payload.fix["refusal"]
@@ -598,7 +598,7 @@ async def test_a_rolled_start_before_the_datasets_first_year_is_refused_before_t
     assert outcome.requirement_id == "annual_debt_service"
     assert not _calls(surface, "growth")
     assert outcome.payload is not None
-    assert outcome.payload.code == ROLLING_WINDOW_OUTSIDE_DATASET
+    assert outcome.payload.code == ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET
     assert classify_refusal(outcome.payload) is Disposition.STOP
     assert outcome.payload.fix == {
         "remedy": outcome.payload.fix["remedy"],

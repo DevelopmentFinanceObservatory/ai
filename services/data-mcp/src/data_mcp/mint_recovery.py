@@ -26,14 +26,20 @@ Recoverable:
   the version records one. A frame registered before `frame_ref_for` named a
   groupby is held under the summed version's own pair, and one registered since
   under the pair that names it; both are recovered.
+- `options.without_party_totals` of a frame without the group totals of its open
+  party roles. dfo-apis mints such a frame a version of its own, with the version it
+  was cut from as `base_content_version`, and its versions route says so beside any
+  `groupby` (`DatasetVersion.without_party_totals`). A cut that left nothing out
+  shares its base's version, which lists as plain, and is recovered without the
+  option, which names the same rows while no total is left out.
 - `scope`, as empty: the dataset's `spec_id` is the identity after any scope was
   applied, so minting it with no scope names the same dataset.
 - `stat_var_count`, read off the frame the store holds under the pair.
 
 Not recoverable:
 
-- A summed frame whose `groupby` dfo-apis recorded on no stored file. Its version
-  lists as `not_recorded`, and it fails with `groupby_unrecorded`.
+- A summed or cut frame whose options dfo-apis recorded on no stored file. Its
+  version lists as `not_recorded`, and it fails with `groupby_unrecorded`.
 - Whether a frame under an unsummed version was a `groupby` sum. dfo-apis serves a
   sum over a dataset one StatVar contributes to under the unsummed
   `content_version`, so a frame there holding one StatVar may have been minted
@@ -73,6 +79,7 @@ from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
     KIND_COLUMNS,
     TYPE_COLUMN_SELECTIONS,
+    WITHOUT_PARTY_TOTALS,
     frame_ref_for,
     observed_shape,
 )
@@ -88,9 +95,10 @@ __all__ = [
 class DatasetVersion(Protocol):
     """One stored version of a dataset, as dfo-apis'
     `GET /api/datasets/{spec_id}/versions` lists it. `base_content_version` is set on
-    a version summed from another by a `groupby`, and `groupby` is that mint's
-    `options.groupby` when dfo-apis recorded it. `common.live_apis.DatasetVersion`
-    is one."""
+    a version summed from another by a `groupby` or cut from it by
+    `without_party_totals`. `groupby` is that mint's `options.groupby` when dfo-apis
+    recorded it, and `without_party_totals` is true when dfo-apis recorded the cut.
+    `common.live_apis.DatasetVersion` is one."""
 
     @property
     def content_version(self) -> str: ...
@@ -100,6 +108,9 @@ class DatasetVersion(Protocol):
 
     @property
     def groupby(self) -> Mapping[str, Any] | None: ...
+
+    @property
+    def without_party_totals(self) -> bool: ...
 
 
 class DatasetVersions(Protocol):
@@ -142,8 +153,8 @@ async def recover_mint_record(
     Raises:
         MintRecordUnrecoverableError: With `reason` `no_version_matches` when no stored
             version reproduces `ref` under any recoverable column selection,
-            `groupby_unrecorded` when the matching version is a `groupby` sum whose
-            `groupby` dfo-apis did not record, and `frame_not_held` when the matching
+            `groupby_unrecorded` when the matching version is a `groupby` sum or a
+            party-totals cut whose options dfo-apis did not record, and `frame_not_held` when the matching
             version is unsummed and `store` no longer holds the frame.
     """
     versions = await dataset_versions(spec_id=ref.spec_id)
@@ -160,9 +171,12 @@ async def recover_mint_record(
                 continue
             options: dict[str, Any] = dict(DEFAULT_MINT_OPTIONS)
             if version.base_content_version is not None:
-                if version.groupby is None:
+                if version.groupby is None and not version.without_party_totals:
                     raise MintRecordUnrecoverableError(ref, reason="groupby_unrecorded")
-                options["groupby"] = dict(version.groupby)
+                if version.groupby is not None:
+                    options["groupby"] = dict(version.groupby)
+                if version.without_party_totals:
+                    options[WITHOUT_PARTY_TOTALS] = True
             if columns:
                 options["columns"] = list(columns)
             stat_var_count = await _held_stat_var_count(store, ref)

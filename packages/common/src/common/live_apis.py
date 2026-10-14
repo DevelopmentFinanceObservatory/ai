@@ -119,22 +119,27 @@ class RecipeWritten:
 
 
 # How a stored version was rendered: `plain` for a raw version, `groupby` for a
-# collapse whose `groupby` dfo-apis recorded, `not_recorded` for a collapse it
-# recorded none for.
-VersionRendering = Literal["plain", "groupby", "not_recorded"]
+# collapse whose `groupby` dfo-apis recorded, `without_party_totals` for a frame cut of
+# the group totals of its open party roles and not summed, `not_recorded` for a derived
+# version whose options dfo-apis recorded none of.
+VersionRendering = Literal["plain", "groupby", "without_party_totals", "not_recorded"]
 
 
 @dataclass(frozen=True)
 class DatasetVersion:
     """One stored version of a dataset. `base_content_version` names the raw
-    version a collapsed (groupby) version was built from, else `None`.
-    `groupby` is the mint request's `options.groupby` that made the collapse,
-    set exactly when `rendering` is `groupby`."""
+    version a derived version (a groupby collapse, a party-totals cut, or both) was
+    built from, else `None`. `groupby` is the mint request's `options.groupby` that
+    made the collapse, set exactly when `rendering` is `groupby`.
+    `without_party_totals` is true when the version's frame leaves out the group totals
+    of its open party roles: on every `without_party_totals` rendering, and on a
+    `groupby` one that summed such a frame."""
 
     content_version: str
     base_content_version: str | None
     rendering: VersionRendering
     groupby: Mapping[str, Any] | None
+    without_party_totals: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,16 +261,25 @@ def _frame_pair(value: object) -> FramePair | None:
 
 def _dataset_version(item: dict[str, Any]) -> DatasetVersion | None:
     """One entry of the versions answer, or `None` when it is outside the contract:
-    no `content_version`, a `rendering` that is none of the three, or a `groupby`
-    present on anything but a `groupby` rendering."""
+    no `content_version`, a `rendering` that is none of the four, a `groupby` present on
+    anything but a `groupby` rendering, or a `without_party_totals` that is not a
+    boolean. dfo-apis leaves a false `without_party_totals` out, and a
+    `without_party_totals` rendering implies it."""
     content_version = _text(item.get("content_version"))
     base_content_version = _text(item.get("base_content_version"))
     groupby = item.get("groupby")
-    if content_version is None:
+    without_party_totals = item.get("without_party_totals", False)
+    if content_version is None or not isinstance(without_party_totals, bool):
         return None
     match item.get("rendering"):
         case "groupby" if isinstance(groupby, dict):
-            return DatasetVersion(content_version, base_content_version, "groupby", groupby)
+            return DatasetVersion(
+                content_version, base_content_version, "groupby", groupby, without_party_totals
+            )
+        case "without_party_totals" if groupby is None:
+            return DatasetVersion(
+                content_version, base_content_version, "without_party_totals", None, True
+            )
         case "plain" if groupby is None:
             return DatasetVersion(content_version, base_content_version, "plain", None)
         case "not_recorded" if groupby is None:

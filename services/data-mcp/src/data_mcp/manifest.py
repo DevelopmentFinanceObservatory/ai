@@ -20,7 +20,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 # The templated URI a caller reads to get the download link for one
 # artifact. The constant `artifact` host segment is deliberate: `AnyUrl`
@@ -50,6 +59,15 @@ def artifact_resource_uri(*, subject_id: str, content_version: str, artifact_dig
 _UNSEEN_FIELDS_ARE_DROPPED = ConfigDict(extra="ignore")
 
 
+class RoleNoun(BaseModel):
+    """What dfo-apis calls the members of a role, for the frame's kind of
+    flow: a provider and providers of aid, a creditor and creditors of debt."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    singular: str = Field(min_length=1)
+    plural: str = Field(min_length=1)
+
+
 class CoverageDimension(BaseModel):
     """One counted dimension of a mint: a declared role column, or `years`.
 
@@ -58,19 +76,61 @@ class CoverageDimension(BaseModel):
     axis covers (`observationAbout`), and from a dfo-apis that predates the
     field. A plain string, so an axis this service has not seen still
     parses.
+
+    `noun` is what dfo-apis calls the role's members
+    (`common.period_note` counts them by it). It is absent for `years`, for a
+    role dfo-apis words no noun for, and from a dfo-apis that predates the
+    field; a noun of any other shape reads as absent, so it fails no
+    retrieval.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
     label: str
     count: int
     axis: str | None = None
+    noun: RoleNoun | None = None
+
+    @field_validator("noun", mode="wrap")
+    @classmethod
+    def _noun_or_absent(cls, noun: object, handler: ValidatorFunctionWrapHandler) -> object:
+        try:
+            return handler(noun)
+        except ValidationError:
+            return None
+
+
+class YearCoverage(BaseModel):
+    """What one calendar year holds of a mint's admitted slice: its series,
+    and the distinct members of each role those series carry."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    year: int
+    series: int
+    role_counts: dict[str, int] = Field(default_factory=dict)
+
+
+def _is_none(value: object) -> bool:
+    return value is None
 
 
 class CoverageModel(BaseModel):
+    """What a mint served: its rows, counted dimensions and window.
+
+    `recent_years` holds three calendar years, newest first, `elected_year`
+    the year dfo-apis' election chooses among them, and `fullest_year` the
+    fullest of the last ten. dfo-apis sends each only for a frame of one
+    year, and `fullest_year` only when it judges the served year thin beside
+    it. An absent one stays out of a dump, so a manifest without them
+    serialises as it arrived.
+    """
+
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
     rows: int
     dimensions: list[CoverageDimension]
     window: dict[str, object] | None = None
+    recent_years: list[YearCoverage] | None = Field(default=None, exclude_if=_is_none)
+    elected_year: int | None = Field(default=None, exclude_if=_is_none)
+    fullest_year: YearCoverage | None = Field(default=None, exclude_if=_is_none)
 
 
 class CitationSource(BaseModel):
@@ -164,6 +224,32 @@ class DefinitionModel(BaseModel):
     schema_version: int
     spec_id: str
     identity: Mapping[str, object]
+
+
+class PartyTotalsLeftOut(BaseModel):
+    """One party role whose group totals dfo-apis left out of a frame minted with
+    `options.without_party_totals`, and the refs of those totals in ref order: one entry
+    of the manifest's `trace.party_totals_left_out` (`party_totals_left_out`)."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    role: str
+    entities: list[str]
+
+
+# The trace member dfo-apis lists a cut frame's left-out totals under, present only when
+# the cut left some out (`datasets_api.party_totals.TRACE_KEY`).
+PARTY_TOTALS_LEFT_OUT_KEY = "party_totals_left_out"
+_PARTY_TOTALS_LEFT_OUT = TypeAdapter(list[PartyTotalsLeftOut])
+
+
+def party_totals_left_out(trace: Mapping[str, object]) -> list[PartyTotalsLeftOut]:
+    """The group totals a manifest's `trace` says dfo-apis left out of its frame, one entry
+    per party role in role order, and none for a frame that left none out.
+
+    Raises:
+        pydantic.ValidationError: When the trace lists them in another shape.
+    """
+    return _PARTY_TOTALS_LEFT_OUT.validate_python(trace.get(PARTY_TOTALS_LEFT_OUT_KEY) or [])
 
 
 class Manifest(BaseModel):

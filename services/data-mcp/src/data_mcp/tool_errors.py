@@ -38,6 +38,7 @@ body carries neither as a structural field.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -48,6 +49,8 @@ from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from fastmcp.tools import ToolResult
 
 from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
+
+logger = logging.getLogger(__name__)
 
 
 class RetryMode(StrEnum):
@@ -191,6 +194,7 @@ class ToolRefusal:
     fix: dict[str, Any]
     upstream_code: str | None = None
     retry_after_s: float | None = None
+    # `to_tool_result` logs it and leaves it out of the result.
     trace_id: str | None = None
     capability_version: str | None = None
 
@@ -1086,12 +1090,20 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
     `content` is `common.refusal.refusal_text`: `refusal.message`, then a blank
     line, then `code`, `retry_mode`, `fix` and `retry_after_s` when set as one
     line of compact JSON, so a client that renders only `content` still sees
-    them. `upstream_code`, `trace_id` and `capability_version` stay in
-    `structured_content` alone: they serve a human or a log line reading the
-    raw payload, not a model deciding whether and how to retry.
+    them. `upstream_code` and `capability_version` stay in `structured_content`
+    alone: they serve a human or a log line reading the raw payload, not a
+    model deciding whether and how to retry. `trace_id`, the upstream's own
+    trace id for the refused call, is logged and left out of the result.
 
     `meta` is `common.refusal.refusal_meta` of `code` and `upstream_code`.
     """
+    if refusal.trace_id:
+        logger.warning(
+            "tool refused code=%s upstream_code=%s upstream_trace_id=%s",
+            refusal.code.value,
+            refusal.upstream_code,
+            refusal.trace_id,
+        )
     return ToolResult(
         content=refusal_text(
             message=refusal.message,
@@ -1113,7 +1125,6 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
             "fix": refusal.fix,
             "upstream_code": refusal.upstream_code,
             "retry_after_s": refusal.retry_after_s,
-            "trace_id": refusal.trace_id,
             "capability_version": refusal.capability_version,
         },
         meta=refusal_meta(code=refusal.code.value, upstream_code=refusal.upstream_code),

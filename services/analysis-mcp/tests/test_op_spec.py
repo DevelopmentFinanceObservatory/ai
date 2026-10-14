@@ -332,6 +332,22 @@ def test_rank_year_window_refuses_non_ascii_digits(field: str) -> None:
         RankOpSpec(**kwargs)
 
 
+def test_rank_window_accepts_one_year_and_refuses_a_reversed_pair() -> None:
+    one_year = RankOpSpec(
+        frame_ref=SNAPSHOT_REF, rank_by=["reporter"], window_start="2020", window_end="2020"
+    )
+    assert one_year.window_end == "2020"
+    with pytest.raises(ValidationError, match="must not be earlier"):
+        RankOpSpec(
+            frame_ref=SNAPSHOT_REF, rank_by=["reporter"], window_start="2021", window_end="2020"
+        )
+
+
+def test_growth_window_refuses_one_year() -> None:
+    with pytest.raises(ValidationError):
+        GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start="2020", window_end="2020")
+
+
 def test_growth_change_defaults_to_relative() -> None:
     op_spec = GrowthOpSpec(frame_ref=SNAPSHOT_REF, window_start="2020", window_end="2023")
     assert op_spec.change == "relative"
@@ -573,18 +589,18 @@ def test_a_rolling_bound_on_a_rank_without_a_window_is_refused() -> None:
         _rank(rolling=_rolling(window_end=LATEST))
 
 
-@pytest.mark.parametrize(
-    "fields",
-    [
-        {"window_start": "2024", "window_end": "2019"},
-        {"window_start": "2024", "window_end": "2024"},
-    ],
-)
-def test_the_ordering_rule_still_reads_a_rolling_windows_literals(fields: dict[str, str]) -> None:
+def test_the_ordering_rule_still_reads_a_rolling_windows_literals() -> None:
+    fields = {"window_start": "2024", "window_end": "2019"}
     with pytest.raises(ValidationError):
         GrowthOpSpec(frame_ref=SNAPSHOT_REF, rolling=_rolling(window_end=LATEST), **fields)
     with pytest.raises(ValidationError):
         _rank(rolling=_rolling(window_end=LATEST), **fields)
+
+
+def test_a_growth_with_a_rolling_window_refuses_a_one_year_window() -> None:
+    fields = {"window_start": "2024", "window_end": "2024"}
+    with pytest.raises(ValidationError):
+        GrowthOpSpec(frame_ref=SNAPSHOT_REF, rolling=_rolling(window_end=LATEST), **fields)
 
 
 def test_populations_have_one_spelling() -> None:

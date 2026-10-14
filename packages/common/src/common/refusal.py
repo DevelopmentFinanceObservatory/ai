@@ -15,8 +15,8 @@ MCP hosts keep `_meta` out of the model's context.
 
 An exception no typed handling anticipated answers `internal_error`. Its
 text can hold a bucket path, a URL or a service account, so the reply
-carries none of it: `log_unexpected_error` logs the exception under a trace
-id, and `internal_error_message` is the fixed text that names the id.
+carries none of it: `log_unexpected_error` logs the exception under the trace
+id, and `internal_error_message` is the fixed text that answers.
 """
 
 from __future__ import annotations
@@ -76,22 +76,22 @@ def refusal_code(structured: Mapping[str, Any] | None) -> str | None:
     return str(code) if code else None
 
 
-def log_unexpected_error(log: logging.Logger, what: str) -> str:
-    """Log the exception being handled at ERROR, with its traceback, and return
-    the trace id the line names (`common.telemetry.current_trace_id`).
+def log_unexpected_error(log: logging.Logger, what: str) -> None:
+    """Log the exception being handled at ERROR, with its traceback and the
+    trace id (`common.telemetry.current_trace_id`).
 
     Call it inside the `except` block, so the record carries the exception.
     `what` says what failed, such as the tool's name.
     """
-    trace_id = current_trace_id()
-    log.exception("%s raised an unexpected error trace_id=%s", what, trace_id)
-    return trace_id
+    log.exception("%s raised an unexpected error trace_id=%s", what, current_trace_id())
 
 
-def internal_error_message(*, subject: str, trace_id: str) -> str:
-    """The fixed text of an `internal_error` reply: `subject` failed, and
-    `trace_id` finds the logged exception."""
+def internal_error_message(*, subject: str) -> str:
+    """The fixed text of an `internal_error` reply: `subject` failed on the
+    server, and the failure can be reported with the time of the call and the
+    name of what was called."""
     return (
-        f"{subject} failed with an unexpected error. Repeating the same call is "
-        f"unlikely to help. Quote trace id {trace_id} when reporting it."
+        f"{subject} failed on the server with an unexpected error. Repeating the "
+        "same call is unlikely to help. Report it with the time of the call and "
+        "the name of what was called."
     )

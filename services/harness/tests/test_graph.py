@@ -33,7 +33,6 @@ from compiler.surface import (
     ToolSurface,
 )
 from data_mcp.server import mcp as data_mcp
-from dfo_frame_grammar.grammar import UnitRequest
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
@@ -54,11 +53,10 @@ from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_
 from google.genai import types
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
-    TopMembers,
-    comparable_members,
+    covers_every_row,
+    every_series_selects,
     over_cap_dimension,
     select_binding_ok,
-    top_members,
 )
 from harness.graph import answer as answer_module
 from harness.graph.execute import (
@@ -801,7 +799,7 @@ async def test_a_stopped_plan_hands_back_no_derived_steps_figures(
     executed = _output_of(events, "execute")
     assert executed["failed_step"]["step_id"] == "change"
     assert [step["step_id"] for step in executed["frame_ref_steps"]] == ["get_data"]
-    assert executed["step_summaries"] == ["fetched"]
+    assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     assert executor.calls == []
     _, body = handed_back(model)
     assert body["frames"] == []
@@ -1034,174 +1032,6 @@ def test_select_binding_ok_matches_dfo_apis_series_estimate(
     )
 
 
-def _provider_rows(values: dict[str, dict[str, float]], **extra: Any) -> list[dict[str, Any]]:
-    """Frame rows of aid to Kenya, one per provider and period."""
-    return [
-        {
-            "stat_var": "dcid:aid",
-            "financingProvider": provider,
-            "financingRecipient": "country/KEN",
-            "time_period": period,
-            "value": value,
-            "unit": "USDollar",
-            "provenance": "crs",
-            **extra,
-        }
-        for provider, by_period in values.items()
-        for period, value in by_period.items()
-    ]
-
-
-_SPARSE = {
-    "A": {"2023": 90.0, "2024": 10.0},
-    "B": {"2023": 1.0, "2024": 50.0},
-    "C": {"2023": 5.0, "2024": 30.0},
-    "D": {"2023": 99.0},
-}
-
-
-def test_top_members_ranks_a_bar_by_the_latest_period_highest_first() -> None:
-    """Over the cap, a bar chart compares the largest providers at the
-    latest period, highest first. A provider with no value that year is not
-    ranked but counts in the total."""
-    top = top_members(
-        rows=_provider_rows(_SPARSE),
-        select={"financingRecipient": "country/KEN"},
-        dimension="financingProvider",
-        limit=2,
-        own_latest=False,
-    )
-
-    assert top == TopMembers(members=["B", "C"], total=4, period="2024")
-
-
-def test_top_members_ranks_a_time_series_by_each_members_own_latest_value() -> None:
-    """A line chart or table ranks each provider by its own latest value, and
-    names no single period when those differ."""
-    top = top_members(
-        rows=_provider_rows(_SPARSE),
-        select={"financingRecipient": "country/KEN"},
-        dimension="financingProvider",
-        limit=2,
-        own_latest=True,
-    )
-
-    assert top == TopMembers(members=["D", "B"], total=4, period=None)
-
-
-def test_top_members_ranks_no_row_without_a_member() -> None:
-    """A row with no member names nothing a select could list."""
-    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}})
-    rows[1]["financingProvider"] = None
-
-    top = top_members(
-        rows=rows,
-        select={"financingRecipient": "country/KEN"},
-        dimension="financingProvider",
-        limit=5,
-        own_latest=False,
-    )
-
-    assert top == TopMembers(members=["A"], total=1, period="2024")
-
-
-def test_top_members_ranks_only_the_values_a_select_lists() -> None:
-    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}, "C": {"2024": 3.0}})
-
-    top = top_members(
-        rows=rows,
-        select={"financingProvider": ["A", "B"]},
-        dimension="financingProvider",
-        limit=5,
-        own_latest=False,
-    )
-
-    assert top == TopMembers(members=["B", "A"], total=2, period="2024")
-
-
-def test_top_members_matches_a_converted_unit_as_the_select_names_it() -> None:
-    """A stored frame holds a converted unit as a `UnitRequest`; a select
-    names it as dfo-apis's view does, `currency/prices/base_year`."""
-    unit = UnitRequest(currency="USD", prices="constant", base_year=2023)
-    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}}, unit=unit)
-
-    top = top_members(
-        rows=rows,
-        select={"unit": "USD/constant/2023"},
-        dimension="financingProvider",
-        limit=1,
-        own_latest=False,
-    )
-
-    assert top == TopMembers(members=["B"], total=2, period="2024")
-
-
-@pytest.mark.parametrize(
-    "other",
-    [
-        {"unit": "EUR"},
-        {"unit": UnitRequest(currency="USD", prices="current")},
-        {"provenance": "other"},
-        {"measurementMethod": "imputed"},
-        {"stat_var": "dcid:other"},
-    ],
-)
-def test_top_members_ranks_nothing_across_unlike_values(other: dict[str, Any]) -> None:
-    """Rows that differ on any other coordinate, a unit, a source, a method
-    or a measure, are not one ranking, so nothing is picked, even when each
-    provider appears under one of them only."""
-    rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}})
-    rows += _provider_rows({"C": {"2024": 3.0}}, **other)
-
-    assert (
-        top_members(
-            rows=rows,
-            select={"financingRecipient": "country/KEN"},
-            dimension="financingProvider",
-            limit=2,
-            own_latest=False,
-        )
-        is None
-    )
-
-
-def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
-    """A group total such as the G7, a residual and a party with no kind are
-    left out of a ranking of donors."""
-    cells = {
-        "DACOfficialDonors": "total",
-        "GroupOfSeven": "total",
-        "AfricaRegional": "residual",
-        "Unknown": "untyped",
-        "Germany": "party",
-        "Japan": "party",
-    }
-
-    assert comparable_members(cells, dimension="financingProvider") == {"Germany", "Japan"}
-
-
-def test_comparable_members_keeps_the_places_at_the_level_most_share() -> None:
-    """Among countries, a World Bank aggregate, a UN region, a continent and
-    an untyped place are left out; Hong Kong, typed Country among others,
-    stays."""
-    cells = {
-        "country/KEN": "Country",
-        "country/NGA": "Country",
-        "country/HKG": "AdministrativeArea1,Country",
-        "wb/LMY": "ProvisionalNode",
-        "undata-geo/G00201000": "UNGeoRegion",
-        "africa": "Continent",
-        "ida/total": "untyped",
-    }
-
-    assert comparable_members(cells, dimension="observationAbout") == {
-        "country/KEN",
-        "country/NGA",
-        "country/HKG",
-    }
-    assert comparable_members({"wb/LMY": "ProvisionalNode"}, dimension="observationAbout") == set()
-
-
 def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
     view = _counted_view(stat_var=1, financingProvider=86, financingRecipient=1)
     wide = _counted_view(stat_var=5, financingProvider=86, financingRecipient=1)
@@ -1312,12 +1142,58 @@ def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> No
     select = {"stat_var": "a", "donor": [f"donor/{index}" for index in range(30)]}
     reason = select_binding_ok(type_="bar_chart", select=select, view=_counted_view(stat_var=1))
     assert reason is not None
-    assert reason["code"] == "select_invalid"
-    assert reason["message"] == "bar_chart select binds ['donor'], which the frame does not declare"
-    bare = {"dimensions": ["stat_var", "observationAbout"]}
-    reason = select_binding_ok(type_="table", select={"sector": "x"}, view=bare)
+    assert (reason["code"], reason["retry_mode"]) == ("select_invalid", "correct_and_retry")
+    assert reason["fix"] == {"dimensions": ["stat_var"]}
+    flow = {"dimensions": ["stat_var", "financingProvider", "financingRecipient"]}
+    reason = select_binding_ok(type_="table", select={"observationAbout": "country/MWI"}, view=flow)
     assert reason is not None
-    assert reason["message"] == "table select binds ['sector'], which the frame does not declare"
+    assert reason["fix"] == {"dimensions": ["stat_var", "financingProvider", "financingRecipient"]}
+
+
+@pytest.mark.parametrize(
+    ("type_", "view", "selects"),
+    [
+        ("stat_card", {"dimensions": [{"name": "donor", "values": ["a"]}]}, [{"donor": "a"}]),
+        # A dimension of one value before one of several.
+        (
+            "bar_chart",
+            {
+                "dimensions": [
+                    {"name": "recipient", "values": ["k", "u"], "total_count": 2},
+                    {"name": "donor", "values": ["a"], "total_count": 1},
+                ]
+            },
+            [{"donor": "a"}, {"recipient": ["k", "u"]}],
+        ),
+        # A view that lists fewer values than the dimension holds names no series set.
+        (
+            "table",
+            {"dimensions": [{"name": "donor", "values": ["a", "b"], "total_count": 3}]},
+            [],
+        ),
+        # A facet may hold rows with no value, which no select on it names.
+        ("table", {"dimensions": [{"name": "unit", "values": ["USD"], "total_count": 1}]}, []),
+        # A select the binding check refuses is not offered.
+        (
+            "line_chart",
+            {"dimensions": [{"name": "donor", "values": list("abcdefghi"), "total_count": 9}]},
+            [],
+        ),
+    ],
+)
+def test_every_series_selects_bind_one_dimension_the_view_lists_in_full(
+    type_: str, view: dict[str, Any], selects: list[dict[str, Any]]
+) -> None:
+    assert every_series_selects(type_=type_, view=view) == selects
+
+
+def test_a_select_covers_every_row_only_when_none_is_empty_on_its_dimension() -> None:
+    """The view counts a dimension's values without its empty cells, so only
+    the rows say whether a select on it names every series."""
+    rows = [{"donor": "a", "recipient": "k"}, {"donor": None, "recipient": "total"}, {"donor": "a"}]
+    assert covers_every_row({"recipient": ["k", "total"]}, rows[:2])
+    assert not covers_every_row({"donor": "a"}, rows[:2])
+    assert not covers_every_row({"recipient": ["k", "total"]}, rows)
 
 
 def test_select_binding_ok_rejects_a_non_mapping_select() -> None:
@@ -1668,6 +1544,8 @@ async def test_a_refused_redraft_over_an_unreadable_plan_says_the_plan_was_disca
     assert refused == {
         "text": f"{UNREADABLE_PLAN_UNPLANNED_NOTE} The draft budget is spent.",
         "final": True,
+        # The scripted refusal states no code.
+        "code": None,
     }
     assert _pending_interrupt(events) is None
     assert (
@@ -1995,7 +1873,10 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
     assert executed["frame_refs"] == [
         {"spec_id": "ops_" + "2" * 32, "content_version": "ocv_" + "3" * 32}
     ]
-    assert executed["step_summaries"] == ["fetched", "computed"]
+    assert [(step["tool"], step["digest"]) for step in executed["step_summaries"]] == [
+        ("get_data", "fetched"),
+        ("aggregate", "computed"),
+    ]
     assert executed["plan_version"] == 1
     assert _output_of(events, "execute")["plan_version"] == 1
 
@@ -2244,7 +2125,7 @@ async def test_a_method_choice_refusal_replans_once_then_closes_with_failed_step
     }
     # get_data ran and completed before the refusal; its frame is kept.
     assert executed["frame_refs"] == [REF_A]
-    assert executed["step_summaries"] == ["fetched"]
+    assert [step["digest"] for step in executed["step_summaries"]] == ["fetched"]
     _, body = handed_back(model)
     assert body["failed_step"] == executed["failed_step"]
 

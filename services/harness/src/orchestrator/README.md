@@ -19,7 +19,7 @@ The harness gives it nine (`harness.orchestrator_tools`):
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `search`         | Sends the question and every part it names to Search in one call; returns each part's reading                                    |
 | `fetch`          | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                    |
-| `make_charts`    | Draws charts from those frames on the canvas and returns each chart's facts, or why it failed                                    |
+| `make_charts`    | Draws charts from those frames on the canvas and returns what each holds and its reply figures, or why it failed                 |
 | `ask_user`       | Records a question for the user; the workflow pauses for the answer and hands it back                                            |
 | `plan`           | Records a brief and the outputs asked for; the plan path runs and hands back its frames and each ask's status                    |
 | `get_skill`      | Loads a skill a search result named, through data-mcp                                                                            |
@@ -28,7 +28,7 @@ The harness gives it nine (`harness.orchestrator_tools`):
 | `recall`         | An earlier turn's plan records or readings, or a canvas component's entry, in full; a typed refusal names the legal turns or ids |
 
 The model sees digests only: part readings, frame views, one-line summaries
-and chart facts, never rows. Each request opens with the canvas digest and
+and a drawn card's reply figures, with no rows. Each request opens with the canvas digest and
 the conversation digest from session state (`prepend_digests`), so the
 instruction stays the same on every call and its prefix is served from the
 shared cache (`harness.prefix_cache`). Within a turn it sees its own calls

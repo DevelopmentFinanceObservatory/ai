@@ -85,7 +85,10 @@ class StepRecord(StrictModel):
     the frame. `dropped_key_count` is how many keys the call declared it left
     out of its result (`executor.artifacts.declared_dropped_key_count`), 0
     for every call but a keyed `quotient_of` that found some numerator keys
-    no denominator.
+    no denominator. `ranked_before_limit` is how many entries a `rank` call
+    ranked before its `limit` cut them
+    (`executor.artifacts.declared_ranked_before_limit`), `None` when the call
+    set no limit.
 
     `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
     the manifest's own pair for a `get_data` step whose `frame_ref` differs
@@ -103,6 +106,7 @@ class StepRecord(StrictModel):
     role_keys: tuple[str, ...] | None = None
     stat_var_count: int | None = None
     dropped_key_count: int = Field(default=0, ge=0)
+    ranked_before_limit: int | None = Field(default=None, ge=0)
 
     @property
     def presented_ref(self) -> FrameRef:

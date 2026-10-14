@@ -33,7 +33,7 @@ class BaseServiceSettings(BaseSettings):
 
     Worst bytes a row is the largest `delta_mb` / claimed rows among whole calls at
     250,000 rows, over frames that carry each flow party's kind, as
-    `get_data(place_types=True)` serves a flow retrieval a sum, a rank or a share reads.
+    `get_data(without_party_totals=True)` serves every flow retrieval.
     On the run this default comes from, growth added 269.0 MiB over 250,000 rows, 1,128
     bytes a row, and the largest join a caller can complete added 477.3 MiB over its two
     inputs' 500,000 rows, 1,001 bytes a row. Idle is assumed to be 400 MiB for ADK, the

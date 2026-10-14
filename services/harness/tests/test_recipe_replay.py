@@ -408,6 +408,40 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
     )
 
 
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        OPTIONS | {"without_party_totals": True},
+        OPTIONS | {"groupby": _GROUPBY, "without_party_totals": True},
+    ],
+    ids=["plain", "groupby"],
+)
+async def test_a_root_minted_without_party_totals_is_minted_with_the_option_again(
+    scene: Scene, recorded: dict[str, Any]
+) -> None:
+    """The option is dfo-apis', sent as recorded and stated again in the replayed recipe,
+    whose normal form stays."""
+    original, recipe = await scene.fixed(recorded)
+    scene.dataset.move(SECOND_VALUES)
+
+    replayed = await scene.replay(recipe)
+
+    assert isinstance(replayed, Replayed), replayed
+    (minted,) = scene.dataset.minted
+    assert minted.options == recorded
+    (root,) = replayed.recipe["roots"]
+    assert (
+        root["frame"]
+        == frame_ref_for(
+            spec_id=SPEC, content_version=SECOND, groupby=recorded.get("groupby")
+        ).model_dump()
+    )
+    assert root["options"] == recorded
+    assert replayed.normal_form_changed is False
+    assert replayed.recipe["normal_form_hash"] == recipe["normal_form_hash"]
+    assert replayed.frame != original
+
+
 async def test_a_second_replay_calls_no_verb_and_publishes_nothing(scene: Scene) -> None:
     _, recipe = await scene.fixed()
     scene.dataset.move(SECOND_VALUES)

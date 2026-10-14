@@ -348,6 +348,9 @@ async def resolve_anchor(
     of every population hold. A series is one combination of a frame's columns
     other than `time_period`, `value` and `status`.
 
+    Use it before a rolling `growth`, `rank` or `filter` call, to find the
+    latest period the data holds.
+
     The result is stored, and its `anchor_key` goes on every rolling `growth`,
     `rank` and `filter` call of the question, whose literal periods are
     `period` moved back by each rolling offset. This tool computes no frame

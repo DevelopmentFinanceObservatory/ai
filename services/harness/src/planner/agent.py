@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -60,20 +59,16 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
-from submission.catalogue import catalogue_revision, render_cards
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     Admission,
     Combination,
     Proposal,
-    Proposer,
     identity_on_record,
     submit,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from submission.tool import TOOL_NAME as SUBMIT_ANALYSIS
-from submission.tool import SubmitAnalysisTool, proposer, submit_analysis
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartNotResolvedError,
@@ -112,7 +107,7 @@ from planner.plan import (
 from planner.records import (
     OpenPeriodFault,
 )
-from planner.settings import AGENT_THINKING_CONFIG, SchemaDelivery, drop_thought_parts
+from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 
@@ -121,7 +116,7 @@ if TYPE_CHECKING:
 
 AGENT_NAME = "dfo_planner"
 
-# The tool that proposes a plan under `SchemaDelivery.EAGER`.
+# The tool the planner proposes a plan through.
 PROPOSE_PLAN = "propose_plan"
 
 
@@ -245,7 +240,7 @@ _PLANNING = (
     "them cites a `Decision` recording that, with the skill in its "
     "`rationale`. Whether any other two datasets add up without counting "
     "a flow twice is the user's to decide, so cite no decision of your "
-    "own for it. `{propose}` refuses such a `sum_of` with the `options` "
+    "own for it. `propose_plan` refuses such a `sum_of` with the `options` "
     "to ask with, and the skill says what to tell the user about the "
     "overlap. If the user picks adding them, cite a `Decision` resolved "
     "by `user` whose `chosen` is that option id. Otherwise show the two "
@@ -303,7 +298,7 @@ _PLANNING = (
 # `question_fixed=True`, where the orchestrator's brief fixes the turn's
 # question. What each argument does is on the argument.
 _VERSIONING_FREE = (
-    "Call `{propose}` once with the complete first draft, and again "
+    "Call `propose_plan` once with the complete first draft, and again "
     "whenever the user asks for a change. Once a plan is recorded, decide "
     "deliberately whether the ask patches it (`amends_version`) or is a "
     "different question that needs a plan of its own (`starts_new_plan`); "
@@ -311,10 +306,10 @@ _VERSIONING_FREE = (
 )
 
 _VERSIONING_FIXED = (
-    "Call `{propose}` once with the complete first draft, and again, "
+    "Call `propose_plan` once with the complete first draft, and again, "
     "patching it through `amends_version`, whenever the user asks for a "
     "change. This turn's question is fixed, so when the user's reply asks "
-    "a different question, call `{propose}` with `starts_new_plan=true` "
+    "a different question, call `propose_plan` with `starts_new_plan=true` "
     "and stop there.\n\n"
 )
 
@@ -346,10 +341,10 @@ _TRANSLATING = (
     "`source_code`, held by more than one publisher, keep the code and "
     "state the picked publisher's label in `source` with its ref in "
     "`source_ref`.\n\n"
-    "`{propose}` has every plan it records translated at once and answers "
+    "`propose_plan` has every plan it records translated at once and answers "
     "with the verdict in `translation`. Once a referral is settled, by "
     "your own decision or the user's answer, propose with the "
-    "`amends_version` the last `{propose}` call answered with, so the "
+    "`amends_version` the last `propose_plan` call answered with, so the "
     "patch lands on that plan and is translated in turn. When "
     "`translation` answers that the plan compiled, it goes to the user "
     "for their answer and your turn ends there.\n\n"
@@ -363,7 +358,7 @@ _TRANSLATING = (
     "is not settled. The referral's `candidates`, each with its "
     "`spec_id`, `sentence`, `coverage_window` and the measures, entities "
     "and unit it resolves, are the only sources that requirement may pin, "
-    "and `{propose}` refuses any other. A `pinned_source_not_found` "
+    "and `propose_plan` refuses any other. A `pinned_source_not_found` "
     "referral also lists in `stale_pins` every other requirement whose "
     "pin was not found, each with its own `candidates`. Repair them all "
     "in one patch.\n\n"
@@ -433,7 +428,7 @@ _TRANSLATING = (
 
 
 _WITHOUT_A_TRANSLATOR = (
-    "Stop once `{propose}` has recorded the plan: having it translated, "
+    "Stop once `propose_plan` has recorded the plan: having it translated, "
     "compiled and carried out belongs to a later step that is not "
     "attached here, so there is no translator to call and nothing to "
     "approve yet.\n\n"
@@ -447,42 +442,11 @@ _CLOSING = (
 )
 
 
-# How the planner proposes under `SchemaDelivery.COMPACT`, where
-# `submit_analysis` declares no kind's fields and the cards below this
-# paragraph name the kinds. `{revision}` is the catalogue's.
-_COMPACT_PROTOCOL = (
-    "`submit_analysis` is how you propose and patch a plan. Every call states "
-    "`submission_stage` and `catalogue_revision`, which is {revision}. Its "
-    "declaration states no kind's own fields: those are in each kind's "
-    "contract. Before you state a kind whose contract no answer in this "
-    "conversation has returned, call it with `submission_stage='intent'`, "
-    "the question, the answer mode, the decisions you know and each "
-    "requirement's `kind`, `id` and the ids it reads. That call records "
-    "nothing and answers `requirements`: each kind's contract once, as JSON "
-    "text holding its schema and the rules no schema states, with "
-    "`attempt_id` and `contract_digest`. Then call it with "
-    "`submission_stage='complete'` and the whole plan, every field written "
-    "from those contracts, echoing `attempt_id` and `contract_digest`. Reuse "
-    "a contract already returned rather than asking for it again. A complete "
-    "call answers `needs_fields` with every field to correct and the "
-    "contracts involved, `needs_decision` when the user has to settle a "
-    "choice first, `recorded` when the plan is recorded and its "
-    "`translation` refers it back, `ready_for_review` when it compiled, or "
-    "a refusal with its `code`. The requirement kinds:\n"
-)
-
-
-def proposing_tool(schema_delivery: SchemaDelivery) -> str:
-    """The tool that proposes a plan under `schema_delivery`."""
-    return PROPOSE_PLAN if schema_delivery is SchemaDelivery.EAGER else SUBMIT_ANALYSIS
-
-
 def planner_instruction(
     *,
     has_translator: bool,
     has_skills: bool = False,
     question_fixed: bool = False,
-    schema_delivery: SchemaDelivery = SchemaDelivery.EAGER,
 ) -> str:
     """The planner's instruction, for the agent it is actually part of.
 
@@ -497,23 +461,12 @@ def planner_instruction(
     `_VERSIONING_FIXED`, where `harness.planner_seam` holds the turn's
     question and a restart is how the model tells it the user asked a
     different one. False, the default, selects `_VERSIONING_FREE`.
-
-    `schema_delivery` names the tool that proposes in every paragraph, and
-    under `SchemaDelivery.COMPACT` adds `_COMPACT_PROTOCOL` and the cards
-    (`submission.catalogue.render_cards`) after the planning paragraph.
     """
-    propose = proposing_tool(schema_delivery)
-    compact = (
-        ""
-        if schema_delivery is SchemaDelivery.EAGER
-        else _COMPACT_PROTOCOL.format(revision=catalogue_revision()) + render_cards() + "\n"
-    )
     return (
-        _PLANNING.format(propose=propose)
-        + compact
-        + (_VERSIONING_FIXED if question_fixed else _VERSIONING_FREE).format(propose=propose)
+        _PLANNING
+        + (_VERSIONING_FIXED if question_fixed else _VERSIONING_FREE)
         + (_SKILLS if has_skills else "")
-        + (_TRANSLATING if has_translator else _WITHOUT_A_TRANSLATOR).format(propose=propose)
+        + (_TRANSLATING if has_translator else _WITHOUT_A_TRANSLATOR)
         + _CLOSING
     )
 
@@ -543,29 +496,25 @@ def _approval_summary(plan: Plan) -> dict[str, object]:
     }
 
 
-def _execution_blocked(
-    plan: Plan, tool_context: ToolContext, *, proposer: Proposer = PROPOSE_PLAN_PROPOSER
-) -> dict[str, object] | None:
+def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, object] | None:
     """Return the problem that stops `declare_ready` on `plan`, or `None` to let it proceed.
 
-    Checked in order: a rejected plan; a pending referral, which the planner
-    settles by proposing again, after asking the user where the referral is of
-    a kind in `USER_DECIDES` (the refusal's `action` names `adk_request_input`
-    until they answer, `proposer`, the tool that proposes, otherwise); a plan
-    not yet translated and compiled; and, last, an allowlist on `plan.status`
-    itself. Only `PENDING_APPROVAL` may be declared ready, so a plan already
-    `APPROVED`, `EXECUTING`, `COMPLETED` or `FAILED` is refused too, even
-    though none of those carries a message of its own above. A plan seeded
-    back from a failed run (see `harness.graph`) still carries a workflow and
-    the version it failed at, so it would otherwise pass every check above and
-    reach the user as though it were still approvable.
+    Checked in order: a rejected plan; a pending referral, which the planner settles by
+    proposing again, after asking the user where the referral is of a kind in `USER_DECIDES`
+    (the refusal's `action` names `adk_request_input` until they answer, `propose_plan`
+    otherwise); a plan not yet translated and compiled; and, last, an allowlist on `plan.status`
+    itself. Only `PENDING_APPROVAL` may be declared ready, so a plan already `APPROVED`,
+    `EXECUTING`, `COMPLETED` or `FAILED` is refused too, even though none of those carries a
+    message of its own above. A plan seeded back from a failed run (see `harness.graph`) still
+    carries a workflow and the version it failed at, so it would otherwise pass every check
+    above and reach the user as though it were still approvable.
     """
     if plan.status is PlanStatus.REJECTED:
         return problem(
             ProblemCode.PLAN_REJECTED,
             "The current plan was rejected. Propose a new one before executing.",
             outcome=Outcome.REFUSED,
-            action=proposer.action(),
+            action=PROPOSE_PLAN_PROPOSER.action(),
         )
     referral = load_referral(tool_context.state)
     if referral is not None:
@@ -578,7 +527,7 @@ def _execution_blocked(
             detail={"referral": referral.model_dump(mode="json")},
             action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME)
             if asks_user
-            else proposer.action(),
+            else PROPOSE_PLAN_PROPOSER.action(),
         )
     if plan.status is PlanStatus.DRAFT or plan.workflow is None:
         # A draft states the methodology; what runs arrives with
@@ -589,7 +538,7 @@ def _execution_blocked(
             "Propose it again, with its `version` as `amends_version`, to have it "
             "translated.",
             outcome=Outcome.REFUSED,
-            action=proposer.action(),
+            action=PROPOSE_PLAN_PROPOSER.action(),
         )
     if plan.status is not PlanStatus.PENDING_APPROVAL:
         return problem(
@@ -598,7 +547,7 @@ def _execution_blocked(
             "declared ready. Propose a new plan before executing.",
             outcome=Outcome.REFUSED,
             detail={"status": plan.status.value},
-            action=proposer.action(),
+            action=PROPOSE_PLAN_PROPOSER.action(),
         )
     return None
 
@@ -606,32 +555,23 @@ def _execution_blocked(
 def declare_ready(
     answer: dict[str, object],
     tool_context: ToolContext,
-    *,
-    proposer: Proposer = PROPOSE_PLAN_PROPOSER,
 ) -> dict[str, object]:
     """Declare the plan on record ready for the user's answer, when `answer`'s translation compiled.
 
-    `answer` is an accepted `propose_plan` answer carrying its `translation`.
-    A verdict other than `ok` leaves it unchanged. Past `_execution_blocked`,
-    it gains `summary` (`_approval_summary`), and the run ends there
-    (`skip_summarization`). The harness asks the user, so no model call
-    follows to restate the plan the user already sees. A plan the gate blocks
-    gains the gate's problem under `submission` instead, its `action` naming
-    `proposer`, the tool that proposes, and the run goes on. Approves
-    nothing. Whatever runs this agent gates on the user's answer, keyed on the
-    summary's revision.
-
-    Both delivery modes declare through here: `propose_plan` answers with
-    this function's result, and `submit_analysis`'s `complete` stage labels
-    it (`submission.tool`), `ready_for_review` exactly when it carries
-    `summary`.
+    `answer` is an accepted `propose_plan` answer carrying its `translation`. A verdict other
+    than `ok` leaves it unchanged. Past `_execution_blocked`, it gains `summary`
+    (`_approval_summary`), and the run ends there (`skip_summarization`). The harness asks the
+    user, so no model call follows to restate the plan the user already sees. A plan the gate
+    blocks gains the gate's problem under `submission` instead, its `action` naming
+    `propose_plan`, and the run goes on. Approves nothing. Whatever runs this agent gates on the
+    user's answer, keyed on the summary's revision.
     """
     translation = answer.get("translation")
     if not isinstance(translation, dict) or translation.get("outcome") != Outcome.OK.value:
         return answer
     plan = load_plan(tool_context.state)
     assert plan is not None, "a translation answers ok only for the plan on record"
-    blocked = _execution_blocked(plan, tool_context, proposer=proposer)
+    blocked = _execution_blocked(plan, tool_context)
     if blocked is not None:
         return {**answer, "submission": blocked}
     tool_context.actions.skip_summarization = True
@@ -832,16 +772,13 @@ def _user_message(event: Any) -> bool:
 def _user_spoke_since_recorded(tool_context: ToolContext, version: int) -> bool:
     """Whether the user has said something since plan `version` was recorded.
 
-    Read off this session's event history. The proposing tool's first
-    response carrying `version` (`propose_plan`'s or `submit_analysis`'s)
-    marks where the plan was recorded. A later response repeating the
-    version records nothing (`_transient_retry` answers a bare retry so)
-    and moves no mark. After the mark, the user speaks with an
-    `adk_request_input` response they answered (`_is_answer`: a pick, free
-    text), an amendment of the approval card (`_is_amendment`), or a
-    message of their own (`_user_message`), as the ADK eval runner sends a
-    case's later messages into one session. A refusal, a skip, a referral
-    and the planner seam's own messages are not.
+    Read off this session's event history. The first `propose_plan` response carrying `version`
+    marks where the plan was recorded. A later response repeating the version records nothing
+    (`_transient_retry` answers a bare retry so) and moves no mark. After the mark, the user
+    speaks with an `adk_request_input` response they answered (`_is_answer`: a pick, free text),
+    an amendment of the approval card (`_is_amendment`), or a message of their own
+    (`_user_message`), as the ADK eval runner sends a case's later messages into one session. A
+    refusal, a skip, a referral and the planner seam's own messages are not.
 
     `harness.studio_state.ConversationState.session_id` opens a new ADK
     session for every Studio turn, and every turn starts with the user's
@@ -850,7 +787,6 @@ def _user_spoke_since_recorded(tool_context: ToolContext, version: int) -> bool:
     seeds such a plan from the graph's record
     (`harness.planner_seam.PlannerSeam`).
     """
-    proposing = {proposing_tool(delivery) for delivery in SchemaDelivery}
     last: object = None
     recorded = False
     spoke = False
@@ -865,7 +801,7 @@ def _user_spoke_since_recorded(tool_context: ToolContext, version: int) -> bool:
             if response is None:
                 continue
             body = response.response or {}
-            if response.name in proposing and "version" in body:
+            if response.name == PROPOSE_PLAN and "version" in body:
                 if body["version"] != last:
                     last = body["version"]
                     recorded, spoke = last == version, False
@@ -885,17 +821,14 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
     translator's referral, and the spec_ids they picked answering those asks,
     read off this session's event history as `_elected_spec_ids` reads it.
 
-    The referral reaches the planner in the `translation` of the response
-    that recorded the plan (`propose_plan`'s or `submit_analysis`'s, told
-    apart by nothing but that key), carrying its `kind` and `requirement_id`.
-    This walks the session once, in event order. An `adk_request_input` call
-    event after that response is an ask the model raised knowing the referral,
-    and its `id` is remembered. A response counts as the user's answer when it
-    pairs by `id` with one of those asks and `_is_answer` holds. An ask issued
-    before the referral, a call the tool or ADK rejected, and a skip do not
-    count. A skip is the user declining to choose, which the planner may not
-    substitute for, so the planner ends the turn by telling them what cannot be
-    done.
+    The referral reaches the planner in the `translation` of the response that recorded the
+    plan, `propose_plan`'s, carrying its `kind` and `requirement_id`. This walks the session
+    once, in event order. An `adk_request_input` call event after that response is an ask the
+    model raised knowing the referral, and its `id` is remembered. A response counts as the
+    user's answer when it pairs by `id` with one of those asks and `_is_answer` holds. An ask
+    issued before the referral, a call the tool or ADK rejected, and a skip do not count. A skip
+    is the user declining to choose, which the planner may not substitute for, so the planner
+    ends the turn by telling them what cannot be done.
 
     A response that recorded a version clears the referral in session
     state and translates the new version, so it ends the referral this walk is
@@ -974,19 +907,15 @@ def _combination_picks(
 ) -> tuple[dict[Combination, str | None], bool]:
     """The option id the user last picked for each combination they were asked about, and a flag.
 
-    A combination ask is an `adk_request_input` call whose `options` are
-    `COMBINATION_OPTIONS`. It asks about the combination the latest
-    `combination_unasked` refusal before it names, read off that refusal's
-    own response event, whichever tool proposed (`propose_plan` or
-    `submit_analysis`), so the model cannot point an ask at
-    another sum. A refusal binds the first ask after it and no other, so an
-    ask with no refusal of its own before it asks about nothing. Each
-    response pairs with the nearest preceding call sharing its `id`, as
-    `_elected_spec_ids` pairs them. Studio sends a picked option's id as
-    `{"spec_id": id}`. Each answer about a combination replaces the one
-    before it, and free text or a skip records `None`, so a user who changes
-    their mind, or answers outside the options, ends with no pick for it.
-    The flag says whether any answer to any combination ask, about a
+    A combination ask is an `adk_request_input` call whose `options` are `COMBINATION_OPTIONS`.
+    It asks about the combination the latest `combination_unasked` refusal before it names, read
+    off that refusal's own response event, so the model cannot point an ask at another sum. A
+    refusal binds the first ask after it and no other, so an ask with no refusal of its own
+    before it asks about nothing. Each response pairs with the nearest preceding call sharing
+    its `id`, as `_elected_spec_ids` pairs them. Studio sends a picked option's id as
+    `{"spec_id": id}`. Each answer about a combination replaces the one before it, and free text
+    or a skip records `None`, so a user who changes their mind, or answers outside the options,
+    ends with no pick for it. The flag says whether any answer to any combination ask, about a
     combination or about nothing, was other than `COMBINE_OPTION`.
     """
     offered = [dict(option) for option in COMBINATION_OPTIONS]
@@ -1080,8 +1009,7 @@ class ToolContextSession:
 # argument itself (`planner.declaration.PlanTool`). `question` and
 # `starts_new_plan` read differently under `question_fixed`, the way
 # `submission.service._resolve_intent` enforces them; `_FIXED_ARGUMENTS`
-# replaces those two. `{propose}` is the tool that proposes (`proposing_tool`),
-# since `submit_analysis` declares these arguments too.
+# replaces those two.
 _PROPOSE_PLAN_ARGUMENTS = {
     "question": (
         "The question this plan answers. Required on a first draft and with "
@@ -1130,7 +1058,7 @@ _PROPOSE_PLAN_ARGUMENTS = {
     "declined": (
         "Each part of the question no operation computes, one per `code` and "
         "`ask_ref`. Only an `unsupported` answer earns a decline, with that "
-        "answer's code: one `{propose}` answered, itself or in its `translation`, "
+        "answer's code: one `propose_plan` answered, itself or in its `translation`, "
         "or a run-time refusal the plan is replanned from that names the code. A "
         "`requirement_unmeetable` translation whose `reason` says it earns a "
         "decline earns that code too, which the plan may make or leave out. "
@@ -1144,7 +1072,7 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "computes part of it."
     ),
     "amends_version": (
-        "The `version` this call patches, as the last `{propose}` call "
+        "The `version` this call patches, as the last `propose_plan` call "
         'answered it and as the brief\'s own "version N" line states it. '
         "Required once a plan is recorded, unless `starts_new_plan` is set: "
         "a call stating neither is refused, and `question` never stands in "
@@ -1259,7 +1187,6 @@ def build_planner_tools(
     translate: Translate | None = None,
     question_fixed: bool = False,
     surface: ToolSurface | None = None,
-    schema_delivery: SchemaDelivery = SchemaDelivery.EAGER,
 ) -> list[BaseTool]:
     """Build the planner's tool set.
 
@@ -1280,15 +1207,7 @@ def build_planner_tools(
     to `submission.service.submit` on every call, and selects `_FIXED_ARGUMENTS`'
     descriptions of `question` and `starts_new_plan`, so those two arguments
     describe the mode this tool set actually enforces.
-
-    `schema_delivery` picks the tool the model proposes through. Under
-    `SchemaDelivery.EAGER` it is `propose_plan`, declaring every kind's
-    schema. Under `SchemaDelivery.COMPACT` it is `submit_analysis`
-    (`submission.tool`), whose `complete` stage runs the same `propose_plan`,
-    reads and translation included, and whose `intent` stage runs none of it.
     """
-    proposing_name = proposing_tool(schema_delivery)
-    plan_proposer = PROPOSE_PLAN_PROPOSER if schema_delivery is SchemaDelivery.EAGER else proposer()
 
     # Named `ask_user` here, for readability, but renamed below (once
     # defined) to `adk_request_input` -- the function-call name ADK's own
@@ -1385,7 +1304,7 @@ def build_planner_tools(
                 starts_new_plan=starts_new_plan,
             ),
             question_fixed=question_fixed,
-            proposer=plan_proposer,
+            proposer=PROPOSE_PLAN_PROPOSER,
         )
 
     def reject_plan(tool_context: ToolContext) -> dict[str, object]:
@@ -1462,7 +1381,7 @@ def build_planner_tools(
                 question=retried.question,
                 translation=await translate(tool_context),
             )
-            return declare_ready(answer, tool_context, proposer=plan_proposer)
+            return declare_ready(answer, tool_context)
         result = (
             propose_plan(**arguments)
             if surface is None
@@ -1473,7 +1392,6 @@ def build_planner_tools(
         return declare_ready(
             {**result, "translation": await translate(tool_context)},
             tool_context,
-            proposer=plan_proposer,
         )
 
     ask_user.__name__ = REQUEST_INPUT_FUNCTION_CALL_NAME
@@ -1482,35 +1400,12 @@ def build_planner_tools(
         proposing = propose_plan_translating
     elif surface is not None:
         proposing = propose_plan_reading
-    arguments = {
-        name: description.format(propose=proposing_name)
-        for name, description in (
-            _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS
-            if question_fixed
-            else _PROPOSE_PLAN_ARGUMENTS
-        ).items()
-    }
-
-    async def submit_analysis_call(
-        args: Mapping[str, Any], tool_context: ToolContext
-    ) -> dict[str, object]:
-        async def propose(**arguments: Any) -> dict[str, object]:
-            answered = proposing(tool_context=tool_context, **arguments)
-            return cast(
-                "dict[str, object]",
-                await answered if inspect.isawaitable(answered) else answered,
-            )
-
-        return await submit_analysis(tool_context.state, args, propose=propose)
-
-    proposal_tool: BaseTool = (
-        PlanTool(proposing, arguments=arguments)
-        if schema_delivery is SchemaDelivery.EAGER
-        else SubmitAnalysisTool(submit_analysis_call, arguments=arguments)
+    arguments = (
+        _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
     )
     return [
         LongRunningFunctionTool(ask_user),
-        proposal_tool,
+        PlanTool(proposing, arguments=arguments),
         FunctionTool(reject_plan),
     ]
 
@@ -1522,7 +1417,6 @@ def create_planner_agent(
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
     prefix_cache: PrefixCache | None = None,
-    schema_delivery: SchemaDelivery = SchemaDelivery.EAGER,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
 
@@ -1554,9 +1448,6 @@ def create_planner_agent(
             Gemini model retries a transient error (408, 429, 5xx) up to
             three attempts, as the orchestrator's does
             (`orchestrator.agent._retrying`).
-        schema_delivery: Whether the planner proposes through `propose_plan`
-            or through `submit_analysis` with the cards in its instruction
-            (`planner.settings.SchemaDelivery`). Eager unless given.
 
     Returns:
         The configured `LlmAgent`.
@@ -1568,7 +1459,6 @@ def create_planner_agent(
             has_translator=translate is not None,
             has_skills=surface is not None,
             question_fixed=question_fixed,
-            schema_delivery=schema_delivery,
         ),
         tools=[
             *(build_skill_tools(surface) if surface is not None else []),
@@ -1576,7 +1466,6 @@ def create_planner_agent(
                 translate=translate,
                 question_fixed=question_fixed,
                 surface=surface,
-                schema_delivery=schema_delivery,
             ),
         ],
         # Run as a workflow node (`harness.planner_seam.PlannerSeam._propose`'s

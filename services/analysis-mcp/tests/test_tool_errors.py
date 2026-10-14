@@ -19,8 +19,6 @@ from common.refusal import internal_error_message
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart
 
-_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
-
 
 def test_every_code_has_exactly_one_retry_mode() -> None:
     for code in ToolErrorCode:
@@ -34,7 +32,7 @@ def test_non_finite_result_is_do_not_retry() -> None:
 
 
 def test_internal_error_is_do_not_retry() -> None:
-    refusal = ToolRefusal.internal_error(tool="aggregate", trace_id=_TRACE_ID)
+    refusal = ToolRefusal.internal_error(tool="aggregate")
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 
@@ -470,11 +468,11 @@ def test_derived_input_unrecoverable_carries_the_engine_version_in_fix() -> None
     assert refusal.fix == {"engine_version": "0.2.0"}
 
 
-def test_internal_error_names_the_tool_and_trace_id_alone() -> None:
-    refusal = ToolRefusal.internal_error(tool="aggregate", trace_id=_TRACE_ID)
+def test_internal_error_names_the_tool_alone() -> None:
+    refusal = ToolRefusal.internal_error(tool="aggregate")
     assert refusal.code == ToolErrorCode.INTERNAL_ERROR
-    assert refusal.fix == {"tool": "aggregate", "trace_id": _TRACE_ID}
-    assert refusal.message == internal_error_message(subject="aggregate", trace_id=_TRACE_ID)
+    assert refusal.fix == {"tool": "aggregate"}
+    assert refusal.message == internal_error_message(subject="aggregate")
 
 
 def test_to_tool_result_is_an_error_result_with_the_code_and_retry_mode() -> None:
@@ -556,7 +554,7 @@ def test_to_tool_result_appends_the_envelope_as_one_line_of_json_after_a_blank_l
 def test_envelope_never_carries_a_retry_after_s_key() -> None:
     """This module carries no `retry_after_s` at all (see the module docstring), so the
     envelope never includes one. data-mcp's equivalent does."""
-    refusal = ToolRefusal.internal_error(tool="aggregate", trace_id=_TRACE_ID)
+    refusal = ToolRefusal.internal_error(tool="aggregate")
 
     result = to_tool_result(refusal)
     _, _, envelope_line = result.content[0].text.partition("\n\n")  # type: ignore[union-attr]

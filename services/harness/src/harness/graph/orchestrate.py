@@ -20,6 +20,7 @@ from harness.graph.state import (
     CLARIFY_INTERRUPT,
     ORCHESTRATOR_ASKED_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_STATUS_KEY,
     ask_candidates,
     ask_options,
@@ -60,7 +61,10 @@ def orchestrate_node(*, orchestrator: LlmAgent) -> Callable[[Context, Any], Asyn
                 )
             finally:
                 ctx.event_author = author
-            yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: node_input["status"]}, branch="")
+            status = {ORCHESTRATOR_STATUS_KEY: node_input["status"]}
+            if "failure" in node_input:
+                status[ORCHESTRATOR_STATUS_FAILURE_KEY] = node_input["failure"]
+            yield Event(custom_metadata=status, branch="")
         else:
             yield Event(custom_metadata={ORCHESTRATOR_STATUS_KEY: "Reading your question"})
         answer = await ctx.run_node(orchestrator, None, override_branch=orchestrator.name)

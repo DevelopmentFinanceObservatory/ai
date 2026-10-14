@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from common.materialisation import FrameRef
+from common.period_note import period_note
 from data_mcp.frame_materialisation import DegradedReason, MaterialisationOutcome
 from data_mcp.get_data_digest import BreakdownLevel, SummedFamily, render_get_data_digest
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
@@ -24,6 +25,7 @@ def _manifest_payload(
     citation_sources: list[dict[str, Any]] | None = None,
     warnings: list[dict[str, Any]] | None = None,
     requested_window: dict[str, Any] | None = None,
+    year_counts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -34,6 +36,7 @@ def _manifest_payload(
             if dimensions is not None
             else [{"count": 1, "label": "recipient"}],
             "window": window if window is not None else {"start_year": 2015, "end_year": 2024},
+            **(year_counts or {}),
         },
         "citation": {
             "text": citation_text,
@@ -277,6 +280,40 @@ def test_coverage_line_singular_row() -> None:
     assert "1 rows" not in digest
 
 
+_DONORS_IN_2024 = {
+    "rows": 85,
+    "dimensions": [
+        {"count": 85, "label": "financingProvider", "axis": "origin"},
+        {"count": 1, "label": "financingRecipient", "axis": "destination"},
+        {"count": 1, "label": "years"},
+    ],
+    "window": {"kind": "latest", "start_year": 2024, "end_year": 2024},
+}
+_RECENT_YEARS = [
+    {"year": 2025, "series": 9, "role_counts": {"financingProvider": 9, "financingRecipient": 1}},
+    {"year": 2024, "series": 85, "role_counts": {"financingProvider": 85, "financingRecipient": 1}},
+    {"year": 2023, "series": 80, "role_counts": {"financingProvider": 80, "financingRecipient": 1}},
+]
+
+
+def test_a_one_year_frame_states_its_period_note_after_the_coverage() -> None:
+    digest = _digest(**_DONORS_IN_2024, year_counts={"recent_years": _RECENT_YEARS})
+
+    coverage, note, frame = digest.split("\n\n")[1:4]
+    assert coverage.startswith("Coverage:")
+    assert note == period_note({**_DONORS_IN_2024, "recent_years": _RECENT_YEARS})
+    assert "2025" in note
+    assert frame.startswith("Frame:")
+
+
+def test_a_frame_with_nothing_to_note_renders_no_period_note() -> None:
+    digest = _digest(**_DONORS_IN_2024)
+
+    coverage, frame = digest.split("\n\n")[1:3]
+    assert coverage.startswith("Coverage:")
+    assert frame.startswith("Frame:")
+
+
 def test_coverage_line_handles_a_missing_window() -> None:
     digest = _digest(window=None)
 
@@ -397,6 +434,64 @@ def test_multiple_dropped_roles_each_get_their_own_note() -> None:
     )
 
     assert digest.count("no longer bound") == 2
+
+
+# Party totals left out of the frame
+
+
+def test_each_role_that_lost_totals_is_named_with_at_most_ten_of_them() -> None:
+    provider_totals = [f"T{index:02d}" for index in range(13)]
+    manifest = strip_manifest(
+        _manifest_payload()
+        | {
+            "trace": {
+                "party_totals_left_out": [
+                    {"role": "financingProvider", "entities": provider_totals},
+                    {"role": "financingRecipient", "entities": ["GroupOfSeven"]},
+                ]
+            }
+        }
+    )
+
+    digest = render_get_data_digest(
+        manifest=manifest,
+        frame_ref=_frame_ref(manifest),
+        entity_labels={"GroupOfSeven": "G7"},
+        dropped_roles=[],
+    )
+
+    lines = {
+        role: next(line for line in digest.split("\n\n") if f" on {role} " in line)
+        for role in ("financingProvider", "financingRecipient")
+    }
+    assert lines["financingProvider"].startswith("Left out of the frame: 13 group totals on")
+    assert [name in lines["financingProvider"] for name in provider_totals] == [True] * 10 + [
+        False
+    ] * 3
+    # A total this call resolved is named by its label.
+    assert "(G7)" in lines["financingRecipient"]
+    assert "GroupOfSeven" not in lines["financingRecipient"]
+
+
+def test_no_left_out_line_when_no_totals_were_left_out() -> None:
+    manifest = strip_manifest(_manifest_payload())
+
+    digest = render_get_data_digest(
+        manifest=manifest, frame_ref=_frame_ref(manifest), entity_labels={}, dropped_roles=[]
+    )
+
+    assert "Left out" not in digest
+
+
+def test_a_trace_listing_left_out_totals_in_another_shape_is_refused() -> None:
+    manifest = strip_manifest(
+        _manifest_payload() | {"trace": {"party_totals_left_out": {"financingProvider": ["G7"]}}}
+    )
+
+    with pytest.raises(ValueError):
+        render_get_data_digest(
+            manifest=manifest, frame_ref=_frame_ref(manifest), entity_labels={}, dropped_roles=[]
+        )
 
 
 # Per-series statistics

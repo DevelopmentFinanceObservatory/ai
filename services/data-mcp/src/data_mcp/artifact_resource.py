@@ -393,7 +393,7 @@ async def serve_artifact(
     failure itself on one line that leaves out the URI, a bearer credential.
 
     A refusal logs its marker at WARNING. Any other exception is logged with
-    its traceback under a trace id and fails as `internal_error`, raised at
+    its traceback and fails as `internal_error`, raised at
     `logging.DEBUG` and with no cause, since fastmcp would otherwise log it at
     ERROR as `Error reading resource '<uri>'` and wrap it in a message that
     repeats the URI.
@@ -404,9 +404,8 @@ async def serve_artifact(
         logger.warning("artifact read refused code=%s trace_id=%s", exc.code, current_trace_id())
         raise
     except Exception:
-        trace_id = log_unexpected_error(logger, "artifact read")
+        log_unexpected_error(logger, "artifact read")
         raise ResourceError(
-            "internal_error: "
-            + internal_error_message(subject="Reading this resource", trace_id=trace_id),
+            "internal_error: " + internal_error_message(subject="Reading this resource"),
             log_level=logging.DEBUG,
         ) from None

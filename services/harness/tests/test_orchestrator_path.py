@@ -11,10 +11,13 @@ from typing import Any, cast
 
 import pytest
 from analysis_mcp import digest as analysis_digest
+from analysis_mcp.digest import render_rank_digest
+from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.execution_identity import current_execution_identity
 from common.materialisation import FrameRef
 from compiler.surface import FixtureSurface, ToolCallResult
 from data_mcp import get_data_digest
+from dfo_frame_grammar import Frame
 from executor.completion import PublishFault
 from executor.ledger import InMemoryRunLedger
 from google.adk.events import EventActions
@@ -25,7 +28,14 @@ from google.genai import types
 from harness import plan_display
 from harness.conversation import current_conversation_id
 from harness.graph import execute as execute_module
-from harness.graph.plan_done import _ask_status, _partial_result, _stopped_steps
+from harness.graph import plan_done as plan_done_module
+from harness.graph.plan_done import (
+    HandBack,
+    StepSummary,
+    _ask_status,
+    _partial_result,
+    _stopped_steps,
+)
 from harness.graph.state import (
     APPROVE_INTERRUPT,
     CLARIFY_INTERRUPT,
@@ -39,6 +49,7 @@ from harness.graph.state import (
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    ORCHESTRATOR_STATUS_FAILURE_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     UNREADABLE_PLAN_NOTE,
     AskOption,
@@ -55,6 +66,7 @@ from harness.scripted import ScriptedPlannerModel, ScriptedSurface, scripted_pub
 from harness.sentences import DECLINE_REASONS
 from harness.settings import Settings
 from harness.studio_translate import _RecordingSurface
+from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
 from planner.plan import (
@@ -439,6 +451,13 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
         in request_text(model.requests[-1])
     )
     assert not [e for e in events if e.error_code]
+    # The failure's code travels with the status that fails the plan's step.
+    failures = [
+        e.custom_metadata[ORCHESTRATOR_STATUS_FAILURE_KEY]
+        for e in events
+        if e.custom_metadata and ORCHESTRATOR_STATUS_FAILURE_KEY in e.custom_metadata
+    ]
+    assert failures == [{"code": "internal_error"}]
 
     bare, _ = orchestrator_runner(
         call("plan", brief="Kenya's debt", asks=[]), planner=FailingPlanner()
@@ -476,6 +495,7 @@ async def test_a_tool_that_raises_answers_the_agent_with_its_class_and_the_turn_
     answer = _tool_answers(model.requests[-1])["search"]
     assert answer["error"].startswith("search failed inside DFO (RuntimeError).")
     assert "internal.example" not in answer["error"]
+    assert (answer["code"], answer["retry_mode"]) == (HarnessCode.RAISED, "do_not_retry")
     assert not [e for e in events if e.error_code]
     (record,) = [r for r in caplog.records if r.name == "orchestrator.tool_failures"]
     assert record.levelno == logging.ERROR
@@ -651,6 +671,238 @@ def test_an_ask_answered_in_part_hands_back_its_steps_and_the_part_not_computed(
         "answered_by": [{"step": "joined", "status": "not_run"}],
         "not_computed": {"part": "their total", "reason": DECLINE_REASONS[code]},
     }
+
+
+def _ranking(entities: int, *, limit: int | None = None, label: str = "") -> StepSummary:
+    """The summary of a rank step over `entities` countries named `label` after
+    their number, as `analysis_mcp` renders its digest, with the row count of
+    the frame it keeps and, under a `limit`, the entries it ranked."""
+    frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:LifeExpectancy",
+                "observationAbout": f"country/C{number:02d}{label}",
+                "time_period": "2023",
+                "value": 80.0 - number,
+                "unit": "dcid:Years",
+            }
+            for number in range(entities)
+        ],
+    )
+    result = run_rank(
+        frame,
+        rank_by=("observationAbout",),
+        aggregation=None,
+        window_start=None,
+        window_end=None,
+        ascending=False,
+        limit=limit,
+    )
+    digest = render_rank_digest(
+        rank_by=("observationAbout",),
+        result=result,
+        op_spec_hash="ops_" + "1" * 32,
+        content_version="ocv_" + "1" * 32,
+        execution_identity=current_execution_identity(),
+    )
+    ranked = len(result.entity_ranks) if limit is not None else None
+    return StepSummary(digest, "rank", result.frame.num_rows, ranked)
+
+
+def _handed_back(
+    digest: str,
+    tool: str | None,
+    rows: int | None = None,
+    ranked_before_limit: int | None = None,
+) -> list[str]:
+    """The lines the orchestrator reads of one `tool` step's `digest` in the hand-back."""
+    summary = StepSummary(digest, tool, rows, ranked_before_limit)
+    summaries = HandBack(_refuses_to_describe, summaries=[summary]).listing({}, None)[
+        "step_summaries"
+    ]
+    return summaries[0].split("\n")
+
+
+def _rows_of(digest: str) -> list[str]:
+    return [line for line in digest.split("\n") if line.startswith("  #")]
+
+
+def test_a_ranking_of_twelve_hands_back_its_first_row_its_last_row_and_its_count() -> None:
+    ranking = _ranking(12)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert len(rows) == 12
+    assert "12 ranked entit(y/ies):" in handed
+    assert [row for row in rows if row in handed] == [rows[0], rows[-1]]
+
+
+def test_a_ranking_of_four_is_handed_back_whole() -> None:
+    ranking = _ranking(4)
+
+    assert _rows_of(ranking.digest) == [
+        line for line in _handed_back(*ranking) if line.startswith("  #")
+    ]
+
+
+@pytest.mark.parametrize("limit", [10, 20], ids=["limit-10", "limit-20"])
+def test_a_limited_ranking_hands_back_every_row_its_frame_keeps_and_no_others(limit: int) -> None:
+    """The digest lists the first 20 of 70 ranked entities under a `limit` of
+    20 or fewer, which the frame keeps whole."""
+    ranking = _ranking(70, limit=limit)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert ranking.rows == limit and len(rows) == 20
+    assert "70 ranked entit(y/ies):" in handed
+    assert f"limit {limit} (kept {limit} of 70 ranked entities)" in handed[0]
+    assert _rows_of("\n".join(handed)) == rows[:limit]
+
+
+@pytest.mark.parametrize(
+    ("limit", "kept"), [(None, 70), (24, 24), (30, 30)], ids=["unlimited", "limit-24", "limit-30"]
+)
+def test_a_ranking_whose_frame_keeps_more_rows_than_the_digest_lists_hands_back_no_closing_row(
+    limit: int | None, kept: int
+) -> None:
+    """The digest prints 20 rows. Rank 20 is the last row only of a frame that
+    keeps 20, so only the first row is handed back, with a marker that says
+    how many of the frame's rows the digest lists."""
+    ranking = _ranking(70, limit=limit)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert ranking.rows == kept and len(rows) == 20
+    assert [row for row in rows if row in handed] == [rows[0]]
+    assert any(f"20 of the frame's {kept} rows" in line for line in handed)
+
+
+def test_a_limited_ranking_over_the_card_cap_hands_back_its_first_and_last_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame that keeps more rows than a card draws is trimmed even when the
+    digest lists them all (here a card draws 9 and the frame keeps 10)."""
+    monkeypatch.setattr(plan_done_module, "MAX_SERIES_PER_COMPONENT", 9)
+    ranking = _ranking(70, limit=10)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert [row for row in rows if row in handed] == [rows[0], rows[9]]
+
+
+def test_a_ranking_stored_without_its_limit_is_trimmed_to_its_first_and_last_kept_row() -> None:
+    """A summary stored before `ranked_before_limit` was carried has no value."""
+    ranking = _ranking(70, limit=10)._replace(ranked_before_limit=None)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert [row for row in rows if row in handed] == [rows[0], rows[9]]
+    assert (
+        StepSummary.of({"tool": "rank", "digest": ranking.digest, "rows": 10}).ranked_before_limit
+        is None
+    )
+
+
+def test_a_limited_ranking_too_long_to_hand_back_whole_is_trimmed_not_cut_mid_row() -> None:
+    ranking = _ranking(70, limit=20, label="x" * 150)
+    rows = _rows_of(ranking.digest)
+
+    handed = _handed_back(*ranking)
+
+    assert sum(len(line) + 1 for line in rows[:20]) > plan_done_module._WHOLE_RANKING_CHARS
+    assert [row for row in rows if row in handed] == [rows[0], rows[19]]
+
+
+@pytest.mark.parametrize("rows", [None, 0], ids=["unknown", "empty"])
+def test_a_ranking_of_unknown_or_empty_frame_hands_back_its_count_and_no_rows(
+    rows: int | None,
+) -> None:
+    ranking = _ranking(12)
+
+    handed = _handed_back(ranking.digest, "rank", rows)
+
+    assert "12 ranked entit(y/ies):" in handed
+    assert _rows_of("\n".join(handed)) == []
+
+
+# The shapes `analysis_mcp.digest` writes for the six other per-entity digests:
+# the digest's opening line, the heading that states the count, one line.
+_COUNT_ONLY_SHAPES = {
+    "aggregate": (
+        "aggregate: sum grouped by reporter",
+        "6 group(s):",
+        "  reporter=dcid:USA [n=1]: 1.0",
+    ),
+    "growth": (
+        "growth: 2020..2023, entity_by reporter",
+        "6 entit(y/ies):",
+        "  reporter=dcid:USA: +10.0% (1 -> 2)",
+    ),
+    "filter": (
+        "filter: 1 predicate(s) applied, 6/6 row(s) kept (0 dropped)",
+        "6 kept row(s):",
+        "  reporter=dcid:USA: 1.0 [Count]",
+    ),
+    "join": (
+        "join: on reporter + time_period, 6 matched key(s) (0 left-only, 0 right-only, dropped)",
+        "6 matched key(s):",
+        "  reporter=dcid:USA [2021]: left=1.0, right=2.0",
+    ),
+    "quotient_of": (
+        "quotient_of: 6 matched period(s), in Count",
+        "6 quotient(s), numerator / denominator, in Count:",
+        "  2020: 1 / 2 = 0.5",
+    ),
+    "share_of": (
+        "share_of: 6 matched period(s), in per cent (Percent)",
+        "6 period share(s):",
+        "  2020: 1 / 2 = 50.000%",
+    ),
+}
+_KEYED_SHARE = (
+    "share_of: 1 key(s), 6 matched (key, period) pair(s), in per cent (Percent)",
+    "reporter=dcid:USA [6 period(s)], first 2020: 50.000%; latest 2025: 50.000%:",
+    "  2020: 1 / 2 = 50.000%",
+)
+
+
+def _entity_digest(shape: tuple[str, str, str], *, lines: int) -> str:
+    opening, heading, line = shape
+    return "\n".join([opening, "", heading, *[line] * lines, "", "unit: Count"])
+
+
+@pytest.mark.parametrize(
+    ("tool", "shape"),
+    [*_COUNT_ONLY_SHAPES.items(), ("share_of", _KEYED_SHARE)],
+    ids=[*_COUNT_ONLY_SHAPES, "keyed share_of"],
+)
+def test_a_per_entity_digest_past_four_lines_hands_back_its_count_and_none_of_its_lines(
+    tool: str, shape: tuple[str, str, str]
+) -> None:
+    _, heading, line = shape
+
+    handed = _handed_back(_entity_digest(shape, lines=5), tool)
+
+    assert heading in handed
+    assert line not in handed
+    assert _handed_back(_entity_digest(shape, lines=4), tool).count(line) == 4
+
+
+@pytest.mark.parametrize("tool", [None, "compare", "get_data"], ids=["no-tool", "compare", "data"])
+def test_a_digest_of_a_step_not_known_to_print_one_line_per_entity_is_handed_back_whole(
+    tool: str | None,
+) -> None:
+    """A summary stored without its tool, as a run paused before the tool was
+    kept leaves it, reads whole."""
+    digest = _entity_digest(_COUNT_ONLY_SHAPES["growth"], lines=9)
+
+    assert _handed_back(digest, tool) == digest.split("\n")
 
 
 async def _refuses_to_describe(*, tool: str, args: dict[str, Any], on_progress: Any = None) -> Any:
@@ -1569,4 +1821,8 @@ async def test_a_search_fetch_and_chart_turn_lands_a_card_over_the_studio_routes
     assert complete["text"] == "Life expectancy in Kenya rose to 62 years."
     drawn = model.requests[-1].contents[-1].parts[0].function_response
     assert drawn.name == "make_charts"
-    assert "facts" in drawn.response["charts"][0]
+    (card,) = drawn.response["charts"]
+    assert card["holds"]["series"] == ["Kenya"]
+    assert card["reply_figures"] == [
+        {"series": "Kenya", "value": 63.6, "unit": "Year", "period": "2023"}
+    ]

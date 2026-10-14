@@ -17,6 +17,7 @@ from typing import Any
 from common.telemetry import current_trace_id
 from google.adk.tools import BaseTool, ToolContext
 from harness.orchestrator_tools import _ANSWER_NOW
+from harness.tool_contracts import HarnessCode, harness_retry_mode
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ type ToolErrorCallback = Callable[[BaseTool, dict[str, Any], ToolContext, Except
 def answering_tool_failures(tool_names: Collection[str]) -> ToolErrorCallback:
     """An `on_tool_error_callback` that logs a failure of one of `tool_names`
     at ERROR, with its traceback, and answers the model with the tool's name
-    and the exception's class.
+    and the exception's class, under the code `raised`.
 
     The exception's message stays out of the answer, since it can carry
     internal URLs or data. A name outside `tool_names` is a tool the model
@@ -52,7 +53,9 @@ def answering_tool_failures(tool_names: Collection[str]) -> ToolErrorCallback:
         return {
             "error": (
                 f"{tool.name} failed inside DFO ({failure}). Do not repeat this call. {_ANSWER_NOW}"
-            )
+            ),
+            "code": HarnessCode.RAISED.value,
+            "retry_mode": harness_retry_mode(HarnessCode.RAISED).value,
         }
 
     return answer

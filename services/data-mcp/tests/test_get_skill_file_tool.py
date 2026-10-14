@@ -124,7 +124,7 @@ async def test_the_description_carries_the_two_skill_loading_sentences() -> None
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
 
     description = " ".join((tools["get_skill_file"].description or "").split())
-    assert "returns instructions and does not finish the task" in description
+    assert "reading one does not answer it" in description
     assert "A file refused as not found is not retried under a guessed path" in description
 
 

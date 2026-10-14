@@ -92,6 +92,9 @@ ORCHESTRATOR_STATUS_KEY = "orchestrator_status"
 # when the approved plan ran; `studio_translate._Translator` shows the first as
 # a failed step and the second as nothing.
 ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
+# The `custom_metadata` key under which the planner's refusal travels beside
+# that status. It holds `{"code"}`, which selects the failed step's sentence.
+ORCHESTRATOR_STATUS_FAILURE_KEY = "orchestrator_status_failure"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
@@ -197,13 +200,12 @@ def turn_budgets(state: Any) -> dict[str, int]:
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
 
 
-def count_call(state: Any, tool: str, step: int = 1) -> None:
-    """Add `step` to `tool`'s calls this turn (`ORCHESTRATOR_CALLS_KEY`),
-    reading the counts afresh: 1 to take a call, -1 to give one back.
-    Synchronous, so no other tool call runs between a check of a budget and
-    the change."""
+def count_call(state: Any, tool: str) -> None:
+    """Count one more of `tool`'s calls this turn (`ORCHESTRATOR_CALLS_KEY`),
+    reading the counts afresh. Synchronous, so no other tool call runs
+    between a check of a budget and the change."""
     calls = dict(state.get(ORCHESTRATOR_CALLS_KEY) or {})
-    calls[tool] = int(calls.get(tool, 0)) + step
+    calls[tool] = int(calls.get(tool, 0)) + 1
     state[ORCHESTRATOR_CALLS_KEY] = calls
 
 
@@ -269,9 +271,7 @@ def store_search(
     origin: Origin = "search",
 ) -> list[dict[str, Any]]:
     """Store what a `resolver_digest` read in the orchestrator's session state,
-    and return its parts as the model reads them, without their blocks. A
-    definite part searched for the latest period keeps its `recent_years`
-    (`reading_facts`), the per-year counts behind that period.
+    and return its parts as the model reads them, without their blocks.
 
     Each part's spec blocks, its own and its candidates', go under
     `ORCHESTRATOR_SPECS_KEY` and the part's warnings under
@@ -298,8 +298,6 @@ def store_search(
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
             facts = reading_facts(part["spec_block"])
-            if facts["requested_window_kind"] == "latest" and facts["recent_years"]:
-                reading["recent_years"] = facts["recent_years"]
         if mentions := reading.get("resolved_sources"):
             blocks = {
                 spec_id: {**block, "_resolved_sources": mentions}

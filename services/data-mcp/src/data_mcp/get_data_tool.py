@@ -24,7 +24,7 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
 import httpx2
 import pyarrow as pa
@@ -55,6 +55,8 @@ from data_mcp.definition_store import (
 from data_mcp.errors import UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
     materialise_and_register,
     place_type_columns_for,
     replayed_mint_options,
@@ -164,6 +166,10 @@ StatVarsReading = Literal["sum", "separate"]
 # `options.groupby.levels` rolls up. A deployment without it serves no `breakdown`.
 _GROUPBY_LEVEL_AXES_FIELD = "groupby_level_axes"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
+# The route that reads a definition out of dfo-apis' registry by `spec_id` and answers its
+# identity under `definition`. A GET of a spec rebuilds its stale head, so it may take a
+# materialisation's time.
+_OPTIONS_ROUTE = "/api/datasets/{id}/options"
 
 # No `UpstreamError` backs a definition-store read failure, so there is no
 # call to derive a wait from. Mirrors `search_tool.py`'s constants of the
@@ -465,6 +471,69 @@ async def _resolve_scope_entities(
     return wire_entities, entity_labels
 
 
+class _RegistryIdentity(NamedTuple):
+    """An identity read from dfo-apis' registry, and whether it hashes to the requested id."""
+
+    identity: dict[str, Any]
+    hashes_to_requested_id: bool
+
+
+async def _registry_identity_or_refuse(
+    spec_id: str, *, deadline: CallDeadline
+) -> _RegistryIdentity | ToolResult:
+    """The identity of `spec_id` read from dfo-apis' registry, for an id the definition
+    store does not hold.
+
+    `get_data` chooses the mint's columns from the spec's identity, and a spec it cannot
+    read would be asked for the wrong ones: a flow table refuses a place type column, and
+    a frame minted without kinds serves every party total. The read is
+    `GET /api/datasets/{id}/options`, which answers the identity of the version it serves
+    and rebuilds a stale head as any GET of the id does, so it must finish while the
+    current `CallBudget.pre_mint_reserve_s` of `deadline` remains, as the write after it.
+
+    The registry may serve the id under another `spec_id`. Its identity still names the
+    same table's sides, so it chooses the columns, but it goes in the mint's `definition`
+    sidecar, which carries the id it hashes to, and in the definition store, only when
+    that id is the requested one (`hashes_to_requested_id`); a stored one is found by the
+    next call. A refusal `ToolResult` when the registry does not hold the id either
+    (`definition_not_held`), answers with another failure, serves a body this service
+    cannot use, or serves an identity that does not hash to its own id.
+    """
+    reserve_s = current_call_budget().pre_mint_reserve_s
+    try:
+        response = await get_client().request(
+            "GET",
+            f"/api/datasets/{spec_id}/options",
+            route=_OPTIONS_ROUTE,
+            deadline=deadline.reserving(reserve_s),
+        )
+        definition = DefinitionModel.model_validate(response.json()["definition"])
+    except UpstreamError as exc:
+        if exc.code == "spec_not_found":
+            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+        return to_tool_result(from_upstream_error(exc))
+    except (ValueError, KeyError, TypeError) as exc:
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail=f"the definition of {spec_id} could not be read from the registry: {exc}"
+            )
+        )
+    hashes_to_requested_id = definition.spec_id == spec_id
+    try:
+        if hashes_to_requested_id:
+            if not await _persist_definition(definition, deadline=deadline, reserve_s=reserve_s):
+                logger.warning(
+                    "get_data: the definition store did not confirm the write of %s; the next "
+                    "call reads the registry again",
+                    spec_id,
+                )
+        else:
+            verify_write(dict(definition.identity), definition.spec_id)
+    except IdentityMismatch as exc:
+        return to_tool_result(ToolRefusal.capability_unavailable(detail=str(exc)))
+    return _RegistryIdentity(dict(definition.identity), hashes_to_requested_id)
+
+
 def _pre_mint_deadline_refusal(*, service: str, step: str) -> ToolResult:
     """The retryable refusal for pre-mint work that ran past its share of the deadline."""
     return to_tool_result(
@@ -591,24 +660,24 @@ async def _load_identity_or_refuse(
     return None
 
 
-async def _persist_reminted_definition(
-    definition: DefinitionModel, *, deadline: CallDeadline
+async def _persist_definition(
+    definition: DefinitionModel, *, deadline: CallDeadline, reserve_s: float
 ) -> bool:
-    """Write a re-minted definition to the store, so a later `get_data` call with its id succeeds.
+    """Write a definition dfo-apis served to the store, so a later `get_data` call with its id succeeds.
 
-    Called only when the mint route's own manifest carries a `spec_id` different from the one
+    Called for a mint route's own manifest carrying a `spec_id` different from the one
     this call was made with: a scope override changed the identity, and upstream re-minted
     under a new id. That new id is what the digest hands the model as its frame reference, so
     it has to be resolvable by a later `get_data` call the same way any other id is -- without
     this write, that later call would refuse `definition_not_held` even though dfo-apis' own
     registry now holds this id, which is exactly the case the platform contract's
-    `definition_not_held` excludes ("held by neither store nor registry"). `verify_write`
+    `definition_not_held` excludes ("held by neither store nor registry"). Called too for
+    the definition of an id this store did not hold (`_registry_identity_or_refuse`). `verify_write`
     canonicalises and hash-checks `definition.identity` the same way `search_tool.py`'s own
     registration path does, so a corrupt identity is caught rather than trusted forward.
 
-    The write must finish while the current `CallBudget.post_mint_reserve_s` of `deadline`
-    remains, so the frame fetch, statistics and rendering after it keep their share. A
-    write that runs past that is abandoned unconfirmed: its worker thread may still land it.
+    The write must finish while `reserve_s` of `deadline` remains, so the work after it
+    keeps its share. A write that runs past that is abandoned unconfirmed: its worker thread may still land it.
 
     Returns:
         `True` once the write is confirmed durable. `False` when the definition store itself
@@ -631,7 +700,6 @@ async def _persist_reminted_definition(
         canonical_bytes=canonical_bytes,
     )
     try:
-        reserve_s = current_call_budget().post_mint_reserve_s
         async with asyncio.timeout(deadline.reserving(reserve_s).remaining()):
             await get_store().put_many([stored])
     except (DefinitionStoreUnavailable, TimeoutError):
@@ -829,6 +897,7 @@ async def _finish_mint_response(
     dropped_roles: Sequence[str],
     settings: Settings,
     deadline: CallDeadline,
+    asked_for_kinds: bool = False,
     operation_poll: OperationPollNote | None = None,
     breakdown: BreakdownLevel | None = None,
 ) -> ToolResult:
@@ -843,7 +912,7 @@ async def _finish_mint_response(
     deadline.
 
     When the manifest's own `spec_id` differs from `requested_spec_id`, this call re-minted
-    under a new identity; see `_persist_reminted_definition` for why that new definition gets
+    under a new identity; see `_persist_definition` for why that new definition gets
     written to the store here, and what happens when the write itself fails.
 
     Once the manifest itself validates, it is narrowed to the requested rendering
@@ -875,6 +944,10 @@ async def _finish_mint_response(
             its row-count ceiling and fetch wall-clock budget.
         deadline: The `get_data` call's deadline, which cuts the re-mint persist's, the
             frame fetch's, the statistics fetch's and the description read's budgets.
+        asked_for_kinds: Whether the call asked for the party kinds, by `place_types` or
+            `without_party_totals`. A manifest naming a flow side, minted without them, refuses
+            `upstream_response_unusable`: a flow frame without kinds would serve every
+            party total beside its parties.
         operation_poll: Set when `payload` was resolved from a 202 operation rather
             than an ordinary 200 mint. Forwarded to the digest renderer.
         breakdown: The code system and level this mint summed within, forwarded to
@@ -899,11 +972,27 @@ async def _finish_mint_response(
             )
         )
     manifest = _narrowed_to_rendering(manifest, options=options)
+    if (
+        asked_for_kinds
+        and place_type_columns_for(manifest.definition.identity) == KIND_COLUMNS
+        and tuple(options.get("columns") or ()) != KIND_COLUMNS
+    ):
+        return to_tool_result(
+            ToolRefusal.upstream_response_unusable(
+                detail=f"{manifest.definition.spec_id} names a flow side, and this call asked for "
+                "party kinds, but the mint was sent without them; the frame would serve every "
+                "group total beside its parties"
+            )
+        )
 
     remint_persist_failed = False
     if manifest.definition.spec_id != requested_spec_id:
         try:
-            persisted = await _persist_reminted_definition(manifest.definition, deadline=deadline)
+            persisted = await _persist_definition(
+                manifest.definition,
+                deadline=deadline,
+                reserve_s=current_call_budget().post_mint_reserve_s,
+            )
         except IdentityMismatch as exc:
             return to_tool_result(ToolRefusal.capability_unavailable(detail=str(exc)))
         remint_persist_failed = not persisted
@@ -1088,10 +1177,12 @@ async def _attempt_mint(
     client: UpstreamClient,
     spec_id: str,
     identity: Mapping[str, Any] | None,
+    sends_definition: bool,
     wire_scope: Mapping[str, Any],
     stat_vars: StatVarsReading,
     breakdown: Breakdown | None,
     place_types: bool,
+    without_party_totals: bool,
     entity_labels: Mapping[str, str],
     dropped_roles: Sequence[str],
     settings: Settings,
@@ -1102,6 +1193,8 @@ async def _attempt_mint(
 
     `identity` is `None` on the registry-fallback path, where the request omits the
     `definition` sidecar and a `spec_not_found` refusal completes `definition_not_held`.
+    An identity read from the registry (`_registry_identity_or_refuse`) chooses the
+    columns, and goes in the sidecar only when `sends_definition`.
     `stat_vars="sum"` adds `_SUM_STAT_VARS_GROUPBY` to the request's options. The sum
     sits outside the spec's identity: the manifest keeps `spec_id`, and dfo-apis mints
     the summed frame its own `content_version` whenever more than one StatVar
@@ -1116,15 +1209,20 @@ async def _attempt_mint(
     column from a table without one is sent once more with no columns
     (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
     flow frame without kinds would let a sum count party totals beside their parties.
+    `without_party_totals` on a flow spec asks for the kinds as `place_types` does, and
+    sends `options.without_party_totals`: dfo-apis leaves out the group totals of the
+    party roles the identity it serves leaves open, and mints the frame that remains a
+    version of its own, which the manifest's pair names and its trace lists the totals
+    left out of (`party_totals_left_out`). On any other spec it changes nothing.
     """
     mint_input: dict[str, Any] = {
         "kind": "spec_id",
         "spec_id": spec_id,
         "scope": dict(wire_scope),
     }
-    if identity is not None:
-        # Sent whenever the store holds the definition; omitted on the
-        # registry-fallback path so `mint_spec_id` is free to serve
+    if identity is not None and sends_definition:
+        # Sent whenever the definition is held or read from the registry under this id;
+        # omitted on the registry-fallback path so `mint_spec_id` is free to serve
         # straight from its own registry on a hit.
         mint_input["definition"] = {
             "schema_version": _SCHEMA_VERSION,
@@ -1137,8 +1235,11 @@ async def _attempt_mint(
         options["groupby"] = breakdown.groupby()
     elif stat_vars == "sum":
         options["groupby"] = _SUM_STAT_VARS_GROUPBY
-    if place_types:
+    drops_totals = without_party_totals and place_type_columns_for(identity) == KIND_COLUMNS
+    if place_types or drops_totals:
         options["columns"] = list(place_type_columns_for(identity))
+    if drops_totals:
+        options[WITHOUT_PARTY_TOTALS] = True
     request_body = {
         "schema_version": _SCHEMA_VERSION,
         "input": mint_input,
@@ -1162,7 +1263,6 @@ async def _attempt_mint(
                 places=_places_named(
                     [ref for refs in entities.values() for ref in refs], entity_labels
                 ),
-                trace_id=refused.get("trace_id"),
                 capability_version=refused.get("capability_version"),
             )
         )
@@ -1179,7 +1279,7 @@ async def _attempt_mint(
                 client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
             )
     except UpstreamError as exc:
-        if identity is None and exc.code == "spec_not_found":
+        if not sends_definition and exc.code == "spec_not_found":
             # The sidecar-free registry-fallback request above just missed
             # dfo-apis' own registry too: `mint_spec_id` raises exactly this
             # code in that case, and the platform contract's
@@ -1205,6 +1305,7 @@ async def _attempt_mint(
         dropped_roles=dropped_roles,
         settings=settings,
         deadline=deadline,
+        asked_for_kinds=place_types or without_party_totals,
         operation_poll=operation_poll,
         breakdown=(
             None
@@ -1363,7 +1464,8 @@ async def _post_recorded_mint(
     """POST the mint `record` names, as `_attempt_mint` posts `get_data`'s, with the
     stored definition beside the `spec_id` when the definition store holds one, and
     return the response with the options it sent: the recorded ones mapped for that
-    definition's identity (`replayed_mint_options`)."""
+    definition's identity (`replayed_mint_options`). A recorded
+    `options.without_party_totals` is sent as recorded."""
     spec_id = record.dataset.spec_id
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
@@ -1507,6 +1609,18 @@ async def get_data(
             )
         ),
     ] = False,
+    without_party_totals: Annotated[
+        bool,
+        Field(
+            description=(
+                "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
+                "Total or the G7) from each side the spec leaves open, and add the party kinds as "
+                "place_types does; a side the spec names, or one holding only totals, keeps every "
+                "row, and the digest names what was left out. On a spec with no flow side it "
+                "changes nothing."
+            )
+        ),
+    ] = False,
     breakdown: Annotated[
         Breakdown | None,
         Field(
@@ -1587,6 +1701,9 @@ async def get_data(
             (the default) for one series per StatVar.
         place_types: Whether to add the places' types (`observationAbout_type`), or
             each party's kind on a flow frame, for a spec that names no place.
+        without_party_totals: Whether a flow frame leaves out the group totals of each side
+            the spec leaves open, and adds the party kinds as `place_types` does. On a spec
+            with no flow side it changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 
@@ -1616,6 +1733,14 @@ async def get_data(
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
         return identity
+    sends_definition = identity is not None
+    if identity is None and (place_types or without_party_totals):
+        # The columns the mint asks for follow the spec's identity.
+        registry = await _registry_identity_or_refuse(spec_id, deadline=deadline)
+        if isinstance(registry, ToolResult):
+            return registry
+        identity = registry.identity
+        sends_definition = registry.hashes_to_requested_id
 
     wire_scope: dict[str, Any] = {}
     entity_labels: dict[str, str] = {}
@@ -1652,10 +1777,12 @@ async def get_data(
         client=client,
         spec_id=spec_id,
         identity=identity,
+        sends_definition=sends_definition,
         wire_scope=wire_scope,
         stat_vars=stat_vars,
         breakdown=breakdown,
         place_types=place_types,
+        without_party_totals=without_party_totals,
         entity_labels=entity_labels,
         dropped_roles=dropped_roles,
         settings=settings,

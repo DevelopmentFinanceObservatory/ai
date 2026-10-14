@@ -100,9 +100,6 @@ from google.adk.evaluation.eval_case import Invocation, get_all_tool_responses
 from google.adk.evaluation.eval_metrics import EvalMetric
 from google.adk.evaluation.evaluator import EvalStatus, EvaluationResult, PerInvocationResult
 from google.genai import types as genai_types
-from planner.tool_results import Outcome
-from submission.tool import TOOL_NAME as SUBMIT_ANALYSIS
-from submission.tool import SubmissionOutcome
 
 # The tools whose response a case may state an expectation on. A
 # `tool_responses` entry naming anything else is not an expectation this
@@ -110,8 +107,6 @@ from submission.tool import SubmissionOutcome
 # `translation` is the verdict an accepted proposal returns under its own
 # `translation` key: `ok` or the referral translation stopped on. No tool of
 # that name exists; `_with_translations` reads it off the proposal's response.
-# A case names a proposal `propose_plan` under either schema delivery:
-# `_with_translations` lists a `submit_analysis` answer under that name.
 TRANSLATION = "translation"
 SCORED_TOOLS = (
     "propose_plan",
@@ -225,43 +220,23 @@ def _by_name(
     return (preferred or matching)[-1]
 
 
-# The `submit_analysis` outcomes of a plan the service recorded, which
-# `propose_plan` answers `ok`.
-_RECORDED = frozenset({SubmissionOutcome.RECORDED, SubmissionOutcome.READY_FOR_REVIEW})
-
-
 def _with_translations(
     responses: list[genai_types.FunctionResponse],
 ) -> list[genai_types.FunctionResponse]:
     """`responses` as a case names them, each proposal's verdict following it as a `translation` response.
 
-    Both proposing tools answer through one submission service. A
-    `submit_analysis` answer is listed as `propose_plan`'s, its `recorded`
-    or `ready_for_review` read as the `ok` `propose_plan` answers, so one
-    case scores either schema delivery. A verdict is lifted from any
-    response carrying one, as `harness.planner_seam` reads it; a proposal
-    the planner refused ran no translation and adds nothing.
+    A verdict is lifted from any response carrying one, as
+    `harness.planner_seam` reads it; a proposal the planner refused ran no
+    translation and adds nothing.
     """
     listed: list[genai_types.FunctionResponse] = []
-    for response in map(_as_proposal, responses):
+    for response in responses:
         listed.append(response)
         answer = response.response
         verdict = answer.get("translation") if isinstance(answer, dict) else None
         if isinstance(verdict, dict):
             listed.append(genai_types.FunctionResponse(name=TRANSLATION, response=verdict))
     return listed
-
-
-def _as_proposal(response: genai_types.FunctionResponse) -> genai_types.FunctionResponse:
-    """`response`, a `submit_analysis` answer listed as `propose_plan`'s; any other unchanged."""
-    answer = response.response
-    if response.name != SUBMIT_ANALYSIS or not isinstance(answer, dict):
-        return response
-    outcome = answer.get("outcome")
-    return genai_types.FunctionResponse(
-        name="propose_plan",
-        response={**answer, "outcome": Outcome.OK.value if outcome in _RECORDED else outcome},
-    )
 
 
 def _is_referral(response: genai_types.FunctionResponse) -> bool:

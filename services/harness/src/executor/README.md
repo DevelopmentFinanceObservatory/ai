@@ -10,14 +10,14 @@ Its tests live in `services/harness/tests/executor/`.
 
 ## What it does
 
-| Module          | Role                                                                                                                                                                                             |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `run.py`        | `execute_authorised`, the shared execution path; `execute_approved_plan`, the planned route's adapter; `resume_run`; and the private step loop underneath them: retries, checks, and transitions |
-| `ledger.py`     | The run ledger: run records, typed authorisations, idempotency keys, and the run's status machine                                                                                                |
-| `completion.py` | The completion gate: publishes each derived terminal frame with its replay recipe before a run completes                                                                                         |
-| `artifacts.py`  | Reads the frame reference a step was compiled to produce out of the tool's structured result                                                                                                     |
-| `classify.py`   | Decides what a tool's refusal calls for: retry, a choice for the planner, rediscovery, or a stop                                                                                                 |
-| `outcomes.py`   | `Accepted`, `MethodChoiceNeeded`, `Refused`, `RediscoveryNeeded`, and the session-state slot that holds the latest                                                                               |
+| Module          | Role                                                                                                                                                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run.py`        | `execute_authorised`, which runs a workflow under a plan's approval; `execute_approved_plan`, which runs an approved plan through it; `resume_run`; and the private step loop underneath them: retries, checks, and transitions |
+| `ledger.py`     | The run ledger: run records, typed authorisations, idempotency keys, and the run's status machine                                                                                                                               |
+| `completion.py` | The completion gate: publishes each derived terminal frame with its replay recipe before a run completes                                                                                                                        |
+| `artifacts.py`  | Reads the frame reference a step was compiled to produce out of the tool's structured result                                                                                                                                    |
+| `classify.py`   | Decides what a tool's refusal calls for: retry, a choice for the planner, rediscovery, or a stop                                                                                                                                |
+| `outcomes.py`   | `Accepted`, `MethodChoiceNeeded`, `Refused`, `RediscoveryNeeded`, and the session-state slot that holds the latest                                                                                                              |
 
 `execute_approved_plan` is a library function for the harness to call once a
 plan is `APPROVED`; it moves the plan to `EXECUTING`, runs it, and returns the
@@ -31,14 +31,14 @@ take longer than a model turn should.
 
 ## The properties that define done
 
-**What runs is what was approved.** `execute_approved_plan` is the planned
-route's entry point: a plan that is not `APPROVED` is refused (`not_approved`)
-untouched, and one that is starts through `Plan.start_execution`, which refuses a plan
-whose content no longer hashes to its `approved_revision` (`stale_revision`).
-The step loop underneath, `_run_workflow`, is private -- reachable only for
-a run the ledger admitted under an authorisation, a plan's approval or a
-direct request's -- so nothing runs that was not authorised. Before the first
-call it re-reads the tool surface and refuses to run
+**What runs is what was approved.** `execute_approved_plan` is the entry
+point for every calculation: a plan that is not `APPROVED` is refused
+(`not_approved`) untouched, and one that is starts through
+`Plan.start_execution`, which refuses a plan whose content no longer hashes
+to its `approved_revision` (`stale_revision`). The step loop underneath,
+`_run_workflow`, is private -- reachable only for a run the ledger admitted
+under an authorisation -- so nothing runs that was not authorised. Before the
+first call it re-reads the tool surface and refuses to run
 (`surface_changed`) if any step's tool has changed since the plan was
 compiled: a different argument schema, a different output schema, or a
 different declared version.

@@ -650,9 +650,10 @@ class _Build:
         source that leaves `observationAbout` open over several places mixes
         levels (`compiler.evidence.opens_place_axis`). Where the place word
         covers a flow axis instead (`compiler.evidence.open_axes_for`), as
-        IDS holds its debtors on `destination`, the axis holds parties,
-        whose kinds keep totals out of a sum or a rank, so the filter has no
-        level to keep and the planner drops it.
+        IDS holds its debtors on `destination`, the axis holds parties, and a
+        flow retrieval serves them without their group totals
+        (`_retrieve_arguments`), so the filter has no level to keep and the
+        planner drops it.
         """
         for operation in self.operations.values():
             if not isinstance(operation, FilterOperation) or not keeps_one_level(
@@ -679,9 +680,9 @@ class _Build:
                 self._issue(
                     CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS,
                     f"source {source.spec_id} holds every {word!r} on its flow axis "
-                    f"{axis.column!r}, whose parties have no place level to keep, and party "
-                    "kinds already keep totals out of a sum or a rank; drop the place_level "
-                    "predicate",
+                    f"{axis.column!r}, whose parties have no place level to keep, and the "
+                    "retrieval already leaves the parties' group totals out; drop the "
+                    "place_level predicate",
                     operation_id=operation.id,
                     requirement_id=requirement.id,
                 )
@@ -2086,11 +2087,15 @@ class _Build:
 
         `place_types` is written for a retrieval a place-level filter reads
         (`_read_by_level_filter`): it adds the `observationAbout_type`
-        column that filter keeps one level by. It is written too for a flow
-        retrieval a sum, a rank, a share or a quotient reads
-        (`_pooled_across_parties`): it adds each flow party's kind, by which
-        `analysis-mcp` leaves out the parties that total others. Rendering
-        only, so it re-mints nothing either.
+        column that filter keeps one level by. Rendering only, so it
+        re-mints nothing either.
+
+        `without_party_totals` is written for every flow retrieval (a source
+        with a flow role column among its stated or open entity axes). A flow
+        side its source leaves open holds single parties and group totals of
+        them, so the frame of a flow retrieval holds each open side's parties
+        without their group totals, for every verb that reads it. It names a
+        frame of its own, and re-mints no definition.
 
         No `scope` is written, even when the source resolves more entities
         than the requirement names. `get_data`'s contract is that any scope
@@ -2113,9 +2118,18 @@ class _Build:
                 "code_system": BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension],
                 "level": requirement.breakdown.level,
             }
-        if self._read_by_level_filter(operation.id) or self._pooled_across_parties(operation.id):
+        if self._read_by_level_filter(operation.id):
             args["place_types"] = True
+        if self._is_flow_source(source):
+            args["without_party_totals"] = True
         return args, {}
+
+    @staticmethod
+    def _is_flow_source(source: SelectedSource) -> bool:
+        """Whether `source` has a flow role column among its stated or open entity axes."""
+        axes = {entity.role for entity in source.entities}
+        axes.update(axis.column for axis in source.open_entity_axes or ())
+        return bool(axes & FLOW_ROLE_COLUMNS.keys())
 
     def _read_by_level_filter(self, retrieve_id: str) -> bool:
         """Whether a filter keeping one level of place reads `retrieve_id`, directly or through other filters."""
@@ -2125,44 +2139,6 @@ class _Build:
             and self._through_filters(operation.input) == retrieve_id
             for operation in self.operations.values()
         )
-
-    def _pooled_across_parties(self, retrieve_id: str) -> bool:
-        """Whether `retrieve_id` reads a flow source, and an aggregate, a rank, a share or a quotient reads it, directly or through filters, growths and joins.
-
-        A flow frame carries every party of each side its table holds, the
-        sides its source leaves unnamed among them, so any such verb may sum
-        or rank across a side holding totals of other parties. A filter, a
-        growth and a join keep each party column they key by together with
-        its kind, so a verb reading their output pools the same parties. A
-        compare and a sum of two series keep no party column, so nothing
-        after them pools across a side.
-        """
-        source = self.sources.get(retrieve_id)
-        if source is None:
-            return False
-        axes = {entity.role for entity in source.entities}
-        axes.update(axis.column for axis in source.open_entity_axes or ())
-        if not axes & FLOW_ROLE_COLUMNS.keys():
-            return False
-        reached = {retrieve_id}
-        frontier = [retrieve_id]
-        while frontier:
-            read = frontier.pop()
-            for operation in self.operations.values():
-                if read not in _inputs_of(operation):
-                    continue
-                if isinstance(
-                    operation,
-                    AggregateOperation | RankOperation | ShareOfOperation | QuotientOfOperation,
-                ):
-                    return True
-                if (
-                    isinstance(operation, FilterOperation | GrowthOperation | JoinOperation)
-                    and operation.id not in reached
-                ):
-                    reached.add(operation.id)
-                    frontier.append(operation.id)
-        return False
 
     def _through_filters(self, op_id: str) -> str:
         """The operation `op_id` reads through filters alone: `op_id` itself when it is no filter."""

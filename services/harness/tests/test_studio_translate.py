@@ -30,16 +30,23 @@ from harness.graph.state import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
 from harness.planner_seam import PlannerSeamError
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
-from harness.sentences import DECLINE_REASONS
-from harness.studio_state import ConversationState, StudioStore, _next_manifest
+from harness.sentences import DECLINE_REASONS, failure_sentence
+from harness.studio_state import (
+    ConversationState,
+    StudioStore,
+    _next_manifest,
+    land_component,
+    remove_cards,
+)
 from harness.studio_translate import (
-    _PLANNER_FAILED_DETAIL,
     _ExecutorRecord,
     _RecordingExecutor,
     _RecordingSurface,
     _stream_fatal,
+    _timeout_refusal,
     _Translator,
 )
+from harness.tool_contracts import HarnessCode, ResolverError
 from harness.wire import CompositionActor, PlanAsk, StepStatus
 from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
@@ -51,6 +58,7 @@ from planner.plan import (
 )
 from planner.workflow import ToolId
 
+from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 
@@ -65,6 +73,72 @@ def _translator() -> _Translator:
         conversation=ConversationState(conversation_id="c1"),
         recorder=_RecordingExecutor(_dummy_executor, store=StudioStore(InMemorySessionService())),
     )
+
+
+_OVER_CEILING_MESSAGE = (
+    "Over the coverage ceiling: member_cardinality is 480 for "
+    "spec_ed5b608a610cdc5a4bc703cf7d1bc2d0, over the 400 ceiling. This spec_id's definition "
+    "has more member series than one request can serve. scope.entities and scope.window do "
+    "not change that."
+)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        {"code": "unsupported_component_type", "message": "no such component"},
+        {"code": "internal_error", "message": "Internal error"},
+        {
+            "code": "over_ceiling",
+            "retry_mode": "correct_and_retry",
+            "fix": {"ceiling_kind": "member_cardinality"},
+            "message": _OVER_CEILING_MESSAGE,
+        },
+        # A code no table names, with a message far past any cap.
+        {"code": "refused", "retry_mode": "do_not_retry", "message": "word " * 200},
+        {"code": "facet_not_available", "fix": {"issues": [{"axis": "gender"}]}},
+    ],
+    ids=["short", "trace-id", "member-cardinality", "long-message", "structured-fix"],
+)
+def test_a_failed_step_states_the_sentence_of_its_code_and_nothing_of_its_refusal(
+    refusal: dict[str, Any],
+) -> None:
+    """A refusal's message, fix and trace id are written for a model or an
+    operator. The failed line states the sentence its code has."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    translator._recorder.record_step(
+        tool="get_data",
+        args={},
+        result={"outcome": "refusal", "refusal": refusal},
+        step_id="debt",
+    )
+
+    (frame,) = translator._drain_recorder()
+
+    assert frame.status is StepStatus.FAILED
+    assert frame.detail == failure_sentence(
+        refusal["code"], refusal.get("retry_mode"), refusal.get("fix")
+    )
+    assert is_user_sentence(frame.detail)
+    assert refusal.get("message", "gender").strip() not in frame.detail
+    assert "41d94ed2" not in frame.detail
+
+
+def test_two_codes_of_different_classes_read_differently_on_a_failed_step() -> None:
+    current_conversation_id.set("c1")
+    translator = _translator()
+    for step_id, code in (("debt", "over_ceiling"), ("pop", "internal_error")):
+        translator._recorder.record_step(
+            tool="get_data",
+            args={},
+            result={"outcome": "refusal", "refusal": {"code": code, "message": "m"}},
+            step_id=step_id,
+        )
+
+    first, second = translator._drain_recorder()
+
+    assert first.detail != second.detail
 
 
 def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() -> None:
@@ -384,6 +458,9 @@ def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame() -> 
         (first.step_id, StepStatus.COMPLETE),
         (other.step_id, StepStatus.COMPLETE),
     ]
+    # The Activity log replaces a line's detail with each frame, so the frame
+    # that fails a line a report was showing on states a reason of its own.
+    assert is_user_sentence(final[0].detail)
 
 
 def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() -> None:
@@ -403,7 +480,9 @@ def test_a_mid_run_report_leaves_a_finished_steps_record_for_the_run_to_amend() 
 
     assert running.status is StepStatus.RUNNING
     assert final.step_id != running.step_id
-    assert (final.status, final.detail) == (StepStatus.FAILED, None)
+    assert final.status is StepStatus.FAILED
+    assert final.detail == classed_sentence("source_drift", "do_not_retry")
+    assert is_user_sentence(final.detail)
 
 
 class _HangingSurface(_UnreachableSurface):
@@ -456,7 +535,8 @@ async def test_a_step_cut_off_mid_call_closes_its_line_as_failed() -> None:
         StepStatus.FAILED,
         "get_data",
     )
-    assert final.detail is None
+    assert final.detail == classed_sentence("transport_failed", "do_not_retry")
+    assert is_user_sentence(final.detail)
     assert final.duration_ms is not None
 
 
@@ -488,9 +568,10 @@ def test_a_step_that_never_called_gets_a_failed_record_and_a_refused_one_keeps_i
     frames = translator._drain_recorder()
 
     assert [(f.status, f.detail, f.duration_ms) for f in frames] == [
-        (StepStatus.FAILED, None, 1),
-        (StepStatus.FAILED, None, 0),
+        (StepStatus.FAILED, classed_sentence("service_unavailable"), 1),
+        (StepStatus.FAILED, classed_sentence("transport_failed", "do_not_retry"), 0),
     ]
+    assert all(is_user_sentence(f.detail) for f in frames)
 
 
 @pytest.mark.parametrize(
@@ -585,6 +666,82 @@ def test_component_frames_lands_and_appends() -> None:
     events = [getattr(f, "event", None) for f in frames]
     assert events == ["component.created", "composition.updated"]
     assert translator._conversation.turn_components[-1]["action"] == "created"
+
+
+async def test_a_step_that_removes_a_card_and_draws_one_streams_each_write_s_own_manifest() -> None:
+    """`remove_cards` writes the composition as its tool runs and a drawn
+    card lands when its record drains, so one model step holding both calls
+    writes twice. Each `composition.updated` carries the manifest its own
+    write produced, and revisions rise along the stream."""
+    current_conversation_id.set("c1")
+    drawn = _written_component("cmp_new")
+
+    async def executor(*, tool: str, args: dict[str, object], on_progress=None) -> dict[str, Any]:
+        del tool, args, on_progress
+        return {"outcome": "ok", "component": drawn}
+
+    conversation = ConversationState(conversation_id="c1")
+    for held in ("cmp_01", "cmp_02"):
+        land_component(conversation, _written_component(held))
+    start = conversation.composition.revision
+    recorder = _RecordingExecutor(executor, store=StudioStore(InMemorySessionService()))
+    translator = _Translator(conversation=conversation, recorder=recorder)
+    calls = {"remove_cards": {"removed": ["cmp_01"]}, "make_charts": {"charts": [{"title": "t"}]}}
+
+    remove_cards(conversation, ["cmp_01"], all_cards=False)
+    await recorder(tool="write_component", args={})
+    recorder.land_component(drawn)
+    frames = [
+        *translator.translate(
+            Event(
+                author="dfo_orchestrator",
+                content=types.Content(
+                    parts=[
+                        types.Part(function_call=types.FunctionCall(id=name, name=name, args={}))
+                        for name in calls
+                    ]
+                ),
+            )
+        ),
+        *translator.translate(
+            Event(
+                author="dfo_orchestrator",
+                content=types.Content(
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=name, name=name, response=answer
+                            )
+                        )
+                        for name, answer in calls.items()
+                    ]
+                ),
+            )
+        ),
+    ]
+
+    updates = [f.manifest for f in frames if getattr(f, "event", None) == "composition.updated"]
+    assert [manifest.revision for manifest in updates] == [start + 1, start + 2]
+    assert [[block.component_id for block in manifest.blocks] for manifest in updates] == [
+        ["cmp_02"],
+        ["cmp_02", "cmp_new"],
+    ]
+    assert conversation.composition == updates[-1]
+    # The removal's manifest leads the drained card, and the card's own
+    # manifest follows it. The `remove_cards` step closes after both, with
+    # the other responses of its event.
+    order = [
+        f.event if f.event != "activity.step" else f"{f.tool}:{f.status.value}"
+        for f in frames
+        if f.event != "activity.step"
+        or (f.tool == "remove_cards" and f.status is StepStatus.COMPLETE)
+    ]
+    assert order == [
+        "composition.updated",
+        "component.created",
+        "composition.updated",
+        "remove_cards:complete",
+    ]
 
 
 def test_component_frames_land_true_holds_when_auto_add_is_off() -> None:
@@ -835,14 +992,7 @@ def _status_lines(frames: list[Any]) -> list[tuple[str, str, StepStatus]]:
     return [(f.step_id, f.label, f.status) for f in frames]
 
 
-@pytest.mark.parametrize(
-    ("proposing", "accepted"),
-    [("propose_plan", "ok"), ("submit_analysis", "ready_for_review")],
-    ids=["eager", "compact"],
-)
-def test_each_planner_call_becomes_a_status_line_as_it_happens(
-    proposing: str, accepted: str
-) -> None:
+def test_each_planner_call_becomes_a_status_line_as_it_happens() -> None:
     """The planner's function-call events arrive as the model finishes a
     call, so each one opens its line then, and completes the line before it.
     `propose_plan` translates the plan before it answers, so its call opens
@@ -860,11 +1010,11 @@ def test_each_planner_call_becomes_a_status_line_as_it_happens(
     )
 
     working = translator.translate(_node_event("planner", planner_started={"revising": False}))
-    checking = translator.translate(_planner_call(proposing, question="q"))
+    checking = translator.translate(_planner_call("propose_plan", question="q"))
     checked = translator.translate(
         _planner_answer(
-            proposing,
-            {"outcome": accepted, "translation": {"outcome": "ok"}},
+            "propose_plan",
+            {"outcome": "ok", "translation": {"outcome": "ok"}},
             **{PLAN_STATE_KEY: plan.model_dump_json()},
         )
     )
@@ -919,36 +1069,6 @@ def test_an_accepted_proposal_without_a_translation_still_closes_its_line(record
         ("s0", "Checking the plan against the data", StepStatus.COMPLETE)
     ]
     assert frames[0].detail is None
-
-
-@pytest.mark.parametrize(
-    ("stage", "lines"),
-    [
-        ("intent", []),
-        ("complete", [("s0", "Checking the plan against the data", StepStatus.COMPLETE)]),
-    ],
-)
-def test_only_a_complete_submission_shows_the_checking_line(
-    stage: str, lines: list[tuple[str, str, StepStatus]]
-) -> None:
-    """An intent checks nothing and records nothing, so it opens no line and
-    its answer closes none and starts no "Reworking the draft" line. A
-    complete call opens the checking line, which its answer completes with no
-    `detail` when it asks for requirements."""
-    translator = _translator()
-    opened = translator.translate(_planner_call("submit_analysis", submission_stage=stage))
-
-    frames = translator.translate(
-        _planner_answer("submit_analysis", {"outcome": "requirements", "contracts": "{}"})
-    )
-
-    assert _status_lines(opened) == (
-        []
-        if stage == "intent"
-        else [("s0", "Checking the plan against the data", StepStatus.RUNNING)]
-    )
-    assert _status_lines(frames) == lines
-    assert all(frame.detail is None for frame in frames)
 
 
 def test_a_planner_call_other_than_a_proposing_one_adds_no_line() -> None:
@@ -1108,20 +1228,122 @@ async def test_a_planner_call_becomes_its_line_while_the_draft_is_still_running(
     ]
 
 
-def test_a_planner_seam_error_reaches_the_user_without_its_model_facing_text() -> None:
+def _timed_out(tool: str) -> Exception:
+    """The exception `mcp_client._call_tool` raises for a call past its timeout."""
+    exc = TimeoutError(f"{tool} timed out")
+    exc.timeout_tool = tool  # type: ignore[attr-defined]
+    exc.timeout_key = f"{tool}:{{}}"  # type: ignore[attr-defined]
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("raised", "error", "retry", "code"),
+    [
+        (
+            [
+                PlannerSeamError(
+                    "This plan still needs translating and compiling into a workflow before "
+                    "it can execute. Propose it again to have it translated."
+                )
+            ],
+            "capability_unavailable",
+            "do_not_retry",
+            "internal_error",
+        ),
+        (
+            [
+                ResolverError(
+                    "search refused",
+                    refusal={
+                        "code": "rate_limited",
+                        "retry_mode": "retry_after_delay",
+                        "fix": {"detail": "resolve_parts over quota for spec_ab12"},
+                    },
+                )
+            ],
+            "rate_limited",
+            "retry_after_delay",
+            "rate_limited",
+        ),
+        # A code the wire grammar has no member for keeps its own sentence.
+        (
+            [ResolverError("gone", refusal={"code": "surface_changed"})],
+            "transient_unavailable",
+            "retry_after_delay",
+            "surface_changed",
+        ),
+        ([RuntimeError("boom")], "transient_unavailable", "retry_after_delay", HarnessCode.RAISED),
+        (
+            [_timed_out("get_data")],
+            "transient_unavailable",
+            "retry_after_delay",
+            "transient_unavailable",
+        ),
+        # The same call timing out again is advised not to retry.
+        (
+            [_timed_out("get_data"), _timed_out("get_data")],
+            "transient_unavailable",
+            "do_not_retry",
+            "transient_unavailable",
+        ),
+        # A card write that timed out may have been stored.
+        (
+            [_timed_out("write_component")],
+            "transient_unavailable",
+            "do_not_retry",
+            HarnessCode.WRITE_UNCONFIRMED,
+        ),
+    ],
+    ids=[
+        "planner-seam",
+        "refusal",
+        "code-off-the-wire",
+        "bare-exception",
+        "timeout",
+        "timeout-repeated",
+        "write-timeout",
+    ],
+)
+def test_a_stream_fatal_error_reads_as_the_sentence_of_its_code(
+    raised: list[Exception], error: str, retry: str, code: str | None
+) -> None:
+    """The `error` frame's detail is the chat reply. It states the sentence of
+    the failure's code under the frame's retry mode, and nothing written for
+    the model, no tool name and no trace id."""
     conversation = ConversationState(conversation_id="c1")
     conversation.begin_turn()
-    exc = PlannerSeamError(
-        "This plan still needs translating and compiling into a workflow before it can "
-        "execute. Propose it again to have it translated."
-    )
 
-    frame = _stream_fatal(conversation, exc)
+    *_, frame = [_stream_fatal(conversation, exc) for exc in raised]
 
-    assert frame.error.error.value == "capability_unavailable"
-    assert frame.error.retry.value == "do_not_retry"
+    assert (frame.error.error.value, frame.error.retry.value) == (error, retry)
+    assert frame.error.detail == classed_sentence(code, retry)
+    assert is_user_sentence(frame.error.detail)
+    assert conversation.trace_id not in frame.error.detail
     assert "Propose it again" not in frame.error.detail
-    assert frame.error.detail == _PLANNER_FAILED_DETAIL.format(trace_id=conversation.trace_id)
+
+
+def test_only_a_card_write_that_timed_out_is_unconfirmed() -> None:
+    """A write that was sent may have been stored, so its timeout carries a
+    code of its own. Any other tool's timeout, a repeated one included, is
+    transient."""
+    conversation = ConversationState(conversation_id="c1")
+    conversation.begin_turn()
+
+    write = _timeout_refusal(conversation, tool="write_component", key="w")
+    fetches = [_timeout_refusal(conversation, tool="get_data", key="g") for _ in range(2)]
+
+    assert (write["code"], write["retry_mode"]) == (
+        HarnessCode.WRITE_UNCONFIRMED,
+        "do_not_retry",
+    )
+    assert [(fetch["code"], fetch["retry_mode"]) for fetch in fetches] == [
+        ("transient_unavailable", "retry_after_delay"),
+        ("transient_unavailable", "do_not_retry"),
+    ]
+    frames = [
+        _stream_fatal(conversation, _timed_out(tool)) for tool in ("write_component", "search")
+    ]
+    assert frames[0].error.detail != frames[1].error.detail
 
 
 def _planner_answer(name: str, response: dict[str, Any], **state: Any) -> Event:

@@ -4,15 +4,16 @@ The resolver's refusal type, `resolver_digest` (the digest of a search
 envelope the orchestrator's `search` tool stores and reads: status / spec_id /
 candidates / parts / warnings / wide / skills, and each part's spec block),
 the presentation tool names `McpExecutor` routes on, and the refusal helpers:
-the `origin` values an executor stamps, `harness_refusal` for a refusal the
-harness mints, and `platform_trace_id_of`. The full envelope, with its dozens
-of unbound definition slots, never reaches session state.
+the `origin` values an executor stamps, `HarnessCode` and `harness_refusal`
+for a refusal the harness mints. The full envelope, with its dozens of unbound definition slots,
+never reaches session state.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
 
 from common.skills import ordered_skill_ids
@@ -24,6 +25,8 @@ from compiler.sources import (
     total_reading,
 )
 from data_mcp.digest import source_codes
+
+from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
@@ -53,23 +56,124 @@ class ResolverError(RuntimeError):
         self.refusal = refusal or {}
 
 
-def harness_refusal(*, code: str, message: str, retry_mode: str = "do_not_retry") -> dict[str, Any]:
+class HarnessCode(StrEnum):
+    """The `code` of a failure the harness mints itself."""
+
+    # `harness.chart_binding`: a chart select that draws more series than the
+    # cap, and one that is malformed.
+    SERIES_LIMIT_EXCEEDED = "series_limit_exceeded"
+    SELECT_INVALID = "select_invalid"
+    # A chart cut to its largest series finds no period that at least half of
+    # its comparable members hold.
+    NO_SHARED_PERIOD = "no_shared_period"
+    # The kind of a frame's members, which a chart cut ranks by, could not be
+    # read.
+    MEMBER_KIND_UNREAD = "member_kind_unread"
+    # `harness.rolling_cards`: what a card whose period moves can meet before
+    # it is written.
+    TITLE_QUOTES_ROLLING_PERIOD = "title_quotes_rolling_period"
+    ROLLING_REPLAY_PENDING = "rolling_replay_pending"
+    ROLLING_REPLAY_REFUSED = "rolling_replay_refused"
+    ROLLING_REPLAY_NOT_CONFIGURED = "rolling_replay_not_configured"
+    ROLLING_SELECT_NEEDS_NEW_FRAME = "rolling_select_needs_new_frame"
+    RELATIVE_PERIOD_ON_CLOSED_WINDOW = "relative_period_on_closed_window"
+    # `harness.mcp_client`: a tool the executor does not route, a card the
+    # platform stored with no revision to draw or no source to state, a search
+    # with no parts, and a refusal that arrived with no code.
+    UNKNOWN_TOOL = "unknown_tool"
+    RESOLVED_REVISION_UNAVAILABLE = "resolved_revision_unavailable"
+    PROVENANCE_UNAVAILABLE = "provenance_unavailable"
+    NO_SEARCH_PARTS = "no_search_parts"
+    UNSPECIFIED = "unspecified"
+    # `harness.orchestrator_tools`: a `fetch` that served no observations, one
+    # whose call did not complete, and one that ran past its deadline.
+    EMPTY_RESULT = "empty_result"
+    TRANSIENT_UNAVAILABLE = "transient_unavailable"
+    DEADLINE_EXCEEDED = "deadline_exceeded"
+    # A chart the `make_charts` tool was asked for and did not draw.
+    CHART_NOT_DRAWN = "chart_not_drawn"
+    # A tool called after its budget of calls for the turn is spent.
+    TOOL_BUDGET_SPENT = "tool_budget_spent"
+    # A tool call whose arguments do not fit the tool's schema.
+    TOOL_ARGUMENTS_INVALID = "tool_arguments_invalid"
+    # A card edit that changes a field set only when the card is created.
+    FIELD_CREATE_ONLY = "field_create_only"
+    # A card write that was sent and got no answer, so the platform may hold
+    # the card.
+    WRITE_UNCONFIRMED = "write_unconfirmed"
+    # A card that was drawn, whose payload the figures of a reply could not
+    # be read from.
+    FIGURES_UNREAD = "figures_unread"
+    # A turn whose state could not be saved.
+    STATE_NOT_SAVED = "state_not_saved"
+    # `harness.graph.execute`: a step whose source has to be found again.
+    REDISCOVERY_NEEDED = "rediscovery_needed"
+    # A chart that names a frame no `fetch` of the turn returned.
+    FRAME_UNKNOWN = "frame_unknown"
+    # A hand-off called while the turn already waits on one.
+    HAND_OFF_PENDING = "hand_off_pending"
+    # An exception that states no refusal: a tool call that raised, recorded
+    # as its failed step, or one that ended the turn's stream.
+    RAISED = "raised"
+    # A tool this deployment has not wired.
+    TOOL_NOT_CONFIGURED = "tool_not_configured"
+    # A card removal that names no card of the conversation.
+    CARD_NOT_FOUND = "card_not_found"
+    # `harness.graph.resume`: a run whose stored submission cannot be read,
+    # and one that raised while it was carried on.
+    RUN_RECORD_UNREADABLE = "run_record_unreadable"
+    RESUME_FAILED = "resume_failed"
+    # `harness.mcp_client.McpExecutor.publish_result`: why a derived frame was
+    # not published. The frame store could not be reached or refused the read,
+    # the dataset's versions could not be read, the replay recipe could not be
+    # built, the store no longer holds the frame, no publisher is wired, and
+    # dfo-apis holds the frame under a recipe of another normal form.
+    STORE_UNAVAILABLE = "store_unavailable"
+    STORE_REFUSED = "store_refused"
+    DATASET_VERSIONS_UNAVAILABLE = "dataset_versions_unavailable"
+    RECIPE_UNBUILDABLE = "recipe_unbuildable"
+    REPLAY_UNAVAILABLE = "replay_unavailable"
+    PUBLISH_UNAVAILABLE = "publish_unavailable"
+    RECIPE_NORMAL_FORM_CONFLICT = "recipe_normal_form_conflict"
+
+
+# The retry mode of a harness code whose refusal can be acted on. Every other
+# code is `do_not_retry`, since the same call meets the same refusal.
+_RETRY_MODES: Mapping[HarnessCode, RetryMode] = {
+    HarnessCode.TOOL_ARGUMENTS_INVALID: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.SELECT_INVALID: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.FIELD_CREATE_ONLY: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.STATE_NOT_SAVED: RetryMode.RETRY_AFTER_DELAY,
+    HarnessCode.MEMBER_KIND_UNREAD: RetryMode.RETRY_AFTER_DELAY,
+    HarnessCode.FRAME_UNKNOWN: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.CARD_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
+}
+
+
+def harness_retry_mode(code: HarnessCode) -> RetryMode:
+    """The retry mode a failure the harness mints under `code` states."""
+    return _RETRY_MODES.get(code, RetryMode.DO_NOT_RETRY)
+
+
+def harness_refusal(
+    *,
+    code: HarnessCode,
+    message: str,
+    fix: Mapping[str, Any] | None = None,
+    retry_mode: RetryMode | None = None,
+) -> dict[str, Any]:
     """The refusal grammar's body for a refusal the harness mints itself: stamped
-    `origin: harness`, with no fix. It is `do_not_retry` unless the message
-    names a corrected call the harness accepts, which is `correct_and_retry`."""
+    `origin: harness`, with the `fix` given and the retry mode of its code.
+    `retry_mode` states another mode than the code's own, for a refusal whose
+    message names a corrected call the harness accepts, which is
+    `correct_and_retry`."""
     return {
-        "code": code,
-        "retry_mode": retry_mode,
-        "fix": None,
+        "code": code.value,
+        "retry_mode": (retry_mode or harness_retry_mode(code)).value,
+        "fix": dict(fix) if fix is not None else None,
         "origin": REFUSAL_ORIGIN_HARNESS,
         "message": message,
     }
-
-
-def platform_trace_id_of(refusal: Mapping[str, Any]) -> str | None:
-    """The platform's own trace id on a refusal, when it is a non-empty string."""
-    platform_trace_id = refusal.get("platform_trace_id")
-    return platform_trace_id if isinstance(platform_trace_id, str) and platform_trace_id else None
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -156,6 +260,15 @@ def _coverage_window(resolved: dict[str, Any]) -> tuple[int, int] | None:
     return (start, end) if start is not None and end is not None else None
 
 
+def _elected_year(resolved: Mapping[str, Any]) -> int | None:
+    """The year Search's answer states it serves: `resolved.headline.year`,
+    which for a `latest` identity is the year Search elected. `None` when
+    the answer carries no headline or its headline states no whole year, as
+    for data with no flow roles or with periods shorter than a year."""
+    headline = resolved.get("headline")
+    return _whole(headline.get("year")) if isinstance(headline, Mapping) else None
+
+
 def requested_range(identity: Mapping[str, Any]) -> tuple[int, int] | None:
     """The years an identity's `requested_window` names outright: both ends
     of a `range` kind, as whole years. `None` for any other kind, and for a
@@ -181,10 +294,12 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
     across (`_coverage_window`): a bare open end is completed from it
     (`{"start": 1990, "end": <the coverage's latest year>}`), and a
     fully open request takes the whole span, `source: "coverage"`.
-    `latest` names a single most-recent observation rather than a range
-    either side could state, so it is left out. Returns `None` when
-    neither side states a usable range, leaving `window` out of the
-    envelope and the period a decision for the caller."""
+    `latest` names one year, the year Search elected to serve
+    (`_elected_year`): that year is both ends, `source: "elected"`, and
+    the coverage is not read, since it spans every year the members hold.
+    Returns `None` when no side states a usable range or year, leaving
+    `window` out of the envelope and the period a decision for the
+    caller."""
     identity = _identity(spec)
     if (asked := requested_range(identity)) is not None:
         return {"start": asked[0], "end": asked[1], "source": "requested"}
@@ -192,6 +307,11 @@ def _window(spec: dict[str, Any]) -> dict[str, int | str] | None:
     kind = requested.get("kind") if isinstance(requested, Mapping) else None
     start = _year(requested.get("start_year")) if kind == "range" else None
     end = _year(requested.get("end_year")) if kind == "range" else None
+    if kind == "latest":
+        elected = _elected_year(spec.get("resolved") or {})
+        if elected is None:
+            return None
+        return {"start": elected, "end": elected, "source": "elected"}
     if kind not in (None, "range", "all"):
         return None
     coverage = _coverage_window(spec.get("resolved") or {})
@@ -256,20 +376,23 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     facet variation.
 
     `window`, on the `definite` branch only, and only when either side
-    states a usable range (`_window` has the full read): the settled time
-    window as whole years plus which side settled it, `{"start": ...,
-    "end": ..., "source": "requested" | "coverage"}`. `"requested"` is the
+    states a usable range or year (`_window` has the full read): the settled
+    time window as whole years plus which side settled it, `{"start": ...,
+    "end": ..., "source": "requested" | "coverage" | "elected"}`.
+    `"requested"` is the
     identity's own `requested_window` when its `range` kind names both
     ends outright. Otherwise, when the question gave no time text at all or
     named only one end of an open range ("since 1990"), the years the
     resolver found data across (`_coverage_window`) fill in what's missing,
     `"coverage"`. The resolver has already found data across some span, so
-    that is what the planner states rather than guessing. Left out of the
-    digest when the identity names only a single most-recent observation
-    (`requested_window.kind == "latest"`, never a range either side could
-    state) and when neither side states a usable range at all, in which
-    case the period is left to the planner to decide, exactly as when the
-    identity carries no window at all.
+    that is what the planner states rather than guessing. An identity
+    naming the most recent observation (`requested_window.kind ==
+    "latest"`) carries the one year Search elected to serve
+    (`resolved.headline.year`) as both ends, `"elected"`. Left out of the
+    digest when a `latest` answer's headline states no year and when
+    neither side states a usable range at all, in which case the period is
+    left to the planner to decide, exactly as when the identity carries no
+    window at all.
 
     `wide`, on the `definite` branch only, is a separate signal from
     `choice_points`: whether the resolved identity mints as more than a
@@ -397,31 +520,22 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `coverage_kind` is `resolved.coverage.kind` (`exact`, `breadth`,
     `bare`); `requested_window_kind` the identity's `requested_window.kind`
     (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
-    `_wide_facts` reads them; `recent_years` the headline's per-year counts,
-    newest first, as `{"year", "observations", "series"}`, empty when the
-    block carries no headline or the headline no `recent_years`. These are
-    keys `harness.turn_records.SearchReading.from_part` reads. The
-    orchestrator's search result shows the model `recent_years` alone, and
-    only when `requested_window_kind` is `latest`.
+    `_wide_facts` reads them. These are keys
+    `harness.turn_records.SearchReading.from_part` reads, and the
+    orchestrator's search result shows the model none of them. The block's
+    per-year counts (`resolved.headline.recent_years`) are left out, since a
+    frame's own manifest states what its year holds
+    (`common.period_note.period_note`).
     """
     spec = dict(spec)
     resolved = spec.get("resolved") or {}
     requested = _identity(spec).get("requested_window")
-    headline = resolved.get("headline")
-    years = headline.get("recent_years") if isinstance(headline, Mapping) else None
     facts = _wide_facts(spec)
     return {
         "coverage_kind": (resolved.get("coverage") or {}).get("kind"),
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
         "entity_roles": facts["entity_roles"],
         "open_entity_axes": facts["open_entity_axes"],
-        "recent_years": [
-            {key: year.get(key) for key in ("year", "observations", "series")}
-            for year in years or ()
-            if isinstance(year, Mapping)
-            and isinstance(year.get("year"), int)
-            and isinstance(year.get("observations"), int)
-        ],
     }
 
 

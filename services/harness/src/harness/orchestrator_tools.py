@@ -12,7 +12,8 @@ the workflow's `route` node (`harness.graph`) to act on once the model's
 turn ends: a pause for the user's answer, or the plan path.
 
 The model sees digests only: part readings, frame views, one-line
-summaries and chart facts, never rows. Frames are named to it by short
+summaries, and of a drawn card what it holds and the figures a reply may
+state (`harness.reply_figures`). It sees no rows. Frames are named to it by short
 ids (`harness.graph.state.frame_id_for`) kept in session state, so `make_charts`
 can only draw a frame `fetch` or an executed plan produced this turn, after
 `describe_frame` answered for it. `search` also stores every part it
@@ -44,7 +45,9 @@ import json
 import logging
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum, auto
 from types import FunctionType
 from typing import Any, Literal, Protocol, get_type_hints
 
@@ -68,6 +71,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
@@ -101,14 +105,20 @@ from harness.chart_binding import (
     MAX_CHARTS_PER_CALL,
     MAX_SERIES_PER_COMPONENT,
     MAX_TABLE_ROWS,
-    SERIES_LIMIT_EXCEEDED,
-    comparable_members,
+    TopMembers,
+    covers_every_row,
+    empty_select_refusal,
+    every_series_selects,
     over_cap_dimension,
     select_binding_ok,
     top_members,
 )
-from harness.dfo_faq import DfoFaqUnavailable, read_catalogue_counts, read_dfo_faq
-from harness.direct_recipes import DirectRecipes, direct_recipe_tools
+from harness.dfo_faq import (
+    CANNOT_DESCRIBE_DFO,
+    DfoFaqUnavailable,
+    read_catalogue_counts,
+    read_dfo_faq,
+)
 from harness.graph.seams import Executor
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
@@ -130,10 +140,24 @@ from harness.graph.state import (
     store_search,
     turn_budgets,
 )
+from harness.reply_figures import (
+    DrawnSeries,
+    card_result,
+    drawn_series,
+    unplaced_names,
+    with_coordinates,
+)
 from harness.studio_state import RecallPart, RecallRefusedError
-from harness.tool_contracts import ResolverError, chosen_part, measure_choice
+from harness.tool_contracts import (
+    HarnessCode,
+    ResolverError,
+    chosen_part,
+    harness_refusal,
+    harness_retry_mode,
+    measure_choice,
+)
 from harness.turn_records import SETTLED_STATUSES, SearchReading
-from harness.wire import usable_component
+from harness.wire import RetryMode, usable_component
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +165,9 @@ logger = logging.getLogger(__name__)
 # summary and the ids of its frames, every one described, or the refusal of a
 # fetch that served no observations.
 _FETCHES_KEY = "orchestrator:fetches"
-# The code dfo-apis warns with, and `fetch` refuses with, when a mint serves
-# no observations.
-EMPTY_RESULT = "empty_result"
-# The refusal code of a `fetch` whose `get_data` call did not complete.
-FETCH_UNAVAILABLE = "transient_unavailable"
-# The refusal code of a `fetch` whose `get_data` call ran past its deadline.
-FETCH_TIMED_OUT = "deadline_exceeded"
+# The ids of the series the canvas drew as a turn began, with the turn's
+# invocation id: {"invocation", "ids"}.
+_CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
 HANDED_OFF = "handed_off"
@@ -225,23 +245,63 @@ class Chart(BaseModel):
     )
     select_json: str = Field(
         description=(
-            "a JSON object mapping at least one dimension in the frame's view to the "
-            "value, or on one dimension the list of values, to show, e.g. "
-            '{"observationAbout": "country/KEN"} or '
-            '{"observationAbout": ["country/KEN", "country/UGA", "country/TZA"]}. A '
+            "a JSON object. {} draws every series of the frame when its rows confirm that one "
+            "dimension covers them all, and is otherwise refused with the dimensions to "
+            "name. Each key is a dimension name the "
+            "frame's view lists, and its value one value the view lists for that "
+            "dimension, or on one dimension a list of them: where the view lists "
+            'observationAbout, {"observationAbout": ["country/KEN", "country/UGA"]}; '
+            'where it lists financingRecipient, {"financingRecipient": "country/MWI"}. A '
             "dimension the select leaves unbound becomes one series per value. A chart "
-            f"draws at most {MAX_SERIES_PER_COMPONENT} series. When the question compares "
-            "more places, donors or categories than that, leave their dimension unbound and "
-            "the chart draws the largest of them by their latest value, sorted, and says so. "
-            "Never list a subset you chose to stand in for the largest."
+            f"draws at most {MAX_SERIES_PER_COMPONENT} series. When a chart the user asked "
+            "to see compares more places, donors or categories than that, leave their "
+            "dimension unbound: the chart is cut for display to the largest of them at one "
+            "period, and its title says how many and when. The cut is for showing them: "
+            "a user asking which are largest wants a ranking calculated, and a cut chart "
+            "does not replace it. Never list a subset you chose to stand in for the "
+            "largest."
         )
     )
     order_by_value: bool = Field(
         default=False,
         description=(
-            "true when the chart answers a ranking (the largest, the most, the top): the "
-            "compared places, donors or categories are drawn highest first by their "
-            "latest value. Leave it false to keep the order select_json lists them in"
+            "true to list a table's or a line chart's compared places, donors or "
+            "categories highest first by their value at the latest period most of them "
+            "hold. Leave it false to keep the order select_json lists them in. A bar chart "
+            "ignores it: its bars are drawn highest first when their dimension is unbound"
+        ),
+    )
+    state_values_for: list[str] = Field(
+        default_factory=list,
+        max_length=MAX_SERIES_PER_COMPONENT,
+        description=(
+            "the series the user asked to be told a value of in words, each named by a "
+            "value the frame's view lists for the compared dimension (country/KEN where "
+            "the view lists it) or by its label. Leave it empty when the user asked to "
+            "see a chart, a ranking, a table or a trend: the card holds those values. "
+            "Left empty, a chart of one series returns its latest value in reply_figures. "
+            "A chart of several series that share one period and one unit returns its "
+            "largest and its smallest, each marked, and every series tying for either "
+            "carries the mark; any other chart of several returns none"
+        ),
+    )
+    state_span: bool = Field(
+        default=False,
+        description=(
+            "true when the user asked how those series changed over a period: "
+            "reply_figures gets each one's first value and its last, each with its period. "
+            "false gives the latest value alone"
+        ),
+    )
+    state_period: str | None = Field(
+        default=None,
+        description=(
+            "a period, when the user asked for those series' value at that one earlier "
+            "period: reply_figures gets the value there in place of the latest, and on a "
+            "chart of one series the value there and the latest, each with its period. "
+            "With state_span it gets the first value, the value there and the last. A "
+            "series holding no value at that period is listed under no_value. Written "
+            "as the frame's coverage writes periods (for example 2015)"
         ),
     )
 
@@ -338,10 +398,12 @@ def _periods_covered(view: Mapping[str, Any]) -> int:
     return months * 31 + last[-1] - first[-1] + 1
 
 
-async def _frame_rows(ref: Mapping[str, Any]) -> tuple[list[dict[str, Any]], Any] | None:
-    """The rows of the frame the store holds under `ref`, each as a mapping,
-    with its trace, read under a claim on the process's row budget; None when
-    the store does not hold it or cannot read it."""
+async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) -> T | None:
+    """What `work` makes of the frame the store holds under `ref` and its
+    trace, or None when the store does not hold the frame or cannot read it.
+    `work` runs in a worker thread, off the event loop, and the frame's rows
+    stay claimed on the process's row budget until that thread returns, also
+    when the task awaiting it is cancelled first."""
     try:
         held = await get_frame_store().open(
             FrameRef(spec_id=ref["spec_id"], content_version=ref["content_version"])
@@ -352,14 +414,24 @@ async def _frame_rows(ref: Mapping[str, Any]) -> tuple[list[dict[str, Any]], Any
         if held.num_rows is None:
             logger.warning("make_charts: the frame under %s states no row count", ref)
             return None
-        with row_budget().claim(held.num_rows) as claim:
-            data, trace = await claim.hold_through(held.read(max_rows=held.num_rows))
-            return [dict(zip(data.columns, row, strict=True)) for row in data.rows], trace
+        claim = row_budget().claim(held.num_rows)
     except Exception:
-        # Ranking only improves a card; a frame it cannot read leaves the
-        # select as the model wrote it.
-        logger.warning("make_charts: could not read %s to rank it", ref, exc_info=True)
+        # A ranking leaves the select as the model wrote it when its frame is
+        # unread, and an empty select is refused.
+        logger.warning("make_charts: could not read %s", ref, exc_info=True)
         return None
+    with claim:
+        try:
+            data, trace = await claim.hold_through(held.read(max_rows=held.num_rows))
+        except Exception:
+            logger.warning("make_charts: could not read %s", ref, exc_info=True)
+            return None
+        return await claim.hold_through(asyncio.to_thread(work, data, trace))
+
+
+def _rows_of(data: Any) -> list[dict[str, Any]]:
+    """The rows of a stored frame, each as a mapping."""
+    return [dict(zip(data.columns, row, strict=True)) for row in data.rows]
 
 
 def _stated_frames(data: Mapping[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
@@ -367,6 +439,22 @@ def _stated_frames(data: Mapping[str, Any]) -> list[tuple[dict[str, Any], dict[s
     store ref `None` where the executor states no `store_refs`."""
     refs = data.get("frame_refs") or []
     return list(zip(refs, data.get("store_refs") or [None] * len(refs), strict=True))
+
+
+def _period_note_entry(held: Mapping[str, Any]) -> dict[str, str]:
+    """The `period_note` of a `get_data` outcome or an earlier `fetch` as the
+    entry a `fetch` result carries; empty when `held` states none."""
+    note = held.get("period_note")
+    return {"period_note": note} if note else {}
+
+
+def _covering_selects(
+    data: Any, _trace: Any, *, selects: Sequence[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Those of `selects` that bind only dimensions every row of a stored
+    frame holds a value on (`covers_every_row`), in their order."""
+    rows = _rows_of(data)
+    return [select for select in selects if covers_every_row(select, rows)]
 
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
@@ -380,80 +468,101 @@ def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, 
     }
 
 
-async def _member_cells(
-    dimension: str, frame: Mapping[str, Any], executor: Executor
-) -> dict[str, str]:
-    """Each `dimension` member's served kind or type cell, read from the same
-    retrieval as `frame` asked again with `place_types`: the fetch's own
+def _role_cells(data: Any, _trace: Any) -> dict[str, dict[str, str]]:
+    """Each typed role's members' kind or type cells among a stored frame's
+    rows, the roles it carries no enrichment column for left out."""
+    rows = _rows_of(data)
+    by_role = {role: _held_cells(role, rows) for role in TYPED_ROLES}
+    return {role: cells for role, cells in by_role.items() if cells}
+
+
+async def _read_member_cells(
+    frame: Mapping[str, Any], executor: Executor
+) -> dict[str, dict[str, str]] | None:
+    """Each typed role's members' served kind or type cells, read from the
+    same retrieval as `frame` asked again with `place_types`: the fetch's own
     arguments, or for a plan step's frame its spec alone, since a member's
-    kind does not change with the period or scope asked. Empty for an
-    analysis result, or when the retrieval or its frames cannot be read."""
-    spec_id = str(frame["ref"]["spec_id"])
-    if spec_id.startswith(OP_SPEC_HASH_PREFIX):
-        return {}
-    args = frame.get("fetch_args") or {"spec_id": spec_id}
+    kind does not change with the period or scope asked. None when the
+    retrieval fails, runs past its deadline, is refused, or serves a frame
+    the store cannot read."""
+    args = frame.get("fetch_args") or {"spec_id": str(frame["ref"]["spec_id"])}
     try:
         data = await executor(tool="get_data", args={**args, "place_types": True})
     except (MCPError, httpx2.TransportError):
-        logger.warning("make_charts: could not read the kinds of %s", dimension, exc_info=True)
-        return {}
+        logger.warning("make_charts: the kind read of %s failed", frame["ref"], exc_info=True)
+        return None
     if data.get("outcome") != "ok":
-        return {}
-    cells: dict[str, str] = {}
+        logger.warning("make_charts: the kind read of %s was refused", frame["ref"])
+        return None
+    cells: dict[str, dict[str, str]] = {}
     for ref, store_ref in _stated_frames(data):
-        read = await _frame_rows(frame_store_ref({"ref": ref, "store_ref": store_ref}))
+        read = await _frame_work(frame_store_ref({"ref": ref, "store_ref": store_ref}), _role_cells)
         if read is None:
-            return {}
-        cells.update(_held_cells(dimension, read[0]))
+            return None
+        for role, members in read.items():
+            cells.setdefault(role, {}).update(members)
     return cells
 
 
-async def _top_select(
-    chart: Chart,
-    select: dict[str, Any],
-    frame: Mapping[str, Any],
-    executor: Executor,
+# The key of a registered frame's entry holding its kind read, each typed
+# role's member cells.
+_MEMBER_CELLS = "member_cells"
+
+
+async def _member_cells(
+    state: Any, frame_id: str, executor: Executor
+) -> dict[str, dict[str, str]] | None:
+    """The kind read of the frame registered as `frame_id`
+    (`_read_member_cells`). A read that succeeded is kept for the turn in the
+    frame's entry of `ORCHESTRATOR_FRAMES_KEY`; one that failed answers None
+    and is made again on the next call."""
+    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    frame = frames[frame_id]
+    if _MEMBER_CELLS in frame:
+        return frame[_MEMBER_CELLS]
+    cells = await _read_member_cells(frame, executor)
+    if cells is None:
+        return None
+    frames = state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+    state[ORCHESTRATOR_FRAMES_KEY] = {
+        **frames,
+        frame_id: {**frames[frame_id], _MEMBER_CELLS: cells},
+    }
+    return cells
+
+
+class _Unranked(Enum):
+    """Why a frame's rows gave no ranking."""
+
+    KINDS_NEEDED = auto()  # a cut of a typed role whose rows carry no kind or type cell
+    RANK_POSITIONS = auto()  # the values are a plan's rank positions
+    NO_PERIOD = auto()  # the compared members have no anchor period
+
+
+def _ranked(
+    data: Any,
+    trace: Any,
     *,
+    select: dict[str, Any],
+    dimension: str,
+    limit: int | None,
     cut: bool,
-) -> tuple[dict[str, Any], str | None] | None:
-    """`select` with its one multiplying dimension listing the frame's
-    values highest first, and when `cut`, only as many as `chart.type`
-    draws, with the note that says what was left out. A bar chart compares
-    members at the frame's latest period; a line chart or table ranks each
-    by its own latest value. dfo-apis draws series in the order the select
-    lists them, so the card is sorted. A cut on a place or flow party
-    dimension ranks only the members one ranking compares
-    (`comparable_members`), by the kind or type cells the frame's own rows
-    carry, or by `_member_cells` when they carry none. Rows are ranked
-    without their enrichment columns (`common.place_type`), which describe a
-    member and split no series. None when the frame cannot be read, holds rank
-    positions rather than values, its rows cannot rank them honestly
-    (`top_members`), a cut cannot learn which members compare, or the card's
-    period moves with the data: a list picked today would not follow it."""
-    dimension = over_cap_dimension(select=select, view=frame["view"])
-    if dimension is None or frame["view"].get("rolling") or chart.latest_periods is not None:
-        return None
-    read = await _frame_rows(frame_store_ref(frame))
-    if read is None:
-        return None
-    rows, trace = read
+    kinds: Mapping[str, str] | None,
+) -> TopMembers | _Unranked | None:
+    """`top_members` over a stored frame. A cut of a place or flow party
+    dimension compares only the members one ranking does, by the kind or type
+    cells the frame's own rows carry, or by `kinds` when they carry none.
+    Rows are ranked without their enrichment columns (`common.place_type`),
+    which describe a member and split no series."""
     marker = read_derived_marker(trace)
     if marker is not None and marker.ordinal:
-        return None
+        return _Unranked.RANK_POSITIONS
+    rows = _rows_of(data)
+    cells = None
     if cut and dimension in TYPED_ROLES:
-        # The level is chosen among the members this chart could draw, not
-        # every member the wider retrieval holds.
-        drawable = {row.get(dimension) for row in rows}
-        if isinstance(select.get(dimension), list):
-            drawable &= set(select[dimension])
-        cells = _held_cells(dimension, rows) or await _member_cells(dimension, frame, executor)
-        members = comparable_members(
-            {member: cell for member, cell in cells.items() if member in drawable},
-            dimension=dimension,
-        )
-        if not members:
-            return None
-        rows = [row for row in rows if row.get(dimension) in members]
+        cells = _held_cells(dimension, rows) or kinds
+        if cells is None:
+            return _Unranked.KINDS_NEEDED
     rows = [
         {
             name: cell
@@ -462,23 +571,131 @@ async def _top_select(
         }
         for row in rows
     ]
-    draws = LINE_CHART_MAX_VALUES if chart.type == "line_chart" else MAX_SERIES_PER_COMPONENT
-    if chart.type == "table":
-        draws = max(1, min(draws, MAX_TABLE_ROWS // _periods_covered(frame["view"])))
-    top = top_members(
-        rows=rows,
-        select=select,
-        dimension=dimension,
-        limit=draws if cut else len(rows),
-        own_latest=chart.type != "bar_chart",
-    )
-    if top is None or not top.members:
+    try:
+        return top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
+    except RollingError:
+        return _Unranked.NO_PERIOD
+
+
+@dataclass(frozen=True)
+class _Narrowed:
+    """A select with its one multiplying dimension listing members highest
+    first, and for a select cut to what its chart draws, the cut."""
+
+    select: dict[str, Any]
+    cut: TopMembers | None
+
+
+async def _top_select(
+    chart: Chart,
+    select: dict[str, Any],
+    state: Any,
+    executor: Executor,
+    *,
+    cut: bool,
+) -> _Narrowed | dict[str, Any] | None:
+    """`select` with its one multiplying dimension listing the frame's
+    members by their value at one period (`top_members`), highest first.
+
+    When `cut`, it lists only the members holding a value at that period, as
+    many as `chart.type` draws: `MAX_SERIES_PER_COMPONENT` bars or table
+    series, `LINE_CHART_MAX_VALUES` lines, and for a table no more than fit
+    `MAX_TABLE_ROWS`. A cut of a place or flow party dimension ranks only the
+    members one ranking compares (`_ranked`), by the frame's kind read
+    (`_member_cells`) when its rows carry no kind or type cell. Otherwise it
+    lists every member, those with no value at the period last. dfo-apis
+    draws a table's and a line chart's series in the order the select lists
+    them.
+
+    Returns:
+        The narrowed select; a harness refusal for a cut whose kind read
+        failed (`member_kind_unread`) or whose members have no anchor period
+        (`no_shared_period`); None, leaving the select as written, when the
+        frame cannot be read, holds rank positions rather than values, its
+        rows cannot be ranked honestly, an analysis result's members state no
+        kind, or the card's period moves with the data, so a list picked today
+        would not follow it.
+    """
+    frame = (state.get(ORCHESTRATOR_FRAMES_KEY) or {})[chart.frame]
+    dimension = over_cap_dimension(select=select, view=frame["view"])
+    if dimension is None or frame["view"].get("rolling") or chart.latest_periods is not None:
         return None
-    note = None
-    if len(top.members) < top.total:
-        period = f"{top.period} value" if top.period else "latest value"
-        note = f"top {len(top.members)} of {top.total} by {period}"
-    return {**select, dimension: top.members}, note
+    limit = None
+    if cut:
+        limit = LINE_CHART_MAX_VALUES if chart.type == "line_chart" else MAX_SERIES_PER_COMPONENT
+        if chart.type == "table":
+            limit = max(1, min(limit, MAX_TABLE_ROWS // _periods_covered(frame["view"])))
+    rank = functools.partial(_ranked, select=select, dimension=dimension, limit=limit, cut=cut)
+    top = await _frame_work(frame_store_ref(frame), functools.partial(rank, kinds=None))
+    analysis = str(frame["ref"]["spec_id"]).startswith(OP_SPEC_HASH_PREFIX)
+    if top is _Unranked.KINDS_NEEDED and not analysis:
+        kinds = await _member_cells(state, chart.frame, executor)
+        if kinds is None:
+            return harness_refusal(
+                code=HarnessCode.MEMBER_KIND_UNREAD,
+                message=(
+                    f"{chart.type} select is over the chart's series limit, and the kinds of "
+                    f"its {dimension} members could not be read to choose the largest of them. "
+                    "Drawing it again reads them once more; or list the members to show in select_json"
+                ),
+            )
+        top = await _frame_work(
+            frame_store_ref(frame), functools.partial(rank, kinds=kinds.get(dimension, {}))
+        )
+    if top is _Unranked.NO_PERIOD and cut:
+        return harness_refusal(
+            code=HarnessCode.NO_SHARED_PERIOD,
+            message=(
+                f"{chart.type} select is over the chart's series limit, and its {dimension} "
+                "members hold several periods with none to choose the largest of them at: no "
+                "period is held by half of them, or their periods are spans or of mixed grains"
+            ),
+        )
+    if not isinstance(top, TopMembers) or not top.members:
+        return None
+    members = top.members if cut else [*top.members, *top.unvalued]
+    return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
+
+
+def _cut_note(cut: TopMembers) -> str:
+    """What a cut card leaves out, for the model, with the members of another
+    kind and the members with no value at the cut's period counted apart."""
+    return (
+        f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
+        f"value in {cut.period}, highest first. Left out as group totals or members of "
+        f"another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
+        f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
+        f"{cut.period}."
+    )
+
+
+def _drawn_store_ref(payload: Mapping[str, Any], frame: Mapping[str, Any]) -> dict[str, Any]:
+    """The pair to read the rows of the frame a written card draws: the
+    registered `frame`'s store pair, unless the revision's input frame
+    (`provenance.inputs[0]` of `payload`) is another. The rolling-card rules
+    move a write to a frame replayed for the card's own series
+    (`harness.rolling_cards`), a derived frame the store holds under its own
+    pair, and the card then draws that frame's values."""
+    inputs = (payload.get("provenance") or {}).get("inputs") or []
+    drawn = inputs[0] if inputs and isinstance(inputs[0], Mapping) else None
+    if drawn is None or dict(drawn) == dict(frame["ref"]):
+        return frame_store_ref(frame)
+    return dict(drawn)
+
+
+def _coordinate_rows(data: Any, _trace: Any, *, series: Sequence[DrawnSeries]) -> list[DrawnSeries]:
+    """`series` with the coordinates a stored frame's rows give those that
+    state none (`with_coordinates`). The rows are read without their
+    enrichment columns, which describe a member and split no series."""
+    rows = [
+        {
+            name: cell
+            for name, cell in row.items()
+            if enrichment_role(name, roles=TYPED_ROLES) is None
+        }
+        for row in _rows_of(data)
+    ]
+    return with_coordinates(series, rows)
 
 
 def _budgets(tool_context: ToolContext) -> dict[str, int]:
@@ -489,26 +706,91 @@ def _used(tool_context: ToolContext, key: str) -> int:
     return int((tool_context.state.get(ORCHESTRATOR_CALLS_KEY) or {}).get(key, 0))
 
 
-def _spend(tool_context: ToolContext, tool: str) -> str | None:
-    """Count one call of `tool`; the refusal text when its budget is spent."""
+def _failed(
+    code: HarnessCode, error: str, *, retry_mode: RetryMode | None = None
+) -> dict[str, Any]:
+    """A tool's failed answer: `error` is the model's reason, and `code` with
+    its retry mode is what the user's line for the failure is worded from.
+    `retry_mode` states another mode than the code's own."""
+    mode = retry_mode or harness_retry_mode(code)
+    return {"error": error, "code": code.value, "retry_mode": mode.value}
+
+
+def _service_failed(body: Mapping[str, Any], error: str) -> dict[str, Any]:
+    """A tool's failed answer for a service's refusal `body`: `error` beside
+    the service's own code and retry mode, or `unspecified` when it states no
+    code."""
+    stated = {key: str(body[key]) for key in ("code", "retry_mode") if body.get(key)}
+    if "code" not in stated:
+        return _failed(HarnessCode.UNSPECIFIED, error)
+    return {"error": error, **stated}
+
+
+def _not_drawn(
+    chart: Chart,
+    error: str,
+    *,
+    refusal: Mapping[str, Any] | None = None,
+    code: HarnessCode = HarnessCode.CHART_NOT_DRAWN,
+) -> dict[str, Any]:
+    """The `make_charts` entry of a chart that was not drawn: `error` is the
+    model's reason. The entry states the `code` and `retry_mode` of `refusal`,
+    the refusal that stopped it, with its `fix` when that is a mapping, as a
+    refusal of the harness's own is. It states those of `code` when no
+    refusal stopped the chart or the refusal names no code."""
+    if refusal is None or not refusal.get("code"):
+        return {"title": chart.title, **_failed(code, error)}
+    entry = {"title": chart.title, "error": error, "code": str(refusal["code"])}
+    if refusal.get("retry_mode"):
+        entry["retry_mode"] = str(refusal["retry_mode"])
+    if isinstance(refusal.get("fix"), Mapping):
+        entry["fix"] = dict(refusal["fix"])
+    return entry
+
+
+def _figures_unread() -> dict[str, Any]:
+    """What the `make_charts` entry of a drawn card states in place of what it
+    holds and its figures when they could not be read, with no figure a reply
+    may state, under the code `figures_unread`."""
+    code = HarnessCode.FIGURES_UNREAD
+    return {
+        "reply_figures": [],
+        "code": code.value,
+        "retry_mode": harness_retry_mode(code).value,
+        "figures_unread": (
+            "This card is on the canvas, but what it holds could not be read back. State "
+            "no value of it in the reply, and do not draw it again."
+        ),
+    }
+
+
+def _spend(tool_context: ToolContext, tool: str) -> dict[str, Any] | None:
+    """Count one call of `tool`; the failed answer when its budget is spent."""
     used = _used(tool_context, tool)
     if used >= _budgets(tool_context)[tool]:
-        return f"{tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}"
+        return _failed(
+            HarnessCode.TOOL_BUDGET_SPENT,
+            f"{tool} has been called {used} time(s) this turn, its limit. {_ANSWER_NOW}",
+        )
     count_call(tool_context.state, tool)
     return None
 
 
-def _charts_spent(tool_context: ToolContext) -> str | None:
-    """The refusal text when either of make_charts' budgets is spent."""
+def _charts_spent(tool_context: ToolContext) -> dict[str, Any] | None:
+    """The failed answer when either of make_charts' budgets is spent."""
     budgets = _budgets(tool_context)
     drew = _used(tool_context, "make_charts")
     if drew >= budgets["make_charts"]:
-        return f"make_charts has drawn charts in {drew} call(s) this turn, its limit. {_ANSWER_NOW}"
+        return _failed(
+            HarnessCode.TOOL_BUDGET_SPENT,
+            f"make_charts has drawn charts in {drew} call(s) this turn, its limit. {_ANSWER_NOW}",
+        )
     failed = _used(tool_context, "make_charts_failed")
     if failed >= budgets["make_charts_failed"]:
-        return (
+        return _failed(
+            HarnessCode.TOOL_BUDGET_SPENT,
             f"make_charts has drawn nothing in {failed} call(s) this turn, the limit for calls "
-            f"that draw nothing. {_ANSWER_NOW}"
+            f"that draw nothing. {_ANSWER_NOW}",
         )
     return None
 
@@ -552,14 +834,17 @@ def _invalid_arguments(
     """Return argument problems, bounded by the turn's invalid-call budget."""
     used = _used(tool_context, "invalid_arguments")
     if used >= _budgets(tool_context)["invalid_arguments"]:
-        return {
-            "error": f"{name}: {used} call(s) this turn had invalid arguments, "
-            f"the limit. {_ANSWER_NOW}"
-        }
+        return _failed(
+            HarnessCode.TOOL_BUDGET_SPENT,
+            f"{name}: {used} call(s) this turn had invalid arguments, the limit. {_ANSWER_NOW}",
+        )
     count_call(tool_context.state, "invalid_arguments")
     return {
-        "error": f"{name}: {'; '.join(line for _, line in problems)}. "
-        "Correct these arguments and call again.",
+        **_failed(
+            HarnessCode.TOOL_ARGUMENTS_INVALID,
+            f"{name}: {'; '.join(line for _, line in problems)}. "
+            "Correct these arguments and call again.",
+        ),
         "invalid": [entry for entry, _ in problems],
     }
 
@@ -572,10 +857,11 @@ def _validated_arguments(
     ADK hands a function tool the model's arguments as parsed JSON, whatever
     the annotations say. The wrapper validates them with pydantic and calls
     `tool` with the validated values. If any fail, it returns the problems as
-    `{"error": <prose>, "invalid": [{"loc", "type"}, ...]}`, with `hints`
-    appended to the prose of the problems they match, and does not call
-    `tool`. Rejected calls count against `BUDGETS["invalid_arguments"]`; past
-    it the reply is `{"error": ...}` alone. A tool with no model arguments is
+    `{"error": <prose>, "invalid": [{"loc", "type"}, ...]}` under the code
+    `tool_arguments_invalid`, with `hints` appended to the prose of the
+    problems they match, and does not call `tool`. Rejected calls count
+    against `BUDGETS["invalid_arguments"]`; past it the reply is the error
+    alone, under `tool_budget_spent`. A tool with no model arguments is
     returned as is.
     """
     signature = inspect.signature(tool)
@@ -768,10 +1054,11 @@ def _pend(tool_context: ToolContext, action: PendingAsk | PendingPlan) -> dict[s
     """
     pending = pending_action(tool_context.state)
     if pending is not None:
-        return {
-            "error": f"This turn is already waiting on {pending.kind}; one hand-off per turn. "
-            "End your turn now."
-        }
+        return _failed(
+            HarnessCode.HAND_OFF_PENDING,
+            f"This turn is already waiting on {pending.kind}; one hand-off per turn. "
+            "End your turn now.",
+        )
     tool_context.state[ORCHESTRATOR_PENDING_KEY] = action.model_dump(mode="json")
     tool_context.actions.skip_summarization = True
     return {
@@ -833,7 +1120,7 @@ def _unresolved_refusal(
             "spec_id": spec_id,
             "refusal": f"Search could not be reached to read {spec_id} just now ({exc}). Fetch "
             "it again, or answer without this data.",
-            "code": FETCH_UNAVAILABLE,
+            "code": HarnessCode.TRANSIENT_UNAVAILABLE.value,
         }
     reason = str(exc) if isinstance(exc, DefinitionNotResolvedError) else exc.fault.value
     return {
@@ -847,13 +1134,18 @@ def _unresolved_refusal(
 def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     """`data`, a `get_data` outcome that served no observations, as the refusal `fetch`
     gives for it, with dfo-apis' own `empty_result` warning when it sent one."""
-    warning = next((w for w in data.get("warnings") or [] if w.get("code") == EMPTY_RESULT), {})
+    warning = next(
+        (w for w in data.get("warnings") or [] if w.get("code") == HarnessCode.EMPTY_RESULT), {}
+    )
     said = f" ({warning['message']})" if warning.get("message") else ""
     message = (
         f"This data holds no observations for the places and period asked{said}. Fetching it "
         "again unchanged returns nothing: change the places or period, or answer without it."
     )
-    return {"outcome": "refusal", "refusal": {"code": EMPTY_RESULT, "message": message}}
+    return {
+        "outcome": "refusal",
+        "refusal": {"code": HarnessCode.EMPTY_RESULT.value, "message": message},
+    }
 
 
 def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
@@ -974,8 +1266,8 @@ def build_orchestrator_tools(
     dfo_faq_surface: ToolSurface | None = None,
     definition_surface: ToolSurface | None = None,
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+    canvas_series: Callable[[], list[str]] | None = None,
     remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
-    direct: DirectRecipes | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
@@ -988,11 +1280,11 @@ def build_orchestrator_tools(
     as the graph's `seed` node stores definitions. Left unset, such a fetch
     is refused.
     `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
-    unset, `recall` says there is nothing to recall from. `remove_cards` is
+    unset, `recall` says there is nothing to recall from. `canvas_series` is
+    `harness.studio_state.make_canvas_series`'s seam; left unset, no series
+    counts as on the canvas. `remove_cards` is
     `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
-    says it is not available. `direct` adds `submit_analysis`, the recipes it
-    enables run without a plan (`harness.direct_recipes`); left unset, there
-    is no such tool.
+    says it is not available.
     """
     # One lock per invocation, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
@@ -1075,9 +1367,6 @@ def build_orchestrator_tools(
         warnings, its `departures` from what was asked when search states
         any, its `group_readings` when it reads a named group as the
         group's published total, and the window it covers. A definite part
-        searched for the latest period lists in `recent_years` the
-        observations and series with data in each of its newest years,
-        newest first. A definite part
         whose count search chose among others states it as `counted_as`,
         with the others under `alternatives`, each with its spec_id and
         label, and lists the `source_codes` of the indicators it found, each
@@ -1099,14 +1388,16 @@ def build_orchestrator_tools(
             )
         spent = _spend(tool_context, "search")
         if spent:
-            return {"error": spent}
+            return spent
         parts = parts or []
         raw_text = as_text or not parts
         wire_parts = [] if raw_text else [part.model_dump(exclude_none=True) for part in parts]
         try:
             digest = await resolver(question=query, parts=wire_parts, raw_text=raw_text)
         except ResolverError as exc:
-            return {"error": (exc.refusal or {}).get("message") or str(exc)}
+            # The service's own code and retry mode word the user's line for
+            # the failed search.
+            return _service_failed(exc.refusal, exc.refusal.get("message") or str(exc))
         # Search answers parts in the order asked, so a digest names the part
         # at its own position when the counts agree. When they do not, no
         # digest is tied to a part, and none records parties asked.
@@ -1150,7 +1441,9 @@ def build_orchestrator_tools(
 
         Returns a one-line summary and the frames the data landed in, each
         with an id to chart and a view listing its dimensions and their
-        values; or a refusal with its `code` and reason, and the platform's
+        values, and a `period_note` when a newer year holds data, the year
+        served is not the elected year, or a fuller earlier year is named; or
+        a refusal with its `code` and reason, and the platform's
         `retry_mode` and `fix` (its details and the values to change to) when
         it gave them. The code `capability_unavailable` means this deployment
         cannot do what the call asked; `empty_result` means the data holds no
@@ -1168,7 +1461,7 @@ def build_orchestrator_tools(
             }
         spent = _spend(tool_context, "fetch")
         if spent:
-            return {"error": spent}
+            return spent
         args: dict[str, Any] = {"spec_id": spec_id}
         if scope is not None:
             args["scope"] = scope.model_dump(exclude_none=True)
@@ -1214,6 +1507,7 @@ def build_orchestrator_tools(
                 else {
                     "spec_id": spec_id,
                     "summary": earlier["summary"],
+                    **_period_note_entry(earlier),
                     "frames": [{"frame": f, "view": frames[f]["view"]} for f in earlier["frames"]],
                     "same_data_as": earlier["spec_id"],
                 }
@@ -1234,14 +1528,14 @@ def build_orchestrator_tools(
                     "spec_id": spec_id,
                     "refusal": "get_data ran past its deadline. Do not repeat the same fetch "
                     "unchanged: narrow it, or answer without this data.",
-                    "code": FETCH_TIMED_OUT,
+                    "code": HarnessCode.DEADLINE_EXCEEDED.value,
                 }
             else:
                 refused = {
                     "spec_id": spec_id,
                     "refusal": "get_data could not reach data-mcp just now. Fetch it again, or "
                     "answer without this data.",
-                    "code": FETCH_UNAVAILABLE,
+                    "code": HarnessCode.TRANSIENT_UNAVAILABLE.value,
                 }
             _attach_fetch(tool_context, refused)
             return refused
@@ -1262,7 +1556,7 @@ def build_orchestrator_tools(
                     **(tool_context.state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {}),
                     spec_id: refused["refusal"],
                 }
-            elif refused["code"] == EMPTY_RESULT:
+            elif refused["code"] == HarnessCode.EMPTY_RESULT:
                 # Kept for the turn, so the same fetch again answers from here.
                 tool_context.state[_FETCHES_KEY] = {
                     **(tool_context.state.get(_FETCHES_KEY) or {}),
@@ -1282,6 +1576,7 @@ def build_orchestrator_tools(
         found = {
             "spec_id": spec_id,
             "summary": data.get("summary"),
+            **_period_note_entry(data),
             "frames": register_frames(frames, described),
         }
         # make_charts asks the same retrieval again for its members' kinds.
@@ -1295,48 +1590,141 @@ def build_orchestrator_tools(
             fetches[key] = {
                 "spec_id": spec_id,
                 "summary": found["summary"],
+                **_period_note_entry(found),
                 "frames": [entry["frame"] for entry in found["frames"]],
             }
             tool_context.state[_FETCHES_KEY] = fetches
         _attach_fetch(tool_context, found)
         return found
 
+    def _canvas_series(tool_context: ToolContext) -> list[str]:
+        """The ids of the series the cards on the canvas drew as the turn
+        began: every series of every card, as `canvas_series` gives them.
+        `make_charts` and `remove_cards`, the tools that change the canvas,
+        each read it before they act, and the first read of a turn is kept
+        for the rest of it."""
+        held = tool_context.state.get(_CANVAS_SERIES_KEY) or {}
+        if held.get("invocation") == tool_context.invocation_id:
+            return held["ids"]
+        ids = list(canvas_series()) if canvas_series is not None else []
+        tool_context.state[_CANVAS_SERIES_KEY] = {
+            "invocation": tool_context.invocation_id,
+            "ids": ids,
+        }
+        return ids
+
+    async def _card_result(
+        chart: Chart,
+        component: Mapping[str, Any],
+        *,
+        frame: Mapping[str, Any],
+        on_canvas: list[str],
+        cut: TopMembers | None,
+    ) -> dict[str, Any]:
+        """What a drawn card holds and the figures a reply may state of it
+        (`harness.reply_figures.card_result`), from the drawn payload of its
+        write reply. The rows of the frame the card draws (`_drawn_store_ref`)
+        are read only for a name in `chart.state_values_for` that matches no
+        series while some state no coordinates: the platform's summary lists
+        the coordinates of twelve."""
+        payload = component.get("payload") or {}
+        series = drawn_series(payload.get("component") or {}, component.get("fact_summary") or {})
+        if unplaced_names(series, chart.state_values_for):
+            placed = await _frame_work(
+                _drawn_store_ref(payload, frame),
+                functools.partial(_coordinate_rows, series=series),
+            )
+            series = placed or series
+        return card_result(
+            series,
+            state_values_for=chart.state_values_for,
+            state_span=chart.state_span,
+            state_period=chart.state_period,
+            on_canvas=on_canvas,
+            cut=cut,
+        )
+
     async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
         """Draw `charts`, up to `MAX_CHARTS_PER_CALL`, and count the call as one
         that drew a chart or one that drew none."""
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
+        on_canvas = _canvas_series(tool_context)
         drawn: list[dict[str, Any]] = []
         landed = False
         try:
             for chart in charts[:MAX_CHARTS_PER_CALL]:
                 frame = frames.get(chart.frame)
                 if frame is None:
-                    drawn.append({"title": chart.title, "error": f"unknown frame {chart.frame!r}"})
+                    drawn.append(
+                        _not_drawn(
+                            chart,
+                            f"unknown frame {chart.frame!r}: name a frame a fetch of this "
+                            "turn returned",
+                            code=HarnessCode.FRAME_UNKNOWN,
+                        )
+                    )
                     continue
                 try:
                     select = json.loads(chart.select_json)
                 except json.JSONDecodeError:
-                    drawn.append({"title": chart.title, "error": "select_json is not valid JSON"})
+                    drawn.append(
+                        _not_drawn(
+                            chart,
+                            "select_json is not valid JSON: write it as one JSON object",
+                            code=HarnessCode.SELECT_INVALID,
+                        )
+                    )
                     continue
-                issue = select_binding_ok(type_=chart.type, select=select, view=frame["view"])
-                note = None
-                over_cap = issue is not None and issue["code"] == SERIES_LIMIT_EXCEEDED
-                if over_cap or (issue is None and chart.order_by_value):
-                    narrowed = await _top_select(chart, select, frame, executor, cut=over_cap)
-                    if narrowed is not None:
+                issue = select_binding_ok(
+                    type_=chart.type,
+                    select=select,
+                    view=frame["view"],
+                    latest_periods=chart.latest_periods is not None,
+                )
+                if select == {} and issue is None and frame["view"].get("dimensions"):
+                    # The platform refuses an empty select, so one that names
+                    # every series is written for it, the first the frame's
+                    # rows hold a value on throughout. A frame that cannot be
+                    # read confirms none, and its refusal says so. A view that
+                    # states no dimensions gives nothing to write one from.
+                    selects = every_series_selects(type_=chart.type, view=frame["view"])
+                    covering: list[dict[str, Any]] | None = []
+                    if selects:
+                        covering = await _frame_work(
+                            frame_store_ref(frame),
+                            functools.partial(_covering_selects, selects=selects),
+                        )
+                    if covering:
+                        select = covering[0]
+                    else:
+                        issue = empty_select_refusal(
+                            type_=chart.type, view=frame["view"], unread=covering is None
+                        )
+                cut = None
+                over_cap = issue is not None and issue["code"] == HarnessCode.SERIES_LIMIT_EXCEEDED
+                # dfo-apis sorts a bar chart's bars itself, at the period it draws.
+                ordered = chart.order_by_value and chart.type != "bar_chart"
+                if over_cap or (issue is None and ordered):
+                    narrowed = await _top_select(
+                        chart, select, tool_context.state, executor, cut=over_cap
+                    )
+                    if isinstance(narrowed, _Narrowed):
                         rewritten = select_binding_ok(
-                            type_=chart.type, select=narrowed[0], view=frame["view"]
+                            type_=chart.type, select=narrowed.select, view=frame["view"]
                         )
                         # Ordering alone never turns a drawable select into a refused one.
                         if over_cap or rewritten is None:
-                            (select, note), issue = narrowed, rewritten
+                            select, cut, issue = narrowed.select, narrowed.cut, rewritten
+                    elif narrowed is not None:
+                        issue = narrowed
                 if issue is not None:
-                    drawn.append({"title": chart.title, "error": issue["message"]})
+                    drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                # The card says what it leaves out: the note ends the title.
-                title = (
-                    chart.title if note is None else f"{chart.title[: 117 - len(note)]} ({note})"
-                )
+                title = chart.title
+                if cut is not None:
+                    # The card says what it leaves out in a suffix that ends the title.
+                    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
+                    title = f"{chart.title[: 117 - len(suffix)]} ({suffix})"
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
@@ -1345,15 +1733,23 @@ def build_orchestrator_tools(
                 }
                 if chart.latest_periods is not None:
                     intent["window"] = _latest_window(chart.latest_periods)
+                elif cut is not None and chart.type == "bar_chart":
+                    # The card's title and members are of the cut's period, so
+                    # its bars stay at it. dfo-apis draws a bar chart at the
+                    # latest period every selected series holds inside its
+                    # window, which without one moves when the frame gains a
+                    # newer period.
+                    intent["window"] = {"start": cut.period, "end": cut.period}
                 try:
                     written = await executor(tool="write_component", args={"intent": intent})
                     component = written.get("component") if written.get("outcome") == "ok" else None
                     if component is None or not usable_component(component):
                         refusal = written.get("refusal") or {}
-                        failed = {
-                            "title": chart.title,
-                            "error": refusal.get("message") or "the platform refused it",
-                        }
+                        failed = _not_drawn(
+                            chart,
+                            refusal.get("message") or "the platform refused it",
+                            refusal=refusal,
+                        )
                         # presentation-mcp's `fix`: the values the platform would
                         # accept, as `label (ref)`, for the retry's select.
                         if refusal.get("advice"):
@@ -1369,23 +1765,28 @@ def build_orchestrator_tools(
                     # so the model is told not to draw it again.
                     logger.exception("make_charts: drawing %r failed", chart.title)
                     drawn.append(
-                        {
-                            "title": chart.title,
-                            "error": (
-                                f"drawing it failed inside DFO ({type(error).__name__}), and "
-                                "the charts after it in this call were not drawn. Do not "
-                                "draw this chart again: it may be on the canvas already."
-                            ),
-                        }
+                        _not_drawn(
+                            chart,
+                            f"drawing it failed inside DFO ({type(error).__name__}), and "
+                            "the charts after it in this call were not drawn. Do not "
+                            "draw this chart again: it may be on the canvas already.",
+                            code=HarnessCode.WRITE_UNCONFIRMED,
+                        )
                     )
                     break
                 landed = True
-                entry = {"title": title, "facts": component["fact_summary"]}
-                if note is not None:
-                    entry["note"] = (
-                        f"This card draws only the {note}, highest first. Say in the reply "
-                        "that it shows the largest of them, and leave its values to the card."
+                try:
+                    held = await _card_result(
+                        chart, component, frame=frame, on_canvas=on_canvas, cut=cut
                     )
+                except Exception:
+                    # The card is on the canvas, so only what a reply may state of
+                    # it is lost, and the charts after it are still drawn.
+                    logger.exception("make_charts: reading the figures of %r failed", title)
+                    held = _figures_unread()
+                entry = {"title": title, **held}
+                if cut is not None:
+                    entry["note"] = _cut_note(cut)
                 drawn.append(entry)
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
@@ -1397,8 +1798,10 @@ def build_orchestrator_tools(
     async def make_charts(charts: list[Chart], tool_context: ToolContext) -> dict[str, Any]:
         """Draw charts on the user's canvas.
 
-        Returns what each chart shows, or why it could not be drawn and, when
-        the platform names them, the values it would accept.
+        Returns for each chart drawn what it holds and its reply_figures, or
+        why it could not be drawn and, when the platform names them, the
+        values it would accept. A chart drawn whose values could not be read
+        back says so under the code `figures_unread`.
         """
         lock = chart_locks.get(tool_context.invocation_id)
         if lock is None:
@@ -1406,13 +1809,14 @@ def build_orchestrator_tools(
         async with lock:
             spent = _charts_spent(tool_context)
             if spent:
-                return {"error": spent}
+                return spent
             if not charts:
                 count_call(tool_context.state, "make_charts_failed")
-                return {
-                    "error": "make_charts needs at least one chart. It only adds charts; it "
-                    "cannot remove or clear cards on the canvas. Nothing changed."
-                }
+                return _failed(
+                    HarnessCode.TOOL_ARGUMENTS_INVALID,
+                    "make_charts needs at least one chart. It only adds charts; it "
+                    "cannot remove or clear cards on the canvas. Nothing changed.",
+                )
             drawn = await _draw(charts, tool_context)
         result: dict[str, Any] = {"charts": drawn}
         if len(charts) > MAX_CHARTS_PER_CALL:
@@ -1434,13 +1838,15 @@ def build_orchestrator_tools(
         answer comes back as the next message.
         """
         if not options:
-            return {"error": "ask_user needs at least one option to offer."}
+            return _failed(
+                HarnessCode.TOOL_ARGUMENTS_INVALID, "ask_user needs at least one option to offer."
+            )
         refused = _options_refusal(options, _named_spec_ids(tool_context))
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")
         if spent:
-            return {"error": spent}
+            return spent
         return _pend(tool_context, PendingAsk(question=question, options=list(options)))
 
     def plan(brief: str, asks: list[AskedOutput], tool_context: ToolContext) -> dict[str, Any]:
@@ -1468,7 +1874,7 @@ def build_orchestrator_tools(
             return refused
         spent = _spend(tool_context, "plan")
         if spent:
-            return {"error": spent}
+            return spent
         return _pend(
             tool_context,
             PendingPlan(
@@ -1489,24 +1895,28 @@ def build_orchestrator_tools(
         """
         spent = _spend(tool_context, tool.name)
         if spent:
-            return {"error": spent}
+            return spent
         if surface is None:
-            return {"error": "skills are not available on this server"}
+            return _failed(
+                HarnessCode.TOOL_NOT_CONFIGURED, "skills are not available on this server"
+            )
         try:
             result = await surface.call_tool(tool=tool, arguments=arguments)
         except ToolSurfaceUnavailableError as exc:
             logger.warning(
                 "orchestrator %s(%s) did not complete: %s", tool.name, dict(arguments), exc
             )
-            return {
-                "error": f"{tool.name} could not reach data-mcp just now. Call it again, or "
-                "answer without this skill."
-            }
+            return _failed(
+                HarnessCode.TRANSIENT_UNAVAILABLE,
+                f"{tool.name} could not reach data-mcp just now. Call it again, or answer "
+                "without this skill.",
+                retry_mode=RetryMode.RETRY_AFTER_DELAY,
+            )
         if result.is_error:
             body = result.structured_content or {}
-            return {
-                "error": str(body.get("message") or result.text or "the skill could not be loaded")
-            }
+            return _service_failed(
+                body, str(body.get("message") or result.text or "the skill could not be loaded")
+            )
         return {"skill": result.text}
 
     async def get_skill(skill_id: str, tool_context: ToolContext) -> dict[str, Any]:
@@ -1546,7 +1956,13 @@ def build_orchestrator_tools(
             read_dfo_faq(dfo_faq_surface), read_catalogue_counts(dfo_faq_surface)
         )
         if isinstance(faq, DfoFaqUnavailable):
-            return {"error": faq.reply}
+            if faq.reply == CANNOT_DESCRIBE_DFO:
+                return _failed(HarnessCode.TOOL_NOT_CONFIGURED, faq.reply)
+            return _failed(
+                HarnessCode.TRANSIENT_UNAVAILABLE,
+                faq.reply,
+                retry_mode=RetryMode.RETRY_AFTER_DELAY,
+            )
         return {"explainer": faq, "counts": counts}
 
     async def recall(
@@ -1571,9 +1987,11 @@ def build_orchestrator_tools(
         listing = part == "canvas" and component_id is None
         spent = _spend(tool_context, "recall_canvas" if listing else "recall")
         if spent:
-            return {"error": spent}
+            return spent
         if recall_part is None:
-            return {"error": "recall is not available on this server"}
+            return _failed(
+                HarnessCode.TOOL_NOT_CONFIGURED, "recall is not available on this server"
+            )
         try:
             return await recall_part(part=part, turn=turn, component_id=component_id)
         except RecallRefusedError as exc:
@@ -1597,16 +2015,25 @@ def build_orchestrator_tools(
         """
         spent = _spend(tool_context, "remove_cards")
         if spent:
-            return {"error": spent}
+            return spent
         if remove_cards is None:
-            return {"error": "removing cards is not available on this server"}
+            return _failed(
+                HarnessCode.TOOL_NOT_CONFIGURED, "removing cards is not available on this server"
+            )
         if not component_ids and not all_cards:
-            return {"error": "Name the cards to take off, or set all_cards. Nothing changed."}
+            return _failed(
+                HarnessCode.TOOL_ARGUMENTS_INVALID,
+                "Name the cards to take off, or set all_cards. Nothing changed.",
+            )
+        _canvas_series(tool_context)
         removed, missing = await remove_cards(
             component_ids=component_ids or [], all_cards=all_cards
         )
         if not removed and missing and len(missing) == len(component_ids or []):
-            return {"error": "No card of this conversation has those ids. Nothing changed."}
+            return _failed(
+                HarnessCode.CARD_NOT_FOUND,
+                "No card of this conversation has those ids. Nothing changed.",
+            )
         if not removed:
             note = (
                 "The canvas was already empty."
@@ -1632,7 +2059,6 @@ def build_orchestrator_tools(
                 explain_dfo,
                 recall,
                 remove_cards_tool,
-                *direct_recipe_tools(direct, executor=executor),
             )
         ),
     ]

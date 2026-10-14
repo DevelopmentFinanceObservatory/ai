@@ -220,7 +220,7 @@ ignore comments; proxies see traffic. Heartbeats carry no `seq`.
 Two failure channels, by scope:
 
 - A **step-scoped** failure arrives as `activity.step` with
-  `status: "failed"`; a failed tool call's step carries no `detail` (the tool error stays in the trace); the run
+  `status: "failed"`, and its `detail` is one sentence for the user, chosen by the failure's code (the tool error stays in the trace). The run
   continues where the plan allows, and `done` still arrives.
 - A **top-level `error` frame is stream-fatal**: `done` does not follow it.
   Branch on `error.retry`: `correct_and_retry` means a fixed call can work

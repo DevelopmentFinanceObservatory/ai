@@ -82,10 +82,11 @@ async def get_skill_file(
 ) -> ToolResult:
     """Read one file of a skill `get_skill` loaded, verbatim.
 
-    Pass the path exactly as `get_skill` lists it. SKILL.md is accepted too.
-    A file refused as not found is not retried under a guessed path. Call
-    `get_skill` for the list of files. Loading a skill's files returns
-    instructions and does not finish the task.
+    Use it after `get_skill`, to read a file the skill lists. Pass the path
+    exactly as `get_skill` lists it. SKILL.md is accepted too. A file refused
+    as not found is not retried under a guessed path. Call `get_skill` for the
+    list of files. A skill's files are reference material for the question, so
+    reading one does not answer it.
 
     A file past 32,000 characters comes in pages. A page that stops short of
     the end closes with a line naming the exact next call, with its `offset`

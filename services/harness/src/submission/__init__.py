@@ -1,1 +1,1 @@
-"""The shared submission service: one validation chain for planned and direct analyses."""
+"""The shared submission service: the validation chain every proposed plan passes."""

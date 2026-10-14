@@ -200,6 +200,8 @@ async def aggregate(
 ) -> ToolResult:
     """Group a stored frame by `group_by` and reduce each group's `value` with `aggregation`.
 
+    Use it to total or average a frame over one of its dimensions.
+
     `aggregate` skips absent grid cells, not null values. `Frame.build` cannot
     represent an in-frame null observation today (`value` must be finite,
     `status` is reserved), so "coverage" here means cells present versus

@@ -34,9 +34,10 @@ from typing import Any, cast
 import httpx2
 import pytest
 import resvg_py
+from common import refusal as refusal_module
 from common.caller import CALLER_HEADER, supplied_caller
 from common.materialisation import content_version as content_version_module
-from common.refusal import REFUSAL_META_KEY
+from common.refusal import REFUSAL_META_KEY, internal_error_message
 from fastmcp import Client
 from fastmcp.apps import UI_EXTENSION_ID, UI_MIME_TYPE, ResourceCSP
 from fastmcp.client.client import CallToolResult
@@ -91,6 +92,7 @@ from .stub_assembler import StubAssembler, load_release, resolved_revision
 
 RELEASE = load_release()
 _BASE_URL = server.settings.presentation_public_url
+_KNOWN_TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
 _RENDERER_URI = renderer_uri(_BASE_URL)
 
 # The caller every in-memory client names, as the harness's `x-dfo-caller`
@@ -730,7 +732,7 @@ async def test_describe_frame_round_trips_through_the_mounted_stub(
 
 
 async def test_safety_net_turns_exceptions_into_internal_error_refusals(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     class _BrokenAssembler(StubAssembler):
         async def get_frame_view(self, **_: Any) -> dict[str, Any]:
@@ -738,17 +740,22 @@ async def test_safety_net_turns_exceptions_into_internal_error_refusals(
 
     broken: Assembler = _BrokenAssembler()
     monkeypatch.setattr(server, "PlatformAssembler", _stub_platform_assembler(broken))
+    monkeypatch.setattr(refusal_module, "current_trace_id", lambda: _KNOWN_TRACE_ID)
 
-    reply = await _call(
-        "describe_frame",
-        {"frame_ref": {"spec_id": "spec_1", "content_version": "cv_1"}},
-        expect_error=True,
-    )
+    with caplog.at_level(logging.ERROR, logger=server.__name__):
+        reply = await _call(
+            "describe_frame",
+            {"frame_ref": {"spec_id": "spec_1", "content_version": "cv_1"}},
+            expect_error=True,
+        )
 
     assert reply["error"] == "internal_error"
     assert reply["retry"] == "do_not_retry"
-    assert re.search(r"trace id [0-9a-f]{32}", reply["detail"])
+    assert reply["detail"] == internal_error_message(subject="This call")
     assert "boom" not in json.dumps(reply)
+    assert _KNOWN_TRACE_ID not in json.dumps(reply)
+    [record] = [r for r in caplog.records if r.name == server.__name__]
+    assert _KNOWN_TRACE_ID in record.getMessage()
 
 
 async def test_a_write_forwards_the_caller_type_and_no_session(
@@ -1547,13 +1554,11 @@ async def test_a_render_failure_after_the_write_still_succeeds_with_the_envelope
     records = [r for r in caplog.records if r.name == server.__name__]
     assert len(records) == 2
     for result, record in zip((created, described), records, strict=True):
-        trace_id = re.search(r"trace_id=([0-9a-f]{32})", record.getMessage())
-        assert trace_id is not None
+        assert re.search(r"trace_id=[0-9a-f]{32}", record.getMessage())
         assert "resolved revision of cmp_1" in record.getMessage()
         assert record.exc_info is not None
         assert result.structured_content == notice_view(
-            f"This revision of the component could not be drawn (trace id {trace_id[1]}).",
-            base_url=_BASE_URL,
+            "This revision of the component could not be drawn.", base_url=_BASE_URL
         )
 
 

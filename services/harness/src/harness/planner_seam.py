@@ -99,6 +99,7 @@ from typing import Any, cast
 from common.telemetry import current_trace_id
 from compiler.compile import CompileIssueCode
 from compiler.surface import ToolSurface
+from executor.classify import ExecutorCode
 from google.adk import Context, Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.base_llm import BaseLlm
@@ -107,7 +108,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
-from planner.agent import proposing_tool
+from planner.agent import PROPOSE_PLAN
 from planner.operations import OperationKind
 from planner.plan import (
     MAX_QUESTION_CHARS,
@@ -289,18 +290,20 @@ class PlannerSeamError(RuntimeError):
     `planner.agent.declare_ready` declared ready.
 
     `refusal` is the shape `harness.studio_translate._stream_fatal` reads
-    (`code`, `retry_mode`, `fix.detail`), so this reaches the wire as the
-    real reason rather than as a bare exception the trace id has to stand
-    in for. Every way this seam fails on its own account replays the same
-    way against the same state, so the default is `do_not_retry` -- a
-    caller told to retry a deterministic failure just pays for the same
-    stall again.
+    (`code`, `retry_mode`), so the user reads the sentence of its code. The
+    default code is `internal_error`, because the seam stopping on its own
+    account is a fault of the system, whatever the question. The wire
+    grammar has no member for it, so the frame states
+    `capability_unavailable`. Every way this seam fails on its own account
+    replays the same way against the same state, so the default is
+    `do_not_retry`. A caller told to retry a deterministic failure pays for
+    the same stall again. `fix.detail` holds the message for the log.
     """
 
     def __init__(self, message: str, *, refusal: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.refusal = refusal or {
-            "code": "capability_unavailable",
+            "code": ExecutorCode.INTERNAL_ERROR.value,
             "retry_mode": "do_not_retry",
             "fix": {"detail": message},
         }
@@ -408,8 +411,6 @@ class PlannerSeam:
         # `after_model_callbacks` run before the seam's own, so they see each
         # response as the model answered it, before `drop_thought_parts`
         # replaces one. `evals/planner_entry` runs the served planner this way.
-        resolved_agent_settings = agent_settings if agent_settings is not None else AgentSettings()
-        self._proposing = proposing_tool(resolved_agent_settings.planner_schema_delivery)
         self._agent = create_planner_with_translator(
             settings=settings,
             agent_settings=agent_settings,
@@ -928,11 +929,9 @@ class PlannerSeam:
     ) -> None:
         """The planner's `after_tool_callback`: progress, then what the answer settles.
 
-        An answer is read by its shape, so `propose_plan` and `submit_analysis`
-        read alike (`planner.settings.SchemaDelivery`): a terminal refusal
-        (`_is_terminal_refusal`) ends the turn, a `translation` is the verdict
-        on the plan the call recorded, and `summary` says the call declared
-        that plan ready (`planner.agent.declare_ready`).
+        A terminal refusal (`_is_terminal_refusal`) ends the turn, a `translation` is the
+        verdict on the plan the call recorded, and `summary` says the call declared that plan
+        ready (`planner.agent.declare_ready`).
         """
         tracker.events += 1
         if tracker.events > _MAX_EVENTS:
@@ -1042,9 +1041,8 @@ class PlannerSeam:
     @staticmethod
     def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
         """Whether a tool response refuses with one of
-        `harness.sentences.TERMINAL_PROPOSE_CODES`, which only a proposal
-        (`propose_plan` or `submit_analysis`) answers: an outcome that records
-        no new version and ends the entry.
+        `harness.sentences.TERMINAL_PROPOSE_CODES`, which only a proposal (`propose_plan`)
+        answers: an outcome that records no new version and ends the entry.
         """
         return (
             isinstance(tool_response, dict)
@@ -1192,7 +1190,7 @@ class PlannerSeam:
             ask = (
                 "\nThe user asks for this change to the plan: "
                 f"{cut_user_text(amendment, MAX_QUESTION_CHARS)}\n"
-                f"Call {self._proposing} again with the revised decisions and evidence "
+                f"Call {PROPOSE_PLAN} again with the revised decisions and evidence "
                 "requirements -- the change has to alter what a requirement "
                 "actually states, not only a decision's rationale -- which has "
                 "it translated and compiled again.\n"
@@ -1208,7 +1206,7 @@ class PlannerSeam:
             ask = (
                 f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
                 f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
-                f"Call {self._proposing} again with a plan that avoids it.{avoid}\n"
+                f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}\n"
             )
         if not fresh:
             return ask

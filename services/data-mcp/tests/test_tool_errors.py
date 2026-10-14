@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -1440,6 +1441,25 @@ def test_no_preamble_leaves_content_unchanged() -> None:
     plain = to_tool_result(refusal)
     explicit_none = to_tool_result(refusal, preamble=None)
     assert plain.content[0].text == explicit_none.content[0].text  # type: ignore[union-attr]
+
+
+async def test_an_upstream_trace_id_is_logged_and_left_out_of_the_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trace_id = "0af7651916cd43dd8448eb211c80319c"
+    problem = json.loads(_problem_body(code="over_ceiling", retryable=False, trace_id=trace_id))
+    refusal = await _refusal_from_body({"status": 422, **problem})
+    assert refusal.trace_id == trace_id
+
+    with caplog.at_level(logging.WARNING, logger="data_mcp.tool_errors"):
+        result = to_tool_result(refusal)
+
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "over_ceiling"
+    assert "trace_id" not in result.structured_content
+    assert trace_id not in json.dumps(result.structured_content) + result.content[0].text  # type: ignore[union-attr]
+    [record] = [r for r in caplog.records if r.name == "data_mcp.tool_errors"]
+    assert trace_id in record.getMessage()
 
 
 # 9c. `node_not_held`.

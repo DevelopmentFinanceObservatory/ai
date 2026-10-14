@@ -345,10 +345,7 @@ def test_growth_digest_carries_the_identity_block() -> None:
     assert "frame reference: spec_id=ops_" + "a" * 32 in digest
     assert "content_version=ocv_" + "b" * 32 in digest
     assert "execution_identity: 0.1.0|1.0.0|0.1.0" in digest
-    assert (
-        "presentation-mcp's write_component accepts only spec_/cv_ frame references "
-        "and refuses an ops_/ocv_ pair." in digest
-    )
+    assert "write_component" not in digest
 
 
 def _growth_result(

@@ -38,12 +38,14 @@ from compiler.surface import (
 )
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
+from data_mcp.definition_store import canonicalize, spec_id_for
+from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
-from harness.graph.answer import link_evidence_to_terminal_frames
+from harness.graph.answer import answer_frames, link_evidence_to_terminal_frames
 from harness.graph.state import ORCHESTRATOR_FRAMES_KEY, frame_id_for, register_frames
 from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
@@ -54,6 +56,7 @@ from harness.recipe_replay import Refused as ReplayRefused
 from harness.server import create_app
 from harness.settings import ANALYSIS_MCP_MOUNT_PATH, DATA_MCP_MOUNT_PATH, Settings
 from harness.studio_translate import _RecordingSurface
+from harness.tool_contracts import HarnessCode
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -1676,11 +1679,13 @@ async def test_charts_of_two_donors_are_drawn_on_a_frame_of_their_own_latest_yea
 
     # The agent reads that the frame rolls in the view it charts from.
     assert frame_view["view"]["rolling"] is True
-    assert "facts" in chart
-    assert "facts" in table
+    assert "reply_figures" in chart
+    assert "reply_figures" in table
     # 2024 is the newest year of the two donors' frame, not of the run's.
-    assert sorted(titled) == ["error", "title"]
+    assert "reply_figures" not in titled
     assert "names 2024" in titled["error"]
+    assert titled["code"] == HarnessCode.TITLE_QUOTES_ROLLING_PERIOD
+    assert str(titled["fix"]["period"]) == "2024"
     # One replay for the two charts' one selection, with the rolling steps run once.
     assert studio.replays == [
         [{"spec_id": ROLLING_SPEC, "bindings": {"donor": sorted([usa, germany])}}]
@@ -1701,7 +1706,7 @@ async def test_charts_of_the_plans_own_donors_are_drawn_on_the_runs_frame(
 ) -> None:
     (drawn,) = await studio.charts(studio.chart([donor.ref for donor in TOP_DONORS]))
 
-    assert "facts" in drawn
+    assert "reply_figures" in drawn
     assert studio.replays == []
     assert [intent["frame_ref"] for intent in studio.platform.created()] == [studio.run_frame]
 
@@ -1714,7 +1719,8 @@ async def test_a_replay_still_pending_draws_no_chart_on_the_runs_frame(studio: _
         studio.chart([usa, germany]), studio.chart([usa, germany], type="table")
     )
 
-    assert [sorted(drawn) for drawn in (chart, table)] == [["error", "title"]] * 2
+    assert [drawn["code"] for drawn in (chart, table)] == [HarnessCode.ROLLING_REPLAY_PENDING] * 2
+    assert not any("reply_figures" in drawn for drawn in (chart, table))
     assert "Asking again shortly may work" in chart["error"]
     assert studio.platform.writes == []
     # The second chart of the same series waits out the first one's refusal.
@@ -1786,10 +1792,12 @@ async def test_a_chart_of_fetched_data_counts_its_period_back_from_the_latest_da
     )
 
     assert "rolling" not in frame["view"]
-    assert "facts" in moving
-    assert "facts" in fixed
-    assert sorted(titled) == ["error", "title"]
+    assert "reply_figures" in moving
+    assert "reply_figures" in fixed
+    assert "reply_figures" not in titled
     assert "names 2024" in titled["error"]
+    assert titled["code"] == HarnessCode.TITLE_QUOTES_ROLLING_PERIOD
+    assert str(titled["fix"]["period"]) == "2024"
     # The platform resolves a relative window as it stores the card, so the
     # titled chart was stored before its title could be judged, and not drawn.
     relative, _, whole = studio.platform.created()
@@ -1820,9 +1828,10 @@ async def test_a_chart_counting_back_on_data_fetched_to_a_stated_end_year_is_ref
 
     moving, whole = await studio.charts({**chart, "latest_periods": 5}, chart)
 
-    assert sorted(moving) == ["error", "title"]
+    assert "reply_figures" not in moving
+    assert moving["code"] == HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW
     assert '{"kind": "range", "start_year": Y}' in moving["error"]
-    assert "facts" in whole
+    assert "reply_figures" in whole
     assert [("window" in intent) for intent in studio.platform.created()] == [False]
 
 
@@ -1854,7 +1863,6 @@ async def test_a_surface_reading_the_mounted_services_without_the_token_is_refus
 
 # "Top 2 by GDP" with no place named: the mint covers every place with data, at every
 # level, and carries each place's types when asked (dfo-apis `materialise.enrichment`).
-GDP_SPEC = "spec_" + "4" * 32
 GDP_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "Amount_EconomicActivity_GrossDomesticProduction_Nominal", "kind": "stat_var"},
@@ -1862,6 +1870,9 @@ GDP_IDENTITY: dict[str, Any] = {
     "requested_window": {"kind": "all"},
     "slots": [],
 }
+# The id dfo-apis' registry holds the identity under: `get_data` reads an identity the
+# definition store lacks from the registry and keeps it only when it hashes to its id.
+GDP_SPEC = spec_id_for(canonicalize(GDP_IDENTITY))
 GDP_BY_PLACE: dict[str, tuple[str, float]] = {
     "Earth": ("Place", 105.0),
     "country/HIC": ("ProvisionalNode", 64.0),
@@ -2040,6 +2051,9 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
         if request.url.path == "/api/datasets":
             options.append(json.loads(request.content)["options"])
             return httpx2.Response(200, json=mint_response)
+        if request.url.path.endswith("/options"):
+            # The spec is not in the definition store, so `get_data` reads its identity here.
+            return httpx2.Response(200, json=mint_response)
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     client_holder.set_client(data_mcp_client(mint_handler))
@@ -2111,6 +2125,9 @@ def _serve_gdp_in_both_renderings(
         if request.url.path == "/api/datasets":
             typed = "columns" in json.loads(request.content)["options"]
             return httpx2.Response(200, json=renderings[typed])
+        if request.url.path.endswith("/options"):
+            # The spec is not in the definition store, so `get_data` reads its identity here.
+            return httpx2.Response(200, json=renderings[True])
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     serve_canonical_frames(monkeypatch, fake_fetch)
@@ -2225,3 +2242,343 @@ def _gdp_surface(app: Any, mounted_mcp_transport: Callable[..., Any]) -> McpSurf
             ),
         }
     )
+
+
+# --- a flow retrieval that ends a plan, served by dfo-apis without its group totals ---
+
+# "Aid to Kenya from every donor": the definition binds Kenya and leaves the donors open.
+KENYA_DONORS_IDENTITY: dict[str, Any] = {
+    "identity_version": "spec1",
+    "shape": {"id": "Oda", "kind": "stat_var"},
+    "entities": {"destination": ["country/KEN"]},
+    "open_roles": ["origin"],
+    "facets": {"unit": {"ref": "USD", "state": "value"}},
+    "requested_window": {"kind": "all"},
+    "slots": [],
+}
+KENYA_DONORS_SPEC = spec_id_for(canonicalize(KENYA_DONORS_IDENTITY))
+# Each donor's 2023 aid to Kenya and the kind dfo-apis' code index declares for it. The
+# DAC total and the G7 hold the two countries' figures again.
+KENYA_DONORS: dict[str, tuple[str, float]] = {
+    "country/DEU": ("party", 20.0),
+    "country/FRA": ("party", 30.0),
+    "DACTotal": ("total", 50.0),
+    "GroupOfSeven": ("total", 50.0),
+}
+KENYA_DONOR_TOTALS = sorted(ref for ref, (kind, _) in KENYA_DONORS.items() if kind == "total")
+# dfo-apis' base version of the frame, and the version its cut of the group totals mints.
+KENYA_DONORS_BASE = "cv_" + "b" * 32
+KENYA_DONORS_CUT = "cv_" + "c" * 32
+
+
+def _kenya_donors(*, cut: bool) -> dict[str, tuple[str, float]]:
+    return {
+        ref: kept for ref, kept in KENYA_DONORS.items() if not (cut and ref in KENYA_DONOR_TOTALS)
+    }
+
+
+def _kenya_donors_parquet_bytes(*, cut: bool) -> bytes:
+    """The frame dfo-apis renders with the party kinds, of the base or the cut version."""
+    donors = _kenya_donors(cut=cut)
+    count = len(donors)
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:Oda"] * count, type=pa.string()),
+            "financingProvider": pa.array(list(donors), type=pa.string()),
+            "financingRecipient": pa.array(["country/KEN"] * count, type=pa.string()),
+            "time_period": pa.array(["2023"] * count, type=pa.string()),
+            "value": pa.array([value for _, value in donors.values()], type=pa.float64()),
+            "unit": pa.array(["USD"] * count, type=pa.string()),
+            "financingProvider_party_kind": pa.array([kind for kind, _ in donors.values()]),
+            "financingRecipient_party_kind": pa.array(["party"] * count),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+    return buf.getvalue()
+
+
+def _kenya_donors_mint_response(*, cut: bool, options: Mapping[str, Any]) -> dict[str, Any]:
+    """dfo-apis' answer to a mint with `options`: the base version, or the version of the
+    frame cut of the donors' group totals, whose coverage, statistics and trace are its
+    own."""
+    donors = _kenya_donors(cut=cut)
+    parquet = _kenya_donors_parquet_bytes(cut=cut)
+    trace: dict[str, Any] = {"graph_revision": "g1", "facets": []}
+    if cut:
+        trace["party_totals_left_out"] = [
+            {"role": "financingProvider", "entities": KENYA_DONOR_TOTALS}
+        ]
+    return {
+        "schema_version": 1,
+        "definition": {
+            "schema_version": 1,
+            "spec_id": KENYA_DONORS_SPEC,
+            "identity": KENYA_DONORS_IDENTITY,
+        },
+        "content_version": KENYA_DONORS_CUT if cut else KENYA_DONORS_BASE,
+        "coverage": {
+            "rows": len(donors),
+            "dimensions": [
+                {"label": "financingProvider", "count": len(donors), "axis": "origin"},
+                {"label": "financingRecipient", "count": 1, "axis": "destination"},
+                {"label": "years", "count": 1},
+            ],
+        },
+        "citation": {"text": "OECD DAC2a", "sources": []},
+        "trace": trace,
+        "warnings": [],
+        "artifacts": [
+            {
+                "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+                "rendering": dict(options),
+                "bytes": len(parquet),
+                "media_type": "application/vnd.apache.parquet",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "tier": "working",
+                "url": "/links/should-not-be-fetched",
+            }
+        ],
+        "statistics": [
+            {
+                "stat_var": "dcid:Oda",
+                "entities": [
+                    {"role": "financingProvider", "ref": ref},
+                    {"role": "financingRecipient", "ref": "country/KEN"},
+                ],
+                "facet": {"unit": "USD"},
+                "observations": 1,
+                "first": {"value": value, "period": "2023"},
+                "latest": {"value": value, "period": "2023"},
+                "minimum": {"value": value, "period": "2023"},
+                "maximum": {"value": value, "period": "2023"},
+            }
+            for ref, (_, value) in donors.items()
+        ],
+    }
+
+
+def _kenya_donors_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
+    """A plan whose answer is the retrieval itself: every donor's aid to Kenya in 2023."""
+    source = SelectedSource(
+        spec_id=KENYA_DONORS_SPEC,
+        sentence="ODA to Kenya from every donor, 2023",
+        has_data=True,
+        served_count=1,
+        shape_member_digest=member_digest(["Oda"]),
+        entities=(ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),),
+        open_entity_axes=(OpenEntityAxis(column="origin", member_count=len(KENYA_DONORS)),),
+        unit_ref="USD",
+        unit_label="US dollars",
+        coverage_window=Period(start=2023, end=2023),
+        identity=KENYA_DONORS_IDENTITY,
+    )
+    draft = Plan(
+        question="Which donors gave Kenya aid in 2023?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="oda_to_kenya",
+                decision_ids=["measure"],
+                measure="ODA to Kenya",
+                entities=[Entity(name="Kenya", role="recipient")],
+                across=("donor",),
+                period=Period(start=2023, end=2023),
+            )
+        ],
+        status=PlanStatus.DRAFT,
+    )
+    translation = Translation(
+        operations=[
+            RetrieveOperation(id="oda", requirement_id="oda_to_kenya", spec_id=KENYA_DONORS_SPEC)
+        ],
+        terminal=["oda"],
+    )
+    compiled = compile_plan(
+        plan=draft,
+        translation=translation,
+        schemas=schemas,
+        discovered={"oda_to_kenya": source},
+    )
+    assert compiled.workflow is not None, compiled.issues
+    return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+        at=datetime.now(UTC)
+    )
+
+
+class _ServedFramePlatform:
+    """The presentation tools `McpExecutor` calls, reading each frame as dfo-apis serves it:
+    by its pair, from `served` (a `content_version` to the donors its frame holds), as
+    presentation-mcp reads a retrieval's frame from dfo-apis. Records the pair of every
+    `describe_frame` and every created component."""
+
+    def __init__(self, served: Mapping[str, Sequence[str]]) -> None:
+        self._served = served
+        self.described: list[dict[str, Any]] = []
+        self.created: list[dict[str, Any]] = []
+
+    async def __aenter__(self) -> _ServedFramePlatform:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+    async def call_tool(self, tool: str, arguments: dict[str, Any], **_: Any) -> SimpleNamespace:
+        if tool == "describe_frame":
+            self.described.append(arguments["frame_ref"])
+            donors = sorted(self._served[arguments["frame_ref"]["content_version"]])
+            view = {
+                "dimensions": [
+                    {"name": "stat_var", "plural": False, "values": ["dcid:Oda"]},
+                    {
+                        "name": "financingProvider",
+                        "plural": True,
+                        "values": donors,
+                        "total_count": len(donors),
+                    },
+                ]
+            }
+            return SimpleNamespace(is_error=False, structured_content=view, content=[], meta=None)
+        assert tool == "write_component", tool
+        intent = arguments["intent"]
+        self.created.append(intent)
+        envelope = resolved_revision(
+            intent["type"], component_id="cmp_1", frame_ref=intent["frame_ref"]
+        )
+        return SimpleNamespace(
+            is_error=False,
+            structured_content={"component_id": "cmp_1", "revision": 1, "fact_summary": {}},
+            content=[],
+            meta={RESOLVED_PAYLOAD_META_KEY: envelope},
+        )
+
+
+async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_cut_version(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    decision: Callable[..., Decision],
+    _stats_registry: _StatsRegistry,
+    publisher: ResultPublisher,
+) -> None:
+    """The compiled retrieval asks get_data for the frame without party totals, which
+    data-mcp asks dfo-apis for. dfo-apis answers with the version of the cut frame, so the
+    frame the answer is described and charted by is that version's pair, holding the two
+    countries alone, and the digest names the totals left out."""
+    minted: list[dict[str, Any]] = []
+
+    async def fake_fetch(*, artifact_digest: str, **_kwargs: Any) -> bytes:
+        for cut in (False, True):
+            parquet = _kenya_donors_parquet_bytes(cut=cut)
+            if artifact_digest == f"sha256:{hashlib.sha256(parquet).hexdigest()}":
+                return parquet
+        raise AssertionError(f"unexpected fetch of {artifact_digest}")
+
+    serve_canonical_frames(monkeypatch, fake_fetch)
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.endswith("/options"):
+            # The spec is not in the definition store, so `get_data` reads its identity here.
+            return httpx2.Response(
+                200, json=_kenya_donors_mint_response(cut=False, options=DEFAULT_MINT_OPTIONS)
+            )
+        if request.url.path != "/api/datasets":
+            raise AssertionError(f"unexpected call to {request.url.path}")
+        options = json.loads(request.content)["options"]
+        minted.append(options)
+        response = _kenya_donors_mint_response(
+            cut=options.get("without_party_totals") is True, options=options
+        )
+        return httpx2.Response(200, json=_register_statistics(_stats_registry, response))
+
+    client_holder.set_client(data_mcp_client(mint_handler))
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+    served = {
+        version: list(_kenya_donors(cut=cut))
+        for version, cut in ((KENYA_DONORS_BASE, False), (KENYA_DONORS_CUT, True))
+    }
+    platform = _ServedFramePlatform(served)
+    monkeypatch.setattr(
+        McpTimeoutPolicy, "client", lambda self, url, *, auth, caller, tool=None: platform
+    )
+
+    async with running_lifespan(app):
+        surface = McpSurface(
+            sources={
+                "data-mcp": mounted_mcp_transport(
+                    app, f"{DATA_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+                "analysis-mcp": mounted_mcp_transport(
+                    app, f"{ANALYSIS_MCP_MOUNT_PATH}/mcp", token="test-token"
+                ),
+            }
+        )
+        provenance = ProvenanceStore()
+        recording = _RecordingSurface(surface, provenance=provenance)
+        schemas = {schema.name: schema for schema in await surface.list_tools()}
+        plan = _kenya_donors_approved_plan(decision, schemas)
+        _, outcome = await execute_approved_plan(plan, surface=recording, publisher=publisher)
+        assert isinstance(outcome, Accepted), outcome
+        assert plan.workflow is not None
+        link_evidence_to_terminal_frames(recording, outcome, workflow=plan.workflow)
+
+        # As `harness.graph.execute` hands the answer frames to `plan_done`, which
+        # describes each and registers it for `make_charts`.
+        (answer,) = answer_frames(outcome).values()
+        executor = McpExecutor(settings=Settings(), provenance=provenance)
+        described = await executor(
+            tool="describe_frame", args={"frame_ref": answer.presented.model_dump()}
+        )
+        frames: dict[str, Any] = {}
+        register_frames(
+            frames,
+            [(answer.presented.model_dump(), described["view"], answer.store.model_dump())],
+        )
+        tools = {
+            tool.__name__: tool
+            for tool in build_orchestrator_tools(resolver=_no_search, executor=executor)
+        }
+        drawn = await tools["make_charts"](
+            [
+                {
+                    "frame": frame_id_for(answer.presented.model_dump()),
+                    "type": "bar_chart",
+                    "title": "ODA to Kenya by donor, 2023",
+                    "select_json": json.dumps(
+                        {"financingProvider": ["country/DEU", "country/FRA"]}
+                    ),
+                }
+            ],
+            SimpleNamespace(
+                state={"surface": "studio", ORCHESTRATOR_FRAMES_KEY: frames},
+                invocation_id="inv_1",
+            ),
+        )
+        held = await get_frame_store().get(answer.store)
+        assert held is not None
+
+    cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
+    assert answer.presented == cut
+    assert answer.store == frame_ref_for(
+        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=("party_kind",)
+    )
+    # The frame the answer is described and drawn by is the cut version's.
+    assert platform.described == [cut.model_dump()]
+    assert described["view"]["dimensions"][1]["values"] == ["country/DEU", "country/FRA"]
+    assert "holds" in drawn["charts"][0], drawn
+    assert [intent["frame_ref"] for intent in platform.created] == [cut.model_dump()]
+    # The steps reading the retrieval hold the same rows.
+    assert sorted(held[0].table.column("financingProvider").to_pylist()) == [
+        "country/DEU",
+        "country/FRA",
+    ]
+    # The digest the agent reads names the totals dfo-apis left out.
+    (step,) = outcome.steps
+    assert (
+        "Left out of the frame: 2 group totals on financingProvider (DACTotal, GroupOfSeven)"
+        in step.digest
+    )
+    # data-mcp asked dfo-apis for the cut, with the kinds.
+    (options,) = minted
+    assert options["without_party_totals"] is True
+    assert options["columns"] == ["party_kind"]

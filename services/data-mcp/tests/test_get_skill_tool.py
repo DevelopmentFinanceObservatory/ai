@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx2
 import pytest
 from data_mcp.server import mcp
@@ -111,21 +113,27 @@ async def test_the_description_carries_the_two_skill_loading_sentences() -> None
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
 
     description = " ".join((tools["get_skill"].description or "").split())
-    assert "Loading a skill returns instructions and does not finish the task" in description
+    assert "loading one does not answer it" in description
     assert "A file refused as not found is not retried under a guessed path" in description
 
 
 # Refusals
 
 
-async def test_an_unknown_id_refuses_skill_not_found_pointing_at_search() -> None:
-    result = await _get_skill(serving_skill(), "no-such-skill")
+async def test_an_unknown_id_refuses_skill_not_found_pointing_at_search(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="data_mcp.tool_errors"):
+        result = await _get_skill(serving_skill(), "no-such-skill")
 
     refusal = refusal_of(result)
     assert refusal["code"] == "skill_not_found"
     assert refusal["retry_mode"] == "correct_and_retry"
     assert refusal["fix"] == {"skill_id": "no-such-skill", "next_step": "search"}
-    assert refusal["trace_id"] == "trace-1"
+    assert "trace_id" not in refusal
+    [record] = [r for r in caplog.records if r.name == "data_mcp.tool_errors"]
+    assert record.levelno == logging.WARNING
+    assert "trace-1" in record.getMessage()
     assert "search result" in text_of(result)
 
 
