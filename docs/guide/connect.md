@@ -72,11 +72,11 @@ For error codes and other technical problems, see [Troubleshooting for developer
 
 ## For developers
 
-The rest of this page covers the server's behaviour, setup for developer tools, and direct access for pilot testers.
+The rest of this page covers the server's behaviour and setup for developer tools.
 
 ### The endpoint
 
-The server uses MCP over streamable HTTP at a single URL, a DFO subdomain served by the website's proxy:
+The server uses MCP over streamable HTTP at a single URL on the website:
 
 ```text
 https://developmentfinance.org/mcp
@@ -211,10 +211,12 @@ The assistant calls `search` with arguments like these:
 The wording of `variable` varies between runs. `search` should return:
 
 ```text
-"Healthcare expenditure per person in Kenya, 2000 to 2023, according to World Development Indicators."  [spec_0002907ee44bf25fc98f343372614a84]
-confidence high · 48 observations · has data
+"Kenya's health expenditure per capita in international dollars, 2000 to 2023. World Development Indicators."  [spec_0002907ee44bf25fc98f343372614a84]
+confidence high · 24 observations · has data
+Measure: Healthcare expenditure per person · at least 1 StatVars.
 observationAbout Kenya (country/KEN)
-provenance options for get_data: dc/base/WorldDevelopmentIndicators (WorldDevelopmentIndicators).
+source World Development Indicators (fallback) · unit InternationalDollar (fallback)
+provenance options for get_data: dc/base/WorldDevelopmentIndicators (World Development Indicators).
 unit options for get_data: InternationalDollar (InternationalDollar), USDollar (USDollar).
 
 no time_text was given; the answer was resolved across every period with data.
@@ -222,43 +224,16 @@ no time_text was given; the answer was resolved across every period with data.
 
 The reply should cite the same spec id as the output above and name World Development Indicators as the source.
 
-<!-- TODO: verify this output against the public endpoint once it exists. It comes from a call to the data tools against the dev APIs on 28 September 2026. -->
-
 If the assistant answers without calling `search`, check that the client lists the DFO tools. In Claude Code, `claude mcp list` shows each server and whether it connected.
-
-### Direct access with a pilot token
-
-Pilot testers with a DFO access token can reach the DFO AI service directly. This URL takes a trailing slash:
-
-```text
-https://<dfo-mcp-host>/mcp/
-```
-
-A bare `/mcp` here answers with a 307 redirect to `/mcp/`. Every request must carry the token as a bearer header:
-
-```text
-Authorization: Bearer <your-dfo-token>
-```
-
-Requests without a valid token are rejected with HTTP 401 before any tool runs. During the pilot, every tester uses the same shared token. Ask whoever runs the deployment for it.
-
-Each developer tool takes the header in its own field:
-
-| Tool        | Where the token goes                                                                          |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| Claude Code | `--header` on `claude mcp add`, or `headers` in `.mcp.json`                                   |
-| Gemini CLI  | `headers` in `settings.json`                                                                  |
-| Codex       | `bearer_token_env_var` in `config.toml`, naming the environment variable that holds the token |
 
 ## Troubleshooting for developers
 
-| Problem                                                                             | Cause                                                                                                          | Fix                                                                                           |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Redirect on connect, or "server unreachable" with a 308 or 307 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp` (no slash) on the website endpoint and `/mcp/` (with slash) on the direct endpoint |
-| HTTP 401 on the direct endpoint                                                     | Token missing or wrong                                                                                         | Check the header reads `Authorization: Bearer <token>`                                        |
-| `rate_limited` refusal                                                              | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                                            |
-| HTTP 429 from the site                                                              | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                                        |
-| `internal_error` refusal                                                            | A tool failed in a way with no specific refusal, and the response says only that it failed on the server       | Send the time of the call and the tool's name to whoever runs the deployment                  |
+| Problem                                                                      | Cause                                                                                                          | Fix                                                                          |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Redirect on connect, or "server unreachable" with a 308 in the client's logs | Wrong URL ending                                                                                               | Use `/mcp`, with no slash at the end                                         |
+| `rate_limited` refusal                                                       | The server is over its calls-per-second limit across all callers, or the instance already has 16 calls running | Repeat after the `retry_after_s` the refusal gives                           |
+| HTTP 429 from the site                                                       | One address sent more requests in a minute than the site allows                                                | Wait for the seconds given in the `Retry-After` header                       |
+| `internal_error` refusal                                                     | A tool failed in a way with no specific refusal, and the response says only that it failed on the server       | Send the time of the call and the tool's name to whoever runs the deployment |
 
 ## Next
 
