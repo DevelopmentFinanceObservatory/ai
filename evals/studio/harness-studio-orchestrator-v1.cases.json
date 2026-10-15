@@ -2182,6 +2182,32 @@
           "property": "The closing message names a second year, different from the year its ranking is for, and states how many donors that second year covers: a newer year with the number of donors it has so far, or an earlier year with the larger number of donors it had. The message may call them donors, providers or members; the count and the year are what is scored, whatever the noun. A message that names no second year, names one without a count, or says only that newer data is incomplete without a count, is a no. This property always applies and is never inapplicable."
         }
       ]
+    },
+    {
+      "id": "orchestrator-live-oda-recipient-country-ranking-uses-destination-axis",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "What are the top five ODA recipient countries in the latest year?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "get_data",
+              "filter",
+              "rank"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "oda-recipient-countries-use-a-strict-recipient-population",
+          "property": "The plan and answer use a gross ODA disbursement flow, retain the latest available year, and rank the five largest recipient or destination countries. The plan opens the recipient or destination side, applies a Country population filter to that same side before ranking, and the answer names five recipient countries. A donor or origin ranking, a worldwide total, an unfiltered mix of organisations and countries, or a different aid measure is a no. This property always applies and is never inapplicable."
+        }
+      ]
     }
   ]
 }

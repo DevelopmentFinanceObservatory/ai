@@ -152,6 +152,9 @@ class RoleDimension:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    mixed_levels: bool = False
+    levelled: bool = False
+    level_filterable: bool = False
 
 
 # The measure count of a family read separately whose source lists none of its
@@ -372,6 +375,16 @@ def _merged_roots(
     return tuple(sorted(set(left) | set(right)))
 
 
+def _without_level_filterability(roles: Sequence[RoleDimension]) -> tuple[RoleDimension, ...]:
+    """Roles after a calculation that no longer proves their type columns survived."""
+    return tuple(replace(role, level_filterable=False) for role in roles)
+
+
+def _role_key(role: RoleDimension) -> tuple[Identifier, str | None]:
+    """Return the stable identity used to carry a role through a filter."""
+    return (role.requirement_id, role.role)
+
+
 # --- The ten transforms ----------------------------------------------------
 
 
@@ -404,6 +417,25 @@ def retrieved(
     levels (`compiler.evidence.opens_place_axis`).
     """
     stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
+    # Older callers represented the one unqualified place dimension only by
+    # FrameShape's summary flags. Preserve that narrow compatibility path,
+    # but never promote an ambiguous or non-place role from global state.
+    if (mixed_levels or place_typed) and not any(
+        role.mixed_levels or role.level_filterable for role in stamped
+    ):
+        places = tuple(role for role in stamped if role.place)
+        if len(places) == 1:
+            target = _role_key(places[0])
+            stamped = tuple(
+                replace(
+                    role,
+                    mixed_levels=mixed_levels,
+                    level_filterable=place_typed,
+                )
+                if _role_key(role) == target
+                else role
+                for role in stamped
+            )
     return FrameShape(
         roles=stamped,
         measures=measures,
@@ -415,8 +447,8 @@ def retrieved(
         limited=False,
         roots=(requirement_id,),
         unsummable_axes=unsummable_axes,
-        mixed_levels=mixed_levels,
-        place_typed=place_typed,
+        mixed_levels=any(role.mixed_levels for role in stamped),
+        place_typed=any(role.level_filterable for role in stamped),
     )
 
 
@@ -466,6 +498,7 @@ def aggregated(
         roles = tuple(role for role in shape.roles if role.breakdown)
     else:
         roles = ()
+    roles = _without_level_filterability(roles)
     return FrameShape(
         roles=roles,
         measures=shape.measures,
@@ -477,7 +510,7 @@ def aggregated(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels and by_entity,
+        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit,
     )
 
@@ -500,8 +533,9 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
         value = ValueKind.ORDINAL
     else:
         value = ValueKind.DIFFERENCE
+    roles = _without_level_filterability(shape.roles)
     return FrameShape(
-        roles=shape.roles,
+        roles=roles,
         measures=shape.measures,
         value=value,
         time=TimeLabel.SPAN,
@@ -511,7 +545,7 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels,
+        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit and change is GrowthChange.ABSOLUTE,
     )
 
@@ -548,7 +582,7 @@ def ranked(
     contains it, so the period stays the span's own.
     """
     axis_role = _select_role(shape.roles, axis)
-    roles = (axis_role,) if axis_role is not None else ()
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
     period = windowed_years(shape.period, window)
     limited = limit is not None or shape.limited
     if per_period:
@@ -564,6 +598,7 @@ def ranked(
             and _spans_years(period),
             limited=limited,
             roots=shape.roots,
+            mixed_levels=any(role.mixed_levels for role in roles),
             composed_unit=shape.composed_unit and limit is not None,
         )
     return FrameShape(
@@ -577,6 +612,7 @@ def ranked(
         limited=limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
+        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit,
     )
 
@@ -654,6 +690,7 @@ def filtered(
     period: Period | None,
     pins_one_year: bool,
     keeps_one_level: bool = False,
+    levelled_role_keys: Sequence[tuple[Identifier, str | None]] = (),
 ) -> FrameShape:
     """The shape `filter` produces: everything `shape` carries, plus what got narrowed.
 
@@ -680,8 +717,21 @@ def filtered(
         if phrase is not None
         for role in roles_named(shape.roles, phrase)
     ]
+    levelled = set(levelled_role_keys)
+    # A pre-role-facts direct use of this helper can still identify exactly
+    # one place dimension. It must not turn an arbitrary global summary into
+    # a country filter when several dimensions are present.
+    if keeps_one_level and not levelled:
+        places = tuple(role for role in shape.roles if role.place)
+        if len(places) == 1:
+            levelled = {_role_key(places[0])}
     roles = tuple(
-        replace(role, narrowed=True) if narrows_every_role or role in named else role
+        replace(
+            role,
+            narrowed=role.narrowed or narrows_every_role or role in named,
+            levelled=role.levelled or _role_key(role) in levelled,
+            mixed_levels=False if _role_key(role) in levelled else role.mixed_levels,
+        )
         for role in shape.roles
     )
     picked_one_year = shape.time is TimeLabel.PICKED and not _spans_years(period)
@@ -696,8 +746,8 @@ def filtered(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels and not keeps_one_level,
-        place_typed=shape.place_typed,
+        mixed_levels=any(role.mixed_levels for role in roles),
+        place_typed=any(role.level_filterable for role in roles),
         composed_unit=shape.composed_unit,
     )
 
@@ -730,7 +780,7 @@ def shared(
     symmetry with `rejects`, which does read it.
     """
     axis_role = _select_role(numerator.roles, axis) if axis is not None else None
-    roles = (axis_role,) if axis_role is not None else ()
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
     return FrameShape(
         roles=roles,
         measures=1,
@@ -741,6 +791,7 @@ def shared(
         cut_per_period=False,
         limited=numerator.limited,
         roots=_merged_roots(numerator.roots, denominator.roots),
+        mixed_levels=any(role.mixed_levels for role in roles),
     )
 
 
@@ -766,7 +817,7 @@ def quotiented(
     quotient's series.
     """
     axis_role = _select_role(numerator.roles, axis) if axis is not None else None
-    roles = (axis_role,) if axis_role is not None else ()
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
     period = _intersection(numerator.period, denominator.period)
     return FrameShape(
         roles=roles,
@@ -779,6 +830,7 @@ def quotiented(
         and _spans_years(period),
         limited=numerator.limited or (denominator_axis is not None and denominator.limited),
         roots=_merged_roots(numerator.roots, denominator.roots),
+        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=True,
     )
 
@@ -836,7 +888,9 @@ def joined(left: FrameShape, right: FrameShape) -> FrameShape:
     right_role_names = {role.role for role in right.roles if role.role is not None}
     shared_roles = tuple(
         sorted(
-            (role for name, role in left_by_role.items() if name in right_role_names),
+            _without_level_filterability(
+                tuple(role for name, role in left_by_role.items() if name in right_role_names)
+            ),
             key=lambda role: role.role or "",
         )
     )
@@ -850,6 +904,7 @@ def joined(left: FrameShape, right: FrameShape) -> FrameShape:
         cut_per_period=False,
         limited=left.limited or right.limited,
         roots=_merged_roots(left.roots, right.roots),
+        mixed_levels=any(role.mixed_levels for role in shared_roles),
     )
 
 
@@ -1170,7 +1225,11 @@ def _rejects_rank(
 
 
 def _rejects_filter(
-    shape: FrameShape, *, place_level: bool = False, period_threshold: bool = False
+    shape: FrameShape,
+    *,
+    place_level: bool = False,
+    place_level_available: bool = False,
+    period_threshold: bool = False,
 ) -> str | None:
     """Return why a filter refuses `shape`, or `None` when it may read it.
 
@@ -1184,7 +1243,7 @@ def _rejects_filter(
             "years, such as 2018/2022, that no year orders against; filter the years before "
             "the step that collapsed them, or drop the year predicate"
         )
-    if place_level and not shape.place_typed:
+    if place_level and not (shape.place_typed or place_level_available):
         return (
             "a place_level filter reads a requirement that names no place, directly or through "
             "other filters: a named place has no level to choose, and every other step drops "

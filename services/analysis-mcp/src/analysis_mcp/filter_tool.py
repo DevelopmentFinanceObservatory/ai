@@ -35,6 +35,7 @@ from pydantic.experimental.missing_sentinel import MISSING
 
 from analysis_mcp.digest import render_filter_digest
 from analysis_mcp.engine.filter import (
+    FilterPlaceLevelUnknownError,
     FilterPredicateTypeMismatchError,
     FilterPredicateValueTypeMismatchError,
     FilterResult,
@@ -81,6 +82,7 @@ _EngineError = (
     FilterUnknownColumnError
     | FilterPredicateTypeMismatchError
     | FilterPredicateValueTypeMismatchError
+    | FilterPlaceLevelUnknownError
     | FilterUnitConversionUnsupportedError
 )
 
@@ -114,6 +116,10 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     elif isinstance(exc, FilterPredicateValueTypeMismatchError):
         refusal = ToolRefusal.filter_predicate_value_type_mismatch(
             column=exc.column, actual_type=exc.actual_type, expected_type=exc.expected_type
+        )
+    elif isinstance(exc, FilterPlaceLevelUnknownError):
+        refusal = ToolRefusal.filter_predicate_type_mismatch(
+            column=exc.column, predicate_kind="place_level", actual_type="untyped place entity"
         )
     else:
         refusal = ToolRefusal.filter_unit_conversion_unsupported(
@@ -289,6 +295,7 @@ async def filter_verb(
         FilterUnknownColumnError,
         FilterPredicateTypeMismatchError,
         FilterPredicateValueTypeMismatchError,
+        FilterPlaceLevelUnknownError,
         FilterUnitConversionUnsupportedError,
     ) as exc:
         return to_tool_result(_refusal_for_engine_error(exc))

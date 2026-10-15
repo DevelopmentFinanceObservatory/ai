@@ -622,7 +622,9 @@ def _not_a_party_reason(across: str) -> str:
         return (
             f"{across!r} narrows a party to its countries, and a source's open axis holds every "
             f"{party_word}, agencies included; state `across` as {pluralize(party_word)!r} to "
-            "cover them all, or name the countries in `entities`"
+            "open that whole side, then add a direct `{kind:place_level, role:<party>, "
+            "level:Country, strict:true}` filter bound to that role and redirect the calculation "
+            "through that filter, or name the countries in `entities`"
         )
     return (
         f"{across!r} is not a party a source's open axis holds: an open axis ranks every "

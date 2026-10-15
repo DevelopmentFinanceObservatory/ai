@@ -14,7 +14,11 @@ import secrets
 import pytest
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.engine.common import PlaceLevelsMixedError
-from analysis_mcp.engine.filter import FilterPredicateTypeMismatchError, run_filter
+from analysis_mcp.engine.filter import (
+    FilterPlaceLevelUnknownError,
+    FilterPredicateTypeMismatchError,
+    run_filter,
+)
 from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.filter_tool import filter_verb
@@ -139,6 +143,52 @@ def test_a_place_level_names_one_level_of_the_closed_set() -> None:
     for level in ("Area1", "Place", "UNGeoRegion", "Country,City"):
         with pytest.raises(ValidationError):
             PlaceLevelPredicate(column="observationAbout_type", level=level)
+
+
+def test_a_strict_place_level_refuses_an_untyped_entity() -> None:
+    with pytest.raises(
+        FilterPlaceLevelUnknownError, match="cannot classify every entity"
+    ) as raised:
+        run_filter(
+            _frame(),
+            predicates=(
+                PlaceLevelPredicate(column="observationAbout_type", level="Country", strict=True),
+            ),
+        )
+
+    assert raised.value.column == "observationAbout_type"
+
+
+def test_a_strict_flow_filter_does_not_read_the_other_partys_type() -> None:
+    frame = Frame.build(
+        role_keys=[
+            "financingProvider",
+            "financingProvider_type",
+            "financingRecipient",
+            "financingRecipient_type",
+        ],
+        rows=[
+            {
+                "stat_var": _GDP,
+                "financingProvider": "org/Bank",
+                "financingProvider_type": "untyped",
+                "financingRecipient": "country/KEN",
+                "financingRecipient_type": "Country,Place",
+                "time_period": "2023",
+                "value": 1.0,
+                "unit": "USDollar",
+            }
+        ],
+    )
+
+    result = run_filter(
+        frame,
+        predicates=(
+            PlaceLevelPredicate(column="financingRecipient_type", level="Country", strict=True),
+        ),
+    )
+
+    assert result.kept_row_count == 1
 
 
 # --- one level ------------------------------------------------------------------------

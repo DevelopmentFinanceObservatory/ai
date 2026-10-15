@@ -392,7 +392,9 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
 
     assert isinstance(replayed, Replayed), replayed
     (minted,) = scene.dataset.minted
-    assert minted.options == OPTIONS | {"columns": ["party_kind"]}
+    assert minted.options == OPTIONS | {
+        "columns": ["financingProvider_type", "financingRecipient_type", "party_kind"]
+    }
     current = FrameRef(spec_id=SPEC, content_version=SECOND)
     held = await scene.store.get_mint_record(current)
     assert held is not None

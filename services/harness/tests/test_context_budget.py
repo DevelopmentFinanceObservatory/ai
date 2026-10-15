@@ -173,11 +173,11 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.agent.planner_instruction`. Measured 16,959 with the skill tools and
+# `planner.agent.planner_instruction`. Measured 17,215 with the skill tools and
 # translation attached. The margin is 4.1% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 17_650
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 17_920
 
 # Every planner tool declaration together: 37,433 (`propose_plan` 33,380 and
 # 4,053 across the smaller ones). The margin is 2.7%.
