@@ -646,6 +646,7 @@ def plan_record(
             direction=RankDirection.HIGHEST_FIRST,
             among=RankAmong.POPULATION,
             reduction=Reduction.SUM,
+            per_period=True,
         ),
         ShareOfRequirement(
             id="share",

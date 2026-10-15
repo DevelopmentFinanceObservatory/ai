@@ -940,6 +940,13 @@ def test_a_rank_sentence_states_its_population_and_whether_it_is_per_period(
     assert "ranks exactly the entities named" in sentence
     assert "the window is collapsed into one ranking" in sentence
 
+    one_year = named_rank.model_copy(update={"window_start": 2020, "window_end": 2020})
+    one_year_plan = plan.model_copy(update={"evidence_requirements": [dataset, narrowed, one_year]})
+    one_year_sentence = next(
+        row for row in requirement_rows(one_year_plan) if row["id"] == "rank_named"
+    )["sentence"]
+    assert one_year_sentence.endswith("; ranks 2020.")
+
     bottom_two = named_rank.model_copy(update={"direction": RankDirection.LOWEST_FIRST, "limit": 2})
     limited = Plan(
         question="q",

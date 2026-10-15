@@ -158,7 +158,7 @@ def _growth_pair(
     )
 
 
-def _rank_pair() -> tuple[RankRequirement, RankOperation]:
+def _rank_pair(**overrides: Any) -> tuple[RankRequirement, RankOperation]:
     """A rank of the last five years' totals, as a requirement and its operation."""
     fields: dict[str, Any] = {
         "direction": RankDirection.HIGHEST_FIRST,
@@ -167,7 +167,7 @@ def _rank_pair() -> tuple[RankRequirement, RankOperation]:
         "window_start": 2019,
         "window_end": 2024,
         "rolling": LAST_FIVE,
-    }
+    } | overrides
     return (
         RankRequirement(
             id="ranked",
@@ -785,6 +785,35 @@ def test_a_resolved_rank_and_filter_are_ones_analysis_mcp_accepts(
     ]
     assert rank_spec.rolling is not None and filter_spec.rolling is not None
     assert rank_spec.rolling.population == filter_spec.rolling.population
+
+
+def test_a_rank_of_the_newest_year_alone_is_a_call_analysis_mcp_accepts(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+) -> None:
+    # The input holds 2015-2024 and the window keeps one of them, so each
+    # entity has one row and the call states no aggregation.
+    newest = RollingWindow(
+        window_start=RelativePeriod(offset=0), window_end=RelativePeriod(offset=0)
+    )
+    ranked_req, ranked = _rank_pair(
+        reduction=None, window_start=2024, window_end=2024, rolling=newest
+    )
+    result = build(
+        [requirement(period_end_open=True), ranked_req],
+        [_retrieve(), ranked],
+        terminal=["ranked"],
+        decisions=[decision(), _population_decision(decision)],
+    )
+
+    step = _step(result, "ranked")
+    assert (step.args["window_start"], step.args["window_end"]) == ("2024", "2024")
+    assert "aggregation" not in step.args
+    arguments = _run_arguments(step, period="2025")
+    key = arguments.pop(ANCHOR_KEY_PARAMETER)
+    spec = with_anchor_key(RankOpSpec.model_validate(arguments), key)
+    assert (spec.window_start, spec.window_end, spec.aggregation) == ("2025", "2025", None)
 
 
 def test_a_compiled_rolling_step_alone_is_not_a_call_analysis_mcp_accepts(

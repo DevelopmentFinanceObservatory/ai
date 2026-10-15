@@ -156,9 +156,9 @@ part the question needs, so the answer covers everything asked.
 When the answer has to be constructed from the data, it needs a calculation:
 a share, ratio or per-person figure, growth or a drop over a period, a
 ranking or comparison across many places, a count of places meeting a
-condition, or a sum across donors, sectors or years. Call plan for it. A
-question about the largest, the most or the top is a ranking, so it goes to
-plan.
+condition, a sum across donors, sectors or places, or a sum over years the
+user named. Call plan for it. A question about the largest, the most or the
+top is a ranking, so it goes to plan.
 
 Do not compute a figure yourself, in the answer or on the way to it. That
 rules out sums, differences, averages, shares or counts of values a tool

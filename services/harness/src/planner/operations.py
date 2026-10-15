@@ -232,10 +232,18 @@ class RankOperation(TaggedModel):
         description="How to collapse an entity's rows to one value first, when its window leaves more than one.",
     )
     window_start: Year | None = Field(
-        default=None, description="The year this rank's window starts, when it is windowed."
+        default=None,
+        description=(
+            "The year this rank's window starts, when it is windowed. The same year as "
+            "`window_end` ranks that one year."
+        ),
     )
     window_end: Year | None = Field(
-        default=None, description="The year this rank's window ends, when it is windowed."
+        default=None,
+        description=(
+            "The year this rank's window ends, when it is windowed. The same year as "
+            "`window_start` ranks that one year."
+        ),
     )
     per_period: bool = Field(
         default=False,
@@ -267,10 +275,10 @@ class RankOperation(TaggedModel):
         if (
             self.window_start is not None
             and self.window_end is not None
-            and self.window_end <= self.window_start
+            and self.window_end < self.window_start
         ):
             raise ValueError(
-                f"rank window must end after it starts; got {self.window_start}-{self.window_end}"
+                f"rank window ends before it starts; got {self.window_start}-{self.window_end}"
             )
         return self
 

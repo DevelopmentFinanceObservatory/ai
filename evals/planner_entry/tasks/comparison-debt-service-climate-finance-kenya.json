@@ -46,6 +46,7 @@
     "kind": "join",
     "distinction": "comparison, not join: the question asks how much larger one measure is than another"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much larger was Kenya's external debt service than the climate finance it received in each year from 2016 to 2021?",
     "answer_mode": "computed",

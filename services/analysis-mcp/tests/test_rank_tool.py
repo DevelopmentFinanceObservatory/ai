@@ -200,6 +200,18 @@ async def test_max_aggregation_reduces_each_entitys_rows_before_ranking(seeded) 
     assert "rank: reporter by max, window 2021..2023" in result.content[0].text
 
 
+async def test_a_one_year_window_is_named_as_that_year(seeded) -> None:
+    _store, handles = seeded
+    result = await rank(
+        frame_ref=handles.plain_single_unit,
+        rank_by=("reporter",),
+        window_start="2021",
+        window_end="2021",
+    )
+    assert result.is_error is False
+    assert "rank: reporter by (raw value), window 2021\n" in result.content[0].text
+
+
 # Tie policy, through the registered tool ----------------------------------------
 
 

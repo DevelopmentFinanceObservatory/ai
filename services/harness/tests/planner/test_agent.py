@@ -71,6 +71,7 @@ from planner.operations import (
 from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_PLAN_DECISIONS,
@@ -6596,6 +6597,7 @@ def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     decision: DecisionFactory,
 ) -> None:
     ctx = _creditor_context((_SPEC_BY_CREDITOR, {"origin": 97}, ("creditor",)))
+    ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = [0]
 
     dropped = _propose_for_creditors(ctx, decision, across=["recipient"])
     kept = _propose_for_creditors(ctx, decision, across=["recipient", "creditor"], ranked=True)
@@ -6606,6 +6608,19 @@ def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     recorded = load_plan(ctx.state)
     assert recorded is not None
     assert recorded.ask_breakdowns == (AskBreakdown(ask=0, by=("creditor",)),)
+    assert recorded.asks_across_years == (0,)
+
+    amended = _tools_by_name()["propose_plan"].func(
+        answered=list(recorded.answered),
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    amended_plan = load_plan(ctx.state)
+    assert amended_plan is not None
+    assert amended_plan.version == 2
+    assert amended_plan.asks_across_years == (0,)
 
 
 _OWN_PIN = {"pin": _SPEC_BY_CREDITOR}

@@ -71,6 +71,7 @@ from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     AskAnswer,
     AskBreakdown,
@@ -419,7 +420,7 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
         call(
             "plan",
             brief="France's aid to Guatemala since 2010",
-            asks=[asks[0], {"text": asks[1], "by": ["donor"]}],
+            asks=[asks[0], {"text": asks[1], "by": ["donor"], "across_years": True}],
         ),
         call("plan", brief="France's bilateral aid to Guatemala", asks=[]),
         types.Part.from_text(text="Could not be calculated."),
@@ -431,9 +432,11 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
 
     assert planner.asks == [tuple(asks), ()]
     assert planner.breakdowns == [(AskBreakdown(ask=1, by=("donor",)),), ()]
+    assert planner.across_years == [(1,), ()]
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
     assert session.state.get(ASKS_STATE_KEY) is None
     assert session.state.get(ASK_BREAKDOWNS_STATE_KEY) is None
+    assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
 async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():

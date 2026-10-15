@@ -39,6 +39,7 @@
     "kind": "join",
     "distinction": "several places of one measure are one dataset requirement, not a join of three"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Show the population of Nigeria, Ethiopia and Egypt for every year from 2000 to 2023.",
     "answer_mode": "series",

@@ -48,6 +48,7 @@
   },
   "unit_asked": true,
   "first_proposal_refusal": "combination_unasked",
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Calculate net flows to Ghana combining net official development assistance and net debt flows in current US dollars",
     "answer_mode": "computed",

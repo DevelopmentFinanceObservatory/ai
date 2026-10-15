@@ -845,11 +845,12 @@ def render_rank_digest(
     rank number say which entries the output frame holds.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
-    window_text = (
-        f"{result.window_start}..{result.window_end}"
-        if result.window_start is not None
-        else "(no window)"
-    )
+    if result.window_start is None:
+        window_text = "(no window)"
+    elif result.window_start == result.window_end:
+        window_text = result.window_start
+    else:
+        window_text = f"{result.window_start}..{result.window_end}"
     header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
     if result.per_period:
         header += ", per_period=True"

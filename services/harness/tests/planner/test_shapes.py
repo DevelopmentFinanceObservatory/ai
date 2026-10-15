@@ -632,7 +632,7 @@ def test_an_aggregate_by_entity_over_a_frame_naming_no_entity_is_refused(
     assert reason is not None
     assert "sums its open ['donor'] away, and this input names no entity" in reason
     assert "group by period alone" in reason
-    assert "rank with a reduction" in reason
+    assert "rank the members" in reason
     assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True) is None
 
 
@@ -1420,7 +1420,7 @@ def test_an_aggregate_by_entity_alone_over_a_limited_per_period_rank_is_refused(
     cut = _top_five_each_year()
     reason = rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=False)
     assert reason is not None
-    assert "rank the source once, with the reduction, the limit and per_period=false" in reason
+    assert "rank the source once with the limit and per_period=false instead" in reason
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=False, by_period=True) is None
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=True) is None
 
