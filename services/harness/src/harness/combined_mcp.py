@@ -68,7 +68,7 @@ through `common.refusal.refusal_meta`, as data-mcp's and analysis-mcp's
 failures put the code at the head of the `ResourceError` text, as
 `"<code>: <prose>"`, as data-mcp's artifact resource does.
 
-data-mcp limits the dfo-apis mint slots outside callers hold, since only it
+data-mcp limits the apis mint slots outside callers hold, since only it
 knows when an upstream mint has ended (`data_mcp.mint_ledger`).
 """
 
@@ -428,7 +428,7 @@ class _RequestLog(Middleware):
 # or format this deployment does not mount (501).
 # `service_unavailable` includes a call the frame row budget (`common.row_budget`)
 # had no room for, which marks an instance sized below its load, as data-mcp's
-# `mint_slots_full` does for dfo-apis mint slots.
+# `mint_slots_full` does for apis mint slots.
 # `operation_still_processing` is a call still running, which the caller collects
 # later, so it keeps the default level. Every other refusal answers something the
 # caller can change or wait out, and is a `WARNING`.
@@ -755,7 +755,7 @@ class _CallLimit(Middleware):
 
     Cancelling unwinds the call. The upstream client's connection pool closes
     the connection a cancelled request held, and a `get_data` mint POST
-    cancelled while it waits keeps its mint-ledger slot until dfo-apis has
+    cancelled while it waits keeps its mint-ledger slot until apis has
     stopped running the mint (`data_mcp.mint_ledger`). Work a tool handed to
     a thread runs to its end, and its result is dropped.
     """

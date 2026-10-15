@@ -1,5 +1,5 @@
 {
-  "comment": "dfo-apis POST /api/datasets for education aid to Kenya from every donor, 1990-2024, posted with the 113 StatVars Search elected and summed by time_period: the manifest as served, and the first three rows of its series-statistics artifact as data_mcp.series_statistics reads them. Search's block for the same part states the open donor side as role_axis_facts role 'origin'; the series statistics name each entity's role by declared property, and coverage.dimensions states each property's flow axis.",
+  "comment": "apis POST /api/datasets for education aid to Kenya from every donor, 1990-2024, posted with the 113 StatVars Search elected and summed by time_period: the manifest as served, and the first three rows of its series-statistics artifact as data_mcp.series_statistics reads them. Search's block for the same part states the open donor side as role_axis_facts role 'origin'; the series statistics name each entity's role by declared property, and coverage.dimensions states each property's flow axis.",
   "manifest": {
     "schema_version": 1,
     "definition": {

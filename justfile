@@ -240,7 +240,7 @@ dev: _check-env
     echo "  analysis-mcp     → http://localhost:{{PORT}}/mcp/analysis/mcp"
     echo "  presentation-mcp → http://localhost:{{PORT}}/mcp/presentation/mcp"
     echo "    (presentation-mcp fetches its release once at startup and mounts no tools"
-    echo "     unless a dfo-apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
+    echo "     unless an apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
     PORT={{PORT}} PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         PRESENTATION_RELEASE_REQUIRED=false uv run --env-file {{ENV_FILE}} harness-server
 
@@ -384,7 +384,7 @@ eval-planner-entry arm *args: _check-env
 eval-planner-entry-validate *args:
     uv run --package harness python evals/planner_entry/validate.py "$@"
 
-# Needs dfo-apis at DFO_APIS_URL (`just apis-proxy`).
+# Needs apis at DFO_APIS_URL (`just apis-proxy`).
 # Record search and skill answers for planner-entry tasks lacking a current recording
 eval-planner-entry-record *args: _check-env _check-apis
     DFO_APIS_URL={{DFO_APIS_URL}} uv run --env-file {{ENV_FILE}} --package harness \
@@ -482,7 +482,7 @@ graph-models:
     GRAPH_WIRE_UPDATE=1 uv run pytest services/data-mcp/tests/test_graph_wire.py -q
 
 # Reads DFO_APIS_URL (`just apis-proxy`) unless given a url.
-# Refresh the Graph API schema and capabilities snapshots from dfo-apis (then `just graph-models`)
+# Refresh the Graph API schema and capabilities snapshots from apis (then `just graph-models`)
 graph-schema url=DFO_APIS_URL: (_check-apis url)
     curl -fsS "{{url}}/api/graph/schema" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_schema.json
     curl -fsS "{{url}}/api/graph/capabilities" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_capabilities.json

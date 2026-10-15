@@ -1,6 +1,6 @@
 """`Frame` <-> Parquet bytes: the on-disk shape a durable store persists the
 `Frame` half of a stored `(Frame, StoredFrameTrace)` pair as, and the layout
-dfo-apis writes a version's canonical frame in.
+apis writes a version's canonical frame in.
 
 `frame_to_parquet_bytes` writes `frame.table` as it stands: every column of
 `frame.columns` in order, with exactly `canonical_frame_schema(frame.columns)`

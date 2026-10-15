@@ -173,7 +173,7 @@ def test_get_data_deadline_must_leave_the_direct_budget_time_to_mint(
 def test_external_mint_concurrency_defaults_to_one_and_refuses_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two harness instances at the default hold at most two of dfo-apis' four mint
+    """Two harness instances at the default hold at most two of apis' four mint
     slots for outside callers."""
     monkeypatch.delenv("EXTERNAL_MINT_CONCURRENCY", raising=False)
     assert Settings().external_mint_concurrency == 1

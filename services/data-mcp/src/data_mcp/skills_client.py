@@ -1,4 +1,4 @@
-"""Reads dfo-apis' Skills API for every data-mcp layer that serves skills.
+"""Reads apis' Skills API for every data-mcp layer that serves skills.
 
 The module holds the skill id and bundle-relative path grammar, the models of
 the three doors data-mcp reads (`GET /api/skills`, `GET /api/skills/{skill_id}`
@@ -373,7 +373,7 @@ def _refusal_from_upstream(
     ones this read asked for. An unmounted Skills API arrives as the client's
     `UpstreamSurfaceUnavailable`, confirmed by its `healthz` probe. Every other
     code, `service_unavailable` while the index builds among them, maps as
-    any dfo-apis refusal does.
+    any apis refusal does.
     """
     if exc.code == "skill_not_found" and skill_id is not None:
         return ToolRefusal.skill_not_found(

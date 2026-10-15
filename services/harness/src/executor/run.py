@@ -433,7 +433,7 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     A manifest with neither `series_count` nor a statistics artifact (an
     old record) needs no fetch and answers `None`, matching a manifest that
     never carried statistics at all. One that carries the artifact but no
-    `series_count` (dfo-apis mints an all-years definition that way) is
+    `series_count` (apis mints an all-years definition that way) is
     fetched with no row count to check. `series_count == 0` answers an empty
     table directly, with no fetch either -- `_series_issues` treats `None`
     and no rows alike as

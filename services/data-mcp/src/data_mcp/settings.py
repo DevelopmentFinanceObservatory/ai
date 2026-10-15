@@ -32,12 +32,12 @@ def _is_origin(url: str) -> bool:
 
 
 class Settings(FrameServiceSettings):
-    """Configuration for data-mcp, combining the shared base fields with the dfo-apis upstream settings it wraps.
+    """Configuration for data-mcp, combining the shared base fields with the apis upstream settings it wraps.
 
-    `dfo_apis_url` is the single base URL of dfo-apis, read from
+    `dfo_apis_url` is the single base URL of apis, read from
     `DFO_APIS_URL` per BaseServiceSettings' case-insensitive env matching.
-    dfo-apis is one FastAPI app serving both `/api/search/*` (always
-    mounted) and `/api/datasets/*` (gated by dfo-apis' own
+    apis is one FastAPI app serving both `/api/search/*` (always
+    mounted) and `/api/datasets/*` (gated by apis' own
     `DFO_DATASETS_SURFACE` flag, default off) on the same host, whether
     that is port 8083 in local dev or one internal Cloud Run URL in
     deployment, so one field covers both. The `SEARCH_PREFIX` /
@@ -56,7 +56,7 @@ class Settings(FrameServiceSettings):
     `gcloud run services proxy` or a local dfo-apis answers without a token.
 
     The `upstream_*` fields bound `UpstreamClient`'s retry loop.
-    `upstream_read_timeout_s` clears dfo-apis' 45s search safety net
+    `upstream_read_timeout_s` clears apis' 45s search safety net
     (`SEARCH_REQUEST_TIMEOUT_S`) with headroom, and `upstream_retry_budget_s`
     is the wall-clock ceiling for *all* attempts of one call rather than a
     per-attempt timeout.
@@ -82,7 +82,7 @@ class Settings(FrameServiceSettings):
     relying on being mounted alongside analysis-mcp, or on the frame-store holder's
     own lazy in-memory default when it is not. Do not set this on a deployment
     before the bucket's own lifecycle rule exists: that rule bounds retention, is
-    provisioned in `dfo-infra`, not here, and until it exists a durable store's
+    provisioned in `infra`, not here, and until it exists a durable store's
     objects accumulate indefinitely.
 
     `frame_store_verify_content_version` names the same env var
@@ -110,7 +110,7 @@ class Settings(FrameServiceSettings):
     waits (hashing, Parquet parsing, rendering) is unbounded and runs in the reserves
     the waits leave. The default, 165s, sits 15s under the harness's 180s
     `call_timeout_s` for `get_data` (`services/harness/src/compiler/capabilities.py`).
-    `operation_poll_interval_s` is the fallback wait between poll attempts: dfo-apis'
+    `operation_poll_interval_s` is the fallback wait between poll attempts: apis'
     own poll route names a pacing interval (`retry_after_ms`) only on the initial 202
     response, never on a later `pending`/`running` poll (`OperationEnvelope
     .retry_after_ms`'s own docstring), so every poll after the first falls back to
@@ -120,7 +120,7 @@ class Settings(FrameServiceSettings):
     non-finite or non-positive value would leave the wait it bounds either
     unbounded or unable to run at all. `operation_poll_interval_s` additionally
     floors at 0.5s, since a shorter fallback interval would spin the poll loop
-    against dfo-apis' own poll door. `get_data_deadline_s` must exceed the direct
+    against apis' own poll door. `get_data_deadline_s` must exceed the direct
     budget's `pre_mint_reserve_s` (50s), which pre-mint work leaves for the mint and
     what follows it, and caps at 170s, 10s under the harness's own 180s
     `call_timeout_s` for `get_data` (`services/harness/src/compiler/capabilities.py`),
@@ -134,15 +134,15 @@ class Settings(FrameServiceSettings):
     `external_mint_concurrency` caps the upstream mints this process holds for
     `get_data` calls under `EXTERNAL_CALL_BUDGET`, the budget the combined server sets
     for outside callers (`data_mcp.mint_ledger`). A mint is held from its POST until
-    dfo-apis answers it, or for dfo-apis' 120s synchronous mint timeout when the call
-    stopped waiting first, since dfo-apis keeps running the mint, and keeps its slot,
+    apis answers it, or for apis' 120s synchronous mint timeout when the call
+    stopped waiting first, since apis keeps running the mint, and keeps its slot,
     after the client leaves. A call past the cap refuses `service_unavailable`. The cap
-    is per process, and the harness runs up to two instances (dfo-infra's `ai` service
+    is per process, and the harness runs up to two instances (the infra repository's `ai` service
     sets `max_instances = 2`), so outside callers can hold up to twice this many of the
-    four mint slots a dfo-apis instance has (`mint_max_concurrency`), all of them on one
+    four mint slots an apis instance has (`mint_max_concurrency`), all of them on one
     instance at worst. The default of 1 leaves the harness's own calls two slots at that
     worst case. Each of those mints also takes
-    one of dfo-apis' two materialisation slots (`materialise_max_concurrency`) while it
+    one of apis' two materialisation slots (`materialise_max_concurrency`) while it
     rebuilds, so at the worst case one of the harness's own mints waits up to 30s for
     one (`materialise_wait_seconds`) and is then refused. Calls through the harness's
     own mount are not counted.

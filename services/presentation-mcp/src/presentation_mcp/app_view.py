@@ -20,7 +20,7 @@ The view makes no further call, so any host and any MCP session can draw it.
 A note_narration or source_card holds no data value, so its shell draws
 whole.
 
-The card follows a dfo-website Studio card. Its face holds one title (the
+The card follows a website Studio card. Its face holds one title (the
 model-authored title, or the derived description for a member without
 one); for a line or bar chart, a caption under it naming the value axis's
 metric and the series' shared unit; the body; and a footer row: the source
@@ -45,7 +45,7 @@ one series standing for its categories, so it has none. A table's value
 column uses Prefab's `number` format. Prefab has no logarithmic axis, so a
 line or bar chart whose value axis is log draws as a `DataTable` of the same
 rows, under a line saying so. Prefab draws a stat value as given, so
-`app_data` formats it and its change with dfo-website's `compact()` rule.
+`app_data` formats it and its change with website's `compact()` rule.
 
 A result with nothing to draw still opens the renderer, so it gets
 `notice_view`, a line of text saying why.
@@ -117,7 +117,7 @@ from presentation_mcp.theme import SERIES_COLOURS, SERIES_COLOURS_LIGHT, themed_
 _MANY_BARS = 8
 _LONG_LABEL = 12
 _TABLE_PAGE_SIZE = 20
-# dfo-website's `compact()` steps.
+# website's `compact()` steps.
 _COMPACT_STEPS = ((1e9, "B"), (1e6, "M"), (1e3, "K"))
 # Wide enough to round any finite float's exact expansion to one decimal.
 _EXACT = Context(prec=400)
@@ -548,7 +548,7 @@ def _table_cell(row: Mapping[str, Any], key: str) -> Any:
 
 
 def _compact(value: float) -> str:
-    """`value` as dfo-website's `compact()` writes it: billions, millions, or
+    """`value` as website's `compact()` writes it: billions, millions, or
     thousands to one decimal with a spaced letter ("1.2 B"), anything smaller
     to at most two decimals with en-US grouping.
 

@@ -1,5 +1,5 @@
 """`POST /api/studio/refresh`: the credential, each answer and refusal, and the
-route's limits, with dfo-apis as `live_refresh_support.RecordedApis` and the
+route's limits, with apis as `live_refresh_support.RecordedApis` and the
 replayer as a double. `test_live_refresh_integration.py` runs the real replayer.
 """
 
@@ -116,7 +116,7 @@ class Replayer:
 
 @pytest.fixture
 def apis() -> RecordedApis:
-    """dfo-apis holding the card on a derived frame whose one dataset has moved."""
+    """apis holding the card on a derived frame whose one dataset has moved."""
     fake = RecordedApis()
     fake.store_card(FrameRef(spec_id=STORED[0], content_version=STORED[1]))
     fake.recipes[STORED] = recipe_of(STORED)

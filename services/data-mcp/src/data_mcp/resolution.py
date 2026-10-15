@@ -1,4 +1,4 @@
-"""Entity resolution seam: human-typed names to graph dcids, via dfo-apis' Graph door.
+"""Entity resolution seam: human-typed names to graph dcids, via apis' Graph door.
 
 `get_data`'s scope block carries entities as spoken text ("France", "Sub-Saharan Africa")
 keyed by role. `resolve_entities` posts them to `POST /api/graph/resolve` with the group and
@@ -205,7 +205,7 @@ async def resolve_entities(
         value, once per role, both entries equal.
 
     Raises:
-        UpstreamError: dfo-apis' graph door failed, timed out, or is unmounted. Left to
+        UpstreamError: apis' graph door failed, timed out, or is unmounted. Left to
             propagate uncaught -- the caller already owns a refusal grammar for
             `UpstreamError` (`data_mcp.tool_errors.from_upstream_error`) and re-wrapping it
             here would just shadow that.

@@ -626,7 +626,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
 
 
 def _refused_mint(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis's 409 `spec_not_exportable`, answering a `spec_id` mint."""
+    """The apis service's 409 `spec_not_exportable`, answering a `spec_id` mint."""
     assert request.url.path == "/api/datasets"
     return httpx2.Response(
         409,

@@ -22,7 +22,7 @@ from fastmcp.tools import ToolResult
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .test_client import _client, _problem_body, _recording_sleep, _settings
 
-# Shaped like dfo-apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
+# Shaped like apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
 # own pattern constraint) so these tests exercise the real validated shape rather than
 # a placeholder a stricter pattern would itself reject.
 _OPERATION_ID = "op_" + hashlib.sha256(b"test-operation").hexdigest()
@@ -100,7 +100,7 @@ async def test_202_then_done_returns_the_manifest() -> None:
 
 
 async def test_202_then_running_then_done_falls_back_to_the_poll_interval() -> None:
-    """Only the very first envelope names `retry_after_ms` -- dfo-apis' own contract
+    """Only the very first envelope names `retry_after_ms`, by apis' own contract
     for every poll response after that. The second sleep here falls back to
     `poll_interval_s` rather than reusing the first envelope's own pacing.
     """
@@ -317,7 +317,7 @@ async def test_failed_operation_over_a_stored_row_ceiling_names_its_kind() -> No
     [
         ("parquet_size_bound", "over_ceiling", "correct_and_retry"),
         ("facet_not_available", "facet_not_available", "correct_and_retry"),
-        # The poll's body says `retryable: false`, as dfo-apis' own bodies do.
+        # The poll's body says `retryable: false`, as apis' own bodies do.
         ("default_facet_undefined", "default_facet_undefined", "do_not_retry"),
         ("definition_not_reproducible", "request_invalid", "correct_and_retry"),
         ("spec_not_exportable", "spec_not_exportable", "do_not_retry"),
@@ -535,7 +535,7 @@ async def test_an_absolute_poll_url_is_ignored_in_favour_of_the_local_operation_
 
 
 async def test_a_malformed_operation_id_is_refused_as_upstream_response_unusable() -> None:
-    """`OperationEnvelope.operation_id` is constrained to dfo-apis' own `op_` +
+    """`OperationEnvelope.operation_id` is constrained to apis' own `op_` +
     sha256-hex wire format; anything else refuses rather than reaching
     `_POLL_ROUTE_TEMPLATE.format` unchecked."""
     async with _client(lambda request: httpx2.Response(200)) as client:
@@ -571,7 +571,7 @@ def _read_timeout(request: httpx2.Request) -> float:
 
 
 async def test_a_retryable_poll_failure_keeps_the_wait_going() -> None:
-    """dfo-apis' poll-door backpressure 503 (`retryable: true`) is one more poll that
+    """apis' poll-door backpressure 503 (`retryable: true`) is one more poll that
     saw nothing new: the loop waits `poll_interval_s` and polls again."""
     manifest_payload = {"content_version": "cv_1"}
     responses = [
@@ -829,7 +829,7 @@ async def test_a_terminal_operation_whose_result_could_not_be_fetched_states_its
     status: str,
 ) -> None:
     """A retryable failure on the first fetch, with no poll time left to try again. The
-    refusal states the status dfo-apis reported and says only that the result was not
+    refusal states the status apis reported and says only that the result was not
     fetched: a `done` or `failed` operation never runs again."""
 
     def handler(_request: httpx2.Request) -> httpx2.Response:

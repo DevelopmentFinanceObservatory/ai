@@ -452,7 +452,7 @@ async def _replay_recipe(
     `data_mcp.mint_recovery.recover_mint_record`), as `harness.recipe_backfill`
     does; without `dataset_versions` such a root leaves the recipe unbuildable.
     A versions read that fails is `dataset_versions_unavailable`, retryable
-    when dfo-apis says so. A rolling frame whose populations name a dataset no
+    when apis says so. A rolling frame whose populations name a dataset no
     rolling period of its tree reads has no anchor of its own, and its recipe
     is the one `build_recipe` puts on its `RecipeAnchorError`, with a null
     `anchor`, as `harness.rolling_cards.RollingCards.frame` reads it."""
@@ -532,7 +532,7 @@ class McpExecutor:
         self._sleep = sleep
         self._jitter = jitter
         self._clock = clock
-        # `publish_result`'s door to dfo-apis: `publish_frame` when given,
+        # `publish_result`'s door to apis: `publish_frame` when given,
         # else the process's `PlatformAssembler` (`_publisher`).
         self._publish_frame = publish_frame
         # Reads a dataset's stored versions, to rebuild the mint record of a
@@ -584,15 +584,15 @@ class McpExecutor:
         await self._get_data_clients.aclose()
 
     async def publish_result(self, frame: FrameRef) -> FramePublished | PublishFault:
-        """Publish the derived `frame` to dfo-apis with the replay recipe built
+        """Publish the derived `frame` to apis with the replay recipe built
         from the store: the completion gate's publisher
         (`executor.completion.ResultPublisher`).
 
         A store that cannot be reached now, no assembler to publish through
-        (`publish_unavailable`), and a refusal dfo-apis says to retry (a
+        (`publish_unavailable`), and a refusal apis says to retry (a
         transport failure among them) are retryable faults. Every other fault
         of the store is final (`_store_fault`), as are a recipe that cannot be
-        built from the traces the run wrote (`recipe_unbuildable`), dfo-apis
+        built from the traces the run wrote (`recipe_unbuildable`), apis
         holding the frame under a recipe of another normal form
         (`recipe_normal_form_conflict`), and any other refusal, an oversized
         recipe's among them.
@@ -825,7 +825,7 @@ class McpExecutor:
             return _refusal_outcome(result.structured_content, fallback_text=_result_text(result))
         manifest = await manifest_with_stat_vars(result.structured_content or {})
         # The frame goes straight to describe_frame and charts, which read it from
-        # dfo-apis under the pair `put_retrieval` returns. The materialisation
+        # apis under the pair `put_retrieval` returns. The materialisation
         # store holds it under the pair the result states as its `frame_ref`.
         ref = self._provenance.put_retrieval(
             conversation=current_conversation_id.get(), manifest=manifest

@@ -1,4 +1,4 @@
-"""Errors raised by `UpstreamClient` for dfo-apis call failures.
+"""Errors raised by `UpstreamClient` for apis call failures.
 
 Three classes, pending #26's ten codes and four retry modes. Enough to tell a
 refusal from a call that never landed, plus the probe's verdict as its own
@@ -12,9 +12,9 @@ from typing import Any
 
 
 class UpstreamError(Exception):
-    """A dfo-apis call failed with a parsed or classified RFC 9457 problem.
+    """An apis service call failed with a parsed or classified RFC 9457 problem.
 
-    #26 reads `status` and `code` together. A refusal dfo-apis meant to send
+    #26 reads `status` and `code` together. A refusal apis meant to send
     carries both, a response without a parseable problem body carries `status`
     alone, and a call that never landed carries neither. `code` is only ever
     read off the wire, keeping an unmapped code and an absent one apart.
@@ -70,7 +70,7 @@ class UpstreamAuthUnavailable(UpstreamTransportError):  # noqa: N818 -- a kind o
 
 
 class UpstreamSurfaceUnavailable(UpstreamError):  # noqa: N818 -- named for the probe's verdict, not a generic "Error"
-    """Raised when the surface probe confirms dfo-apis has not mounted `prefix`.
+    """Raised when the surface probe confirms apis has not mounted `prefix`.
 
     An unmounted surface answers `not_found`, `retryable: false` on every path
     beneath it, exactly as a genuine "no such id" refusal does, so this means

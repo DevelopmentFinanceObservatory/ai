@@ -1,6 +1,6 @@
 """A retrieval asked to sum its family of StatVars must return one StatVar.
 
-dfo-apis collapses a summed family into one series under the family's own
+apis collapses a summed family into one series under the family's own
 ref, so `get_data` declares `stat_var_count == 1` for it. A count above one
 means the sum did not happen; the executor refuses `SHAPE_MISMATCH` at the
 retrieval rather than letting the aggregate reading it fail as

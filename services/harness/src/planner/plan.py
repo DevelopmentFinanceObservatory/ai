@@ -885,7 +885,7 @@ def names_no_place(requirement: DatasetRequirement) -> bool:
     """Whether `requirement` names no place: its `across` states the place party.
 
     Its retrieval holds every place with data at every level, or the
-    countries where dfo-apis cannot list them all, so a rank, a total or a
+    countries where apis cannot list them all, so a rank, a total or a
     share over it needs a `PlaceLevel` filter first (`planner.shapes`).
     """
     return any(across_party(word) == "place" for word in requirement.across)
@@ -3325,7 +3325,7 @@ class SessionState(Protocol):
 def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
     """`period` as an identity's `requested_window`.
 
-    With `end_open` the range states `start_year` alone, the form dfo-apis
+    With `end_open` the range states `start_year` alone, the form apis
     ends at the current year at every mint
     (`datasets_api.adapter.window_to_identity` writes no `end_year` key
     either), so the definition reaches years published after the plan.

@@ -3,31 +3,31 @@
 `materialise_and_register` writes a mint record (`common.materialisation.MintRecord`)
 on every mint. A root registered before it did has none until it is minted again,
 and `recover_mint_record` rebuilds one from the frame's pair, the frame the store
-holds under it, and the dataset's versions in dfo-apis.
+holds under it, and the dataset's versions in apis.
 
 Recoverable:
 
-- The dfo-apis pair. A frame minted with the default columns is held under the
-  dfo-apis pair itself. A frame minted with `options.columns` or `options.groupby`
-  is held under a `content_version` that is a one-way hash of the dfo-apis
+- The apis pair. A frame minted with the default columns is held under the
+  apis pair itself. A frame minted with `options.columns` or `options.groupby`
+  is held under a `content_version` that is a one-way hash of the apis
   `content_version`, the columns and the groupby (`frame_ref_for`), so the routine
   recomputes that hash for each stored version of the dataset, each column selection
-  `get_data` can send (`RECOVERABLE_COLUMNS`), and no groupby or the one dfo-apis
+  `get_data` can send (`RECOVERABLE_COLUMNS`), and no groupby or the one apis
   recorded for the version, and takes the one that matches.
 - `options.columns`, by the same match.
-- A sum that kept its version, held under the pair that names its groupby. dfo-apis
+- A sum that kept its version, held under the pair that names its groupby. apis
   records no groupby on an unsummed version, so no candidate above reproduces the
   pair. The frame's own trace keeps the options it was minted with
   (`MaterialisationTrace.options`), and the pair `frame_ref_for` derives from them
   and a listed version is the match. The record holds those options.
-- `options.groupby` of a summed frame with a `content_version` of its own. dfo-apis
+- `options.groupby` of a summed frame with a `content_version` of its own. apis
   records the version it was summed from as `base_content_version`, and its
   versions route returns the `groupby` the mint sent whenever a file stored under
   the version records one. A frame registered before `frame_ref_for` named a
   groupby is held under the summed version's own pair, and one registered since
   under the pair that names it; both are recovered.
 - `options.without_party_totals` of a frame without the group totals of its open
-  party roles. dfo-apis mints such a frame a version of its own, with the version it
+  party roles. apis mints such a frame a version of its own, with the version it
   was cut from as `base_content_version`, and its versions route says so beside any
   `groupby` (`DatasetVersion.without_party_totals`). A cut that left nothing out
   shares its base's version, which lists as plain, and is recovered without the
@@ -38,9 +38,9 @@ Recoverable:
 
 Not recoverable:
 
-- A summed or cut frame whose options dfo-apis recorded on no stored file. Its
+- A summed or cut frame whose options apis recorded on no stored file. Its
   version lists as `not_recorded`, and it fails with `groupby_unrecorded`.
-- Whether a frame under an unsummed version was a `groupby` sum. dfo-apis serves a
+- Whether a frame under an unsummed version was a `groupby` sum. apis serves a
   sum over a dataset one StatVar contributes to under the unsummed
   `content_version`, so a frame there holding one StatVar may have been minted
   either way. It is recovered with no `groupby` and a `stat_var_count` of 1, which
@@ -54,7 +54,7 @@ Not recoverable:
 - A sum that kept its version whose frame the store no longer holds, or holds with a
   trace written before it kept the mint's options. It fails with
   `no_version_matches`.
-- A frame whose dataset version dfo-apis no longer lists, or one minted with a
+- A frame whose dataset version apis no longer lists, or one minted with a
   column selection outside `RECOVERABLE_COLUMNS`. Both fail with
   `no_version_matches`.
 """
@@ -93,11 +93,11 @@ __all__ = [
 
 
 class DatasetVersion(Protocol):
-    """One stored version of a dataset, as dfo-apis'
+    """One stored version of a dataset, as apis'
     `GET /api/datasets/{spec_id}/versions` lists it. `base_content_version` is set on
     a version summed from another by a `groupby` or cut from it by
-    `without_party_totals`. `groupby` is that mint's `options.groupby` when dfo-apis
-    recorded it, and `without_party_totals` is true when dfo-apis recorded the cut.
+    `without_party_totals`. `groupby` is that mint's `options.groupby` when apis
+    recorded it, and `without_party_totals` is true when apis recorded the cut.
     `common.live_apis.DatasetVersion` is one."""
 
     @property
@@ -147,14 +147,14 @@ async def recover_mint_record(
 
     Args:
         ref: A root frame's pair, as the materialisation store holds it.
-        dataset_versions: Reads the stored versions of a dataset from dfo-apis.
+        dataset_versions: Reads the stored versions of a dataset from apis.
         store: The materialisation store holding the frame.
 
     Raises:
         MintRecordUnrecoverableError: With `reason` `no_version_matches` when no stored
             version reproduces `ref` under any recoverable column selection,
             `groupby_unrecorded` when the matching version is a `groupby` sum or a
-            party-totals cut whose options dfo-apis did not record, and `frame_not_held` when the matching
+            party-totals cut whose options apis did not record, and `frame_not_held` when the matching
             version is unsummed and `store` no longer holds the frame.
     """
     versions = await dataset_versions(spec_id=ref.spec_id)

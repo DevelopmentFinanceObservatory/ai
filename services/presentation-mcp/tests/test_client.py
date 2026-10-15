@@ -382,7 +382,7 @@ async def test_a_revise_reply_carries_no_write_token() -> None:
     assert reply.write_token is None
 
 
-# dfo-apis's write_refused problem body: its detail names the write-token
+# The apis service's write_refused problem body: its detail names the write-token
 # header and folds in a fix that names its REST routes.
 WRITE_REFUSED_PROBLEM = _problem_body(
     code="write_refused",
@@ -511,7 +511,7 @@ def _publish_then_frame_handler(
 async def test_get_frame_view_publishes_an_ops_ref_before_reaching_the_platform(
     materialisation_store: InMemoryMaterialisationStore, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An `ops_`/`ocv_` ref this process holds gets published to dfo-apis'
+    """An `ops_`/`ocv_` ref this process holds gets published to apis'
     `datasets_api` surface before the `presentation_api` call that reads it
     -- the whole point of the publish hook. Its trace carries no op-spec and
     no step, so it is published without a recipe or steps, and the pair is
@@ -771,8 +771,8 @@ async def test_a_recipe_conflict_leaves_the_frame_published_and_any_other_confli
     published: bool,
     answered: type,
 ) -> None:
-    """dfo-apis records the frame before it compares recipes, so a recipe conflict
-    means the pair is published under the recipe dfo-apis already held. A caller
+    """apis records the frame before it compares recipes, so a recipe conflict
+    means the pair is published under the recipe apis already held. A caller
     publishing its own recipe is told when the held one has another normal form."""
     ref = await _put_derived_frame(materialisation_store)
     recipe = await build_recipe(ref, store=materialisation_store)
@@ -924,7 +924,7 @@ async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_publi
     materialisation_store: InMemoryMaterialisationStore, role: str, cell: str
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
-    sum keyed by a flow party carries `financingRecipient_party_kind`. dfo-apis joins
+    sum keyed by a flow party carries `financingRecipient_party_kind`. apis joins
     every role's value into a series label, so the published frame holds the
     place column alone, and the door's own `Frame.build` accepts it with every
     row kept.
@@ -1155,7 +1155,7 @@ async def test_create_component_does_not_publish_twice_for_the_same_pair(
 
 
 def _publish_not_permitted_body(*, principal: str | None) -> bytes:
-    """dfo-apis' `datasets_api.doors.publish.PublishNotPermitted` wire shape:
+    """apis' `datasets_api.doors.publish.PublishNotPermitted` wire shape:
     `publish_not_permitted`, 403, not retryable.
     """
     detail = "the publish permission is not granted to this caller"
@@ -1167,7 +1167,7 @@ def _publish_not_permitted_body(*, principal: str | None) -> bytes:
 async def test_publish_call_carries_the_configured_principal_header(
     materialisation_store: InMemoryMaterialisationStore,
 ) -> None:
-    """The one call this client makes that dfo-apis' publish door actually
+    """The one call this client makes that the apis service's publish door actually
     checks (`datasets_api.doors.publish`) carries the configured principal.
     No other call carries it -- that door is the only route on this surface
     that reads the header at all.

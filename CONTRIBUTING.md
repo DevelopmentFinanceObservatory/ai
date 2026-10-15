@@ -42,10 +42,10 @@ Two kinds of value live there.
 
 **Secrets** come from Secret Manager in `dev-fin-observatory`:
 
-| Key                                          | Secret                                                          |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dfo-dcp` and `dfo-apis`) |
-| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key`    |
+| Key                                          | Secret                                                       |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dcp` and `apis`)      |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key` |
 
 **Everything else** (`MODEL_NAME`, `DFO_APIS_URL`, `LANGFUSE_BASE_URL`, `PORT`)
 is a committed default in `.env.example`, so git distributes it.

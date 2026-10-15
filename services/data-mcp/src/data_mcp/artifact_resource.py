@@ -1,4 +1,4 @@
-"""The artifact resource: reads dfo-apis' snapshot route and returns an artifact's stable download link.
+"""The artifact resource: reads apis' snapshot route and returns an artifact's stable download link.
 
 Each artifact in a manifest carries a root-relative link,
 `/api/datasets/{id}/{content_version}/files/{digest}`. The link never
@@ -6,10 +6,10 @@ expires: a GET on it answers 302 to an object-store URL signed for a few
 minutes, so the signed URL is minted at the moment of use and never sits in a
 manifest, a tool result or this resource's response. This module holds no key
 and signs nothing. It resolves the link against the public origin,
-`UpstreamClient.public_url` (the website, which proxies dfo-apis' paths, when
+`UpstreamClient.public_url` (the website, which proxies apis' paths, when
 `DFO_SITE_ORIGIN` is set), and returns the absolute URL beside the artifact's
 metadata. This service's own fetches take the root-relative link
-(`artifact_link`, `artifact_link_by_rendering`) and GET it on the dfo-apis
+(`artifact_link`, `artifact_link_by_rendering`) and GET it on the apis
 origin through `UpstreamClient.stream_link`.
 `get_data_tool.py` strips the link from the manifest it returns; each
 artifact's `resource_uri` (`manifest.py`) points here, so a caller pulls a link
@@ -25,7 +25,7 @@ nowhere to live on that wire. So this module never reaches for
 `ToolErrorCode`/`RetryMode` -- the four retry modes stay on the tool path --
 and instead puts a stable, lowercase marker at the head of the `ResourceError`
 message itself, as `"<code>: <prose>"` (`_refuse`). That marker mirrors
-dfo-apis' own snapshot-route vocabulary verbatim (`spec_not_found`,
+apis' own snapshot-route vocabulary verbatim (`spec_not_found`,
 `snapshot_not_found`, `snapshot_revoked`, `artifact_expired`,
 `service_unavailable`), plus three this module owns for a failure upstream never
 sees (`upstream_response_unusable`, `request_invalid`,
@@ -231,7 +231,7 @@ def _root_relative_link(url: object) -> str:
 
     `ArtifactEntryModel.url` upstream is a bare, unconstrained `str`. A scheme
     or a host (`//host/...`) would send the caller to an origin other than the
-    dfo-apis this service calls. `urlsplit` can also raise `ValueError` on
+    apis this service calls. `urlsplit` can also raise `ValueError` on
     malformed input.
     """
     refusal = "the matched artifact entry's url is not a root-relative link"
@@ -249,7 +249,7 @@ def _root_relative_link(url: object) -> str:
 async def read_artifact(
     subject_id: str, content_version: str, artifact_digest: str
 ) -> dict[str, Any]:
-    """Read one artifact's stable download link off dfo-apis' snapshot route.
+    """Read one artifact's stable download link off apis' snapshot route.
 
     Reading this resource looks up the artifact identified by `subject_id`
     (a `spec_` id), `content_version`, and `artifact_digest` -- a metadata
