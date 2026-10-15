@@ -13,6 +13,7 @@ from typing import Any
 import httpx2
 import pytest
 from analysis_mcp.execution_identity import current_execution_identity
+from common.apis_auth import ApisAuthError, IdTokenProvider
 from common.live_apis import LiveApisClient
 from common.materialisation import FrameRef
 from common.recipe import replay_key
@@ -567,6 +568,26 @@ async def test_without_the_datasets_principal_the_route_says_it_is_not_configure
     assert_refused(response, "refresh_not_configured")
 
 
+async def test_a_failed_token_mint_is_upstream_unavailable_and_sends_nothing(
+    apis: RecordedApis,
+) -> None:
+    async def no_token() -> Mapping[str, str]:
+        raise ApisAuthError("metadata server answered 500")
+
+    unauthenticated = LiveApisClient(
+        base_url="http://apis.test",
+        datasets_principal=PRINCIPAL,
+        live_refresh_principal=LIVE_PRINCIPAL,
+        auth=no_token,
+        transport=httpx2.MockTransport(apis),
+    )
+    async with client_of(service_over(apis, Replayer(apis), apis=unauthenticated)) as client:
+        response = await refresh(client)
+
+    assert_refused(response, "upstream_unavailable")
+    assert apis.requests == []
+
+
 # --- time and load --------------------------------------------------------------
 
 
@@ -695,6 +716,24 @@ async def test_the_served_refresh_has_a_row_budget_and_a_publisher_of_its_own() 
         assert service.row_budget.max_rows == SETTINGS.live_refresh_rows_in_flight_max
         assert service.row_budget.max_rows < row_budget().max_rows
         assert getattr(service.publish, "__self__", None).__class__ is PlatformAssembler
+    finally:
+        await service.aclose()
+
+
+async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+    monkeypatch.setenv("DFO_APIS_URL", "https://dfo-dev-apis-abc123.a.run.app/")
+
+    service = build_live_refresh(settings=SETTINGS)
+    try:
+        auth = service._apis._auth
+        assert isinstance(auth, IdTokenProvider)
+        assert auth.audience == "https://dfo-dev-apis-abc123.a.run.app"
+        assembler = getattr(service.publish, "__self__", None)
+        assert isinstance(assembler, PlatformAssembler)
+        assert assembler._auth is auth
     finally:
         await service.aclose()
 

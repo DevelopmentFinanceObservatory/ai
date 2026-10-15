@@ -179,8 +179,8 @@ class _StubPlatform:
     any revise, and answers any describe `transient_unavailable`, as the
     assembler does when the platform cannot be reached."""
 
-    def __init__(self, *, settings: object) -> None:
-        del settings
+    def __init__(self, *, settings: object, auth: object = None) -> None:
+        del settings, auth
 
     async def release(self) -> dict[str, Any]:
         return _RELEASE

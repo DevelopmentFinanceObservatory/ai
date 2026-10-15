@@ -29,6 +29,7 @@ from dataclasses import replace
 from typing import Any, Self
 
 import httpx2
+from common.apis_auth import ApisAuthError, AuthProvider
 from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -126,7 +127,6 @@ _WRITE_REFUSED_FIX = (
 # `Accept`. Every caller here wants the buffered body.
 DEFAULT_ACCEPT_HEADER = "application/json"
 
-AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -393,7 +393,9 @@ class PlatformAssembler:
             settings: The service's `Settings`, supplying the base URL and
                 the `upstream_*` timeout/retry knobs.
             auth: Async credential provider, called once per call rather than
-                per attempt. Injects nothing by default.
+                per attempt. The deployed assembler gets
+                `common.apis_auth.apis_auth_provider`'s Cloud Run ID token.
+                Injects nothing by default.
             sleep: Backoff sleep, which tests replace to avoid waiting.
             transport: `httpx2` transport override, `httpx2.MockTransport` in
                 tests.
@@ -981,9 +983,13 @@ class PlatformAssembler:
 
         Raises:
             PlatformError: dfo-apis returned a non-2xx response.
-            PlatformTransportError: no response was ever received.
+            PlatformTransportError: no response was ever received, or the auth
+                provider could not mint a token and nothing was sent.
         """
-        request_headers = dict(await self._auth()) if self._auth else {}
+        try:
+            request_headers = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise PlatformTransportError(detail=f"no dfo-apis ID token: {exc}") from exc
         if principal is not None:
             request_headers[PRINCIPAL_HEADER] = principal
         request_headers.update(headers or {})

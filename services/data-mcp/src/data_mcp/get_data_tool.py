@@ -52,7 +52,7 @@ from data_mcp.definition_store import (
     get_store,
     verify_write,
 )
-from data_mcp.errors import UpstreamError, UpstreamTransportError
+from data_mcp.errors import UpstreamAuthUnavailable, UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
     KIND_COLUMNS,
@@ -1106,10 +1106,12 @@ async def _post_mint(
     The current `CallBudget` sizes it: the POST gets `mint_timeout_s` at most and must
     end with `post_mint_reserve_s` of `deadline` left. With less than
     `min_mint_timeout_s` to offer it, this refuses without sending, so nothing starts
-    upstream. Any POST that gets no response (whether `mint_timeout_s` elapses first,
-    the deadline cuts it, or the connection fails outright, the same
-    `UpstreamTransportError` each way) refuses with `mint_unanswered`: dfo-apis does
-    not cancel a mint whose client went away, so it may still be running it.
+    upstream. A dfo-apis ID token that cannot be minted refuses `service_unavailable`
+    the same way, with nothing sent. Any POST that gets no response (whether
+    `mint_timeout_s` elapses first, the deadline cuts it, or the connection fails
+    outright, the same `UpstreamTransportError` each way) refuses with
+    `mint_unanswered`: dfo-apis does not cancel a mint whose client went away, so it
+    may still be running it.
 
     Under a budget that does not wait out dfo-apis' synchronous mint, the POST first
     takes a slot in `_mint_ledger`, or returns the ledger's refusal without sending.
@@ -1154,6 +1156,14 @@ async def _post_mint(
             retry=False,
             timeout=timeout_s,
             deadline=mint_deadline,
+        )
+    except UpstreamAuthUnavailable as exc:
+        if held is not None:
+            _mint_ledger.answered(held)
+        return ToolRefusal.service_unavailable(
+            service="dfo-apis",
+            detail=f"{exc.detail}; nothing was sent",
+            retry_after_s=DEADLINE_RETRY_AFTER_S,
         )
     except UpstreamTransportError:
         now = deadline.clock()

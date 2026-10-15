@@ -16,6 +16,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import AuthProvider
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -59,7 +60,7 @@ from mcp.types import ResourceLink, TextContent
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .resolve_results import members_result, resolve_result, resolved_result
-from .test_client import _client, _problem_body, text_of
+from .test_client import _client, _problem_body, id_token_auth, text_of
 from .test_operations import _FakeClock
 
 Handler = (
@@ -330,9 +331,13 @@ def _mint_only_handler(status: int, payload: dict[str, Any]) -> Handler:
 
 
 async def _call_get_data(
-    handler: Handler, store: Any, arguments: dict[str, object]
+    handler: Handler,
+    store: Any,
+    arguments: dict[str, object],
+    *,
+    auth: AuthProvider | None = None,
 ) -> CallToolResult:
-    async with _client(handler) as upstream:
+    async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             # server.py's lifespan already built its own store on entering
@@ -3143,6 +3148,30 @@ async def test_a_direct_call_is_neither_limited_nor_counted_by_the_mint_ledger(
     assert unanswered.structured_content["retry_after_s"] == 5.0
     assert external.is_error is False
     assert posted == [held.spec_id, other.spec_id, other.spec_id, other.spec_id]
+
+
+async def test_a_mint_with_no_id_token_refuses_unavailable_and_frees_its_slot() -> None:
+    """A token that cannot be minted means the POST was never sent, so the external
+    slot is freed at once and the next external mint is admitted."""
+    failed, other = _stored_definition(), _stored_definition(shape_id="OtherShape")
+    posted: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        spec_id = json.loads(request.content)["input"]["spec_id"]
+        posted.append(spec_id)
+        return httpx2.Response(200, json=_manifest_response(spec_id=spec_id))
+
+    with use_call_budget(EXTERNAL_CALL_BUDGET):
+        refused = await _call_get_data(
+            handler, _StubStore(failed), {"spec_id": failed.spec_id}, auth=id_token_auth(mints=0)
+        )
+        admitted = await _call_get_data(handler, _StubStore(other), {"spec_id": other.spec_id})
+
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "service_unavailable"
+    assert refused.structured_content["retry_after_s"] == 5.0
+    assert admitted.is_error is False
+    assert posted == [other.spec_id]
 
 
 def _statistics_manifest() -> Manifest:

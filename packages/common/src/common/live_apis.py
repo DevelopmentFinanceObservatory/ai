@@ -15,6 +15,12 @@ Two credentials, sent in dfo-apis' principal header (`PRINCIPAL_HEADER`):
 `LiveApisNotConfigured` before any request is made. Neither value appears in an
 exception message, an attribute or a `repr`.
 
+Every call also carries the headers of the `auth` hook, once per call: the Cloud
+Run ID token from `common.apis_auth.apis_auth_provider`, which Cloud Run IAM in
+front of dfo-apis checks. A hook that raises `ApisAuthError` fails the call
+with `LiveApisTransportError` before any request is made, as an unreachable
+dfo-apis does.
+
 Every wire path and body is built in this module, in the `_*_PATH` constants and
 the method that uses each. A refusal is an RFC 9457 problem body; `LiveApisError`
 carries its `code` and `constraint_id`.
@@ -37,6 +43,8 @@ from typing import Any, Literal, Self
 from urllib.parse import quote
 
 import httpx2
+
+from common.apis_auth import ApisAuthError, AuthProvider
 
 # dfo-apis' principal header (`principal_header`, default `x-dfo-principal`).
 PRINCIPAL_HEADER = "x-dfo-principal"
@@ -306,6 +314,7 @@ class LiveApisClient:
         base_url: str,
         datasets_principal: str | None = None,
         live_refresh_principal: str | None = None,
+        auth: AuthProvider | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         connect_timeout_s: float = 5.0,
         read_timeout_s: float = 50.0,
@@ -319,6 +328,7 @@ class LiveApisClient:
             base_url: Origin of dfo-apis.
             datasets_principal: `DATASETS_FIRST_PARTY_PRINCIPAL`, for the recipe routes.
             live_refresh_principal: `LIVE_REFRESH_PRINCIPAL`, for refresh and render.
+            auth: Async credential hook, called once per call. Adds nothing by default.
             transport: An `httpx2` transport, `httpx2.MockTransport` in tests.
             connect_timeout_s: Connection deadline of each attempt.
             read_timeout_s: Read deadline of each attempt.
@@ -328,6 +338,7 @@ class LiveApisClient:
         """
         self._datasets_principal = datasets_principal
         self._live_refresh_principal = live_refresh_principal
+        self._auth = auth
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._sleep = sleep
@@ -489,7 +500,7 @@ class LiveApisClient:
             LiveApisTransportError: on a transport failure, including one that cuts
                 the body short.
         """
-        headers = self._live_headers()
+        headers = await self._with_auth(self._live_headers())
         params: dict[str, str] = frame.as_json()
         if format is not None:
             params["format"] = format
@@ -552,6 +563,7 @@ class LiveApisClient:
 
         Returns the 2xx response.
         """
+        headers = await self._with_auth(headers)
         attempt = 0
         while True:
             attempt += 1
@@ -563,12 +575,26 @@ class LiveApisClient:
                 raise error
             await self._sleep(random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1)))
 
+    async def _with_auth(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        """`headers` plus the auth hook's, minted after the principal check has passed.
+
+        The auth hook's headers win over a header of the same name in `headers`.
+
+        Raises:
+            LiveApisTransportError: the hook could not mint a token.
+        """
+        try:
+            auth = await self._auth() if self._auth else {}
+        except ApisAuthError as exc:
+            raise LiveApisTransportError(detail=f"no dfo-apis ID token: {exc}") from exc
+        return {**(headers or {}), **auth}
+
     async def _attempt(
         self,
         method: str,
         path: str,
         *,
-        headers: Mapping[str, str] | None,
+        headers: Mapping[str, str],
         json: Any | None,
         params: Mapping[str, Any] | None,
     ) -> httpx2.Response | LiveApisError:

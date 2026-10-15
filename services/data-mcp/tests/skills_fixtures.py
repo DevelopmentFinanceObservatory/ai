@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx2
+from common.apis_auth import AuthProvider
 from data_mcp import client_holder
 from data_mcp.server import mcp
 from fastmcp import Client
@@ -139,8 +140,10 @@ def refusing(status: int, code: str) -> Handler:
     return lambda _request: refusal(status, code)
 
 
-async def call_tool(handler: Handler, tool: str, arguments: dict[str, Any]) -> CallToolResult:
-    async with _client(handler) as upstream:
+async def call_tool(
+    handler: Handler, tool: str, arguments: dict[str, Any], *, auth: AuthProvider | None = None
+) -> CallToolResult:
+    async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             return await client.call_tool(tool, arguments, raise_on_error=False)

@@ -87,6 +87,7 @@ from dfo_frame_grammar.grammar import validate_unit_request
 from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
+from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import ArtifactEntry, Manifest
 from data_mcp.settings import Settings
@@ -109,11 +110,12 @@ logger = logging.getLogger(__name__)
 
 # The bare link GET has its own small retry budget (see `_fetch_artifact_bytes_uncapped`'s
 # docstring): this hop is idempotent, so a handful of quick retries costs little and buys
-# resilience against a transient GCS blip. `read_artifact` (the link lookup) is never
+# resilience against a transient GCS blip. `artifact_link` (the link lookup) is never
 # wrapped in a second retry loop of its own -- it already retries internally against
 # dfo-apis' snapshot route.
 _ARTIFACT_GET_ATTEMPTS = 3
 _ARTIFACT_GET_BACKOFF_S = 0.5  # short: this hop is idempotent and cheap
+_ARTIFACT_GET_TIMEOUT_S = 30.0
 
 # The status the download link answers once its artifact has aged out of the working tier
 # and cannot render again (`artifact_expired`), or its version was taken down
@@ -475,14 +477,14 @@ async def _locate_canonical_frame(
     manifest without the requested rendering does. A snapshot read that fails or runs
     out of `budget_s` degrades with `fetch_failure_reason`, as a failed fetch does.
 
-    `read_artifact_by_rendering` is imported here for the reason
+    `artifact_link_by_rendering` is imported here for the reason
     `_fetch_artifact_bytes_uncapped` gives.
     """
-    from data_mcp.artifact_resource import read_artifact_by_rendering  # noqa: PLC0415
+    from data_mcp.artifact_resource import artifact_link_by_rendering  # noqa: PLC0415
 
     try:
         async with asyncio.timeout(budget_s):
-            document = await read_artifact_by_rendering(
+            located = await artifact_link_by_rendering(
                 ref.spec_id, ref.content_version, CANONICAL_FRAME_RENDERING
             )
     except (ResourceError, TimeoutError) as exc:
@@ -495,11 +497,11 @@ async def _locate_canonical_frame(
         return MaterialisationOutcome(
             status="degraded", attempts=0, degraded_reason=fetch_failure_reason
         )
-    if document is None:
+    if located is None:
         return _no_artifact_refusal(
             listed_by="the version's snapshot", rendering=CANONICAL_FRAME_RENDERING
         )
-    return document["artifact_digest"], document["url"]
+    return located
 
 
 async def _check_store(
@@ -915,7 +917,7 @@ async def _fetch_artifact_bytes(
     progress: _FetchProgress,
 ) -> bytes | None:
     """Fetch one artifact's bytes under one wall-clock budget, or return `None`.
-    `link` is the artifact's absolute stable link when the caller has read it
+    `link` is the artifact's root-relative stable link when the caller has read it
     already, else `None`.
 
     A crossed deadline mid-sequence returns `None` (degraded), the same outcome as
@@ -954,25 +956,27 @@ async def _fetch_artifact_bytes_uncapped(
     transport: httpx2.AsyncBaseTransport | None,
     progress: _FetchProgress,
 ) -> bytes | None:
-    """One `read_artifact` call for the artifact's download link, unless `link` is
-    given -- that function already
-    retries internally against dfo-apis' snapshot route, so it is called once here, never
-    wrapped in a second retry loop -- then up to `_ARTIFACT_GET_ATTEMPTS` bare GETs on the
-    link, which follow its 302 to a freshly signed object-store URL. A `410` from the link
-    (`_ARTIFACT_GONE_STATUS`) ends the fetch at once, since retrying cannot bring the
-    artifact back; any other GET failure retries the link, which signs a new URL each time.
-    `progress` is incremented once per bare GET actually attempted, whatever its outcome.
+    """One `artifact_link` call for the artifact's download link, unless `link` is
+    given -- that function already retries internally against dfo-apis' snapshot
+    route, so it is called once here, never wrapped in a second retry loop -- then up
+    to `_ARTIFACT_GET_ATTEMPTS` GETs on the link through `UpstreamClient.stream_link`,
+    which sends the ID token to dfo-apis only and follows its 302 to a freshly signed
+    object-store URL. An ID token that cannot be minted fails an attempt as a
+    transport error does. A `410` from the link (`_ARTIFACT_GONE_STATUS`) ends the
+    fetch at once, since retrying cannot bring the artifact back; any other GET
+    failure retries the link, which signs a new URL each time. `progress` is
+    incremented once per GET actually attempted, whatever its outcome.
 
-    `read_artifact` is imported here, not at module level: `data_mcp.artifact_resource`
+    `artifact_link` is imported here, not at module level: `data_mcp.artifact_resource`
     itself imports `_SPEC_ID_PATTERN` from `data_mcp.get_data_tool`, which imports
     `materialise_and_register` from this module -- a module-level import here would be
     circular. Deferred to first call, well after both modules have finished loading.
     """
-    from data_mcp.artifact_resource import read_artifact  # noqa: PLC0415
+    from data_mcp.artifact_resource import artifact_link  # noqa: PLC0415
 
     if link is None:
         try:
-            link = (await read_artifact(subject_id, content_version, artifact_digest))["url"]
+            link = await artifact_link(subject_id, content_version, artifact_digest)
         except ResourceError as exc:
             logger.warning(
                 "materialise_and_register: could not read the artifact link for %s/%s: %s",
@@ -985,46 +989,48 @@ async def _fetch_artifact_bytes_uncapped(
     logger.info(
         "materialise_and_register: fetching artifact bytes for %s/%s", subject_id, content_version
     )
-    async with httpx2.AsyncClient(
-        transport=transport, timeout=httpx2.Timeout(30.0), follow_redirects=True
-    ) as client:
-        for attempt in range(1, _ARTIFACT_GET_ATTEMPTS + 1):
-            try:
-                response = await client.get(link)
-            except httpx2.TransportError as exc:
-                progress.attempts += 1
-                logger.warning(
-                    "materialise_and_register: GET attempt %d/%d for %s/%s failed: %s",
-                    attempt,
-                    _ARTIFACT_GET_ATTEMPTS,
-                    subject_id,
-                    content_version,
-                    exc,
-                )
-                if attempt < _ARTIFACT_GET_ATTEMPTS:
-                    await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
-                continue
+    upstream = get_client()
+    for attempt in range(1, _ARTIFACT_GET_ATTEMPTS + 1):
+        try:
+            async with upstream.stream_link(
+                link, timeout_s=_ARTIFACT_GET_TIMEOUT_S, transport=transport
+            ) as response:
+                status = response.status_code
+                body = await response.aread() if response.is_success else None
+        except httpx2.TransportError as exc:
             progress.attempts += 1
-            if response.is_success:
-                return response.content
-            if response.status_code == _ARTIFACT_GONE_STATUS:
-                logger.warning(
-                    "materialise_and_register: the link for %s/%s answered %d; not retrying",
-                    subject_id,
-                    content_version,
-                    response.status_code,
-                )
-                return None
             logger.warning(
-                "materialise_and_register: GET attempt %d/%d for %s/%s returned status %d",
+                "materialise_and_register: GET attempt %d/%d for %s/%s failed: %s",
                 attempt,
                 _ARTIFACT_GET_ATTEMPTS,
                 subject_id,
                 content_version,
-                response.status_code,
+                exc,
             )
             if attempt < _ARTIFACT_GET_ATTEMPTS:
                 await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
+            continue
+        progress.attempts += 1
+        if body is not None:
+            return body
+        if status == _ARTIFACT_GONE_STATUS:
+            logger.warning(
+                "materialise_and_register: the link for %s/%s answered %d; not retrying",
+                subject_id,
+                content_version,
+                status,
+            )
+            return None
+        logger.warning(
+            "materialise_and_register: GET attempt %d/%d for %s/%s returned status %d",
+            attempt,
+            _ARTIFACT_GET_ATTEMPTS,
+            subject_id,
+            content_version,
+            status,
+        )
+        if attempt < _ARTIFACT_GET_ATTEMPTS:
+            await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
     logger.warning(
         "materialise_and_register: exhausted %d GET attempt(s) for %s/%s",
         _ARTIFACT_GET_ATTEMPTS,

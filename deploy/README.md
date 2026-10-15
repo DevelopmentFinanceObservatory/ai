@@ -122,6 +122,11 @@ Before the first real deploy, infra needs to set up, per environment:
   search until it's set. The value depends on the dfo-apis dev deployment
   existing. The Datasets surface additionally needs dfo-apis's
   `DFO_DATASETS_SURFACE` flag set, since that gates whether it mounts at all.
+- `DFO_SITE_ORIGIN` on that service, set to the website's public origin
+  (scheme and host, no path). The artifact download links data-mcp hands to
+  models sit on it, since the website proxies `/api/datasets/*` to dfo-apis
+  with its own ID token and dfo-apis refuses callers without one. The harness
+  fails at startup, naming the variable, when it is unset on Cloud Run.
 - `PRESENTATION_PUBLIC_URL` on that service, set to the service's own public
   `https` URL plus `/mcp/presentation`. Every presentation view's payload
   names its theme stylesheet under it, and the renderer's CSP admits its
@@ -190,6 +195,8 @@ The module ships in the image (`services/harness/src/harness/recipe_backfill.py`
 | `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
 
 The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.
+
+From a workstation, set `DFO_APIS_URL=http://localhost:8083` and run `just apis-proxy` beside it, since the job sends a Cloud Run ID token only on Cloud Run, in a service (`K_SERVICE` set) or a job (`CLOUD_RUN_JOB` set).
 
 ```
 uv run --package harness python -m harness.recipe_backfill               # dry run, the default

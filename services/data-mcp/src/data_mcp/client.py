@@ -15,15 +15,21 @@ import json
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Self
 
 import httpx2
+from common.apis_auth import ApisAuthError, AuthProvider
 from opentelemetry import trace
 
 from data_mcp.deadline import CallDeadline
-from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
+from data_mcp.errors import (
+    UpstreamAuthUnavailable,
+    UpstreamError,
+    UpstreamSurfaceUnavailable,
+    UpstreamTransportError,
+)
 from data_mcp.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -91,7 +97,10 @@ _PROBE_TIMEOUT_S = 5.0
 # needs SSE can still override it.
 DEFAULT_ACCEPT_HEADER = "application/json"
 
-AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
+# The redirects `stream_link` follows. dfo-apis answers a stable artifact link
+# with 302 to a short-lived signed URL.
+_LINK_REDIRECT_STATUSES = frozenset({302, 303, 307})
+
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -176,9 +185,9 @@ class UpstreamClient:
             settings: The service's `Settings`, supplying the base URL and
                 the `upstream_*` timeout/retry knobs.
             auth: Async credential provider, called once per call rather than
-                per attempt. Async because its destination is Cloud Run
-                service-to-service auth, where minting an ID token is an
-                async, cached, refreshing call. Injects nothing by default.
+                per attempt. The surface probe sends its headers too. The
+                deployed client gets `common.apis_auth.apis_auth_provider`'s
+                Cloud Run ID token. Injects nothing by default.
             sleep: Backoff sleep, which tests replace to avoid waiting.
             transport: `httpx2` transport override, `httpx2.MockTransport` in
                 tests.
@@ -190,6 +199,7 @@ class UpstreamClient:
         self._connect_timeout_s = settings.upstream_connect_timeout_s
         self._auth = auth
         self._sleep = sleep
+        self._public_origin = settings.dfo_site_origin
         self._client = httpx2.AsyncClient(
             base_url=settings.dfo_apis_url,
             timeout=httpx2.Timeout(
@@ -214,9 +224,74 @@ class UpstreamClient:
         """Release the underlying connection pool."""
         await self._client.aclose()
 
-    def absolute_url(self, link: str) -> str:
-        """`link`, a root-relative path, on the dfo-apis origin this client calls."""
-        return str(self._client.base_url.join(link))
+    def public_url(self, link: str) -> str:
+        """`link`, a root-relative dfo-apis path, as a caller outside this service reaches it.
+
+        On `Settings.dfo_site_origin` when set, the website that proxies dfo-apis'
+        paths with its own ID token, else on the dfo-apis origin this client calls.
+        """
+        base = self._client.base_url if self._public_origin is None else self._public_origin
+        return str(httpx2.URL(base).join(link))
+
+    @asynccontextmanager
+    async def stream_link(
+        self,
+        link: str,
+        *,
+        timeout_s: float,
+        headers: Mapping[str, str] | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ) -> AsyncIterator[httpx2.Response]:
+        """GET `link`, a root-relative dfo-apis path, and yield the streamed response.
+
+        The first hop goes to the dfo-apis origin this client calls, with the auth
+        provider's headers, which win over a header of the same name in `headers`.
+        A 302, 303 or 307 from it is followed once, with `headers` alone. httpx
+        keeps custom headers across a redirect it follows itself, so automatic
+        following would hand the ID token to the signed-URL host. Any other answer,
+        a second redirect included, is yielded as it is.
+
+        Args:
+            link: The root-relative path, e.g. an artifact's stable link.
+            timeout_s: Each hop's timeout.
+            headers: Headers for both hops.
+            transport: `httpx2` transport override, `httpx2.MockTransport` in
+                tests. Separate from this client's own, which carries the
+                snapshot and mint calls.
+
+        Raises:
+            ValueError: `link` resolves off the dfo-apis origin, as an absolute or
+                scheme-relative URL for another host does. Nothing was sent and no
+                token was minted.
+            httpx2.TransportError: a hop failed, or the auth provider could not
+                mint a token, in which case nothing was sent.
+        """
+        base = self._client.base_url
+        url = base.join(link)
+        if (url.scheme, url.host, url.port) != (base.scheme, base.host, base.port):
+            raise ValueError(f"link {link!r} is not on the dfo-apis origin")
+        try:
+            auth = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise httpx2.TransportError(f"no dfo-apis ID token: {exc}") from exc
+        hop_headers = dict(headers or {})
+        async with httpx2.AsyncClient(
+            transport=transport, timeout=httpx2.Timeout(timeout_s)
+        ) as client:
+            response = await client.send(
+                client.build_request("GET", url, headers={**hop_headers, **auth}),
+                stream=True,
+            )
+            if response.status_code in _LINK_REDIRECT_STATUSES and "Location" in response.headers:
+                await response.aclose()
+                target = response.url.join(response.headers["Location"])
+                response = await client.send(
+                    client.build_request("GET", target, headers=hop_headers), stream=True
+                )
+            try:
+                yield response
+            finally:
+                await response.aclose()
 
     async def request(
         self,
@@ -257,13 +332,18 @@ class UpstreamClient:
 
         Raises:
             UpstreamError: dfo-apis returned a non-2xx response.
+            UpstreamAuthUnavailable: the auth provider could not mint a token,
+                so nothing was sent. A subclass of `UpstreamTransportError`.
             UpstreamTransportError: no response was ever received, including
                 when `deadline` passed before or during an attempt.
             UpstreamSurfaceUnavailable: a gated-prefix call 404d and the probe
                 confirmed the surface is unmounted.
         """
         attempt_timeout = timeout if timeout is not None else self._read_timeout_s
-        headers = dict(await self._auth()) if self._auth else {}
+        try:
+            headers = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise UpstreamAuthUnavailable(detail=f"no dfo-apis ID token: {exc}") from exc
         # The budget bounds retrying, not one attempt a caller asked for.
         # Mint's 125s exceeds the 120s budget and must survive it.
         call_budget_s = max(self._retry_budget_s, attempt_timeout)
