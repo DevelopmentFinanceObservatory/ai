@@ -252,7 +252,7 @@
     },
     {
       "eval_id": "refers-a-constant-price-requirement",
-      "note": "The requirement asks for constant 2015 prices and no operation restates a series in another year's prices, so the compiler refuses the requirement as unmeetable whatever is proposed. The correct outcome is a referral: either requirement_unmeetable naming the requirement, or no_operation_covers naming the price_basis decision, since the instruction lists a restatement in another year's prices among the things no operation performs. Proposing first and referring on the compiler's issue is acceptable. workflow_outcome pins requirement_unmeetable specifically, since that is the outcome the model-free reachability test in test_eval_outcomes.py confirms the compiler always reports first.",
+      "note": "The requirement asks for constant 2015 prices, and the canned source states no price basis (its unit is a bare US dollar), so a constant-price ask cannot be verified against it and the compiler refuses the source as unusable through the evidence check whatever is proposed. The correct outcome is a referral: either requirement_unmeetable naming the requirement, or no_operation_covers naming the price_basis decision, since the instruction lists a restatement in another year's prices among the things no operation performs. Proposing first and referring on the compiler's issue is acceptable. workflow_outcome pins requirement_unmeetable specifically, since that is the outcome the model-free reachability test in test_eval_outcomes.py confirms the compiler always reports first.",
       "session_input": {
         "app_name": "harness_translator_v1",
         "user_id": "eval-user",

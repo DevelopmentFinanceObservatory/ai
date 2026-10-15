@@ -3,6 +3,7 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from pathlib import Path
@@ -53,9 +54,10 @@ from harness.graph.state import (
     ORCHESTRATOR_UNAVAILABLE_KEY,
     UNREADABLE_PLAN_NOTE,
     AskOption,
+    AskQuestion,
     GraphState,
     PendingAsk,
-    ask_candidates,
+    ask_questions,
     pending_action,
 )
 from harness.graph.workflow import planner_entry
@@ -69,6 +71,7 @@ from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
+from planner.agent import ToolContextSession
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
     ASKS_STATE_KEY,
@@ -159,121 +162,422 @@ async def test_an_answered_turn_ends_after_the_agent_without_a_pause():
     assert "route" in visited_nodes(events) and "ask" not in visited_nodes(events)
 
 
-async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words():
+_CONGO = {
+    "question": "Which Congo?",
+    "options": [{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+}
+_SETTLED = "Each answered choice is settled. Do not ask it again."
+
+
+def _answers(**answers: dict[str, Any]) -> dict[str, Any]:
+    """The clarify interrupt's resume value: one answer per question id."""
+    return {"answers": answers}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_answers(q1={"kind": "option", "spec_id": "o1"}), {"spec_id": "o1"}],
+    ids=["answers", "legacy_pick"],
+)
+async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words(
+    answer: dict[str, Any],
+):
     runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            question="Which Congo?",
-            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
-        ),
+        call("ask_user", questions=[_CONGO]),
         types.Part.from_text(text="The Republic of the Congo's GDP was $15.7 billion in 2024."),
     )
     await open_session(runner)
 
     pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
     assert pause.id == CLARIFY_INTERRUPT
-    assert pause.args["payload"]["candidates"] == [
-        {"spec_id": "o1", "label": "Republic of the Congo"},
-        {"spec_id": "o2", "label": "DR Congo"},
-    ]
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    events = await run_turn(runner, types.Content(role="user", parts=[answer]))
+    assert pause.args["payload"] == {
+        "questions": [
+            {
+                "id": "q1",
+                "question": "Which Congo?",
+                "candidates": [
+                    {"spec_id": "o1", "label": "Republic of the Congo"},
+                    {"spec_id": "o2", "label": "DR Congo"},
+                ],
+            }
+        ]
+    }
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
     resumed = request_text(model.requests[-1])
     assert "GDP of Congo?" in resumed
-    assert "You asked the user: Which Congo?\nThe user chose: Republic of the Congo" in resumed
+    assert (
+        f"You asked the user: Which Congo?\nThe user chose: Republic of the Congo\n{_SETTLED}"
+        in resumed
+    )
     assert not carries_an_interrupt(model.requests[-1])
     assert not quotes_another_agent(model.requests[-1])
     assert not [e for e in events if e.error_code]
 
 
-async def test_a_count_option_pauses_under_its_spec_id_and_the_pick_hands_it_back():
-    gross, net = "spec_" + "a" * 32, "spec_" + "c" * 32
+_GROSS, _NET = "spec_" + "a" * 32, "spec_" + "c" * 32
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (
+            _answers(q1={"kind": "option", "spec_id": _NET}, q2={"kind": "skipped"}),
+            [
+                f"1. How should aid be counted? The user chose: net disbursements ({_NET})",
+                "2. In which prices? The user left this to you. Go on with Current US dollars.",
+                _SETTLED,
+            ],
+        ),
+        (
+            _answers(
+                q1={"kind": "option", "spec_id": "o3"},
+                q2={"kind": "text", "text": "2015 dollars"},
+            ),
+            [
+                "1. How should aid be counted? The user chose: Either",
+                "2. In which prices? The user answered in their own words: 2015 dollars",
+                _SETTLED,
+            ],
+        ),
+        (
+            _answers(q2={"kind": "option", "spec_id": "o2"}),
+            [
+                "1. How should aid be counted? The user left this to you. Go on with "
+                "gross disbursements.",
+                "2. In which prices? The user chose: Constant 2023 US dollars",
+                _SETTLED,
+            ],
+        ),
+        (
+            {"skip": True},
+            [
+                "1. How should aid be counted?",
+                "2. In which prices?",
+                "The user skipped the questions. Do not answer them",
+            ],
+        ),
+    ],
+    ids=["count_and_skipped", "other_and_free_text", "unanswered", "dismissed"],
+)
+async def test_several_questions_pause_together_and_each_answer_is_handed_back(
+    answer: dict[str, Any], expected: list[str]
+):
     block = {
-        "spec_id": gross,
+        "spec_id": _GROSS,
         "resolved": {
             "measure_label": "gross disbursements",
             "alternative_measures": [
-                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": net}}
+                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": _NET}}
             ],
         },
     }
     runner, model = orchestrator_runner(
         call(
             "ask_user",
-            question="How should aid be counted?",
-            options=[
-                {"label": "gross disbursements", "spec_id": gross},
-                {"label": "net disbursements", "spec_id": net},
-                {"label": "Either"},
+            questions=[
+                {
+                    "question": "How should aid be counted?",
+                    "options": [
+                        {"label": "gross disbursements", "spec_id": _GROSS},
+                        {"label": "net disbursements", "spec_id": _NET},
+                        {"label": "Either"},
+                    ],
+                },
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "Current US dollars"},
+                        {"label": "Constant 2023 US dollars"},
+                    ],
+                },
             ],
         ),
         types.Part.from_text(text="Done."),
     )
-    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {gross: block}})
+    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_GROSS: block}})
 
     pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
-    assert pause.args["payload"]["candidates"] == [
-        {"spec_id": gross, "label": "gross disbursements"},
-        {"spec_id": net, "label": "net disbursements"},
-        {"spec_id": "o3", "label": "Either"},
+    assert pause.args["message"] == "How should aid be counted?"
+    assert pause.args["payload"]["questions"] == [
+        {
+            "id": "q1",
+            "question": "How should aid be counted?",
+            "candidates": [
+                {"spec_id": _GROSS, "label": "gross disbursements"},
+                {"spec_id": _NET, "label": "net disbursements"},
+                {"spec_id": "o3", "label": "Either"},
+            ],
+        },
+        {
+            "id": "q2",
+            "question": "In which prices?",
+            "candidates": [
+                {"spec_id": "o1", "label": "Current US dollars"},
+                {"spec_id": "o2", "label": "Constant 2023 US dollars"},
+            ],
+        },
     ]
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": net}})
-    await run_turn(runner, types.Content(role="user", parts=[answer]))
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
-    assert f"The user chose: net disbursements ({net})" in request_text(model.requests[-1])
+    assert "\n".join(["You asked the user:", *expected]) in request_text(model.requests[-1])
+    assert not [e for e in events if e.error_code]
 
 
-async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such():
-    for answer, expected in [
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
-    ]:
-        runner, model = orchestrator_runner(
-            call("ask_user", question="Which Congo?", options=[{"label": "Republic of the Congo"}]),
-            types.Part.from_text(text="Done."),
-        )
-        await open_session(runner)
-        pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+# Search's answer to "Bilateral plus imputed multilateral aid from France to
+# Kenya": gross disbursements in current prices, offering net disbursements.
+_FRANCE_KENYA = json.loads(
+    (
+        Path(__file__).parents[2]
+        / "data-mcp"
+        / "tests"
+        / "fixtures"
+        / "resolve_aid_france_kenya.json"
+    ).read_text()
+)["parts"][0]["spec"]
+_FK_GROSS = _FRANCE_KENYA["spec_id"]
+_FK_NET = "spec_c67524ce5da3bfd4d94994a76c560b28"
+_FK_CONSTANT = "spec_" + "e" * 32
 
-        reply = create_request_input_response(pause.id, {"result": answer})
-        await run_turn(runner, types.Content(role="user", parts=[reply]))
 
-        assert expected in request_text(model.requests[-1])
+def _priced(alternative: dict[str, Any], qualifier: str) -> dict[str, Any]:
+    """`alternative` with its measure in `qualifier` prices."""
+    priced = copy.deepcopy(alternative)
+    priced["definition"]["identity"]["shape"]["measurement_qualifier"] = qualifier
+    for value in priced["measure_axis_values"]:
+        if value["axis"] == "measurementQualifier":
+            value["value"] = {"ref": qualifier, "label": qualifier}
+    return priced
+
+
+def _france_kenya_with_constant_prices(*, net_qualifier: str) -> dict[str, Any]:
+    """The France to Kenya block offering, besides net disbursements in
+    `net_qualifier` prices, the gross count in constant prices as dfo-apis
+    lists it: axis "unit", labelled by its prices."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    resolved = block["resolved"]
+    (net,) = resolved["alternative_measures"]
+    gross = {
+        "definition": copy.deepcopy(block["definition"]),
+        "measure_axis_values": resolved["measure_axis_values"],
+    }
+    constant = _priced(gross, "RealValue")
+    constant["definition"]["spec_id"] = _FK_CONSTANT
+    resolved["alternative_measures"] = [
+        _priced(net, net_qualifier),
+        {**constant, "label": "constant prices", "axis": "unit"},
+    ]
+    return block
+
+
+_COUNT_AND_PRICES = [
+    {
+        "question": "How should aid be counted?",
+        "options": [
+            {"label": "Gross disbursements", "spec_id": _FK_GROSS},
+            {"label": "Net disbursements", "spec_id": _FK_NET},
+        ],
+    },
+    {
+        "question": "In which prices?",
+        "options": [
+            {"label": "Current US dollars"},
+            {"label": "Constant US dollars", "spec_id": _FK_CONSTANT},
+        ],
+    },
+]
+_NET_LINE = f"1. How should aid be counted? The user chose: Net disbursements ({_FK_NET})"
+_CONSTANT_LINE = f"2. In which prices? The user chose: Constant US dollars ({_FK_CONSTANT})"
 
 
 @pytest.mark.parametrize(
-    ("answer", "expected"),
+    ("net_qualifier", "answer", "expected", "elected"),
     [
-        ({"spec_id": "o2"}, "The user chose: DR Congo"),
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
+        (
+            "RealValue",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                _NET_LINE,
+                _CONSTANT_LINE,
+                "Together the answers ask for net disbursements in constant prices. Fetch "
+                f"{_FK_NET}, which this search listed with both.",
+            ],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                _NET_LINE,
+                _CONSTANT_LINE,
+                "Together the answers ask for net disbursements in constant prices, which this "
+                "search did not list. Search once for that reading.",
+            ],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET}, q2={"kind": "option", "spec_id": "o1"}
+            ),
+            [_NET_LINE, "2. In which prices? The user chose: Current US dollars"],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(q1={"kind": "skipped"}, q2={"kind": "option", "spec_id": _FK_CONSTANT}),
+            [
+                "1. How should aid be counted? The user left this to you. Go on with Gross "
+                "disbursements.",
+                _CONSTANT_LINE,
+            ],
+            set(),
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_GROSS},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                f"1. How should aid be counted? The user chose: Gross disbursements ({_FK_GROSS})",
+                _CONSTANT_LINE,
+                "Together the answers ask for gross disbursements in constant prices. Fetch "
+                f"{_FK_CONSTANT}, which this search listed with both.",
+            ],
+            {_FK_GROSS, _FK_CONSTANT},
+        ),
+        (
+            "RealValue",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET}, q2={"kind": "option", "spec_id": "o1"}
+            ),
+            [
+                _NET_LINE,
+                "2. In which prices? The user chose: Current US dollars",
+                "This search listed net disbursements only in constant prices. For other "
+                "prices, search once for that reading.",
+            ],
+            {_FK_NET},
+        ),
+    ],
+    ids=[
+        "both_resolved",
+        "both_unlisted",
+        "only_count",
+        "only_prices",
+        "elected_picked",
+        "count_only_in_other_prices",
     ],
 )
-async def test_a_question_paused_with_bare_label_options_resumes(
-    answer: dict[str, Any], expected: str
+async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both(
+    net_qualifier: str, answer: dict[str, Any], expected: list[str], elected: set[str]
 ):
+    """A count picked in one answer, search's own reading included, and
+    other prices in another, both of one search result, name the listed
+    reading measuring both, or ask for one search when none is listed. A
+    count listed only at the other price basis is said to be. Any other pair
+    reads answer by answer."""
+    block = _france_kenya_with_constant_prices(net_qualifier=net_qualifier)
     runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            question="Which Congo?",
-            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
-        ),
-        types.Part.from_text(text="Done."),
+        call("ask_user", questions=_COUNT_AND_PRICES), types.Part.from_text(text="Done.")
     )
-    await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
-    asked = _stored_state(runner)[ORCHESTRATOR_ASKED_KEY]
-    asked["options"] = ["Republic of the Congo", "DR Congo"]
+    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block}})
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
 
     reply = create_request_input_response(pause.id, {"result": answer})
     events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
     assert not [e for e in events if e.error_code]
+    assert "\n".join(["You asked the user:", *expected, _SETTLED]) in request_text(
+        model.requests[-1]
+    )
+    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
+    assert session is not None
+    tool_context = SimpleNamespace(state=session.state, session=session)
+    chosen = ToolContextSession(cast(Any, tool_context)).elected_spec_ids()
+    assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        (
+            _answers(q1={"kind": "text", "text": "the big one"}),
+            "The user answered in their own words: the big one",
+        ),
+        ({"skip": True}, "The user skipped the question. Do not answer it"),
+    ],
+    ids=["legacy_text", "answers_text", "dismissed"],
+)
+async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such(
+    answer: dict[str, Any], expected: str
+):
+    runner, model = orchestrator_runner(
+        call("ask_user", questions=[_CONGO]),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+
+    reply = create_request_input_response(pause.id, {"result": answer})
+    await run_turn(runner, types.Content(role="user", parts=[reply]))
+
     assert expected in request_text(model.requests[-1])
 
 
-def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["Republic of the Congo", "DR Congo"],
+        [{"label": "Republic of the Congo", "spec_id": None}, {"label": "DR Congo"}],
+    ],
+    ids=["bare_labels", "options"],
+)
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"spec_id": "o2"}, "The user chose: DR Congo"),
+        (_answers(q1={"kind": "option", "spec_id": "o2"}), "The user chose: DR Congo"),
+        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        ({"skip": True}, "The user skipped the question. Do not answer it"),
+    ],
+    ids=["legacy_pick", "answers_pick", "text", "dismissed"],
+)
+async def test_a_question_paused_in_the_one_question_shape_resumes(
+    options: list[Any], answer: dict[str, Any], expected: str
+):
+    """A question held in the one-question shape `{kind, question, options}`
+    resumes, whether its options are bare labels or option objects."""
+    runner, model = orchestrator_runner(
+        call("ask_user", questions=[_CONGO]),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+    _stored_state(runner)[ORCHESTRATOR_ASKED_KEY] = {
+        "kind": "ask",
+        "question": "Which Congo?",
+        "options": options,
+    }
+
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
+
+    assert not [e for e in events if e.error_code]
+    assert f"You asked the user: Which Congo?\n{expected}" in request_text(model.requests[-1])
+
+
+def test_a_pending_question_stored_in_the_one_question_shape_reads_as_one_question():
     state = {
         ORCHESTRATOR_PENDING_KEY: {
             "kind": "ask",
@@ -285,9 +589,15 @@ def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
     pending = pending_action(state)
 
     assert isinstance(pending, PendingAsk)
-    assert ask_candidates(pending.model_dump()["options"]) == [
-        {"spec_id": "o1", "label": "Republic of the Congo"},
-        {"spec_id": "o2", "label": "DR Congo"},
+    assert ask_questions(pending.questions) == [
+        {
+            "id": "q1",
+            "question": "Which Congo?",
+            "candidates": [
+                {"spec_id": "o1", "label": "Republic of the Congo"},
+                {"spec_id": "o2", "label": "DR Congo"},
+            ],
+        }
     ]
 
 
@@ -333,7 +643,16 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
             ["Kenya's aid since 2015"],
             [("the total",)],
         ),
-        ("ask_user", {"question": "Which years?", "options": [AskOption(label="2015")]}, [], []),
+        (
+            "ask_user",
+            {
+                "questions": [
+                    AskQuestion(question="Which years?", options=[AskOption(label="2015")])
+                ]
+            },
+            [],
+            [],
+        ),
     ],
 )
 async def test_the_planner_entry_runs_alone_from_a_plan_calls_hand_off(
@@ -1246,8 +1565,12 @@ async def test_a_hand_back_is_still_in_view_after_a_later_pause():
         call("plan", brief="Kenya's debt service", asks=[]),
         call(
             "ask_user",
-            question="Which years?",
-            options=[{"label": "Since 2015"}, {"label": "Since 2020"}],
+            questions=[
+                {
+                    "question": "Which years?",
+                    "options": [{"label": "Since 2015"}, {"label": "Since 2020"}],
+                }
+            ],
         ),
         types.Part.from_text(text="Kenya's debt service since 2015 could not be calculated."),
     )

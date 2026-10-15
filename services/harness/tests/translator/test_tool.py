@@ -480,8 +480,8 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
     [
         (
             {"unit": Unit(currency="USD", prices="constant", base_year=2015)},
-            {},
-            "requirement_unmeetable",
+            {"unit_ref": "SDG_CU_USD"},
+            "source_unusable",
             [],
         ),
         (
@@ -497,7 +497,7 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
             [SPEC_KENYA],
         ),
     ],
-    ids=["constant-prices", "period-outside-coverage", "stated-source-not-found"],
+    ids=["constant-prices-over-current", "period-outside-coverage", "stated-source-not-found"],
 )
 async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     real_schemas: list[ToolSchema],
@@ -953,7 +953,7 @@ def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
             "annual_debt_service",
             {UnsupportedOperation.NO_OPERATION_COVERS},
         ),
-        (CompileIssueCode.REQUIREMENT_UNMEETABLE, "multilateral", set()),
+        (CompileIssueCode.SOURCE_UNUSABLE, "multilateral", set()),
     ],
 )
 async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decline(
@@ -996,7 +996,7 @@ async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decl
 
 def test_a_source_issue_is_tried_before_an_unmeetable_one() -> None:
     issues = [
-        CompileIssue(code=CompileIssueCode.REQUIREMENT_UNMEETABLE, reason="r", requirement_id="a"),
+        CompileIssue(code=CompileIssueCode.SOURCE_UNUSABLE, reason="r", requirement_id="a"),
         CompileIssue(code=CompileIssueCode.SOURCE_UNSELECTED, reason="r", requirement_id="b"),
     ]
 

@@ -2,18 +2,23 @@
   "event": "elicitation.request",
   "seq": 2,
   "interrupt_id": "clarify_flow_type",
-  "question": "Which flow should this use?",
-  "input": "single_select",
-  "options": [
+  "questions": [
     {
-      "id": "disbursements",
-      "label": "Disbursements",
-      "description": "Cash actually transferred in the year."
-    },
-    {
-      "id": "commitments",
-      "label": "Commitments",
-      "description": "Agreements signed for future funding."
+      "id": "q1",
+      "question": "Which flow should this use?",
+      "input": "single_select",
+      "options": [
+        {
+          "id": "disbursements",
+          "label": "Disbursements",
+          "description": "Cash actually transferred in the year."
+        },
+        {
+          "id": "commitments",
+          "label": "Commitments",
+          "description": "Agreements signed for future funding."
+        }
+      ]
     }
   ]
 }

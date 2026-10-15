@@ -80,6 +80,7 @@ from planner.plan import (
 from planner.records import (
     DenominatorScope,
     EntityIn,
+    EvidenceIssueCode,
     GrowthChange,
     Period,
     PeriodThreshold,
@@ -2500,28 +2501,99 @@ def test_a_two_branch_graph_reports_source_width_once_not_once_per_path(
     assert width_issues[0].operation_id == "gap"
 
 
-def test_constant_prices_are_unmeetable_by_any_operation(
+def _bound_to(**unit: Any) -> dict[str, Any]:
+    """Source fields for a definition bound by request to `unit`, as `search` binds OECD
+    DAC2a for "constant prices": the frame is converted on fetch, while the source's
+    own unit ref stays `CurrencyUSD`."""
+    return {
+        "unit_ref": "CurrencyUSD",
+        "unit_label": "US Dollar",
+        "identity": {"facets": {"unit": {"state": "value", "request": unit}}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("source_fields", "refused_by"),
+    [
+        pytest.param(
+            _bound_to(currency="USD", prices="constant", base_year=2024),
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+        pytest.param(
+            {"unit_ref": "ConstantUSD_2024", "unit_label": "Constant 2024 US dollars"},
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            {
+                "unit_ref": "undata/UNIT_MEASURE-CR_USD_K",
+                "unit_label": "United States dollars at constant prices",
+            },
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            {"unit_ref": "SDG_CON_USD", "unit_label": "Constant USD"},
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="a-unit-id-in-constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            {
+                "unit_ref": "undata/UNIT_MEASURE-CR_USD_K",
+                "unit_label": "United States dollars at constant 2024 prices",
+            },
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            _bound_to(currency="USD", prices="current"),
+            EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
+            id="bound-by-request-to-current-prices",
+        ),
+        pytest.param(
+            _bound_to(currency="USD", prices="constant", base_year=2015),
+            EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
+            id="bound-by-request-to-another-base-year",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyUSD", "unit_label": "US Dollar"},
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="a-unit-stating-no-price-basis",
+        ),
+    ],
+)
+def test_a_constant_price_requirement_is_met_by_a_source_in_those_prices(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
+    source: SourceFactory,
+    source_fields: dict[str, Any],
+    refused_by: EvidenceIssueCode | None,
 ) -> None:
-    # No operation restates a series in another year's prices, so this is
-    # refused at compile time with the requirement named, rather than left
-    # for a step to claim.
+    # No operation restates a series in other prices, so a requirement in
+    # constant 2024 prices compiles over a source whose request or unit id
+    # states them. It is refused over one in current prices, in another
+    # base year, stating no basis or no base year, or stating constant
+    # prices only in its label, which a retrieved series does not carry.
     plan = _draft(
         [decision()],
         [
-            requirement(unit=Unit(currency="USD", prices="constant", base_year=2015)),
+            requirement(unit=Unit(currency="USD", prices="constant", base_year=2024)),
             derived_requirement(),
         ],
     )
 
-    result = build(plan, _translation(_retrieve(), _aggregate()))
+    result = build(
+        plan,
+        _translation(_retrieve(), _aggregate()),
+        discovered={"annual_debt_service": source(**source_fields)},
+    )
 
-    assert Code.REQUIREMENT_UNMEETABLE in _codes(result)
-    unmeetable = next(i for i in result.issues if i.code is Code.REQUIREMENT_UNMEETABLE)
-    assert unmeetable.requirement_id == "annual_debt_service"
+    assert [(i.code, i.finding) for i in result.issues] == (
+        [(Code.SOURCE_UNUSABLE, refused_by)] if refused_by is not None else []
+    )
 
 
 # --- Operations against requirements -----------------------------------------------------
@@ -3257,6 +3329,15 @@ _CURRENT_NO_CURRENCY = {
             id="a-pinned-source-in-constant-prices",
         ),
         pytest.param(
+            {"unit_ref": "ConstantUSD_2024"},
+            _OWN_UNIT_PINNED,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_PRICE_BASES_DIFFER,
+            None,
+            [],
+            id="a-pinned-source-in-constant-prices-of-a-stated-base-year",
+        ),
+        pytest.param(
             _CONSTANT_UNSTATED_YEAR,
             _OWN_UNIT,
             _BOUND_BY_REQUEST,
@@ -3301,11 +3382,12 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
     # analysis-mcp pairs two frames only when their unit cells are equal. A
     # ref and a request denoting one currency and price basis differ in form
     # alone, and the refusal names every side to retrieve by request, so the
-    # planner repairs both in one round when both are refs. No requirement
-    # may ask for constant prices, so a pinned source in them never pairs
-    # with a side in current prices, and the refusal names the pinned side
-    # for the user to decide; an unpinned one is repaired to current prices
-    # on both sides.
+    # planner repairs both in one round when both are refs. A requirement
+    # may ask for constant prices only at a stated base year, so a pinned
+    # source in constant prices of an unstated year never pairs with a side
+    # in current prices, and the refusal names the pinned side for the user
+    # to decide. A pinned source of a stated year, or an unpinned one, is
+    # repaired by stating one unit on both sides.
     requirements, translation = _summed(requirement)
     requirements[0] = requirement(**left_requirement)
     pin = left_requirement.get("source_spec_id")
@@ -3335,6 +3417,106 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
         assert [
             r for r in ("annual_debt_service", "multilateral") if repr(r) in found[0].reason
         ] == named
+
+
+# A definition bound by request to constant 2024 US dollars, as `search` binds
+# OECD DAC2a for "constant prices", and a series in current US dollars.
+_CONSTANT_2024_BY_REQUEST = {
+    "unit_ref": "CurrencyUSD",
+    "identity": {
+        "facets": {
+            "unit": {
+                "state": "value",
+                "request": {"currency": "USD", "prices": "constant", "base_year": 2024},
+            }
+        }
+    },
+}
+_CURRENT_USD = {"unit_ref": "CurrencyUSD", "identity": _NOMINAL}
+
+
+@pytest.mark.parametrize(
+    ("left_source", "right_source", "pinned", "code", "about"),
+    [
+        pytest.param(
+            _CONSTANT_2024_BY_REQUEST,
+            _CURRENT_USD,
+            ("annual_debt_service", "multilateral"),
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "annual_debt_service",
+            id="both-pinned-the-constant-side-bound-by-request",
+        ),
+        pytest.param(
+            _CURRENT_USD,
+            _CONSTANT_2024_BY_REQUEST,
+            ("annual_debt_service", "multilateral"),
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "multilateral",
+            id="both-pinned-the-current-side-first",
+        ),
+        pytest.param(
+            _CONSTANT_2024_BY_REQUEST,
+            _CURRENT_USD,
+            ("annual_debt_service",),
+            Code.FRAME_PRICE_BASES_DIFFER,
+            None,
+            id="the-other-side-unpinned",
+        ),
+    ],
+)
+def test_two_pinned_sides_in_different_prices_go_back_to_the_user(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    left_source: dict[str, Any],
+    right_source: dict[str, Any],
+    pinned: tuple[str, ...],
+    code: CompileIssueCode,
+    about: str | None,
+) -> None:
+    # A pinned side is served in its source's own unit, a request object
+    # included, and no operation restates a series in other prices. With
+    # both sides pinned no requirement change pairs them, so the issue names
+    # the side in constant prices for the user to decide. With one pinned,
+    # stating its unit on the other side repairs the pair.
+    requirements, translation = _summed(requirement)
+    spec_ids = {"annual_debt_service": SPEC_KENYA, "multilateral": SPEC_OTHER}
+    pins: list[Decision] = []
+    for index, requirement_id in enumerate(("annual_debt_service", "multilateral")):
+        if requirement_id not in pinned:
+            continue
+        slot = f"pin_{index}"
+        pins.append(pinning_decision(spec_ids[requirement_id], slot=slot))
+        requirements[index] = DatasetRequirement.model_validate(
+            requirements[index].model_dump()
+            | {
+                "unit": None,
+                "source_spec_id": spec_ids[requirement_id],
+                "decision_ids": ["measure", slot],
+            }
+        )
+
+    result = build(
+        _draft([decision(), *pins], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
+            "multilateral": source(
+                spec_id=SPEC_OTHER, **_pinned("MultilateralDebtService", right_source)
+            ),
+        },
+    )
+
+    unit_codes = {
+        Code.FRAME_UNITS_DIFFER,
+        Code.FRAME_PRICE_BASES_DIFFER,
+        Code.FRAME_UNITS_IRRECONCILABLE,
+    }
+    assert [
+        (issue.code, issue.requirement_id) for issue in result.issues if issue.code in unit_codes
+    ] == [(code, about)]
 
 
 def _two_sided(
