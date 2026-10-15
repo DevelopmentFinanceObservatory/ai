@@ -2806,16 +2806,37 @@ def _rank_positions() -> HeldFrames:
     return HeldFrames(trace=trace)
 
 
+class TwoUnitFrames(HeldFrames):
+    """The store, holding the frame with every other provider in euros."""
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [
+            {**row, "unit": "EUR"} if int(row[self.role][-2:]) % 2 else row
+            for row in super().rows()
+        ]
+
+
+_UNIT_VIEW = copy.deepcopy(WIDE_VIEW)
+_UNIT_VIEW["dimensions"].append({"name": "unit", "values": [], "plural": True, "total_count": 2})
+
+
 @pytest.mark.parametrize(
-    ("store", "chart", "view", "warned"),
+    ("store", "chart", "view", "warned", "named"),
     [
-        (UnreadableFrames(), {}, None, True),
-        (FailingStore(), {}, None, True),
-        (HeldFrames(held=False), {}, None, True),
-        (UncountedFrames(), {}, None, True),
-        (_rank_positions(), {}, None, False),
-        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False),
-        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False),
+        (UnreadableFrames(), {}, None, True, "could not be picked"),
+        (FailingStore(), {}, None, True, "could not be picked"),
+        (HeldFrames(held=False), {}, None, True, "could not be picked"),
+        (UncountedFrames(), {}, None, True, "could not be picked"),
+        (_rank_positions(), {}, None, False, "rank positions"),
+        (TwoUnitFrames(), {}, _UNIT_VIEW, False, "Bind unit to one value"),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, "ranking with a limit"),
+        (
+            HeldFrames(),
+            {"type": "line_chart", "latest_periods": 2},
+            None,
+            False,
+            "ranking with a limit",
+        ),
     ],
     ids=[
         "unreadable",
@@ -2823,6 +2844,7 @@ def _rank_positions() -> HeldFrames:
         "not_held",
         "no_row_count",
         "rank_positions",
+        "two_units",
         "rolling",
         "latest_periods",
     ],
@@ -2834,27 +2856,83 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     chart: dict[str, Any],
     view: Any,
     warned: bool,
+    named: str,
 ) -> None:
     """A frame the store cannot read, a plan's rank positions (where the
-    highest number is the worst), and a card whose period moves with the
-    data (a list picked today would not follow it) are never narrowed: the
-    refusal stands. A frame the store cannot read, does not hold or states no
-    row count for is logged as a warning."""
+    highest number is the worst), rows in two units, and a card whose period
+    moves with the data (a list picked today would not follow it) are never
+    narrowed: the refusal stands and says what to change. One that is not
+    about a moving period names the dimension over the cap and its count in
+    `fix`. A frame the store cannot read, does not hold or states no row
+    count for is logged as a warning."""
     monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
 
     with caplog.at_level(logging.WARNING, logger=orchestrator_tools.__name__):
         executor, result = await _draw_wide(monkeypatch, store, view=view, **chart)
 
-    assert "error" in result["charts"][0]
+    (refused,) = result["charts"]
+    assert named in refused["error"]
     assert _writes(executor) == 0
     assert (orchestrator_tools.__name__ in {record.name for record in caplog.records}) is warned
-    # A chart whose period moves is told what draws in place of a cut.
+    assert _stated(refused) == (HarnessCode.SERIES_LIMIT_EXCEEDED, "correct_and_retry")
     moving = bool(view and view.get("rolling")) or "latest_periods" in chart
-    assert ("ranking with a limit" in result["charts"][0]["error"]) is moving
-    assert _stated(result["charts"][0]) == (
-        HarnessCode.SERIES_LIMIT_EXCEEDED,
-        "correct_and_retry" if moving else "do_not_retry",
+    assert refused.get("fix") == (
+        None if moving else {"dimension": "financingProvider", "values": 30}
     )
+
+
+@pytest.mark.parametrize(
+    ("unranked", "plans"),
+    [
+        (orchestrator_tools._Unranked("rank_positions"), False),
+        (orchestrator_tools._Unranked("coordinates_differ", coordinates=("unit",)), False),
+        (orchestrator_tools._Unranked("not_ranked"), True),
+    ],
+    ids=["rank_positions", "coordinates_differ", "not_ranked"],
+)
+def test_over_cap_remedy_differs_with_each_reason_the_largest_were_not_picked(
+    unranked: Any, plans: bool
+) -> None:
+    """A plan is offered only beside a list of values and only while the plan
+    call is unspent, and the remedy names the coordinate the rows differ on,
+    or the dimension to list and how many the chart draws."""
+    spent, unspent = (
+        orchestrator_tools._over_cap_remedy(
+            dimension="financingProvider",
+            unranked=unranked,
+            draws=8,
+            plan_unspent=plan_unspent,
+        )
+        for plan_unspent in (False, True)
+    )
+
+    assert (spent != unspent) is plans
+    assert "plan" not in spent
+    if unranked.coordinates:
+        assert "Bind unit to one value" in spent
+    else:
+        assert "financingProvider" in spent
+        assert re.search(r"at most 8\b", spent)
+
+
+@pytest.mark.parametrize(
+    ("store", "view"),
+    [(UnreadableFrames(), WIDE_VIEW), (HeldFrames(), {**WIDE_VIEW, "rolling": True})],
+    ids=["unranked", "rolling"],
+)
+async def test_make_charts_offers_a_plan_for_an_unranked_select_only_while_one_is_unspent(
+    monkeypatch: pytest.MonkeyPatch, store: Any, view: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: store)
+    tools, ctx = _tools(executor=WideFrameExecutor(view=copy.deepcopy(view)))
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    unspent = await tools["make_charts"]([_wide_chart()], ctx)
+    tools["plan"]("Rank the providers of aid to Kenya", [], ctx)
+    spent = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert "plan" in unspent["charts"][0]["error"]
+    assert "plan" not in spent["charts"][0]["error"]
 
 
 def _marker_of(trace: Any) -> Any:

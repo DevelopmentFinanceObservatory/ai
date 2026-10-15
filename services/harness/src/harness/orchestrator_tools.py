@@ -49,7 +49,6 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum, auto
 from types import FunctionType
 from typing import Any, Literal, Protocol, get_type_hints
 
@@ -109,6 +108,7 @@ from harness.chart_binding import (
     MAX_TABLE_ROWS,
     TopMembers,
     covers_every_row,
+    differing_coordinates,
     empty_select_refusal,
     every_series_selects,
     over_cap_dimension,
@@ -533,12 +533,24 @@ async def _member_cells(
     return cells
 
 
-class _Unranked(Enum):
-    """Why a frame's rows gave no ranking."""
+@dataclass(frozen=True)
+class _Unranked:
+    """Why a select's largest members were not picked: a cut of a typed role
+    whose rows carry no kind or type cell (`kinds_needed`), a plan's rank
+    positions for values (`rank_positions`), compared members with no anchor
+    period (`no_period`), a chart whose period moves with the data
+    (`period_moves`), matching rows that differ on the declared `coordinates`
+    (`coordinates_differ`), or anything else (`not_ranked`)."""
 
-    KINDS_NEEDED = auto()  # a cut of a typed role whose rows carry no kind or type cell
-    RANK_POSITIONS = auto()  # the values are a plan's rank positions
-    NO_PERIOD = auto()  # the compared members have no anchor period
+    reason: Literal[
+        "kinds_needed",
+        "rank_positions",
+        "no_period",
+        "period_moves",
+        "coordinates_differ",
+        "not_ranked",
+    ]
+    coordinates: tuple[str, ...] = ()
 
 
 def _ranked(
@@ -547,24 +559,26 @@ def _ranked(
     *,
     select: dict[str, Any],
     dimension: str,
+    view: dict[str, Any],
     limit: int | None,
     cut: bool,
     kinds: Mapping[str, str] | None,
-) -> TopMembers | _Unranked | None:
+) -> TopMembers | _Unranked:
     """`top_members` over a stored frame. A cut of a place or flow party
     dimension compares only the members one ranking does, by the kind or type
     cells the frame's own rows carry, or by `kinds` when they carry none.
     Rows are ranked without their enrichment columns (`common.place_type`),
-    which describe a member and split no series."""
+    which describe a member and split no series. Rows that give no ranking
+    and differ on a dimension `view` declares are `coordinates_differ`."""
     marker = read_derived_marker(trace)
     if marker is not None and marker.ordinal:
-        return _Unranked.RANK_POSITIONS
+        return _Unranked("rank_positions")
     rows = _rows_of(data)
     cells = None
     if cut and dimension in TYPED_ROLES:
         cells = _held_cells(dimension, rows) or kinds
         if cells is None:
-            return _Unranked.KINDS_NEEDED
+            return _Unranked("kinds_needed")
     rows = [
         {
             name: cell
@@ -574,9 +588,82 @@ def _ranked(
         for row in rows
     ]
     try:
-        return top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
+        top = top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
     except RollingError:
-        return _Unranked.NO_PERIOD
+        return _Unranked("no_period")
+    if top is not None:
+        return top
+    differing = differing_coordinates(rows=rows, select=select, dimension=dimension, view=view)
+    if differing:
+        return _Unranked("coordinates_differ", coordinates=tuple(differing))
+    return _Unranked("not_ranked")
+
+
+def _draws(chart: Chart, view: Mapping[str, Any]) -> int:
+    """The most members of one dimension a chart of a frame with `view`
+    draws: `LINE_CHART_MAX_VALUES` lines, `MAX_SERIES_PER_COMPONENT` bars or
+    table series, and for a table no more than fit `MAX_TABLE_ROWS`."""
+    if chart.type == "line_chart":
+        return LINE_CHART_MAX_VALUES
+    if chart.type == "table":
+        return max(1, min(MAX_SERIES_PER_COMPONENT, MAX_TABLE_ROWS // _periods_covered(view)))
+    return MAX_SERIES_PER_COMPONENT
+
+
+def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_unspent: bool) -> str:
+    """What to change in a select refused with the one `dimension` over the
+    series cap, given why its largest members were not picked: bind the
+    coordinates the rows differ on; or list at most `draws` of its values,
+    with a plan offered beside the list when `plan_unspent` and the frame's
+    values can be ranked."""
+    if unranked.reason == "coordinates_differ":
+        differing = " and ".join(unranked.coordinates)
+        each = " each" if len(unranked.coordinates) > 1 else ""
+        return (
+            f"Its rows differ on {differing}, so the largest cannot be compared. "
+            f"Bind {differing}{each} to one value."
+        )
+    if unranked.reason == "rank_positions":
+        return (
+            "This frame holds rank positions, which the chart draws as they are. "
+            f"List the {dimension} values to show, at most {draws}."
+        )
+    plan = f", or plan a ranking or a total across {dimension}" if plan_unspent else ""
+    return (
+        "The largest could not be picked from this frame's rows. "
+        f"List the {dimension} values the question names, at most {draws}{plan}."
+    )
+
+
+def _unnarrowed_refusal(
+    issue: dict[str, Any],
+    *,
+    chart: Chart,
+    select: dict[str, Any],
+    view: dict[str, Any],
+    unranked: _Unranked,
+    plan_unspent: bool,
+) -> dict[str, Any]:
+    """The over-cap `issue` of a select `_top_select` left as written, with
+    what to change (`_over_cap_remedy`) when one dimension is over the cap:
+    `correct_and_retry`, with the dimension and its count in `fix`. A chart
+    whose period moves keeps `issue`, which says what draws already."""
+    over = over_cap_dimension(select=select, view=view)
+    if over is None or unranked.reason == "period_moves":
+        return issue
+    dimension, count = over
+    remedy = _over_cap_remedy(
+        dimension=dimension,
+        unranked=unranked,
+        draws=_draws(chart, view),
+        plan_unspent=plan_unspent,
+    )
+    return harness_refusal(
+        code=HarnessCode.SERIES_LIMIT_EXCEEDED,
+        message=f"{issue['message']}. {remedy}",
+        fix={"dimension": dimension, "values": count},
+        retry_mode=RetryMode.CORRECT_AND_RETRY,
+    )
 
 
 @dataclass(frozen=True)
@@ -595,14 +682,12 @@ async def _top_select(
     executor: Executor,
     *,
     cut: bool,
-) -> _Narrowed | dict[str, Any] | None:
+) -> _Narrowed | dict[str, Any] | _Unranked:
     """`select` with its one multiplying dimension listing the frame's
     members by their value at one period (`top_members`), highest first.
 
     When `cut`, it lists only the members holding a value at that period, as
-    many as `chart.type` draws: `MAX_SERIES_PER_COMPONENT` bars or table
-    series, `LINE_CHART_MAX_VALUES` lines, and for a table no more than fit
-    `MAX_TABLE_ROWS`. A cut of a place or flow party dimension ranks only the
+    many as `chart.type` draws (`_draws`). A cut of a place or flow party dimension ranks only the
     members one ranking compares (`_ranked`), by the frame's kind read
     (`_member_cells`) when its rows carry no kind or type cell. Otherwise it
     lists every member, those with no value at the period last. dfo-apis
@@ -612,25 +697,30 @@ async def _top_select(
     Returns:
         The narrowed select; a harness refusal for a cut whose kind read
         failed (`member_kind_unread`) or whose members have no anchor period
-        (`no_shared_period`); None, leaving the select as written, when the
-        frame cannot be read, holds rank positions rather than values, its
-        rows cannot be ranked honestly, an analysis result's members state no
-        kind, or the card's period moves with the data, so a list picked today
-        would not follow it.
+        (`no_shared_period`); or an `_Unranked`, leaving the select as
+        written: `period_moves` when the card's period moves with the data,
+        so a list picked today would not follow it; `not_ranked` when no one
+        dimension multiplies or the frame cannot be read; otherwise why its
+        rows gave no ranking (`_ranked`).
     """
     frame = (state.get(ORCHESTRATOR_FRAMES_KEY) or {})[chart.frame]
-    dimension = over_cap_dimension(select=select, view=frame["view"])
-    if dimension is None or frame["view"].get("rolling") or chart.latest_periods is not None:
-        return None
-    limit = None
-    if cut:
-        limit = LINE_CHART_MAX_VALUES if chart.type == "line_chart" else MAX_SERIES_PER_COMPONENT
-        if chart.type == "table":
-            limit = max(1, min(limit, MAX_TABLE_ROWS // _periods_covered(frame["view"])))
-    rank = functools.partial(_ranked, select=select, dimension=dimension, limit=limit, cut=cut)
+    if frame["view"].get("rolling") or chart.latest_periods is not None:
+        return _Unranked("period_moves")
+    over = over_cap_dimension(select=select, view=frame["view"])
+    if over is None:
+        return _Unranked("not_ranked")
+    dimension = over[0]
+    rank = functools.partial(
+        _ranked,
+        select=select,
+        dimension=dimension,
+        view=frame["view"],
+        limit=_draws(chart, frame["view"]) if cut else None,
+        cut=cut,
+    )
     top = await _frame_work(frame_store_ref(frame), functools.partial(rank, kinds=None))
     analysis = str(frame["ref"]["spec_id"]).startswith(OP_SPEC_HASH_PREFIX)
-    if top is _Unranked.KINDS_NEEDED and not analysis:
+    if top == _Unranked("kinds_needed") and not analysis:
         kinds = await _member_cells(state, chart.frame, executor)
         if kinds is None:
             return harness_refusal(
@@ -644,7 +734,7 @@ async def _top_select(
         top = await _frame_work(
             frame_store_ref(frame), functools.partial(rank, kinds=kinds.get(dimension, {}))
         )
-    if top is _Unranked.NO_PERIOD and cut:
+    if top == _Unranked("no_period") and cut:
         return harness_refusal(
             code=HarnessCode.NO_SHARED_PERIOD,
             message=(
@@ -654,7 +744,7 @@ async def _top_select(
             ),
         )
     if not isinstance(top, TopMembers) or not top.members:
-        return None
+        return top if isinstance(top, _Unranked) else _Unranked("not_ranked")
     members = top.members if cut else [*top.members, *top.unvalued]
     return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
 
@@ -1672,11 +1762,13 @@ def build_orchestrator_tools(
                         )
                     )
                     continue
+                plan_unspent = _used(tool_context, "plan") < _budgets(tool_context)["plan"]
                 issue = select_binding_ok(
                     type_=chart.type,
                     select=select,
                     view=frame["view"],
                     latest_periods=chart.latest_periods is not None,
+                    plan_unspent=plan_unspent,
                 )
                 if select == {} and issue is None and frame["view"].get("dimensions"):
                     # The platform refuses an empty select, so one that names
@@ -1712,8 +1804,17 @@ def build_orchestrator_tools(
                         # Ordering alone never turns a drawable select into a refused one.
                         if over_cap or rewritten is None:
                             select, cut, issue = narrowed.select, narrowed.cut, rewritten
-                    elif narrowed is not None:
+                    elif not isinstance(narrowed, _Unranked):
                         issue = narrowed
+                    elif over_cap and issue is not None:
+                        issue = _unnarrowed_refusal(
+                            issue,
+                            chart=chart,
+                            select=select,
+                            view=frame["view"],
+                            unranked=narrowed,
+                            plan_unspent=plan_unspent,
+                        )
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
