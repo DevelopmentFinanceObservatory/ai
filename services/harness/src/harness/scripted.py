@@ -124,7 +124,7 @@ _Y_LABEL = "Life expectancy"
 
 async def scripted_publish_result(frame: FrameRef) -> FramePublished:
     """Publish every frame at once, under a replay key read off its content
-    version: there is no dfo-apis to publish to."""
+    version: there is no apis to publish to."""
     return FramePublished(replay_key=f"rpk_{frame.content_version.removeprefix('ocv_')}")
 
 

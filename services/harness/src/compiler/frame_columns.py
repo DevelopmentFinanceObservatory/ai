@@ -390,7 +390,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # `analysis_mcp.engine` computes it:
 #
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
-#   dfo-apis collapses every member into one series under the family's own
+#   apis collapses every member into one series under the family's own
 #   ref; otherwise the frame holds what the definition binds, unbounded here.
 # - `growth` and `rank` refuse an input holding several StatVars
 #   (`require_single_stat_var`) and stamp the one they read on every row.

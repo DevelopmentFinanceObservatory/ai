@@ -1,15 +1,15 @@
-"""A converted frame as dfo-apis serves it, read by data-mcp and pinned by an
+"""A converted frame as apis serves it, read by data-mcp and pinned by an
 analysis-mcp verb.
 
-dfo-apis writes a `get_data` Parquet artifact's `unit` column as text
-(`materialise.formats._cell_text` in dfo-apis): a unit ref as its own text, a
+apis writes a `get_data` Parquet artifact's `unit` column as text
+(`materialise.formats._cell_text` in apis): a unit ref as its own text, a
 converted unit as the JCS text of its `{currency, prices, base_year}` object.
 `data_mcp.frame_materialisation._frame_from_parquet_bytes` decodes each cell
 into the frame's own unit, so a converted-unit pin on `rank`, `aggregate` or
 `share_of` compares with the cell by currency, prices and base year.
 
 The EUR artifact mirrors the frame a France-to-Kenya-and-Senegal gross
-disbursements `get_data` returned from dfo-apis: six rows, `unit` the text
+disbursements `get_data` returned from apis: six rows, `unit` the text
 `{"currency":"EUR","prices":"current"}`, and the 2024 values 460681.0254
 (Kenya) and 153000.0342 (Senegal).
 """
@@ -41,7 +41,7 @@ from fastmcp import Client
 EUR_CURRENT = {"currency": "EUR", "prices": "current"}
 USD_CONSTANT_2024 = {"currency": "USD", "prices": "constant", "base_year": 2024}
 
-# The text dfo-apis writes for each converted unit: JCS, keys in code-point order.
+# The text apis writes for each converted unit: JCS, keys in code-point order.
 _UNIT_TEXT = {
     "EUR_CURRENT": '{"currency":"EUR","prices":"current"}',
     "USD_CONSTANT_2024": '{"base_year":2024,"currency":"USD","prices":"constant"}',
@@ -63,7 +63,7 @@ _SENEGAL_TOTAL = 98100.5 + 120400.25 + 153000.0342
 
 
 def _artifact(unit_text: str) -> bytes:
-    """A `get_data(place_types=true)` Parquet artifact in dfo-apis's layout: canonical
+    """A `get_data(place_types=true)` Parquet artifact in the apis service's layout: canonical
     column order, every grain column a string, `unit` the text `unit_text` on every
     row, an all-null `status` column, and each party's kind, which a sum across the
     recipients reads."""

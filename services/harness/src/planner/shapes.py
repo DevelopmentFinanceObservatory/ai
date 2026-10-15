@@ -191,7 +191,7 @@ class FrameShape:
     `cut_per_period` implies `limited`. `roots` is the
     retrievals the frame ultimately rests on, sorted -- used for
     degenerate-side detection. `unsummable_axes` is, for a frame carrying a
-    family read separately, the axes the family varies along that dfo-apis
+    family read separately, the axes the family varies along that apis
     may not sum over (empty when it may sum over every one), or `None` where
     no source is known to say; a single-measure verb's refusal reads it to
     say whether summing the family would give it one measure.
@@ -888,7 +888,7 @@ def _several_measures(verb: str, shape: FrameShape) -> str | None:
     on a source binding one StatVar, and the compiler counts it once the
     source is known. The reason states the count, or "several" for a family
     whose source lists none of its StatVars or one of a capped list (`SEVERAL`). It advises reading the family summed where
-    dfo-apis may sum it over every axis it varies along
+    apis may sum it over every axis it varies along
     (`FrameShape.unsummable_axes`), names the axes it may not sum over
     otherwise, and puts the advice as a condition where neither is known.
     """

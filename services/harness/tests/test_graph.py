@@ -286,7 +286,7 @@ def _step_progress(event: Event) -> dict[str, Any] | None:
 class _ReportsThenWaits(ScriptedSurface):
     """`ScriptedSurface`, whose `get_data` sends one progress report and then
     waits for `release` before answering, standing in for data-mcp polling
-    a background dfo-apis operation."""
+    a background apis operation."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -864,9 +864,9 @@ _MULTISERIES_VIEW: dict[str, Any] = {
 
 
 def _population_view(*, plural: str) -> dict[str, Any]:
-    """The ONEcampaign/dfo-apis#953 population frame's view: one `stat_var`, seven countries, and
+    """The population frame's view: one `stat_var`, seven countries, and
     a `unit` column holding `USDollar` on some rows and null on others, which
-    dfo-apis reports as plural with the one non-null value listed. `plural`
+    apis reports as plural with the one non-null value listed. `plural`
     names a further dimension marked plural with two listed values."""
     return {
         "dimensions": [
@@ -885,7 +885,7 @@ def _population_view(*, plural: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("facet", ["measurementMethod", "provenance"])
 def test_stat_card_may_leave_plural_facets_unpinned(facet: str) -> None:
-    """dfo-apis refuses an unbound facet only when it splits a series, so a
+    """apis refuses an unbound facet only when it splits a series, so a
     population card pinning the country passes with `unit` = `{USDollar,
     null}` and a second plural facet column left unbound."""
     select = {"stat_var": "dcid:Count_Person", "observationAbout": "country/GTM"}
@@ -959,7 +959,7 @@ def test_select_binding_ok_permits_24_series(type_: str) -> None:
 
 @pytest.mark.parametrize("type_", ["bar_chart", "table"])
 def test_select_binding_ok_rejects_a_25th_series(type_: str) -> None:
-    """dfo-apis refuses a component past 24 series even though the catalogue
+    """apis refuses a component past 24 series even though the catalogue
     grammar's `maxItems` allows an array of 30."""
     select = {"observationAbout": _countries(25), "stat_var": "a"}
     reason = select_binding_ok(type_=type_, select=select, view={})
@@ -978,7 +978,7 @@ def test_select_binding_ok_counts_a_tables_cross_product_against_the_cap() -> No
 
 
 def _counted_view(**total_counts: int) -> dict[str, Any]:
-    """A `describe_frame` view whose dimensions carry dfo-apis's `total_count`."""
+    """A `describe_frame` view whose dimensions carry the apis service's `total_count`."""
     return {
         "dimensions": [
             {"name": name, "plural": count > 1, "values": [], "total_count": count}
@@ -1016,11 +1016,11 @@ def _counted_view(**total_counts: int) -> dict[str, Any]:
 def test_select_binding_ok_matches_dfo_apis_series_estimate(
     type_: str, select: dict[str, Any], view: dict[str, Any], estimate: int
 ) -> None:
-    """The harness computes dfo-apis's own estimate (`_check_series_estimate`
+    """The harness computes the apis service's own estimate (`_check_series_estimate`
     in dfo-data-tools' `assembler/resolve.py`): over every coordinate
     dimension, the bound array's length, 1 for a single bound value, and
     `max(total_count, 1)` for an unbound dimension, on every component type
-    the assembler resolves. Each case here is one dfo-apis refuses with
+    the assembler resolves. Each case here is one apis refuses with
     `MAX_SERIES_PER_COMPONENT`: an unbound plural dimension, a `line_chart`
     array past 24, and an unbound dimension multiplying a table's array.
     An unbound facet column counts 1 and a bound one counts its values."""
@@ -1136,7 +1136,7 @@ def test_select_binding_ok_counts_a_dimension_with_no_total_count_as_one() -> No
 
 
 def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> None:
-    """dfo-apis estimates series over its own dimensions only, and refuses a
+    """apis estimates series over its own dimensions only, and refuses a
     select binding any other name as an invalid binding; the harness gives
     the same reason."""
     select = {"stat_var": "a", "donor": [f"donor/{index}" for index in range(30)]}
@@ -1882,7 +1882,7 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
 
 
 class _ServedPairsPlatform:
-    """presentation-mcp over dfo-apis, which serves a frame under the pair it
+    """presentation-mcp over apis, which serves a frame under the pair it
     minted: `describe_frame` refuses `frame_unavailable` on any other pair and
     answers ok on one it serves."""
 
@@ -1913,7 +1913,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval the plan answers with is held by data-mcp under a pair of its
-    own once read with extra columns, and dfo-apis serves only its manifest's pair.
+    own once read with extra columns, and apis serves only its manifest's pair.
     `execute` hands on the manifest's pair, so `plan_done` describes the series
     and registers it for charting, while the total reading it was given the
     frame's own pair. Each frame is registered with the pair the store holds
@@ -1992,7 +1992,7 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
     state: dict[str, Any], node_input: dict[str, Any]
 ) -> None:
     """A hand-back event or kept ask recorded without store pairs names each
-    frame by the pair dfo-apis serves alone. Its frame is registered without
+    frame by the pair apis serves alone. Its frame is registered without
     a store pair, so the store is opened by the frame's own pair."""
     ctx = SimpleNamespace(state=dict(state))
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())

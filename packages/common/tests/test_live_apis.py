@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx2
 import pytest
+from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
 from common.live_apis import (
     FRAME_NOT_REFRESHABLE,
     PRINCIPAL_HEADER,
@@ -69,6 +70,7 @@ def make_client(
     *,
     datasets_principal: str | None = DATASETS_PRINCIPAL,
     live_refresh_principal: str | None = LIVE_PRINCIPAL,
+    auth: AuthProvider | None = None,
     max_attempts: int = 1,
 ) -> LiveApisClient:
     async def no_sleep(_: float) -> None:
@@ -78,10 +80,22 @@ def make_client(
         base_url="http://apis.test",
         datasets_principal=datasets_principal,
         live_refresh_principal=live_refresh_principal,
+        auth=auth,
         transport=httpx2.MockTransport(handler),
         max_attempts=max_attempts,
         sleep=no_sleep,
     )
+
+
+class CountingAuth:
+    """An auth hook that counts its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self) -> Mapping[str, str]:
+        self.calls += 1
+        return {TOKEN_HEADER: f"Bearer token-{self.calls}"}
 
 
 def ok(body: object, status: int = 200) -> httpx2.Response:
@@ -587,8 +601,9 @@ async def test_live_routes_refuse_an_unset_live_principal_before_any_request(
     principal: str | None,
 ) -> None:
     calls = Calls(ok({}))
+    auth = CountingAuth()
 
-    async with make_client(calls, live_refresh_principal=principal) as client:
+    async with make_client(calls, live_refresh_principal=principal, auth=auth) as client:
         for call in (
             client.refresh_frame(spec_id=SPEC, content_version=CV),
             client.render(component_id="cmp_1", revision=1, frame=FRAME),
@@ -600,6 +615,7 @@ async def test_live_routes_refuse_an_unset_live_principal_before_any_request(
                 pass
 
     assert calls.requests == []
+    assert auth.calls == 0
 
 
 async def test_the_two_principals_are_not_interchangeable() -> None:
@@ -641,6 +657,68 @@ async def test_no_principal_value_reaches_an_error_message_or_repr() -> None:
             assert all(
                 DATASETS_PRINCIPAL not in text and LIVE_PRINCIPAL not in text for text in texts
             )
+
+
+# auth hook
+
+
+async def test_auth_headers_ride_every_route_once_per_call_beside_the_principal() -> None:
+    calls = Calls(
+        problem(503, "service_unavailable", retryable=True),
+        ok({"status": "current", "frame": FRAME.as_json()}),
+        ok({"stored_intent": None}),
+        httpx2.Response(200, content=b"x"),
+    )
+    auth = CountingAuth()
+
+    async with make_client(calls, auth=auth, max_attempts=3) as client:
+        await client.refresh_frame(spec_id=SPEC, content_version=CV)
+        await client.read_component(component_id="cmp_1")
+        async with client.stream_render_data(component_id="cmp_1", revision=3, frame=FRAME):
+            pass
+
+    sent = [
+        (
+            r.url.path.rsplit("/", 1)[-1],
+            r.headers.get(TOKEN_HEADER),
+            r.headers.get(PRINCIPAL_HEADER),
+        )
+        for r in calls.requests
+    ]
+    assert sent == [
+        ("refresh", "Bearer token-1", LIVE_PRINCIPAL),
+        ("refresh", "Bearer token-1", LIVE_PRINCIPAL),
+        ("cmp_1", "Bearer token-2", None),
+        ("data", "Bearer token-3", LIVE_PRINCIPAL),
+    ]
+
+
+async def _failing_auth() -> Mapping[str, str]:
+    raise ApisAuthError("metadata server answered 500")
+
+
+async def _refresh(client: LiveApisClient) -> None:
+    await client.refresh_frame(spec_id=SPEC, content_version=CV)
+
+
+async def _stream(client: LiveApisClient) -> None:
+    async with client.stream_render_data(component_id="cmp_1", revision=3, frame=FRAME):
+        pass
+
+
+@pytest.mark.parametrize("call", [_refresh, _stream], ids=["request", "stream"])
+async def test_a_failed_mint_is_unreachable_and_sends_nothing(
+    call: Callable[[LiveApisClient], Awaitable[None]],
+) -> None:
+    calls = Calls(ok({"status": "current", "frame": FRAME.as_json()}))
+
+    async with make_client(calls, auth=_failing_auth, max_attempts=3) as client:
+        with pytest.raises(LiveApisTransportError) as raised:
+            await call(client)
+
+    assert (raised.value.status, raised.value.retryable) == (None, True)
+    assert isinstance(raised.value.__cause__, ApisAuthError)
+    assert calls.requests == []
 
 
 # failures

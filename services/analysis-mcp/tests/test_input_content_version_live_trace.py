@@ -1,5 +1,5 @@
 """Verbs over a frame registered under a live-shaped `upstream_trace`: a real
-dfo-apis manifest's `facets` entries carry bookkeeping members beyond
+apis manifest's `facets` entries carry bookkeeping members beyond
 `{axis, ref, basis}`, a `basis` of `"deployment_fallback"`, and an entry with
 `ref: None` (an axis with no facet selected).
 

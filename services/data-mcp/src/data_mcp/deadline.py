@@ -13,7 +13,7 @@ from typing import Self
 
 Clock = Callable[[], float]
 
-# dfo-apis' default `mint_timeout_seconds` (`datasets_api/config.py`): the longest it runs
+# apis' default `mint_timeout_seconds` (`datasets_api/config.py`): the longest it runs
 # a synchronous mint before answering 504.
 UPSTREAM_SYNC_MINT_TIMEOUT_S = 120.0
 
@@ -106,14 +106,14 @@ class CallBudget:
 
     @property
     def waits_out_sync_mint(self) -> bool:
-        """Whether a mint POST given its full `mint_timeout_s` outlasts dfo-apis'
+        """Whether a mint POST given its full `mint_timeout_s` outlasts apis'
         synchronous mint timeout, so a synchronous mint always answers inside it."""
         return self.mint_timeout_s > UPSTREAM_SYNC_MINT_TIMEOUT_S
 
 
 # A call through the harness's own mount. Its deadline is `Settings.get_data_deadline_s`,
 # 165s by default, 15s under the harness's 180s `get_data` call timeout
-# (`compiler/capabilities.py`), and the 125s mint cap outlasts dfo-apis' 120s
+# (`compiler/capabilities.py`), and the 125s mint cap outlasts apis' 120s
 # synchronous mint timeout.
 DIRECT_CALL_BUDGET = CallBudget(
     deadline_s=None,
@@ -140,10 +140,10 @@ DIRECT_CALL_BUDGET = CallBudget(
 #
 # A repeat call made after the refusal's 5s wait rejoins the operation and polls
 # for about 30s more, so an operation that takes 125s finishes on the fourth call.
-# A synchronous mint gets at most 32s, under dfo-apis' 120s synchronous mint
-# timeout: one that dfo-apis admits to its synchronous path and that runs longer
+# A synchronous mint gets at most 32s, under apis' 120s synchronous mint
+# timeout: one that apis admits to its synchronous path and that runs longer
 # refuses `mint_unanswered`, and keeps running upstream. `data_mcp.mint_ledger`
-# holds its dfo-apis slot until the 120s plus its own margin have passed and
+# holds its apis slot until the 120s plus its own margin have passed and
 # refuses a repeat until then; a repeat after that runs the mint again from the
 # start.
 _EXTERNAL_DEADLINE_S = EXTERNAL_CALL_LIMIT_S - EXTERNAL_CALL_MARGIN_S

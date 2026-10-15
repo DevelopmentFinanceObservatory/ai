@@ -1,6 +1,6 @@
-"""The description dfo-apis serves for one dataset version, read for the `get_data` digest.
+"""The description apis serves for one dataset version, read for the `get_data` digest.
 
-dfo-apis composes a version's description (`GET /api/datasets/{id}/{content_version}
+apis composes a version's description (`GET /api/datasets/{id}/{content_version}
 /description`) from the record it stores at mint, and the cards the presentation
 service draws carry the same description. `get_data` reads it once after each mint,
 so the digest's citation, latest period, caveats and steps are the words the card
@@ -53,7 +53,7 @@ class VersionDescription(BaseModel):
     """The members of a served description `get_data` reads.
 
     `steps` is `None` when the record holds no steps. `gaps` lists the dotted paths
-    of the members dfo-apis could not fill, `title` among them when today's words
+    of the members apis could not fill, `title` among them when today's words
     could not compose it.
     """
 
@@ -69,12 +69,12 @@ class VersionDescription(BaseModel):
 async def fetch_version_description(
     *, spec_id: str, content_version: str, deadline: CallDeadline
 ) -> VersionDescription | None:
-    """The description of dfo-apis' version `{spec_id, content_version}`, or `None`.
+    """The description of apis' version `{spec_id, content_version}`, or `None`.
 
-    The pair is the manifest's own, which names dfo-apis' version. A frame minted
+    The pair is the manifest's own, which names apis' version. A frame minted
     with `options.columns` or `options.groupby` is held under a frame reference of
-    its own, which dfo-apis serves no description for. The request carries no
-    `If-None-Match`, so dfo-apis answers 200 or a refusal, never 304.
+    its own, which apis serves no description for. The request carries no
+    `If-None-Match`, so apis answers 200 or a refusal, never 304.
     """
     path = f"/api/datasets/{spec_id}/{content_version}/description"
     try:

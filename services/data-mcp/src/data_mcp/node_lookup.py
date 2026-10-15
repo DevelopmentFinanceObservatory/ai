@@ -1,4 +1,4 @@
-"""Node lookup seam: dcids to node envelopes, via dfo-apis' `POST /api/graph/nodes`.
+"""Node lookup seam: dcids to node envelopes, via apis' `POST /api/graph/nodes`.
 
 `describe_nodes` reads every dcid it is given through the node batch route, up to
 `_MAX_DCIDS_PER_REQUEST` per request, and validates each entry through the generated

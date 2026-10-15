@@ -262,7 +262,7 @@ def test_decode_trace_reads_a_record_stored_without_steps_as_none() -> None:
     [("financingProvider", True), ("financing_provider", False), ("FinancingProvider", False)],
 )
 def test_a_pooled_count_names_a_lower_camel_case_role(role: str, accepted: bool) -> None:
-    """The role pattern is the kit's, so a role dfo-apis' door would refuse is refused
+    """The role pattern is the kit's, so a role apis' door would refuse is refused
     here first."""
     entry = {"reason": "party_total", "count": 3, "of": "pooled_entities", "role": role}
     if accepted:

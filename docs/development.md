@@ -13,6 +13,14 @@ just setup    # env file, dependencies, pre-commit hooks
 just dev      # harness on :8080
 ```
 
+Recipes that call `apis` (`just dev`, `just studio-live`, `just eval-planner-entry-record`, `just graph-schema`) reach it at `DFO_APIS_URL`, `http://localhost:8083` by default. Cloud Run IAM guards the dev deployment, so serve it on that port from a second terminal:
+
+```bash
+just apis-proxy   # gcloud run services proxy dfo-dev-apis --region northamerica-northeast1 --project dev-fin-observatory --port 8083
+```
+
+The proxy signs each request as your gcloud account, which needs `roles/run.invoker` on `dfo-dev-apis`. A local `apis` checkout's `just dev` serves the same port instead.
+
 `just setup` is safe to re-run and skips what is already done. It checks prerequisites, builds `.env`, syncs the workspace members into the shared `.venv`, and installs pre-commit hooks. `just doctor` checks tooling, gcloud auth, which config keys resolved, and whether the workspace is synced, and prints the command that fixes anything it finds.
 
 ## Configuration
@@ -21,10 +29,10 @@ Local config lives in `.env` at the workspace root. It is generated and gitignor
 
 Secrets come from Secret Manager in `dev-fin-observatory`:
 
-| Key                                          | Secret                                                          |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dfo-dcp` and `dfo-apis`) |
-| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key`    |
+| Key                                          | Secret                                                       |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dcp` and `apis`)      |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key` |
 
 Everything else (`MODEL_NAME`, `DFO_APIS_URL`, `LANGFUSE_BASE_URL`, `PORT`) is a committed default in `.env.example`, so git distributes it. `just env` carries new keys into an existing `.env` on the next run, and `just doctor` reports when yours has fallen behind.
 
