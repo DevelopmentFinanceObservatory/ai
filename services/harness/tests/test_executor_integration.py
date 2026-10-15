@@ -1637,13 +1637,13 @@ async def studio(
 
         # `plan_done` lists a plan's final frames to the agent this way.
         described = await executor(tool="describe_frame", args={"frame_ref": run_frame})
-        frames: dict[str, Any] = {}
-        register_frames(frames, [(run_frame, described["view"], run_frame)])
+        state: dict[str, Any] = {"surface": "studio"}
+        register_frames(state, [(run_frame, described["view"], run_frame)])
         tools = build_orchestrator_tools(resolver=_no_search, executor=executor)
         yield _Studio(
             tools={tool.__name__: tool for tool in tools},
             context=SimpleNamespace(
-                state={"surface": "studio", ORCHESTRATOR_FRAMES_KEY: frames},
+                state=state,
                 invocation_id="inv_1",
             ),
             executor=executor,
@@ -2529,9 +2529,9 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
         described = await executor(
             tool="describe_frame", args={"frame_ref": answer.presented.model_dump()}
         )
-        frames: dict[str, Any] = {}
+        state: dict[str, Any] = {"surface": "studio"}
         register_frames(
-            frames,
+            state,
             [(answer.presented.model_dump(), described["view"], answer.store.model_dump())],
         )
         tools = {
@@ -2549,10 +2549,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
                     ),
                 }
             ],
-            SimpleNamespace(
-                state={"surface": "studio", ORCHESTRATOR_FRAMES_KEY: frames},
-                invocation_id="inv_1",
-            ),
+            SimpleNamespace(state=state, invocation_id="inv_1"),
         )
         held = await get_frame_store().get(answer.store)
         assert held is not None
