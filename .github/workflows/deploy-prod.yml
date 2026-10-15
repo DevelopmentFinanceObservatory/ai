@@ -1,11 +1,8 @@
 name: Deploy production
 
-# Deploys on every push to main and on manual dispatch, in the
-# DevelopmentFinanceObservatory org only. main there is a tree copy of a
-# ONEcampaign commit that a releaser approved, so this workflow builds the ai
-# image from main into prod's Artifact Registry and points prod's Cloud Run
-# service at it. The steps live in build-deploy.yml, which deploy-dev.yml
-# runs too.
+# Deploys on every push to main and on manual dispatch. It builds the ai image
+# from main into prod's Artifact Registry and points prod's Cloud Run service
+# at it. The steps live in build-deploy.yml, which deploy-dev.yml runs too.
 #
 # The `production` GitHub Environment supplies every name. Its deployment
 # branch policy admits main only, so a dispatch from another branch fails.
@@ -22,7 +19,6 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.repository_owner == 'DevelopmentFinanceObservatory'
     permissions:
       contents: read
       id-token: write

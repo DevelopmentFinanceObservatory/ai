@@ -17,8 +17,7 @@ name: Deploy dev
 # below and create the matching GitHub Environment with its own vars/secrets
 # -- everything else in this file is written to be reused as-is.
 #
-# Dev deploys run in the ONEcampaign org only. The DevelopmentFinanceObservatory
-# copy of this repo deploys prod through deploy-prod.yml.
+# Prod deploys through deploy-prod.yml.
 
 on:
   push:
@@ -50,7 +49,7 @@ jobs:
 
   deploy:
     needs: changes
-    if: github.repository_owner == 'ONEcampaign' && needs.changes.outputs.ai == 'true'
+    if: needs.changes.outputs.ai == 'true'
     permissions:
       contents: read
       id-token: write

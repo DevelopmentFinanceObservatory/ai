@@ -60,7 +60,7 @@ def skill_body(
             "version": "1.10",
         },
         "content_version": "sha256:" + "c" * 64,
-        "url": f"https://github.com/ONEcampaign/dfo-skills/tree/main/skills/{SKILL_ID}",
+        "url": f"https://github.com/DevelopmentFinanceObservatory/skills/tree/main/skills/{SKILL_ID}",
         "attached": True,
         "excluded": False,
         "statvar_count": 4695,

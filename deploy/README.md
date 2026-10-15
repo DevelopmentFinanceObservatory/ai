@@ -5,9 +5,8 @@ data-mcp, analysis-mcp, and presentation-mcp FastMCP apps it mounts
 in-process) and swaps it
 onto an existing Cloud Run service. It never creates or reconfigures a
 service. Dev deploys automatically on every push to `dev` that touches the
-image's inputs, in the ONEcampaign org. Production deploys on every push to
-`main` of the DevelopmentFinanceObservatory copy of this repo, and on manual
-dispatch there. Both run the same steps from `build-deploy.yml`. The sibling
+image's inputs. Production deploys on every push to `main`, and on manual
+dispatch. Both run the same steps from `build-deploy.yml`. The sibling
 `dfo-infra` repo owns the Cloud Run service definition (service account,
 scaling, secrets, env vars) that these workflows target.
 
@@ -80,12 +79,9 @@ its own Cloud Run service (see "Splitting a service out later" below).
 loopback, and startup refuses that combination without a shared
 `MCP_API_TOKEN` the split-out service also has.
 
-Every workflow that installs or builds the workspace (`ci.yml` and
-`build-deploy.yml`) also reads the repo variable `READER_APP_CLIENT_ID` and
-the repo secret `READER_APP_PRIVATE_KEY`, the credentials of the read-only
-`dfo-reader` GitHub App. Each run mints a token with `contents: read` on
-`ONEcampaign/dfo-spec-kit` from them to fetch the private dfo-spec-kit git
-dependencies. They are repository-level, so they serve every environment.
+The workspace's `dfo-spec-kit` git dependencies come from the public
+`DevelopmentFinanceObservatory/spec-kit` repo, so `ci.yml`, `build-deploy.yml`,
+and `deploy/Dockerfile.ai` need no token to install them.
 
 The service name value above is a placeholder for illustration. dfo-infra
 names the actual service, and whatever they pick goes in this var verbatim.
@@ -138,11 +134,9 @@ Before the first real deploy, dfo-infra needs to set up, per environment:
 
 ## Repo-side prerequisites
 
-- A `production` GitHub Environment on the DevelopmentFinanceObservatory
-  repo with `main` as its only deployment branch. The release gate is the
-  approval a sync pull request into `main` needs. Neither environment takes
-  any other protection rule: dfo-infra's `scripts/handoff.sh` refuses to run
-  against an environment with required reviewers or a wait timer.
+- A `dev` GitHub Environment with `dev` as its only deployment branch, and a
+  `production` GitHub Environment with `main` as its only deployment branch
+  and `release` as required reviewers.
 - The vars/secrets table above, populated per environment.
 - Staging is unbuilt. dfo-infra has no staging Terraform tree or GCP
   project, and standing one up means a new `infra/<env>/` directory with

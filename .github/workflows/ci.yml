@@ -26,11 +26,7 @@ concurrency:
 jobs:
   lint:
     # `edited` fires on closed PRs too; closed PRs need no checks.
-    # Mints a dfo-reader token, which prod keeps only in main-limited
-    # environments, so this runs in ONEcampaign only. The identical tree
-    # ran it here before it was synced.
     if: >-
-      github.repository_owner == 'ONEcampaign' &&
       github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
@@ -47,25 +43,6 @@ jobs:
 
       - name: Set up Python 3.13
         run: uv python install 3.13
-
-      # ONEcampaign/dfo-spec-kit is a private repo the default GITHUB_TOKEN
-      # cannot read; the services pull its packages as git dependencies, so
-      # `uv sync` needs a read token on it. The rewrite covers ONEcampaign
-      # URLs only, so the token travels with no other fetch.
-      - id: spec-kit-token
-        name: Mint a read token for dfo-spec-kit
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.READER_APP_CLIENT_ID }}
-          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
-          owner: ONEcampaign
-          repositories: dfo-spec-kit
-          permission-contents: read
-
-      - name: Authenticate git for the dfo-spec-kit dependencies
-        run: git config --global url."https://x-access-token:${READER_TOKEN}@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/"
-        env:
-          READER_TOKEN: ${{ steps.spec-kit-token.outputs.token }}
 
       - name: Install workspace
         run: uv sync --frozen --all-packages
@@ -92,11 +69,7 @@ jobs:
         run: uv run ty check services/presentation-mcp/src
 
   test:
-    # Mints a dfo-reader token, which prod keeps only in main-limited
-    # environments, so this runs in ONEcampaign only. The identical tree
-    # ran it here before it was synced.
     if: >-
-      github.repository_owner == 'ONEcampaign' &&
       github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
@@ -118,25 +91,6 @@ jobs:
       - name: Set up Python 3.13
         run: uv python install 3.13
 
-      # ONEcampaign/dfo-spec-kit is a private repo the default GITHUB_TOKEN
-      # cannot read; the services pull its packages as git dependencies, so
-      # `uv sync` needs a read token on it. The rewrite covers ONEcampaign
-      # URLs only, so the token travels with no other fetch.
-      - id: spec-kit-token
-        name: Mint a read token for dfo-spec-kit
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.READER_APP_CLIENT_ID }}
-          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
-          owner: ONEcampaign
-          repositories: dfo-spec-kit
-          permission-contents: read
-
-      - name: Authenticate git for the dfo-spec-kit dependencies
-        run: git config --global url."https://x-access-token:${READER_TOKEN}@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/"
-        env:
-          READER_TOKEN: ${{ steps.spec-kit-token.outputs.token }}
-
       - name: Install workspace
         run: uv sync --frozen --all-packages
 
@@ -144,14 +98,8 @@ jobs:
         run: uv run pytest
 
   docker:
-    # Catches a broken Dockerfile.ai before merge. uv.lock has git+ deps on
-    # ONEcampaign/dfo-spec-kit, so the build needs spec_kit_token --
-    # Dockerfile.ai mounts it as a BuildKit secret around the uv sync layers.
-    # Mints a dfo-reader token, which prod keeps only in main-limited
-    # environments, so this runs in ONEcampaign only. The identical tree
-    # ran it here before it was synced.
+    # Catches a broken Dockerfile.ai before merge.
     if: >-
-      github.repository_owner == 'ONEcampaign' &&
       github.event.pull_request.draft != true &&
       (github.event_name != 'pull_request' || github.event.pull_request.state == 'open')
     runs-on: ubuntu-latest
@@ -160,16 +108,6 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
-
-      - id: spec-kit-token
-        name: Mint a read token for dfo-spec-kit
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.READER_APP_CLIENT_ID }}
-          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
-          owner: ONEcampaign
-          repositories: dfo-spec-kit
-          permission-contents: read
 
       - name: Build image
         uses: docker/build-push-action@v7
@@ -180,5 +118,3 @@ jobs:
           cache-from: type=gha
           # The cache is an optimization; export failures should warn, not fail the build.
           cache-to: type=gha,mode=max,ignore-error=true
-          secrets: |
-            spec_kit_token=${{ steps.spec-kit-token.outputs.token }}

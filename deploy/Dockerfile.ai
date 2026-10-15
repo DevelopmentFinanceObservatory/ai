@@ -43,15 +43,9 @@ COPY services/presentation-mcp/pyproject.toml services/presentation-mcp/pyprojec
 # packages as workspace packages. --no-install-workspace skips building the
 # workspace packages themselves, since their source isn't copied in yet --
 # this keeps the slow dependency layer cacheable across source-only
-# changes. ONEcampaign/dfo-spec-kit is a private git dependency; the token
-# is mounted as a BuildKit secret (tmpfs, never written to a layer) and the
-# git credential rewrite it drives is undone in this same RUN, so neither
-# the token nor the rewrite survives into the committed layer.
+# changes.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=secret,id=spec_kit_token \
-    git config --global url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/" \
-    && uv sync --frozen --no-dev --no-install-workspace --package harness \
-    && git config --global --unset-all url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf
+    uv sync --frozen --no-dev --no-install-workspace --package harness
 
 COPY packages/common/src packages/common/src
 COPY services/harness/src services/harness/src
@@ -64,13 +58,9 @@ COPY services/presentation-mcp/src services/presentation-mcp/src
 # runtime stage below copies only /app/.venv, not the source tree, so a
 # default editable install (a .pth file pointing back at builder-stage
 # source) would leave `import harness` (and the mounted MCP packages)
-# broken at runtime. Same BuildKit secret mount as the dependency-only
-# layer above -- this sync re-resolves the git dependency too.
+# broken at runtime.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=secret,id=spec_kit_token \
-    git config --global url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf "https://github.com/ONEcampaign/" \
-    && uv sync --frozen --no-dev --no-editable --package harness \
-    && git config --global --unset-all url."https://x-access-token:$(cat /run/secrets/spec_kit_token)@github.com/ONEcampaign/".insteadOf
+    uv sync --frozen --no-dev --no-editable --package harness
 
 FROM python:3.13-slim AS runtime
 
