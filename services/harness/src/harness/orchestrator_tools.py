@@ -616,6 +616,12 @@ def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_un
     coordinates the rows differ on; or list at most `draws` of its values,
     with a plan offered beside the list when `plan_unspent` and the frame's
     values can be ranked."""
+    plan = f", or plan a ranking or a total across {dimension}" if plan_unspent else ""
+    if unranked.reason == "period_moves":
+        return (
+            "This chart's period moves with the latest data, so its largest members are not "
+            f"chosen for it. List at most {draws} {dimension} values in the select{plan}."
+        )
     if unranked.reason == "coordinates_differ":
         differing = " and ".join(unranked.coordinates)
         each = " each" if len(unranked.coordinates) > 1 else ""
@@ -628,7 +634,6 @@ def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_un
             "This frame holds rank positions, which the chart draws as they are. "
             f"List the {dimension} values to show, at most {draws}."
         )
-    plan = f", or plan a ranking or a total across {dimension}" if plan_unspent else ""
     return (
         "The largest could not be picked from this frame's rows. "
         f"List the {dimension} values the question names, at most {draws}{plan}."
@@ -646,10 +651,9 @@ def _unnarrowed_refusal(
 ) -> dict[str, Any]:
     """The over-cap `issue` of a select `_top_select` left as written, with
     what to change (`_over_cap_remedy`) when one dimension is over the cap:
-    `correct_and_retry`, with the dimension and its count in `fix`. A chart
-    whose period moves keeps `issue`, which says what draws already."""
+    `correct_and_retry`, with the dimension and its count in `fix`."""
     over = over_cap_dimension(select=select, view=view)
-    if over is None or unranked.reason == "period_moves":
+    if over is None:
         return issue
     dimension, count = over
     remedy = _over_cap_remedy(

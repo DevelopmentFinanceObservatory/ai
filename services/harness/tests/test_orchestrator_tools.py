@@ -2829,13 +2829,13 @@ _UNIT_VIEW["dimensions"].append({"name": "unit", "values": [], "plural": True, "
         (UncountedFrames(), {}, None, True, "could not be picked"),
         (_rank_positions(), {}, None, False, "rank positions"),
         (TwoUnitFrames(), {}, _UNIT_VIEW, False, "Bind unit to one value"),
-        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, "ranking with a limit"),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, "plan a ranking"),
         (
             HeldFrames(),
             {"type": "line_chart", "latest_periods": 2},
             None,
             False,
-            "ranking with a limit",
+            f"at most {LINE_CHART_MAX_VALUES} ",
         ),
     ],
     ids=[
@@ -2861,8 +2861,8 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     """A frame the store cannot read, a plan's rank positions (where the
     highest number is the worst), rows in two units, and a card whose period
     moves with the data (a list picked today would not follow it) are never
-    narrowed: the refusal stands and says what to change. One that is not
-    about a moving period names the dimension over the cap and its count in
+    narrowed: the refusal stands, says what to change with the count the
+    chart type draws, and names the dimension over the cap and its count in
     `fix`. A frame the store cannot read, does not hold or states no row
     count for is logged as a warning."""
     monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
@@ -2875,10 +2875,7 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     assert _writes(executor) == 0
     assert (orchestrator_tools.__name__ in {record.name for record in caplog.records}) is warned
     assert _stated(refused) == (HarnessCode.SERIES_LIMIT_EXCEEDED, "correct_and_retry")
-    moving = bool(view and view.get("rolling")) or "latest_periods" in chart
-    assert refused.get("fix") == (
-        None if moving else {"dimension": "financingProvider", "values": 30}
-    )
+    assert refused["fix"] == {"dimension": "financingProvider", "values": 30}
 
 
 @pytest.mark.parametrize(
@@ -2887,8 +2884,9 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
         (orchestrator_tools._Unranked("rank_positions"), False),
         (orchestrator_tools._Unranked("coordinates_differ", coordinates=("unit",)), False),
         (orchestrator_tools._Unranked("not_ranked"), True),
+        (orchestrator_tools._Unranked("period_moves"), True),
     ],
-    ids=["rank_positions", "coordinates_differ", "not_ranked"],
+    ids=["rank_positions", "coordinates_differ", "not_ranked", "period_moves"],
 )
 def test_over_cap_remedy_differs_with_each_reason_the_largest_were_not_picked(
     unranked: Any, plans: bool

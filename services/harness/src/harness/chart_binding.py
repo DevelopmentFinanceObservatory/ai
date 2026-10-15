@@ -141,8 +141,9 @@ def _series_refusal(
     draw (`_one_dimension_per_chart`) and the refusal is `correct_and_retry`.
     `moving_repair` is what draws instead on a chart whose period moves with
     the latest data, where no dimension over the cap is cut to its largest
-    members (`_moving_period_repair`). The message says it, which makes the
-    refusal of one dimension over the cap `correct_and_retry` too."""
+    members (`_moving_period_repair`); that message says it. Where one
+    dimension is over the cap, `make_charts` adds what to change, with the
+    count the chart type draws."""
     series = _series_estimate(select=select, declared=declared)
     if series <= MAX_SERIES_PER_COMPONENT:
         return None
@@ -151,14 +152,8 @@ def _series_refusal(
         f"over the platform's maximum of {MAX_SERIES_PER_COMPONENT}"
     )
     multiplying = _multiplying_dimensions(select=select, declared=declared)
-    if len(multiplying) < 2 and moving_repair is None:
-        return harness_refusal(code=HarnessCode.SERIES_LIMIT_EXCEEDED, message=over)
     if len(multiplying) < 2:
-        return harness_refusal(
-            code=HarnessCode.SERIES_LIMIT_EXCEEDED,
-            message=f"{over}. {moving_repair}",
-            retry_mode=RetryMode.CORRECT_AND_RETRY,
-        )
+        return harness_refusal(code=HarnessCode.SERIES_LIMIT_EXCEEDED, message=over)
     return harness_refusal(
         code=HarnessCode.SERIES_LIMIT_EXCEEDED,
         message=f"{over}: {_one_dimension_per_chart(multiplying, moving_repair=moving_repair)}",
