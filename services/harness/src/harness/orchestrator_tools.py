@@ -105,8 +105,8 @@ from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     MAX_CHARTS_PER_CALL,
     MAX_SERIES_PER_COMPONENT,
-    MAX_TABLE_ROWS,
     TopMembers,
+    chart_draws,
     covers_every_row,
     differing_coordinates,
     empty_select_refusal,
@@ -382,24 +382,6 @@ class FetchScope(GetDataScope):
 _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do."
 
 
-def _periods_covered(view: Mapping[str, Any]) -> int:
-    """The periods a table of a frame with `view` draws rows at: every period
-    from the first to the last the frame covers, gaps included, as dfo-apis
-    binds a table's window. A day counts as up to 31 a month, so the count
-    errs high, never low. A span frame (`2020/2024`) has one period."""
-    coverage = view.get("coverage") or []
-    if len(coverage) != 2 or "/" in coverage[0]:
-        return 1
-    first, last = ([int(part) for part in bound.split("-")] for bound in coverage)
-    years = last[0] - first[0]
-    if len(first) == len(last) == 1:
-        return years + 1
-    months = years * 12 + last[1] - first[1]
-    if len(first) == len(last) == 2:
-        return months + 1
-    return months * 31 + last[-1] - first[-1] + 1
-
-
 async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) -> T | None:
     """What `work` makes of the frame the store holds under `ref` and its
     trace, or None when the store does not hold the frame or cannot read it.
@@ -599,17 +581,6 @@ def _ranked(
     return _Unranked("not_ranked")
 
 
-def _draws(chart: Chart, view: Mapping[str, Any]) -> int:
-    """The most members of one dimension a chart of a frame with `view`
-    draws: `LINE_CHART_MAX_VALUES` lines, `MAX_SERIES_PER_COMPONENT` bars or
-    table series, and for a table no more than fit `MAX_TABLE_ROWS`."""
-    if chart.type == "line_chart":
-        return LINE_CHART_MAX_VALUES
-    if chart.type == "table":
-        return max(1, min(MAX_SERIES_PER_COMPONENT, MAX_TABLE_ROWS // _periods_covered(view)))
-    return MAX_SERIES_PER_COMPONENT
-
-
 def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_unspent: bool) -> str:
     """What to change in a select refused with the one `dimension` over the
     series cap, given why its largest members were not picked: bind the
@@ -659,7 +630,7 @@ def _unnarrowed_refusal(
     remedy = _over_cap_remedy(
         dimension=dimension,
         unranked=unranked,
-        draws=_draws(chart, view),
+        draws=chart_draws(type_=chart.type, view=view),
         plan_unspent=plan_unspent,
     )
     return harness_refusal(
@@ -691,9 +662,10 @@ async def _top_select(
     members by their value at one period (`top_members`), highest first.
 
     When `cut`, it lists only the members holding a value at that period, as
-    many as `chart.type` draws (`_draws`). A cut of a place or flow party dimension ranks only the
-    members one ranking compares (`_ranked`), by the frame's kind read
-    (`_member_cells`) when its rows carry no kind or type cell. Otherwise it
+    many as `chart.type` draws (`chart_draws`). A cut of a place or flow
+    party dimension ranks only the members one ranking compares (`_ranked`),
+    by the frame's kind read (`_member_cells`) when its rows carry no kind or
+    type cell. Otherwise it
     lists every member, those with no value at the period last. dfo-apis
     draws a table's and a line chart's series in the order the select lists
     them.
@@ -719,7 +691,7 @@ async def _top_select(
         select=select,
         dimension=dimension,
         view=frame["view"],
-        limit=_draws(chart, frame["view"]) if cut else None,
+        limit=chart_draws(type_=chart.type, view=frame["view"]) if cut else None,
         cut=cut,
     )
     top = await _frame_work(frame_store_ref(frame), functools.partial(rank, kinds=None))

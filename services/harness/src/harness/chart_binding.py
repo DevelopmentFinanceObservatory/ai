@@ -56,14 +56,45 @@ def _plural_dimension_names(view: dict[str, Any]) -> set[str]:
     }
 
 
-def _moving_period_repair(*, plan_unspent: bool) -> str:
+def periods_covered(view: Mapping[str, Any]) -> int:
+    """The periods a table of a frame with `view` draws rows at: every period
+    from the first to the last the frame covers, gaps included, as dfo-apis
+    binds a table's window. A day counts as up to 31 a month, so the count
+    errs high, never low. A span frame (`2020/2024`) has one period."""
+    coverage = view.get("coverage") or []
+    if len(coverage) != 2 or "/" in coverage[0]:
+        return 1
+    first, last = ([int(part) for part in bound.split("-")] for bound in coverage)
+    years = last[0] - first[0]
+    if len(first) == len(last) == 1:
+        return years + 1
+    months = years * 12 + last[1] - first[1]
+    if len(first) == len(last) == 2:
+        return months + 1
+    return months * 31 + last[-1] - first[-1] + 1
+
+
+def chart_draws(*, type_: str, view: Mapping[str, Any]) -> int:
+    """The most members of one dimension a `type_` chart of a frame with
+    `view` draws: `LINE_CHART_MAX_VALUES` lines, `MAX_SERIES_PER_COMPONENT`
+    bars or table series, and for a table no more than fit `MAX_TABLE_ROWS`
+    over the periods it covers (`periods_covered`)."""
+    if type_ == "line_chart":
+        return LINE_CHART_MAX_VALUES
+    if type_ == "table":
+        return max(1, min(MAX_SERIES_PER_COMPONENT, MAX_TABLE_ROWS // periods_covered(view)))
+    return MAX_SERIES_PER_COMPONENT
+
+
+def _moving_period_repair(*, draws: int, plan_unspent: bool) -> str:
     """What draws in place of a chart over the series cap whose period moves
     with the latest data, which `make_charts` cuts to no largest members: a
-    list of members, or while the turn's plan call is `plan_unspent`, a
+    list of at most `draws` members, the most the chart type draws
+    (`chart_draws`), or while the turn's plan call is `plan_unspent`, a
     ranking with a limit through plan."""
     repair = (
         "This chart's period moves with the latest data, so its largest members are not "
-        f"chosen for it: list at most {MAX_SERIES_PER_COMPONENT} members in the select"
+        f"chosen for it: list at most {draws} members in the select"
     )
     if plan_unspent:
         return f"{repair}, or get the largest from a ranking with a limit through plan."
@@ -125,7 +156,9 @@ def select_binding_ok(
         select=select,
         declared=declared,
         moving_repair=(
-            _moving_period_repair(plan_unspent=plan_unspent)
+            _moving_period_repair(
+                draws=chart_draws(type_=type_, view=view), plan_unspent=plan_unspent
+            )
             if latest_periods or view.get("rolling")
             else None
         ),

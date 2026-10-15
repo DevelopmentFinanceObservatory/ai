@@ -2440,18 +2440,27 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
 
 
 @pytest.mark.parametrize(
-    ("moves", "chart"),
-    [({}, {}), ({"rolling": True}, {}), ({}, {"latest_periods": 5})],
-    ids=["fixed", "rolling", "latest_periods"],
+    ("moves", "chart", "draws"),
+    [
+        ({}, {}, None),
+        ({"rolling": True}, {}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"latest_periods": 5}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"type": "line_chart", "latest_periods": 5}, LINE_CHART_MAX_VALUES),
+    ],
+    ids=["fixed", "rolling", "latest_periods", "line_chart_latest_periods"],
 )
 async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
-    monkeypatch: pytest.MonkeyPatch, moves: dict[str, Any], chart: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch,
+    moves: dict[str, Any],
+    chart: dict[str, Any],
+    draws: int | None,
 ) -> None:
     """A table that binds neither the six recipients nor the thirty providers
     is not narrowed: the model reads both dimensions and their counts. It is
     told a chart of the thirty alone is cut to its largest, except where the
     chart's period moves with the data: no cut is made there, so it is told
-    to list fewer or to rank with a limit."""
+    to list at most as many members as the chart type draws or to rank with
+    a limit."""
     view = copy.deepcopy(WIDE_VIEW) | moves
     view["dimensions"][2]["total_count"] = 6
 
@@ -2465,6 +2474,7 @@ async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
     moving = bool(moves or chart)
     assert ("draws its largest members" in error) is not moving
     assert ("ranking with a limit" in error) is moving
+    assert (f"at most {draws} members" in error) is moving
     assert _stated(result["charts"][0]) == (
         HarnessCode.SERIES_LIMIT_EXCEEDED,
         "correct_and_retry",
@@ -2560,7 +2570,7 @@ def test_periods_covered_counts_every_period_of_the_window_never_too_few(
     coverage: list[str], periods: int
 ) -> None:
     """Days count up to 31 a month: January to March is 91 days, counted 93."""
-    assert orchestrator_tools._periods_covered({"coverage": coverage}) == periods
+    assert chart_binding.periods_covered({"coverage": coverage}) == periods
 
 
 async def test_make_charts_keeps_a_drawable_select_when_ordering_would_break_it(
