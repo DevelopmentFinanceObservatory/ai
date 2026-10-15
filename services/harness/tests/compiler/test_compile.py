@@ -4519,6 +4519,7 @@ def test_a_level_filter_over_ids_debtors_reads_the_debtors_type_column(
     assert result.workflow is not None
     retrieve, countries, _ = result.workflow.steps
     assert retrieve.args["place_types"] is True
+    assert retrieve.args["without_party_totals"] is True
     assert countries.args == {
         "predicates": [
             {

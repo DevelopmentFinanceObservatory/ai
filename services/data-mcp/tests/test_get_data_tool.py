@@ -4623,6 +4623,12 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
             ["financingProvider_type", "financingRecipient_type", "party_kind"],
             False,
         ),
+        (
+            _FLOW_OPEN_PROVIDER,
+            {"without_party_totals": True, "place_types": True},
+            ["financingProvider_type", "financingRecipient_type", "party_kind"],
+            True,
+        ),
         (_FLOW_OPEN_PROVIDER, {}, None, False),
         (_PLACE_SPEC, {"without_party_totals": True}, None, False),
         (
@@ -4632,7 +4638,14 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
             False,
         ),
     ],
-    ids=["flow-totals-only", "flow-types-only", "flow-neither", "place-totals-only", "place-both"],
+    ids=[
+        "flow-totals-only",
+        "flow-types-only",
+        "flow-both",
+        "flow-neither",
+        "place-totals-only",
+        "place-both",
+    ],
 )
 async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
     monkeypatch: pytest.MonkeyPatch,

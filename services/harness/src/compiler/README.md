@@ -153,7 +153,9 @@ columns both upstream sources resolve in common as `join_keys` (else
 grammar's own `ordered_threshold` or `category_match` shape, resolving an
 `EntityIn`'s names against the upstream requirement's entities and the
 source, the same way a comparison's side does. A `PlaceLevel` becomes a
-`place_level` predicate on `observationAbout_type`, and the retrieval that filter
+`place_level` predicate on the type column of the role it filters
+(`observationAbout_type` for a place, `destination_type` for a flow's destination, and so on;
+`_place_level_column`), and the retrieval that filter
 reads, directly or through other filters, asks `get_data` for that column with
 `place_types: true` (`_read_by_level_filter`). Every flow retrieval asks for
 `without_party_totals: true`, so dfo-apis serves a frame holding each open side's parties
