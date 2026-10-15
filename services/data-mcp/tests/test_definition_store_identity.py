@@ -75,10 +75,10 @@ def test_verify_read_refuses_a_tampered_stored_value() -> None:
 
 def test_a_real_captured_envelope_round_trips_byte_exactly() -> None:
     """`captured_definition.json` is a real `Spec.definition` object, captured from
-    dfo-apis' own offline `TestClient` fixture at
+    apis' own offline `TestClient` fixture at
     `tests/engine/test_parsed_door.py::make_client` (fake graph/LLM/SDMX, no
     network), posting its `_fertility_kenya_payload()` to `/api/search/resolve`
-    on a checkout of dfo-apis pinned to `dfo-spec-kit` revision
+    on a checkout of apis pinned to `dfo-spec-kit` revision
     `d4b1438e1d9a2aad91cdbf9f933652a952bf7c18` (`uv.lock`'s own pin at capture
     time) -- the same revision `search.models.BaseIdentity` documents as
     carrying the two-arm `shape: {kind: "statvar_schema"|"stat_var", ...}`
@@ -88,8 +88,8 @@ def test_a_real_captured_envelope_round_trips_byte_exactly() -> None:
 
     This test is the one that would have caught a canonicalisation mismatch
     a synthetic fixture cannot: it verifies `rfc8785.dumps` plus
-    `hashlib.sha256` over dfo-apis' actual wire bytes reproduces the actual
-    `spec_id` dfo-apis minted, which is exactly the guarantee `search_tool`'s
+    `hashlib.sha256` over apis' actual wire bytes reproduces the actual
+    `spec_id` apis minted, which is exactly the guarantee `search_tool`'s
     write path leans on.
     """
     captured = json.loads((_FIXTURES / "captured_definition.json").read_text())

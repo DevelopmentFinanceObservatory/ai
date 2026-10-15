@@ -28,7 +28,7 @@ def extract_frame_ref(
     """Read a frame reference from `structured_content` the way `extract` says to.
 
     `get_data`'s result is a definition manifest with the frame's reference beside
-    it as `frame_ref`. The manifest's own pair names dfo-apis' materialisation, and
+    it as `frame_ref`. The manifest's own pair names apis' materialisation, and
     a frame minted with extra columns is held under a `content_version` of its own
     (`data_mcp.frame_materialisation.frame_ref_for`), so the reference later steps
     read is `frame_ref`. `manifest_frame_ref` reads the manifest's own pair.
@@ -59,9 +59,9 @@ def extract_frame_ref(
 def manifest_frame_ref(structured_content: Mapping[str, object]) -> FrameRef:
     """The manifest's own `{spec_id, content_version}` in `get_data`'s result.
 
-    dfo-apis serves the frame under this pair, so it is the pair a retrieval is
+    apis serves the frame under this pair, so it is the pair a retrieval is
     described and drawn by. A frame minted with extra columns is held by data-mcp
-    under a `content_version` of its own (`extract_frame_ref`), which dfo-apis
+    under a `content_version` of its own (`extract_frame_ref`), which apis
     never minted and does not serve.
 
     Raises:

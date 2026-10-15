@@ -16,6 +16,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import AuthProvider
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -59,7 +60,7 @@ from mcp.types import ResourceLink, TextContent
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 from .resolve_results import members_result, resolve_result, resolved_result
-from .test_client import _client, _problem_body, text_of
+from .test_client import _client, _problem_body, id_token_auth, text_of
 from .test_operations import _FakeClock
 
 Handler = (
@@ -330,9 +331,13 @@ def _mint_only_handler(status: int, payload: dict[str, Any]) -> Handler:
 
 
 async def _call_get_data(
-    handler: Handler, store: Any, arguments: dict[str, object]
+    handler: Handler,
+    store: Any,
+    arguments: dict[str, object],
+    *,
+    auth: AuthProvider | None = None,
 ) -> CallToolResult:
-    async with _client(handler) as upstream:
+    async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             # server.py's lifespan already built its own store on entering
@@ -528,9 +533,9 @@ async def test_the_definition_sidecar_is_always_sent(arguments_extra: dict[str, 
     }
 
 
-# A mint that crosses dfo-apis' own sync budget: 202, then polled to completion
+# A mint that crosses apis' own sync budget: 202, then polled to completion
 
-# Shaped like dfo-apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
+# Shaped like apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
 # own pattern constraint) so these tests exercise the real validated shape rather than
 # a placeholder a stricter pattern would itself reject.
 _OPERATION_ID = "op_" + hashlib.sha256(b"test-operation").hexdigest()
@@ -835,7 +840,7 @@ async def test_identity_mismatch_refuses_capability_unavailable() -> None:
 
 async def test_registry_fallback_serves_a_definition_store_never_held() -> None:
     """A `spec_id` this process's store never saw can still be served straight from
-    dfo-apis' own permanent registry: the platform contract's `definition_not_held` means
+    apis' own permanent registry: the platform contract's `definition_not_held` means
     "held by neither store nor registry", not "held by neither store nor a sidecar this
     call carried" -- so a store miss alone must not refuse before trying the registry.
     """
@@ -933,7 +938,7 @@ async def test_mint_transport_failure_becomes_a_refusal() -> None:
 async def test_upstream_invalid_role_ref_pointer_matches_the_local_entities_convention() -> None:
     """A locally-rejected name and an upstream-rejected role both point at
     `/scope/entities/{role}` -- this tool's own argument path -- rather than
-    leaking dfo-apis' `/input`-wrapped wire envelope. The rendered message agrees
+    leaking apis' `/input`-wrapped wire envelope. The rendered message agrees
     with the structured `fix.pointer`: `request_invalid`'s factory embeds the
     pointer inline in `message`, so both come from the same rebase call rather
     than naming two different paths for the same mistake.
@@ -973,7 +978,7 @@ _UNIT_ISSUE_DETAIL = (
     "facet axis 'unit' is unbound, no default policy is declared, and no "
     "probed candidate has any observations"
 )
-# dfo-apis#1221 carries each issue's own code and detail.
+# The platform sends each issue's own code and detail.
 _FACET_REFUSAL: dict[str, Any] = {
     "retryable": False,
     "detail": "one or more facet axes could not be resolved",
@@ -990,7 +995,7 @@ _FACET_REFUSAL: dict[str, Any] = {
 
 @pytest.mark.parametrize("path", ["sync", "polled"])
 async def test_a_refused_mint_names_the_spec_and_places_it_was_minting(path: str) -> None:
-    """`default_facet_undefined` relays dfo-apis' detail and retryable flag as sent, and
+    """`default_facet_undefined` relays apis' detail and retryable flag as sent, and
     adds only what get_data was asking for: the spec_id and the places it bound. The same
     holds when the mint ran as a 202 operation and its poll reports the refusal."""
     stored = _stored_definition(entities={"observationAbout": ["africa"]})
@@ -1977,7 +1982,7 @@ async def test_the_result_states_no_frame_shape_when_the_frame_was_not_read(
 
 
 def _stat_var_entries(count: int) -> list[dict[str, Any]]:
-    """`count` `trace.resolved_stat_vars` entries shaped as dfo-apis writes them."""
+    """`count` `trace.resolved_stat_vars` entries shaped as apis writes them."""
     prefix = "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSPurposeCode"
     return [
         {
@@ -2432,7 +2437,7 @@ async def test_the_registry_fallback_mint_posts_the_spec_id_alone() -> None:
 
 
 async def test_a_member_list_is_refused_before_any_call() -> None:
-    """dfo-apis resolves a family's members itself and takes no list."""
+    """apis resolves a family's members itself and takes no list."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("a refused argument must not reach dfo-apis")
@@ -2491,7 +2496,7 @@ def _parquet_bytes() -> bytes:
 
 
 def _content_version_of(data: bytes) -> str:
-    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    """The `content_version` apis mints for the canonical frame `data` holds."""
     return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
 
 
@@ -2829,7 +2834,7 @@ async def test_a_mint_post_cut_by_its_own_cap_with_deadline_left_refuses_as_unan
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The mint POST's own `CallBudget.mint_timeout_s` (125s) cap ends it first, well inside the
-    165s call deadline (135s remained after the pre-mint reserve). dfo-apis does not
+    165s call deadline (135s remained after the pre-mint reserve). apis does not
     cancel a mint whose client went away, so this refuses with `mint_unanswered`, like
     a deadline-cut POST, whose message says the mint may still be running."""
     clock = _FakeClock()
@@ -2924,7 +2929,7 @@ def _poll_waits_move(clock: _FakeClock, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _operation_done_at(clock: _FakeClock, *, done_at: float, spec_id: str) -> Handler:
-    """dfo-apis for one mint over its sync budget, done once `clock` reaches `done_at`.
+    """apis for one mint over its sync budget, done once `clock` reaches `done_at`.
 
     Every POST answers 202 with the same operation id, as a repeat submit rejoins
     the operation while coverage is unchanged.
@@ -3037,7 +3042,7 @@ async def test_an_external_mint_post_gets_the_32s_before_the_reserve_and_promise
 
 
 def _mint_never_answers(clock: _FakeClock, posted: list[str]) -> Handler:
-    """dfo-apis running every mint synchronously for longer than the external
+    """apis running every mint synchronously for longer than the external
     budget's 32s: each POST records its spec_id and gets no answer."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -3052,7 +3057,7 @@ def _mint_never_answers(clock: _FakeClock, posted: list[str]) -> Handler:
 async def test_an_abandoned_external_mint_holds_its_slot_until_its_window_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dfo-apis runs an abandoned synchronous mint for up to 120s after its POST, and the
+    """apis runs an abandoned synchronous mint for up to 120s after its POST, and the
     ledger holds its slot a further margin past that. Until then a mint for another
     definition finds the one external slot held and refuses without sending, with the
     time left as its wait."""
@@ -3143,6 +3148,30 @@ async def test_a_direct_call_is_neither_limited_nor_counted_by_the_mint_ledger(
     assert unanswered.structured_content["retry_after_s"] == 5.0
     assert external.is_error is False
     assert posted == [held.spec_id, other.spec_id, other.spec_id, other.spec_id]
+
+
+async def test_a_mint_with_no_id_token_refuses_unavailable_and_frees_its_slot() -> None:
+    """A token that cannot be minted means the POST was never sent, so the external
+    slot is freed at once and the next external mint is admitted."""
+    failed, other = _stored_definition(), _stored_definition(shape_id="OtherShape")
+    posted: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        spec_id = json.loads(request.content)["input"]["spec_id"]
+        posted.append(spec_id)
+        return httpx2.Response(200, json=_manifest_response(spec_id=spec_id))
+
+    with use_call_budget(EXTERNAL_CALL_BUDGET):
+        refused = await _call_get_data(
+            handler, _StubStore(failed), {"spec_id": failed.spec_id}, auth=id_token_auth(mints=0)
+        )
+        admitted = await _call_get_data(handler, _StubStore(other), {"spec_id": other.spec_id})
+
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "service_unavailable"
+    assert refused.structured_content["retry_after_s"] == 5.0
+    assert admitted.is_error is False
+    assert posted == [other.spec_id]
 
 
 def _statistics_manifest() -> Manifest:
@@ -3271,7 +3300,7 @@ def _summed_manifest_response(
 ) -> dict[str, Any]:
     """A summed mint's manifest: the groupby rendering, a trace listing two StatVars with
     rows and one without, and, for a version stored before descriptions
-    (`contributing_member_count` set), dfo-apis' `stat_vars_summed` warning."""
+    (`contributing_member_count` set), apis' `stat_vars_summed` warning."""
     response = _manifest_response(
         spec_id=spec_id, content_version=content_version, artifact_digest=artifact_digest
     )
@@ -3626,9 +3655,9 @@ async def _call_get_data_in_one_process(
 
 
 class _RawAndSummedMint:
-    """dfo-apis for one spec: the raw frame under one `content_version`, and the summed
+    """apis for one spec: the raw frame under one `content_version`, and the summed
     frame under its own unless a single StatVar contributed (`sole_contributor`), when
-    dfo-apis serves the raw frame's own manifest. Each version's canonical frame is its
+    apis serves the raw frame's own manifest. Each version's canonical frame is its
     bytes. Records every artifact fetch."""
 
     def __init__(self, *, spec_id: str, sole_contributor: bool = False) -> None:
@@ -3690,7 +3719,7 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
 ) -> None:
     """The frame store is insert-only and keyed on `{spec_id, content_version}`: the
     raw frame is the raw version's canonical frame under its pair, and the summed
-    frame, which dfo-apis minted as a version of its own, is held under the pair
+    frame, which apis minted as a version of its own, is held under the pair
     naming its groupby, whichever call comes first. The summed frame's family ref
     marks it summed, with no warning or description."""
     monkeypatch.undo()  # the real `materialise_and_register`
@@ -3740,7 +3769,7 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
 
 
 def _breakdown_frame_parquet(*, spec_id: str, sectors: list[str]) -> bytes:
-    """dfo-apis' frame for a `groupby.levels` roll-up: one row per sector, every row's
+    """apis' frame for a `groupby.levels` roll-up: one row per sector, every row's
     `stat_var` the family ref, and `stat_var_crsPurpose` the sector's label."""
     table = pa.table(
         {
@@ -3760,7 +3789,7 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A breakdown frame reaches the store under the pair naming the roll-up's groupby
-    and the `content_version` dfo-apis minted for it, with `stat_var_crsPurpose` as a
+    and the `content_version` apis minted for it, with `stat_var_crsPurpose` as a
     role column and one StatVar."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
@@ -3821,7 +3850,7 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
 async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With one StatVar holding rows, dfo-apis answers a summed request with the raw
+    """With one StatVar holding rows, apis answers a summed request with the raw
     frame's own `content_version` and no `stat_vars_summed` warning. The sum keeps the
     raw version, so its rendering is held under the pair naming its groupby, apart
     from the raw version's canonical frame."""
@@ -3907,7 +3936,7 @@ async def test_a_call_without_place_types_sends_no_columns() -> None:
 
 
 def _column_unknown(*, served: list[str], truncated: bool = False) -> httpx2.Response:
-    """dfo-apis' 422 for an `options.columns` token the table lacks, listing what it serves."""
+    """apis' 422 for an `options.columns` token the table lacks, listing what it serves."""
     return httpx2.Response(
         422,
         json={
@@ -4017,9 +4046,9 @@ async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_ret
 
 
 class _PlainAndTypedMint:
-    """dfo-apis for one place-subject spec: the default columns, or the place-type
+    """apis for one place-subject spec: the default columns, or the place-type
     column added when `options.columns` names it, both under one `content_version`
-    (dfo-apis keeps it across renderings), each its own artifact. Every manifest lists
+    (apis keeps it across renderings), each its own artifact. Every manifest lists
     both renderings, the one not requested first, as a done operation lists every
     rendering stored under its pair. Records every artifact fetch as
     `(content_version, artifact_digest)`."""
@@ -4089,7 +4118,7 @@ class _PlainAndTypedMint:
 async def _mint_recorded_root(
     handler: Handler, stored: StoredDefinition, record: MintRecord
 ) -> RootMint | QueuedOperation | ToolResult:
-    """`mint_recorded_root` for `record` against `handler` as dfo-apis."""
+    """`mint_recorded_root` for `record` against `handler` as apis."""
     async with _client(handler) as upstream:
         client_holder.set_client(upstream)
         set_store(_StubStore(stored))
@@ -4186,7 +4215,7 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
         operation_id=_OPERATION_ID, status="pending", retry_after_s=1.5
     )
     assert isinstance(again, RootMint)
-    # The repeat is the same request, which dfo-apis answers from the operation it holds.
+    # The repeat is the same request, which apis answers from the operation it holds.
     assert submitted[0] == submitted[1]
     assert len(submitted) == 2
 
@@ -4250,7 +4279,7 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
 async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_option(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The option is dfo-apis': the replay sends it as recorded, and the record of the new
+    # The option is apis': the replay sends it as recorded, and the record of the new
     # pair keeps it.
     stored = _stored_definition(**_FLOW_OPEN_PROVIDER)
     registered: list[Mapping[str, Any]] = []
@@ -4322,7 +4351,7 @@ async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
 async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     monkeypatch: pytest.MonkeyPatch, order: tuple[bool, bool]
 ) -> None:
-    """dfo-apis answers both renderings under one `{spec_id, content_version}`. The
+    """apis answers both renderings under one `{spec_id, content_version}`. The
     store is insert-only, so under one key whichever was stored first would be served
     to the other. The plain frame keeps the mint's pair, so a frame stored before
     renderings had their own identity still resolves, and the typed frame is held
@@ -4352,7 +4381,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     assert plain_ref == FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
     assert typed_ref.spec_id == stored.spec_id
     assert typed_ref.content_version != upstream.content_version
-    # The manifest stays dfo-apis' document, naming the materialisation its artifacts
+    # The manifest stays apis' document, naming the materialisation its artifacts
     # are read under.
     assert {c["content_version"] for c in content.values()} == {upstream.content_version}
     assert content[False]["role_keys"] == ["observationAbout"]
@@ -4369,7 +4398,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     typed_frame = await frame_store.get(typed_ref)
     assert plain_frame is not None
     assert typed_frame is not None
-    # Each frame's mint record sits under the frame's own pair and names dfo-apis'.
+    # Each frame's mint record sits under the frame's own pair and names apis'.
     dataset = FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
     plain_options = {"format": "parquet", "bundle": False, "layout": "frame"}
     assert await frame_store.get_mint_record(plain_ref) == MintRecord(
@@ -4440,7 +4469,7 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
 
     assert result.is_error is False, result.structured_content
     assert [sent_options.get("columns") for sent_options in sent] == [columns]
-    # Sent only when true, as dfo-apis records it in a rendering only then.
+    # Sent only when true, as apis records it in a rendering only then.
     assert [sent_options.get("without_party_totals") for sent_options in sent] == [
         True if cut else None
     ]
@@ -4448,9 +4477,9 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
 
 
 class _FlowMint:
-    """dfo-apis for a flow spec with an open provider side and a named recipient. Its frame
+    """apis for a flow spec with an open provider side and a named recipient. Its frame
     holds single parties, group totals, a residual and a party of no kind. A mint with
-    `options.without_party_totals` answers as dfo-apis cuts it: the rows of the providers of
+    `options.without_party_totals` answers as apis cuts it: the rows of the providers of
     kind `total` left out, under a version of its own (`CUT_VERSION`) whose coverage counts
     the rows kept and whose trace lists the totals left out. The artifact of each mint is the
     rendering it asked for. Records every artifact fetch."""
@@ -4551,7 +4580,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     assert left_out_again.structured_content is not None
     kept_ref = FrameRef.model_validate(with_totals.structured_content["frame_ref"])
     cut_ref = FrameRef.model_validate(left_out.structured_content["frame_ref"])
-    # The manifest names dfo-apis' cut version, and the frame is held under the pair its
+    # The manifest names apis' cut version, and the frame is held under the pair its
     # kinds derive from that version.
     assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
     assert cut_ref == frame_ref_for(
@@ -4576,7 +4605,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         "country/FRA",
         "country/XYZ",
     ]
-    # The record keeps the option, so a replay asks dfo-apis for the cut again.
+    # The record keeps the option, so a replay asks apis for the cut again.
     record = await frame_store.get_mint_record(cut_ref)
     assert record is not None
     assert record.dataset == FrameRef(spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION)
@@ -4596,7 +4625,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     assert "Left out of the frame" not in text_of(with_totals)
 
 
-# `GET /api/datasets/{id}/options` as dfo-apis answered it for the DAC2a spec "official
+# `GET /api/datasets/{id}/options` as apis answered it for the DAC2a spec "official
 # development assistance to Kenya from every provider, 2015-2022".
 _REGISTRY_OPTIONS = json.loads(
     (Path(__file__).parent / "fixtures" / "options_dac2a_kenya_open_provider.json").read_text()
@@ -4605,7 +4634,7 @@ _REGISTRY_SPEC_ID = _REGISTRY_OPTIONS["definition"]["spec_id"]
 
 
 class _RegistryFlowMint:
-    """dfo-apis for the spec `_REGISTRY_OPTIONS` records, which the definition store does not
+    """apis for the spec `_REGISTRY_OPTIONS` records, which the definition store does not
     hold: its registry answers the options route, and a flow table refuses a place type
     column and serves the artifact of the rendering that asks for party kinds, cut of the
     providers of kind `total` under a version of its own (`CUT_VERSION`) when the mint asks
@@ -4763,7 +4792,7 @@ async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_
 async def test_a_flow_frame_that_cannot_carry_the_asked_kinds_is_refused(
     monkeypatch: pytest.MonkeyPatch, argument: str
 ) -> None:
-    # The registry reads the spec as a place spec, and dfo-apis then serves a flow manifest
+    # The registry reads the spec as a place spec, and apis then serves a flow manifest
     # for the mint without kinds: that frame would carry every group total.
     monkeypatch.undo()  # the real `materialise_and_register`
     place = _stored_definition(entities={"recipient": ["country/KEN"]})

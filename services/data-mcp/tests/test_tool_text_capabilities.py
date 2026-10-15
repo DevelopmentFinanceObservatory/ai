@@ -1,6 +1,6 @@
 """The tool text data-mcp publishes, checked against what the Graph API's resolve door answers.
 
-`fixtures/graph_api_capabilities.json` is the body of dfo-apis' `GET /api/graph/capabilities`:
+`fixtures/graph_api_capabilities.json` is the body of apis' `GET /api/graph/capabilities`:
 `kinds` is the closed kind list, `resolve_kinds` the kinds a resolve request may name. The
 kinds `get_data` resolves are the ones a request naming none admits, since
 `data_mcp.resolution` names none: `resolve_request.kinds.default` in

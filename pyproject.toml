@@ -25,7 +25,7 @@ dev = [
     "pre-commit>=4.6.0",
     # starlette.testclient imports httpx2 first and falls back to httpx with a
     # deprecation warning; the fallback is slated for removal. data-mcp also
-    # imports httpx2 directly, as the client it wraps around dfo-apis, so this
+    # imports httpx2 directly, as the client it wraps around apis, so this
     # pin serves both a workspace-wide test dependency and a service one.
     "httpx2>=2.13.0",
     # In-memory span exporter for asserting data-mcp's call/attempt spans in

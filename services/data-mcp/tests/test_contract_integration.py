@@ -1,7 +1,7 @@
-"""Contract check against a REAL dfo-apis. Requires DFO_APIS_URL.
+"""Contract check against a REAL apis. Requires DFO_APIS_URL.
 
 Skipped automatically otherwise (no network access in CI). Run manually
-against a live dfo-apis Search API to catch a contract drift between this
+against a live apis Search API to catch a contract drift between this
 service's client.py and the upstream API before it turns into a runtime
 error, e.g.:
 
@@ -33,7 +33,7 @@ _GRAPH_SCHEMA_SNAPSHOT = Path(__file__).resolve().parent / "fixtures" / "graph_a
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DFO_APIS_URL"),
-    reason="set DFO_APIS_URL to a live dfo-apis to run this contract check",
+    reason="set DFO_APIS_URL to a live apis to run this contract check",
 )
 
 
@@ -104,7 +104,7 @@ async def test_healthz_endpoint_is_reachable() -> None:
 
 
 # Graph node door: validates a real node response against the generated wire models,
-# distinct from the fixture round-trips in test_node_lookup.py, which replay dfo-apis'
+# distinct from the fixture round-trips in test_node_lookup.py, which replay apis'
 # documented examples.
 
 

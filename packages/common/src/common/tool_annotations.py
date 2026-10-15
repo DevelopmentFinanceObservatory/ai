@@ -5,15 +5,15 @@ These tools store content they derive, each keyed by a hash of that content:
 
 - `search` writes the definitions it resolves to into the definition store
   (`data_mcp.definition_writes`).
-- `get_data` asks dfo-apis to mint a frame, which registers its definition
+- `get_data` asks apis to mint a frame, which registers its definition
   there, and a mint can keep running after the caller's call has ended
   (`data_mcp.mint_ledger`). It stores the frame in the frame store.
 - The analysis tools store their result frame in the frame store, and
   `resolve_anchor` stores the anchor record it resolves.
-- `describe_frame`, for an analysis result, uploads that frame to dfo-apis'
+- `describe_frame`, for an analysis result, uploads that frame to apis'
   publish door before asking for its view, because the platform computes the
   view and cannot otherwise resolve the frame
-  (`presentation_mcp.client._ensure_published_pair`). dfo-apis keeps accepted
+  (`presentation_mcp.client._ensure_published_pair`). apis keeps accepted
   frames.
 
 The label stays read-only because a repeat of any of these stores nothing new,

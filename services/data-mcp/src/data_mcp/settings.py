@@ -2,28 +2,61 @@
 
 from __future__ import annotations
 
+import os
+from typing import Self
+from urllib.parse import urlsplit
+
 from common.settings import FrameServiceSettings
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 from data_mcp.deadline import DIRECT_CALL_BUDGET
 from data_mcp.definition_store.caching import DEFAULT_MAX_ENTRIES
 
 
-class Settings(FrameServiceSettings):
-    """Configuration for data-mcp, combining the shared base fields with the dfo-apis upstream settings it wraps.
+def _is_origin(url: str) -> bool:
+    """Whether `url` is an `http(s)` scheme and host, with an optional valid port and
+    nothing else: no credentials, path, query, fragment, or whitespace."""
+    if any(char.isspace() for char in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        _ = parts.port  # raises ValueError on a malformed or out-of-range port
+    except ValueError:
+        return False
+    return (
+        parts.scheme in {"http", "https"}
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and not (parts.path or parts.query or parts.fragment)
+    )
 
-    `dfo_apis_url` is the single base URL of dfo-apis, read from
+
+class Settings(FrameServiceSettings):
+    """Configuration for data-mcp, combining the shared base fields with the apis upstream settings it wraps.
+
+    `dfo_apis_url` is the single base URL of apis, read from
     `DFO_APIS_URL` per BaseServiceSettings' case-insensitive env matching.
-    dfo-apis is one FastAPI app serving both `/api/search/*` (always
-    mounted) and `/api/datasets/*` (gated by dfo-apis' own
+    apis is one FastAPI app serving both `/api/search/*` (always
+    mounted) and `/api/datasets/*` (gated by apis' own
     `DFO_DATASETS_SURFACE` flag, default off) on the same host, whether
     that is port 8083 in local dev or one internal Cloud Run URL in
     deployment, so one field covers both. The `SEARCH_PREFIX` /
     `DATASETS_PREFIX` split happens at the path level in `client.py`, not
     here.
 
+    `dfo_site_origin` is the website's public origin, scheme and host only, read
+    from `DFO_SITE_ORIGIN`. The artifact links this service hands to models and
+    MCP clients (`artifact_resource._link_document`) sit on it: the website
+    proxies `/api/datasets/*` to dfo-apis with its own ID token, so a link there
+    works for anyone who can reach the site, where dfo-apis itself answers only
+    callers holding an ID token. This service's own fetches of those links stay
+    on `dfo_apis_url` and never read this field. On Cloud Run (`K_SERVICE` set)
+    an unset value fails Settings construction, and so startup. Off Cloud Run an
+    unset value puts the links on `dfo_apis_url`, which the local
+    `gcloud run services proxy` or a local dfo-apis answers without a token.
+
     The `upstream_*` fields bound `UpstreamClient`'s retry loop.
-    `upstream_read_timeout_s` clears dfo-apis' 45s search safety net
+    `upstream_read_timeout_s` clears apis' 45s search safety net
     (`SEARCH_REQUEST_TIMEOUT_S`) with headroom, and `upstream_retry_budget_s`
     is the wall-clock ceiling for *all* attempts of one call rather than a
     per-attempt timeout.
@@ -49,7 +82,7 @@ class Settings(FrameServiceSettings):
     relying on being mounted alongside analysis-mcp, or on the frame-store holder's
     own lazy in-memory default when it is not. Do not set this on a deployment
     before the bucket's own lifecycle rule exists: that rule bounds retention, is
-    provisioned in `dfo-infra`, not here, and until it exists a durable store's
+    provisioned in `infra`, not here, and until it exists a durable store's
     objects accumulate indefinitely.
 
     `frame_store_verify_content_version` names the same env var
@@ -77,7 +110,7 @@ class Settings(FrameServiceSettings):
     waits (hashing, Parquet parsing, rendering) is unbounded and runs in the reserves
     the waits leave. The default, 165s, sits 15s under the harness's 180s
     `call_timeout_s` for `get_data` (`services/harness/src/compiler/capabilities.py`).
-    `operation_poll_interval_s` is the fallback wait between poll attempts: dfo-apis'
+    `operation_poll_interval_s` is the fallback wait between poll attempts: apis'
     own poll route names a pacing interval (`retry_after_ms`) only on the initial 202
     response, never on a later `pending`/`running` poll (`OperationEnvelope
     .retry_after_ms`'s own docstring), so every poll after the first falls back to
@@ -87,7 +120,7 @@ class Settings(FrameServiceSettings):
     non-finite or non-positive value would leave the wait it bounds either
     unbounded or unable to run at all. `operation_poll_interval_s` additionally
     floors at 0.5s, since a shorter fallback interval would spin the poll loop
-    against dfo-apis' own poll door. `get_data_deadline_s` must exceed the direct
+    against apis' own poll door. `get_data_deadline_s` must exceed the direct
     budget's `pre_mint_reserve_s` (50s), which pre-mint work leaves for the mint and
     what follows it, and caps at 170s, 10s under the harness's own 180s
     `call_timeout_s` for `get_data` (`services/harness/src/compiler/capabilities.py`),
@@ -101,21 +134,22 @@ class Settings(FrameServiceSettings):
     `external_mint_concurrency` caps the upstream mints this process holds for
     `get_data` calls under `EXTERNAL_CALL_BUDGET`, the budget the combined server sets
     for outside callers (`data_mcp.mint_ledger`). A mint is held from its POST until
-    dfo-apis answers it, or for dfo-apis' 120s synchronous mint timeout when the call
-    stopped waiting first, since dfo-apis keeps running the mint, and keeps its slot,
+    apis answers it, or for apis' 120s synchronous mint timeout when the call
+    stopped waiting first, since apis keeps running the mint, and keeps its slot,
     after the client leaves. A call past the cap refuses `service_unavailable`. The cap
-    is per process, and the harness runs up to two instances (dfo-infra's `ai` service
+    is per process, and the harness runs up to two instances (the infra repository's `ai` service
     sets `max_instances = 2`), so outside callers can hold up to twice this many of the
-    four mint slots a dfo-apis instance has (`mint_max_concurrency`), all of them on one
+    four mint slots an apis instance has (`mint_max_concurrency`), all of them on one
     instance at worst. The default of 1 leaves the harness's own calls two slots at that
     worst case. Each of those mints also takes
-    one of dfo-apis' two materialisation slots (`materialise_max_concurrency`) while it
+    one of apis' two materialisation slots (`materialise_max_concurrency`) while it
     rebuilds, so at the worst case one of the harness's own mints waits up to 30s for
     one (`materialise_wait_seconds`) and is then refused. Calls through the harness's
     own mount are not counted.
     """
 
     dfo_apis_url: str = "http://localhost:8083"
+    dfo_site_origin: str | None = None
     upstream_connect_timeout_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     upstream_read_timeout_s: float = Field(default=50.0, gt=0, allow_inf_nan=False)
     upstream_retry_budget_s: float = Field(default=120.0, gt=0, allow_inf_nan=False)
@@ -134,3 +168,30 @@ class Settings(FrameServiceSettings):
     )
     operation_poll_interval_s: float = Field(default=2.0, ge=0.5, allow_inf_nan=False)
     external_mint_concurrency: int = Field(default=1, ge=1)
+
+    @field_validator("dfo_site_origin", mode="before")
+    @classmethod
+    def _site_origin_is_an_origin(cls, value: object) -> object:
+        """A blank value means unset; anything else must be an `http(s)` origin,
+        returned without a trailing slash."""
+        if not isinstance(value, str):
+            return value
+        origin = value.strip().removesuffix("/")
+        if not origin:
+            return None
+        if not _is_origin(origin):
+            raise ValueError(
+                "DFO_SITE_ORIGIN must be the website's public origin, scheme and host "
+                f"with no path, e.g. https://developmentfinance.org (got {value!r})"
+            )
+        return origin
+
+    @model_validator(mode="after")
+    def _site_origin_is_set_on_cloud_run(self) -> Self:
+        if self.dfo_site_origin is None and os.environ.get("K_SERVICE"):
+            raise ValueError(
+                "DFO_SITE_ORIGIN must be set on Cloud Run (K_SERVICE is set): the "
+                "artifact links handed to models would otherwise sit on the dfo-apis "
+                "origin, which refuses callers without an ID token."
+            )
+        return self

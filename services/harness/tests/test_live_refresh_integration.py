@@ -3,7 +3,7 @@ filter-then-growth frame is refreshed after its dataset moves.
 
 The verbs run through the mounted analysis-mcp app and the root is minted through
 data-mcp's `mint_recorded_root` over a canned mint, as in
-`test_recipe_replay_integration.py`. dfo-apis is
+`test_recipe_replay_integration.py`. apis is
 `live_refresh_support.RecordedApis`, whose answers on the live-refresh routes are
 the recorded ones, and the store is the in-memory one. No socket opens.
 """
@@ -51,11 +51,11 @@ async def _reset_data_mcp_client() -> AsyncIterator[None]:
 
 
 class Harness:
-    """The served app with its mounted tools, the canned mint, and dfo-apis.
+    """The served app with its mounted tools, the canned mint, and apis.
 
     `service` builds a `LiveRefresh` over them as `build_live_refresh` wires the
     served one, counting the replays and the verb calls. Each call is a harness
-    instance of its own: it shares only the store and dfo-apis with the others.
+    instance of its own: it shares only the store and apis with the others.
     """
 
     def __init__(self, app: FastAPI, surface: McpSurface, upstream: Upstream) -> None:
@@ -211,7 +211,7 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     first = await harness.refresh(harness.service())
 
     assert first.status_code == 200
-    # The render is dfo-apis' recorded answer, member for member and in its order.
+    # The render is apis' recorded answer, member for member and in its order.
     assert first.content == json.dumps(_REDRAWN, ensure_ascii=False, separators=(",", ":")).encode()
     (target,) = harness.apis.rendered_on()
     assert target != pair(original)
@@ -232,7 +232,7 @@ async def test_a_moved_card_is_replayed_once_and_later_requests_render_the_store
     assert (harness.upstream.mints, len(harness.apis.published())) == (mints, publishes)
 
     # An instance that started before the first published replays to the same
-    # pairs: every step is in the store, and dfo-apis records nothing new.
+    # pairs: every step is in the store, and apis records nothing new.
     del harness.apis.recipes[target]
     late = await harness.refresh(harness.service())
 

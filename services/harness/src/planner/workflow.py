@@ -96,7 +96,7 @@ class OpenAxis(StrictModel):
     """One constraint property a source's family of StatVars varies along.
 
     `property` is the slot's constraint property dcid, as `search` resolved
-    it. `summable` is whether dfo-apis may sum the family's members over it:
+    it. `summable` is whether apis may sum the family's members over it:
     the slot declares it summable, and every member resolved a value on it.
     """
 
@@ -137,7 +137,7 @@ class MeasureAlternative(StrictModel):
     identity with its measure axes swapped. `label` names the measure without
     its price basis ("net disbursements") on axis `what`, or names the prices
     ("constant prices") on axis `unit`. `axis` is a plain string, since
-    the vocabulary belongs to dfo-apis and an unknown axis must not fail
+    the vocabulary belongs to apis and an unknown axis must not fail
     validation. `identity` preserves the sibling definition for approval
     amendments and later turns, so choosing it resolves the recorded
     dataset without a fresh search.

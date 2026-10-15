@@ -5,16 +5,15 @@ data-mcp, analysis-mcp, and presentation-mcp FastMCP apps it mounts
 in-process) and swaps it
 onto an existing Cloud Run service. It never creates or reconfigures a
 service. Dev deploys automatically on every push to `dev` that touches the
-image's inputs, in the ONEcampaign org. Production deploys on every push to
-`main` of the DevelopmentFinanceObservatory copy of this repo, and on manual
-dispatch there. Both run the same steps from `build-deploy.yml`. The sibling
-`dfo-infra` repo owns the Cloud Run service definition (service account,
+image's inputs. Production deploys on every push to `main`, and on manual
+dispatch. Both run the same steps from `build-deploy.yml`. The sibling
+`infra` repo owns the Cloud Run service definition (service account,
 scaling, secrets, env vars) that these workflows target.
 
 The workspace services (harness, data-mcp, analysis-mcp,
 presentation-mcp) deploy as ONE Cloud Run service. See docs/architecture.md for the full rationale.
 
-Until dfo-infra defines the Cloud Run service and someone sets the repo
+Until infra defines the Cloud Run service and someone sets the repo
 variables below, the deploy workflows will fail at the "resolve image ref"
 or `auth` step. `ci.yml` needs none of this and works today.
 
@@ -37,26 +36,26 @@ and secret _names_ in each environment with per-environment values. The
 workflow YAML doesn't change between environments. Only the environment it
 targets does.
 
-| Name           | Kind   | Example value                                                                               | Who provides it                                        |
-| -------------- | ------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `WIF_PROVIDER` | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | dfo-infra's handoff (WIF pool/provider)                |
-| `WIF_SA`       | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | dfo-infra's handoff (deployer service account)         |
-| `REGION`       | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | dfo-infra's handoff                                    |
-| `PROJECT_ID`   | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | dfo-infra's handoff                                    |
-| `AR_REPO`      | var    | `datacommons`                                                                               | dfo-infra's handoff (Artifact Registry repo)           |
-| `SERVICE_AI`   | var    | `dfo-dev-ai`                                                                                | dfo-infra's handoff, once the Cloud Run service exists |
+| Name           | Kind   | Example value                                                                               | Who provides it                                                   |
+| -------------- | ------ | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `WIF_PROVIDER` | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | the infra repository's handoff (WIF pool/provider)                |
+| `WIF_SA`       | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | the infra repository's handoff (deployer service account)         |
+| `REGION`       | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | the infra repository's handoff                                    |
+| `PROJECT_ID`   | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | the infra repository's handoff                                    |
+| `AR_REPO`      | var    | `datacommons`                                                                               | the infra repository's handoff (Artifact Registry repo)           |
+| `SERVICE_AI`   | var    | `dfo-dev-ai`                                                                                | the infra repository's handoff, once the Cloud Run service exists |
 
 The Cloud Run service itself also needs `STUDIO_API_TOKEN` mounted as a
-secret (dfo-infra, in the service definition next to `GOOGLE_API_KEY`). It
+secret (infra, in the service definition next to `GOOGLE_API_KEY`). It
 is the shared secret the frontend's proxy presents on studio requests. A
 service without it accepts any non-empty bearer token and logs
 `STUDIO AUTH IS OPEN` at startup.
 
-The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (dfo-infra
-generates it in the apis stack and mounts one value on dfo-apis, this service,
+The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (infra
+generates it in the apis stack and mounts one value on apis, this service,
 and the website). It is the bearer of `POST /api/studio/refresh`, which the
 website calls to redraw a live share's derived card, and the principal this
-service presents to dfo-apis' frame refresh and render routes. A service
+service presents to apis' frame refresh and render routes. A service
 without it refuses every refresh with 401 and logs `LIVE REFRESH IS CLOSED` at
 startup. Startup fails when it equals `STUDIO_API_TOKEN`. The route also reads
 `DFO_APIS_URL` and `DATASETS_FIRST_PARTY_PRINCIPAL`, which the service already
@@ -65,7 +64,7 @@ holds.
 A refresh answers within 53 seconds, the deadline `LIVE_REFRESH_DEADLINE_S`
 (default 45) plus an 8 second hard stop. The website gives the call 60 seconds, so startup
 fails for a deadline above 52 or below 30, and the Cloud Run request timeout,
-set in dfo-infra, must be above the deadline plus 8. The other
+set in infra, must be above the deadline plus 8. The other
 refresh settings (`LIVE_REFRESH_REQUESTS_PER_S`, `LIVE_REFRESH_BURST`,
 `LIVE_REFRESH_MAX_IN_FLIGHT`, `LIVE_REFRESH_ROWS_IN_FLIGHT_MAX`) have defaults
 sized for one instance and are described in `services/harness/README.md`.
@@ -80,26 +79,23 @@ its own Cloud Run service (see "Splitting a service out later" below).
 loopback, and startup refuses that combination without a shared
 `MCP_API_TOKEN` the split-out service also has.
 
-Every workflow that installs or builds the workspace (`ci.yml` and
-`build-deploy.yml`) also reads the repo variable `READER_APP_CLIENT_ID` and
-the repo secret `READER_APP_PRIVATE_KEY`, the credentials of the read-only
-`dfo-reader` GitHub App. Each run mints a token with `contents: read` on
-`ONEcampaign/dfo-spec-kit` from them to fetch the private dfo-spec-kit git
-dependencies. They are repository-level, so they serve every environment.
+The workspace's `dfo-spec-kit` git dependencies come from the public
+`DevelopmentFinanceObservatory/spec-kit` repo, so `ci.yml`, `build-deploy.yml`,
+and `deploy/Dockerfile.ai` need no token to install them.
 
-The service name value above is a placeholder for illustration. dfo-infra
+The service name value above is a placeholder for illustration. infra
 names the actual service, and whatever they pick goes in this var verbatim.
 
-dfo-infra sets every variable and secret in the Environment: `SERVICE_AI`,
+infra sets every variable and secret in the Environment: `SERVICE_AI`,
 `WIF_PROVIDER`, `WIF_SA`, `REGION`, `PROJECT_ID`, and `AR_REPO`. Run
-`just ENV=dfo-dev handoff ai` from the dfo-infra repo for the `dev`
+`just ENV=dfo-dev handoff ai` from the infra repo for the `dev`
 Environment, and `just ENV=dfo-prod handoff ai` for `production`. The
 script also sets the deployment branch policy. The values stay reproducible
 and the Environment has one writer.
 
-## GCP prerequisites (dfo-infra)
+## GCP prerequisites (infra)
 
-Before the first real deploy, dfo-infra needs to set up, per environment:
+Before the first real deploy, infra needs to set up, per environment:
 
 - A Workload Identity Federation pool and provider trusting this repo's
   GitHub Actions OIDC issuer (no JSON service account keys).
@@ -119,13 +115,18 @@ Before the first real deploy, dfo-infra needs to set up, per environment:
   `GOOGLE_GENAI_USE_VERTEXAI` + `GOOGLE_CLOUD_PROJECT` +
   `GOOGLE_CLOUD_LOCATION`), not from this repo's settings classes, so they
   must be wired into the service definition as env vars/secrets.
-- `DFO_APIS_URL` on that service, pointing at dfo-apis, the FastAPI app that
+- `DFO_APIS_URL` on that service, pointing at apis, the FastAPI app that
   serves both the Search and Datasets surfaces. The data-mcp component
   mounted in the harness reads it to reach that API and falls back to a
   `http://localhost:8083` default without it, so the deployed service can't
-  search until it's set. The value depends on the dfo-apis dev deployment
-  existing. The Datasets surface additionally needs dfo-apis's
+  search until it's set. The value depends on the apis dev deployment
+  existing. The Datasets surface additionally needs the apis service's
   `DFO_DATASETS_SURFACE` flag set, since that gates whether it mounts at all.
+- `DFO_SITE_ORIGIN` on that service, set to the website's public origin
+  (scheme and host, no path). The artifact download links data-mcp hands to
+  models sit on it, since the website proxies `/api/datasets/*` to dfo-apis
+  with its own ID token and dfo-apis refuses callers without one. The harness
+  fails at startup, naming the variable, when it is unset on Cloud Run.
 - `PRESENTATION_PUBLIC_URL` on that service, set to the service's own public
   `https` URL plus `/mcp/presentation`. Every presentation view's payload
   names its theme stylesheet under it, and the renderer's CSP admits its
@@ -138,13 +139,11 @@ Before the first real deploy, dfo-infra needs to set up, per environment:
 
 ## Repo-side prerequisites
 
-- A `production` GitHub Environment on the DevelopmentFinanceObservatory
-  repo with `main` as its only deployment branch. The release gate is the
-  approval a sync pull request into `main` needs. Neither environment takes
-  any other protection rule: dfo-infra's `scripts/handoff.sh` refuses to run
-  against an environment with required reviewers or a wait timer.
+- A `dev` GitHub Environment with `dev` as its only deployment branch, and a
+  `production` GitHub Environment with `main` as its only deployment branch
+  and `release` as required reviewers.
 - The vars/secrets table above, populated per environment.
-- Staging is unbuilt. dfo-infra has no staging Terraform tree or GCP
+- Staging is unbuilt. infra has no staging Terraform tree or GCP
   project, and standing one up means a new `infra/<env>/` directory with
   its own backend and state prefix. Once it exists, a `staging` GitHub
   Environment and a `staging` entry in `deploy-dev.yml`'s `deploy` job
@@ -185,17 +184,19 @@ independently of each other.
 
 ## Recipe backfill
 
-`python -m harness.recipe_backfill` stores in dfo-apis the recipe of every derived frame in the materialisation bucket. A derived frame published without its recipe can only be replayed from the traces in that bucket, so run this job to completion before the bucket's 30-day age rule is restored.
+`python -m harness.recipe_backfill` stores in apis the recipe of every derived frame in the materialisation bucket. A derived frame published without its recipe can only be replayed from the traces in that bucket, so run this job to completion before the bucket's 30-day age rule is restored.
 
 The module ships in the image (`services/harness/src/harness/recipe_backfill.py`) and starts no service, no model, and no MCP server. It reads three settings from the environment or `.env`, under the names the services use, and exits 2 naming any that is unset:
 
 | Setting                          | Use                                                           |
 | -------------------------------- | ------------------------------------------------------------- |
-| `DFO_APIS_URL`                   | dfo-apis' origin                                              |
+| `DFO_APIS_URL`                   | apis' origin                                                  |
 | `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe and versions routes |
 | `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
 
 The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.
+
+From a workstation, set `DFO_APIS_URL=http://localhost:8083` and run `just apis-proxy` beside it, since the job sends a Cloud Run ID token only on Cloud Run, in a service (`K_SERVICE` set) or a job (`CLOUD_RUN_JOB` set).
 
 ```
 uv run --package harness python -m harness.recipe_backfill               # dry run, the default
@@ -204,39 +205,39 @@ uv run --package harness python -m harness.recipe_backfill --write --since 2026-
 uv run --package harness python -m harness.recipe_backfill --limit 50
 ```
 
-A dry run builds every recipe and compares it with what dfo-apis holds. It sends no `PUT` and writes nothing to the bucket. `--write` puts each recipe to `PUT /api/datasets/frames/{spec_id}/{content_version}/recipe` and writes each recovered mint record to the bucket. `--since` and `--until` bound the frames by the time their object was written, and `--limit` takes the oldest N in range, so the job can run in parts. A run can be repeated: dfo-apis keeps a pair's first recipe, and a second `--write` run reports `already_stored` for each.
+A dry run builds every recipe and compares it with what apis holds. It sends no `PUT` and writes nothing to the bucket. `--write` puts each recipe to `PUT /api/datasets/frames/{spec_id}/{content_version}/recipe` and writes each recovered mint record to the bucket. `--since` and `--until` bound the frames by the time their object was written, and `--limit` takes the oldest N in range, so the job can run in parts. A run can be repeated: apis keeps a pair's first recipe, and a second `--write` run reports `already_stored` for each.
 
 The job walks the frames oldest first and works on four at a time. For each derived frame it downloads the frame's object once (at most 64 MiB), checks its digest, and reads the trace from the Parquet footer. It decodes no rows, writes no frame object, and deletes nothing.
 
 The report lists every derived frame with one reason:
 
-| Reason               | Meaning                                                                                 | Detail                                                     |
-| -------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `stored`             | this run stored the recipe                                                              |                                                            |
-| `already_stored`     | dfo-apis holds the recipe, with the same two hashes when it could be rebuilt            | `not rebuilt: <reason> ...` when it could not              |
-| `would_store`        | dry run only: the recipe was built and dfo-apis holds none                              |                                                            |
-| `not_published`      | dfo-apis has no version of the frame (404 `snapshot_not_found`), so no card draws on it |                                                            |
-| `missing_ancestor`   | a frame it was computed from is gone from the bucket                                    | the missing pair                                           |
-| `root_unrecoverable` | a root dataset frame has no mint record and none could be rebuilt                       | the root pair and the reason, such as `no_version_matches` |
-| `trace_unusable`     | a stored trace on the way yields no op-spec                                             | the pair and why                                           |
-| `anchor_unresolved`  | a rolling frame's latest period cannot be stated from what the bucket holds             | the pair and the reason, such as `no_anchor_record`        |
-| `conflict`           | dfo-apis refused the recipe (409 `publish_conflict`)                                    | the `constraint_id`                                        |
-| `apis_failure`       | a dfo-apis call failed after the client's retries                                       | `status=` and `code=`                                      |
-| `unexpected_error`   | reading the frame raised; the traceback is logged                                       | the exception type                                         |
+| Reason               | Meaning                                                                             | Detail                                                     |
+| -------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `stored`             | this run stored the recipe                                                          |                                                            |
+| `already_stored`     | apis holds the recipe, with the same two hashes when it could be rebuilt            | `not rebuilt: <reason> ...` when it could not              |
+| `would_store`        | dry run only: the recipe was built and apis holds none                              |                                                            |
+| `not_published`      | apis has no version of the frame (404 `snapshot_not_found`), so no card draws on it |                                                            |
+| `missing_ancestor`   | a frame it was computed from is gone from the bucket                                | the missing pair                                           |
+| `root_unrecoverable` | a root dataset frame has no mint record and none could be rebuilt                   | the root pair and the reason, such as `no_version_matches` |
+| `trace_unusable`     | a stored trace on the way yields no op-spec                                         | the pair and why                                           |
+| `anchor_unresolved`  | a rolling frame's latest period cannot be stated from what the bucket holds         | the pair and the reason, such as `no_anchor_record`        |
+| `conflict`           | apis refused the recipe (409 `publish_conflict`)                                    | the `constraint_id`                                        |
+| `apis_failure`       | an apis service call failed after the client's retries                              | `status=` and `code=`                                      |
+| `unexpected_error`   | reading the frame raised; the traceback is logged                                   | the exception type                                         |
 
 Exit status is 0 when every frame ended on a settled reason, and 1 when any ended `apis_failure` or `unexpected_error`, which a rerun may clear.
 
 The report closes with the numbers to read before the age rule returns:
 
 ```
-Derived frames with a recipe stored in dfo-apis: 3 (stored 3, already stored 0)
+Derived frames with a recipe stored in apis: 3 (stored 3, already stored 0)
 Derived frames without a stored recipe: 3
   missing_ancestor   1
   root_unrecoverable 1
   conflict           1
-  (2 of these had no recipe to send, so dfo-apis was not asked whether they are published)
-Not published in dfo-apis, so no card draws on them: 1
+  (2 of these had no recipe to send, so apis was not asked whether they are published)
+Not published in apis, so no card draws on them: 1
 Oldest frame object: 23.0 days (written 2026-09-14T00:01:00Z)
 ```
 
-The first number is the frames whose cards can be refreshed after the bucket's objects are deleted. Every frame under the second is listed above with its reason, and a card drawn from one of them cannot be refreshed. A `conflict` whose detail is `recipe_requires_matching_normal_form_hash` or `recipe_requires_matching_replay_key` means dfo-apis holds another recipe for the pair. The last line is the age of the oldest object the walk saw: a restored 30-day rule deletes every object older than 30 days on its next pass.
+The first number is the frames whose cards can be refreshed after the bucket's objects are deleted. Every frame under the second is listed above with its reason, and a card drawn from one of them cannot be refreshed. A `conflict` whose detail is `recipe_requires_matching_normal_form_hash` or `recipe_requires_matching_replay_key` means apis holds another recipe for the pair. The last line is the age of the oldest object the walk saw: a restored 30-day rule deletes every object older than 30 days on its next pass.

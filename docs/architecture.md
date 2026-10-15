@@ -68,8 +68,8 @@ See `services/harness/src/planner/README.md`,
 `services/harness/src/executor/README.md`.
 
 **`services/data-mcp`** is a FastMCP server over the Data seam of the
-`dfo-apis` repo: the Search API (served at `/api/search/*`) today, the
-Datasets API (`/api/datasets/*`) next, both reading from the `dfo-dcp`
+`apis` repo: the Search API (served at `/api/search/*`) today, the
+Datasets API (`/api/datasets/*`) next, both reading from the `dcp`
 graph. Only agent-facing tool definitions belong here; the search and
 dataset logic, ranking, and data access stay behind those HTTP APIs. This
 wrapper exists so the harness gets a stable MCP-shaped interface without
@@ -119,11 +119,11 @@ tests, and the harness reaches them through `DATA_MCP_URL` /
 `ANALYSIS_MCP_URL` / `PRESENTATION_MCP_URL` env vars that default to the
 mounted loopback paths but can point anywhere.
 
-GitHub Actions builds one image (`ai`) and updates the Cloud Run dev and
-staging service automatically on every merge that touches its inputs.
-Production deploys are a manual `workflow_dispatch`. The `dfo-infra` repo owns the Cloud Run service
+GitHub Actions builds one image (`ai`) and updates the Cloud Run dev
+service on every merge to `dev` that touches its inputs. Production deploys on
+every push to `main`. The `infra` repo owns the Cloud Run service
 _definition_ (service account, scaling, secrets). This repo's CI only swaps
-the image on the service `dfo-infra` already provisioned.
+the image on the service `infra` already provisioned.
 
 **Harness-to-MCP traffic.** The harness talks to `data-mcp`,
 `analysis-mcp`, and `presentation-mcp` over streamable HTTP, configured via
@@ -258,9 +258,9 @@ driven entirely by environment variables. Each service has one `Settings`
 class for the service itself; harness carries a second,
 `planner.settings.AgentSettings`, so the planner pins its own model without
 a caller reading a model string having to import the service's MCP URLs and
-session backend. Recognised names include `DFO_APIS_URL`,
-`DATA_MCP_URL`, `ANALYSIS_MCP_URL`, `PRESENTATION_MCP_URL`,
-`PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
+session backend. Recognised names include `DFO_APIS_URL`, `DFO_SITE_ORIGIN`
+(required on Cloud Run), `DATA_MCP_URL`, `ANALYSIS_MCP_URL`,
+`PRESENTATION_MCP_URL`, `PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
 `PLANNER_MODEL_NAME`, `DATABASE_URL` and the
 `SESSION_STORE_*` family (optional, for a durable harness session store;
 unset falls back to in-memory sessions, see `services/harness/README.md`),

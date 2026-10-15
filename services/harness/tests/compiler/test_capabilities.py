@@ -297,17 +297,17 @@ def test_call_timeouts_returns_exactly_the_rows_that_state_one() -> None:
     }
 
 
-# dfo-apis's search request deadline: `request_timeout_s` (env `SEARCH_REQUEST_TIMEOUT_S`)
-# in dfo-apis `src/search/engine/config.py`.
+# The apis service's search request deadline: `request_timeout_s` (env `SEARCH_REQUEST_TIMEOUT_S`)
+# in apis `src/search/engine/config.py`.
 DFO_APIS_SEARCH_DEADLINE_S = 45.0
 
-# dfo-apis's deadline for a resubmit whose member walk enters the full subject read.
+# The apis service's deadline for a resubmit whose member walk enters the full subject read.
 DFO_APIS_RESUBMIT_DEADLINE_S = 90.0
 
 
 def test_search_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness() -> None:
     """Each layer's deadline outlasts the one it waits on, so a slow search surfaces
-    dfo-apis's own typed 503 or 504 instead of a timeout raised a layer above it.
+    the apis service's own typed 503 or 504 instead of a timeout raised a layer above it.
     data-mcp's retries run inside `SEARCH_CALL_BUDGET_S`, which ends before the harness's.
 
     Read from the shipped defaults, so an environment override cannot mask a
@@ -320,7 +320,7 @@ def test_search_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness() -> No
 
 
 def test_resubmit_timeouts_are_ordered_dfo_apis_then_data_mcp_then_harness() -> None:
-    """A resubmit whose member walk reads the whole subject set runs up to dfo-apis's
+    """A resubmit whose member walk reads the whole subject set runs up to the apis service's
     90 s resubmit deadline; data-mcp's read and budget and the harness's
     `resolve_definition` timeout each outlast the layer below."""
     harness_call_s = call_timeouts()[ToolId(server="data-mcp", name="resolve_definition")]

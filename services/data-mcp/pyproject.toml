@@ -1,7 +1,7 @@
 [project]
 name = "data_mcp"
 version = "0.1.0"
-description = "Thin FastMCP wrapper over the dfo-apis Data seam: the Search API today, the Datasets API next."
+description = "Thin FastMCP wrapper over the apis Data seam: the Search API today, the Datasets API next."
 requires-python = ">=3.13"
 dependencies = [
     "common",
@@ -46,5 +46,5 @@ precision = 2
 
 [tool.uv.sources]
 common = { workspace = true }
-dfo-spec-kit = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "959f8bc9876ae60d000c405c66b62ea588759f19", subdirectory = "python/spec-kit" }
-dfo-spec-kit-frame-grammar = { git = "https://github.com/ONEcampaign/dfo-spec-kit.git", rev = "959f8bc9876ae60d000c405c66b62ea588759f19", subdirectory = "python/frame-grammar" }
+dfo-spec-kit = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "708f293d39094977bf2ed3a646016d951fddf685", subdirectory = "python/spec-kit" }
+dfo-spec-kit-frame-grammar = { git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git", rev = "708f293d39094977bf2ed3a646016d951fddf685", subdirectory = "python/frame-grammar" }

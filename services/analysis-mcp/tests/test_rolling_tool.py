@@ -178,7 +178,7 @@ async def test_a_series_is_every_column_but_period_value_and_status(store) -> No
 
 
 async def test_a_left_out_series_names_a_composed_unit_by_its_canonical_text(store) -> None:
-    # dfo-apis groups a series under a composed unit by the unit's RFC 8785 text.
+    # apis groups a series under a composed unit by the unit's RFC 8785 text.
     per_head = {"numerator": "dcid:USD", "denominator": {"stat_var": "dcid:Count_Person"}}
     frame = Frame.build(
         role_keys=["reporter"],

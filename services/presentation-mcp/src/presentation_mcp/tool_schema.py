@@ -74,7 +74,7 @@ _DESCRIBE_INCLUDE_PROJECTION_DESCRIPTION = (
     "view."
 )
 
-# Kept in step with dfo-apis' presentation path-parameter checks and the
+# Kept in step with apis' presentation path-parameter checks and the
 # client-side refusals in `client.py`.
 _COMPONENT_ID_PATTERN = r"^cmp_[A-Za-z0-9_-]{1,64}$"
 _WRITE_TOKEN_PATTERN = r"^cmw_[A-Za-z0-9_-]{1,64}$"

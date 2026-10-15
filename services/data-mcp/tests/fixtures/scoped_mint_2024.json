@@ -1,5 +1,5 @@
 {
-  "recorded": "dev dfo-apis, POST /api/datasets kind spec_id with scope.window, through data-mcp get_data",
+  "recorded": "dev apis, POST /api/datasets kind spec_id with scope.window, through data-mcp get_data",
   "window": {
     "kind": "range",
     "start_year": 2024,

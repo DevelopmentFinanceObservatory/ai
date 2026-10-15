@@ -1,4 +1,4 @@
-# Upstream asks (dfo-apis / platform) — from the studio v1.1 build
+# Upstream asks (apis / platform) from the studio v1.1 build
 
 Each item names the studio screen that needs it and what the harness does
 in the meantime. Live traces reference the hosted dev deployment.
@@ -87,7 +87,7 @@ through `ask_user`.
 
 ## 7. Skills for planner grounding
 
-**Resolved.** dfo-apis serves skills through its Skills API, and data-mcp reads
+**Resolved.** apis serves skills through its Skills API, and data-mcp reads
 them with `get_skill` and `get_skill_file`. The planner carries both as its own
 tools (`services/harness/src/planner/skills.py`), called through the harness's
 tool surface, and loads a skill that bears on the question. Where the Skills
@@ -95,13 +95,13 @@ API is not mounted, both tools refuse `capability_unavailable` and the planner d
 
 ## 8. Frames produced by analysis-mcp are invisible to the presentation surface
 
-**Resolved.** The rejection was not dfo-apis' id validator: `dfo-apis/src/presentation_api/path_params.py` passes an `ops_` spec_id and an `ocv_` content_version through its own format check and leaves the spec\_/ops\_ classification to `FrameStore.load`. The regexes that gate a `frame_ref` before it reaches the platform live in this repo, in `services/presentation-mcp/src/presentation_mcp/client.py` and `tool_schema.py`, and match `^(?:spec|ops)_[a-z0-9]{1,64}$` and `^(?:cv|ocv)_[a-z0-9]{1,64}$`.
+**Resolved.** The rejection was not apis' id validator: `apis/src/presentation_api/path_params.py` passes an `ops_` spec_id and an `ocv_` content_version through its own format check and leaves the spec\_/ops\_ classification to `FrameStore.load`. The regexes that gate a `frame_ref` before it reaches the platform live in this repo, in `services/presentation-mcp/src/presentation_mcp/client.py` and `tool_schema.py`, and match `^(?:spec|ops)_[a-z0-9]{1,64}$` and `^(?:cv|ocv)_[a-z0-9]{1,64}$`.
 
-dfo-apis exposes `POST /api/datasets/frames/publish` (`src/datasets_api/doors/publish.py`), which takes a derived frame's role keys and rows plus its derivation trace, renders frame1 through the same `render_and_store_frame1` every definition mint uses, and records a version row and artifact location under the frame's own `ops_`/`ocv_` pair. A repeat publish of the same pair with byte-identical content succeeds again; one carrying different bytes refuses `identity_collision` (409, not retryable) instead of silently reporting success.
+apis exposes `POST /api/datasets/frames/publish` (`src/datasets_api/doors/publish.py`), which takes a derived frame's role keys and rows plus its derivation trace, renders frame1 through the same `render_and_store_frame1` every definition mint uses, and records a version row and artifact location under the frame's own `ops_`/`ocv_` pair. A repeat publish of the same pair with byte-identical content succeeds again; one carrying different bytes refuses `identity_collision` (409, not retryable) instead of silently reporting success.
 
 `PlatformAssembler` calls the publish route lazily, ahead of the platform call itself, on both `get_frame_view` (`describe_frame`) and `create_component`/`revise_component` (`write_component`), so nothing upstream of these two tools has to publish a frame by hand first. `FrameStore.load`'s `ops_unsupported` reason keeps a narrower meaning: minted by analysis-mcp but not yet published to the platform, and retryable, since publishing the pair is the retry that resolves it.
 
-The remaining gap was in dfo-spec-kit, not in dfo-apis or this repo: its component envelope schema accepted a `spec_`/`ops_` spec_id but only a `cv_` content_version, so stamping a resolved component with a real `ocv_` content_version failed envelope validation even with the platform and client-side checks clear. dfo-spec-kit PR #73 widens that pattern to `^(cv|ocv)_[0-9a-f]{6,64}$`, merged at commit `89ec9988aa2100e8e99684edc249a44a0720c448`. dfo-apis pins commit `91400b0470827a0f156c3a8e6f2cfb39ec280143` on branch `pin/envelope-ocv-on-44c8013d`, which cherry-picks that same envelope fix onto the previous pin. spec-kit main also carries the `facet_probe_ceiling` and `qualifier_not_bound` registry entries, which dfo-apis' `tests/platform/test_registry_binding.py` requires it to serve before it can pin past them.
+The remaining gap was in spec-kit, not in apis or this repo: its component envelope schema accepted a `spec_`/`ops_` spec_id but only a `cv_` content_version, so stamping a resolved component with a real `ocv_` content_version failed envelope validation even with the platform and client-side checks clear. spec-kit widens that pattern to `^(cv|ocv)_[0-9a-f]{6,64}$` in commit `89ec9988aa2100e8e99684edc249a44a0720c448`. apis pins commit `91400b0470827a0f156c3a8e6f2cfb39ec280143` on branch `pin/envelope-ocv-on-44c8013d`, which cherry-picks that same envelope fix onto the previous pin. spec-kit main also carries the `facet_probe_ceiling` and `qualifier_not_bound` registry entries, which apis' `tests/platform/test_registry_binding.py` requires it to serve before it can pin past them.
 
 ## 9. Analysis verbs take raw column names (planner grounding)
 

@@ -92,7 +92,7 @@ _DIGEST_HEX_LENGTH = 32
 _ROLLING = "rolling"
 _PRIMARY_SLOT = "frame_ref"
 _SLOT_SUFFIX = "_frame_ref"
-# The columns that are no part of a series: `dfo-apis`' assembler groups rows
+# The columns that are no part of a series: `apis`' assembler groups rows
 # into series by every other column.
 NON_SERIES_COLUMNS = frozenset({"time_period", "value", "status"})
 # Each entity binding of a two-sided verb, and the frame slot it narrows.

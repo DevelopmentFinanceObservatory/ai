@@ -23,7 +23,7 @@ from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import resolve_and_register
 from data_mcp.tool_errors import ToolRefusal, to_tool_result
 
-# The wall-clock budget for one resubmit, and its read timeout. dfo-apis gives a
+# The wall-clock budget for one resubmit, and its read timeout. apis gives a
 # resubmit whose member walk reads a family's whole subject set 90 s, against
 # 45 s for a search, so the read waits 95 s and the budget leaves room for the
 # connect. The harness's `resolve_definition` call timeout
