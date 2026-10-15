@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Cloud Run service name is dfo-infra's to define; this repo only
+      # Cloud Run service name is infra's to define; this repo only
       # knows about it through vars.SERVICE_AI. See deploy/README.md.
       - name: Resolve image ref
         id: target
@@ -71,9 +71,9 @@ jobs:
           push: true
           tags: ${{ steps.target.outputs.image }}
 
-      # Image-only update against the service dfo-infra already defined.
+      # Image-only update against the service infra already defined.
       # Deliberately not `gcloud run services replace` -- that takes a full
-      # manifest and would fight dfo-infra for ownership of scaling, secrets,
+      # manifest and would fight infra for ownership of scaling, secrets,
       # and service-account config.
       - name: Point Cloud Run at the new image
         env:

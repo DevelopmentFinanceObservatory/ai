@@ -119,9 +119,9 @@ tests, and the harness reaches them through `DATA_MCP_URL` /
 `ANALYSIS_MCP_URL` / `PRESENTATION_MCP_URL` env vars that default to the
 mounted loopback paths but can point anywhere.
 
-GitHub Actions builds one image (`ai`) and updates the Cloud Run dev and
-staging service automatically on every merge that touches its inputs.
-Production deploys are a manual `workflow_dispatch`. The `dfo-infra` repo owns the Cloud Run service
+GitHub Actions builds one image (`ai`) and updates the Cloud Run dev
+service on every merge to `dev` that touches its inputs. Production deploys on
+every push to `main`. The `infra` repo owns the Cloud Run service
 _definition_ (service account, scaling, secrets). This repo's CI only swaps
 the image on the service `dfo-infra` already provisioned.
 
