@@ -1,9 +1,9 @@
 name: CI
 
 on:
-  # One run on the merged tree after each merge into dev. main moves either by
-  # fast-forward to a dev commit that already ran here or through a pull
-  # request whose own run tested the merge, so main has no push trigger.
+  # One run on the merged tree after each merge into dev. main moves through a
+  # pull request from dev whose own run tested the merge, so main has no push
+  # trigger.
   push:
     branches: [dev]
   pull_request:

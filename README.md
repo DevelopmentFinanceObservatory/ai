@@ -89,6 +89,6 @@ and developer commands.
 
 GitHub Actions builds one container image (`ai`) containing the harness and
 all three mounted MCP servers. Merges to `dev` deploy automatically to the Cloud Run
-development environment. Production deployments trigger manually through `workflow_dispatch`.
-`dfo-infra` defines the Cloud Run service configuration (service accounts, scaling limits,
+development environment. Production deploys on every push to `main`.
+`infra` defines the Cloud Run service configuration (service accounts, scaling limits,
 secrets). Repository CI only updates the container image deployed to that service.

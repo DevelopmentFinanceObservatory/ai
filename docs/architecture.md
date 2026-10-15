@@ -123,7 +123,7 @@ GitHub Actions builds one image (`ai`) and updates the Cloud Run dev
 service on every merge to `dev` that touches its inputs. Production deploys on
 every push to `main`. The `infra` repo owns the Cloud Run service
 _definition_ (service account, scaling, secrets). This repo's CI only swaps
-the image on the service `dfo-infra` already provisioned.
+the image on the service `infra` already provisioned.
 
 **Harness-to-MCP traffic.** The harness talks to `data-mcp`,
 `analysis-mcp`, and `presentation-mcp` over streamable HTTP, configured via

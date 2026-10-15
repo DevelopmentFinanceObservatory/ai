@@ -168,7 +168,7 @@ that moves a measured number means running `just context-baseline`, and the diff
 ## Deploying
 
 CI builds one image and updates the dev Cloud Run service on every merge to
-`dev`. Production is a manual `workflow_dispatch`. `dfo-infra` owns the
-service definition, including its runtime secrets -- the `.env` flow above is
-for local development only. See [deploy/README.md](./deploy/README.md) for
+`dev`, and production on every push to `main`. `infra` owns the service
+definition, including its runtime secrets. The `.env` flow above is for local
+development. See [deploy/README.md](./deploy/README.md) for
 the full division and the GitHub Environment setup.
