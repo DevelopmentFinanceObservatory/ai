@@ -19,6 +19,7 @@ from data_mcp.server import mcp
 from data_mcp.settings import Settings
 from data_mcp.skills_resources import SKILL_FILE_TEMPLATE
 from fastmcp import Client
+from pydantic import ValidationError
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
 
@@ -244,5 +245,18 @@ async def test_standalone_lifespan_refuses_to_start_when_verify_is_on_with_no_de
     monkeypatch.setenv("FRAME_STORE_VERIFY_CONTENT_VERSION", "true")
 
     with pytest.raises(ContentVersionDeriverUnregistered):
+        async with server._lifespan(mcp):
+            pass
+
+
+async def test_lifespan_refuses_to_start_on_cloud_run_without_a_site_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Artifact links handed to models need the public site origin there, since
+    dfo-apis refuses callers without an ID token."""
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+    monkeypatch.delenv("DFO_SITE_ORIGIN", raising=False)
+
+    with pytest.raises(ValidationError, match="DFO_SITE_ORIGIN"):
         async with server._lifespan(mcp):
             pass

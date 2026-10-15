@@ -258,9 +258,9 @@ driven entirely by environment variables. Each service has one `Settings`
 class for the service itself; harness carries a second,
 `planner.settings.AgentSettings`, so the planner pins its own model without
 a caller reading a model string having to import the service's MCP URLs and
-session backend. Recognised names include `DFO_APIS_URL`,
-`DATA_MCP_URL`, `ANALYSIS_MCP_URL`, `PRESENTATION_MCP_URL`,
-`PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
+session backend. Recognised names include `DFO_APIS_URL`, `DFO_SITE_ORIGIN`
+(required on Cloud Run), `DATA_MCP_URL`, `ANALYSIS_MCP_URL`,
+`PRESENTATION_MCP_URL`, `PRESENTATION_PUBLIC_URL` (required), `MODEL_NAME`,
 `PLANNER_MODEL_NAME`, `DATABASE_URL` and the
 `SESSION_STORE_*` family (optional, for a durable harness session store;
 unset falls back to in-memory sessions, see `services/harness/README.md`),

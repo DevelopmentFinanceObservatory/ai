@@ -3,11 +3,13 @@
 Built lazily on first use: the deployed topology mounts data-mcp's FastMCP
 app in-process and never calls `data_mcp.server.main()`, so nothing would
 otherwise wire a client. `set_client()` (tests, and `main()` for a
-standalone data-mcp run) pre-empts the lazy default. `aclose_client()` is
+standalone data-mcp run) preempts the lazy default. `aclose_client()` is
 called from `server.py`'s lifespan on shutdown.
 """
 
 from __future__ import annotations
+
+from common.apis_auth import apis_auth_provider
 
 from data_mcp.client import UpstreamClient
 from data_mcp.settings import Settings
@@ -24,7 +26,7 @@ class _ClientHolder:
 
     def get(self) -> UpstreamClient:
         if self._client is None:
-            self._client = UpstreamClient(settings=Settings())
+            self._client = build_client(Settings())
         return self._client
 
     async def aclose(self) -> None:
@@ -37,6 +39,13 @@ class _ClientHolder:
             self._client = None
 
 
+def build_client(settings: Settings) -> UpstreamClient:
+    """The upstream client the deployed service uses: `settings`' dfo-apis, with its ID token."""
+    return UpstreamClient(
+        settings=settings, auth=apis_auth_provider(base_url=settings.dfo_apis_url)
+    )
+
+
 _holder = _ClientHolder()
 
 
@@ -46,7 +55,7 @@ def get_client() -> UpstreamClient:
 
 
 def set_client(client: UpstreamClient | None) -> None:
-    """Set (or clear) the upstream client tools call, pre-empting the lazy default."""
+    """Set (or clear) the upstream client tools call, preempting the lazy default."""
     _holder.set(client)
 
 

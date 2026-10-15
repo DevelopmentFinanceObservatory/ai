@@ -15,6 +15,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import TOKEN_HEADER
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -57,7 +58,8 @@ from dfo_frame_grammar import (
 from google.api_core.exceptions import NotFound
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .test_client import _client
+from .test_client import ID_TOKEN, _client, id_token_auth
+from .test_client import _settings as _upstream_settings
 from .test_operations import _FakeClock
 
 _SPEC_ID = "spec_" + "1" * 32
@@ -1069,6 +1071,39 @@ async def test_a_sign_failure_before_any_get_returns_degraded_with_zero_attempts
     assert outcome.refusal is None
 
 
+async def test_an_id_token_that_cannot_mint_fails_each_get_as_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot read takes the first token. Every mint for the link GET fails
+    and is retried as a failed GET is, and the fetch degrades with nothing sent."""
+    monkeypatch.setattr(frame_materialisation, "_ARTIFACT_GET_BACKOFF_S", 0.0)
+    manifest = _manifest()
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload())
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    set_frame_store(InMemoryMaterialisationStore())
+    async with _client(snapshot_handler, auth=id_token_auth(mints=1)) as upstream:
+        client_holder.set_client(upstream)
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=manifest,
+            settings=_settings(),
+            writer="tester",
+            transport=httpx2.MockTransport(get_handler),
+        )
+
+    assert outcome.status == "degraded"
+    assert outcome.degraded_reason == "fetch"
+    assert outcome.attempts == _ARTIFACT_GET_ATTEMPTS
+    assert seen == []
+
+
 async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> None:
     data = _parquet_bytes()
     digest = _digest_for(data)
@@ -1087,7 +1122,11 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     set_frame_store(InMemoryMaterialisationStore())
-    async with _client(snapshot_handler) as upstream:
+    # The site origin is the model-facing one. This fetch must not use it.
+    upstream_settings = _upstream_settings(dfo_site_origin="https://site.example")
+    async with _client(
+        snapshot_handler, settings=upstream_settings, auth=id_token_auth()
+    ) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
             options=_OPTIONS,
@@ -1098,8 +1137,12 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     assert outcome.status == "registered"
-    assert [r.url.path for r in seen] == [_LINK, "/signed"]
-    assert seen[1].url.host == "storage.example"
+    assert [(r.url.host, r.url.path) for r in seen] == [
+        ("localhost", _LINK),
+        ("storage.example", "/signed"),
+    ]
+    assert seen[0].headers[TOKEN_HEADER] == ID_TOKEN
+    assert TOKEN_HEADER not in seen[1].headers
     credential_headers = {"authorization", "cookie", "x-dfo-principal"}
     for request in seen:
         assert credential_headers.isdisjoint(request.headers.keys())

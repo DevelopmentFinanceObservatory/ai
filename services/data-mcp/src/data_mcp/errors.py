@@ -61,6 +61,14 @@ class UpstreamTransportError(UpstreamError):
         super().__init__(status=None, code=None, detail=detail, retryable=True)
 
 
+class UpstreamAuthUnavailable(UpstreamTransportError):  # noqa: N818 -- a kind of transport error, named for its cause
+    """Raised when the auth provider could not mint a dfo-apis ID token, so nothing was sent.
+
+    A subclass so callers that map any unanswered call keep doing so, while a
+    caller that must tell "never sent" from "sent but unanswered" can catch it first.
+    """
+
+
 class UpstreamSurfaceUnavailable(UpstreamError):  # noqa: N818 -- named for the probe's verdict, not a generic "Error"
     """Raised when the surface probe confirms dfo-apis has not mounted `prefix`.
 

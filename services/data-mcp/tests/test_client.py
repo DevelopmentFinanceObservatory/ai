@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
 import httpx2
 import pytest
+from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
 from data_mcp.client import (
     _PROBE_TIMEOUT_S,
     DATASETS_PREFIX,
@@ -57,6 +58,24 @@ def _client(
         transport=httpx2.MockTransport(handler),
         **kwargs,
     )
+
+
+ID_TOKEN = "Bearer test-id-token"
+
+
+def id_token_auth(*, mints: int | None = None) -> AuthProvider:
+    """An auth hook sending `ID_TOKEN` in `TOKEN_HEADER`, which fails with
+    `ApisAuthError` once it has answered `mints` calls, when `mints` is set."""
+    answered = 0
+
+    async def auth() -> Mapping[str, str]:
+        nonlocal answered
+        if mints is not None and answered >= mints:
+            raise ApisAuthError("metadata server unreachable: ConnectError")
+        answered += 1
+        return {TOKEN_HEADER: ID_TOKEN}
+
+    return auth
 
 
 def _problem_body(*, code: str, retryable: bool, **extra: object) -> bytes:
@@ -417,6 +436,48 @@ async def test_auth_seam_adds_header_default_adds_none() -> None:
         await client.request("GET", "/api/search/query", route="/api/search/query")
 
     assert requests[0].headers["authorization"] == "Bearer test-token"
+
+
+@pytest.mark.parametrize(
+    ("link", "sent"),
+    [("/api/artifacts/a1", True), ("https://other/x", False), ("//other/x", False)],
+    ids=["root-relative", "absolute", "scheme-relative"],
+)
+async def test_stream_link_sends_the_token_to_the_dfo_apis_origin_alone(
+    link: str, sent: bool
+) -> None:
+    """A link off the dfo-apis origin is refused before a token is minted. On it,
+    the token wins over a caller's header of the same name."""
+    seen: list[httpx2.Request] = []
+    mints = 0
+
+    async def auth() -> Mapping[str, str]:
+        nonlocal mints
+        mints += 1
+        return {TOKEN_HEADER: ID_TOKEN}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(200)
+
+    async def fetch() -> None:
+        async with client.stream_link(
+            link,
+            timeout_s=1.0,
+            headers={TOKEN_HEADER: "Bearer caller"},
+            transport=httpx2.MockTransport(handler),
+        ):
+            pass
+
+    async with _client(handler, auth=auth) as client:
+        if sent:
+            await fetch()
+        else:
+            with pytest.raises(ValueError, match="not on the dfo-apis origin"):
+                await fetch()
+
+    assert [r.headers[TOKEN_HEADER] for r in seen] == ([ID_TOKEN] if sent else [])
+    assert mints == (1 if sent else 0)
 
 
 async def test_default_accept_header_requests_the_buffered_body() -> None:

@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any
 
 # Registers the codec a derived frame's stored trace decodes through.
 import analysis_mcp.trace  # noqa: F401
+from common.apis_auth import apis_auth_provider
 from common.live_apis import PUBLISH_CONFLICT, LiveApisClient, LiveApisError
 from common.materialisation import (
     AnchorRecord,
@@ -522,6 +523,7 @@ async def _run(arguments: argparse.Namespace, settings: BackfillSettings) -> Bac
         async with LiveApisClient(
             base_url=settings.dfo_apis_url,
             datasets_principal=settings.datasets_first_party_principal,
+            auth=apis_auth_provider(base_url=settings.dfo_apis_url),
         ) as client:
             return await run_backfill(
                 store=store,

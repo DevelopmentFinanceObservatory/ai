@@ -57,6 +57,7 @@ from typing import Any, Final
 
 from analysis_mcp.execution_identity import current_execution_identity
 from common import live_apis
+from common.apis_auth import apis_auth_provider
 from common.live_apis import (
     DatasetVersion,
     FramePair,
@@ -562,12 +563,14 @@ def build_live_refresh(*, settings: Settings) -> LiveRefresh:
             "on two max_frame_rows inputs could never be replayed; raise "
             "LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"
         )
+    auth = apis_auth_provider(base_url=presentation.dfo_apis_url)
     apis = LiveApisClient(
         base_url=presentation.dfo_apis_url,
         datasets_principal=presentation.datasets_first_party_principal,
         live_refresh_principal=settings.live_refresh_principal,
+        auth=auth,
     )
-    assembler = PlatformAssembler(settings=presentation)
+    assembler = PlatformAssembler(settings=presentation, auth=auth)
     surface = build_tool_surface(settings=settings)
     return LiveRefresh(
         apis=apis,

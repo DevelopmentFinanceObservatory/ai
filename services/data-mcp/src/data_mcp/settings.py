@@ -2,11 +2,33 @@
 
 from __future__ import annotations
 
+import os
+from typing import Self
+from urllib.parse import urlsplit
+
 from common.settings import FrameServiceSettings
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
 from data_mcp.deadline import DIRECT_CALL_BUDGET
 from data_mcp.definition_store.caching import DEFAULT_MAX_ENTRIES
+
+
+def _is_origin(url: str) -> bool:
+    """Whether `url` is an `http(s)` scheme and host, with an optional valid port and
+    nothing else: no credentials, path, query, fragment, or whitespace."""
+    if any(char.isspace() for char in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        _ = parts.port  # raises ValueError on a malformed or out-of-range port
+    except ValueError:
+        return False
+    return (
+        parts.scheme in {"http", "https"}
+        and bool(parts.hostname)
+        and "@" not in parts.netloc
+        and not (parts.path or parts.query or parts.fragment)
+    )
 
 
 class Settings(FrameServiceSettings):
@@ -21,6 +43,17 @@ class Settings(FrameServiceSettings):
     deployment, so one field covers both. The `SEARCH_PREFIX` /
     `DATASETS_PREFIX` split happens at the path level in `client.py`, not
     here.
+
+    `dfo_site_origin` is the website's public origin, scheme and host only, read
+    from `DFO_SITE_ORIGIN`. The artifact links this service hands to models and
+    MCP clients (`artifact_resource._link_document`) sit on it: the website
+    proxies `/api/datasets/*` to dfo-apis with its own ID token, so a link there
+    works for anyone who can reach the site, where dfo-apis itself answers only
+    callers holding an ID token. This service's own fetches of those links stay
+    on `dfo_apis_url` and never read this field. On Cloud Run (`K_SERVICE` set)
+    an unset value fails Settings construction, and so startup. Off Cloud Run an
+    unset value puts the links on `dfo_apis_url`, which the local
+    `gcloud run services proxy` or a local dfo-apis answers without a token.
 
     The `upstream_*` fields bound `UpstreamClient`'s retry loop.
     `upstream_read_timeout_s` clears dfo-apis' 45s search safety net
@@ -116,6 +149,7 @@ class Settings(FrameServiceSettings):
     """
 
     dfo_apis_url: str = "http://localhost:8083"
+    dfo_site_origin: str | None = None
     upstream_connect_timeout_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     upstream_read_timeout_s: float = Field(default=50.0, gt=0, allow_inf_nan=False)
     upstream_retry_budget_s: float = Field(default=120.0, gt=0, allow_inf_nan=False)
@@ -134,3 +168,30 @@ class Settings(FrameServiceSettings):
     )
     operation_poll_interval_s: float = Field(default=2.0, ge=0.5, allow_inf_nan=False)
     external_mint_concurrency: int = Field(default=1, ge=1)
+
+    @field_validator("dfo_site_origin", mode="before")
+    @classmethod
+    def _site_origin_is_an_origin(cls, value: object) -> object:
+        """A blank value means unset; anything else must be an `http(s)` origin,
+        returned without a trailing slash."""
+        if not isinstance(value, str):
+            return value
+        origin = value.strip().removesuffix("/")
+        if not origin:
+            return None
+        if not _is_origin(origin):
+            raise ValueError(
+                "DFO_SITE_ORIGIN must be the website's public origin, scheme and host "
+                f"with no path, e.g. https://developmentfinance.org (got {value!r})"
+            )
+        return origin
+
+    @model_validator(mode="after")
+    def _site_origin_is_set_on_cloud_run(self) -> Self:
+        if self.dfo_site_origin is None and os.environ.get("K_SERVICE"):
+            raise ValueError(
+                "DFO_SITE_ORIGIN must be set on Cloud Run (K_SERVICE is set): the "
+                "artifact links handed to models would otherwise sit on the dfo-apis "
+                "origin, which refuses callers without an ID token."
+            )
+        return self
