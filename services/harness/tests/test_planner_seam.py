@@ -612,9 +612,9 @@ async def test_an_unknown_tool_name_keeps_adks_answer_listing_the_tools(
 
 @pytest.mark.parametrize("resumed", [False, True])
 async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool) -> None:
-    """A new planner entry starts with no `unsupported` answer to decline, no optional
-    decline earned and no compile failure to call repeated; an ask-the-user resume
-    inside one entry keeps all three."""
+    """A new first-draft entry starts with no `unsupported` answer to decline, no
+    compile failure to call repeated, and only the optional decline every first draft
+    may make; an ask-the-user resume inside one entry keeps all three."""
     stale = {
         UNSUPPORTED_STATE_KEY: ["calculation_over_combined"],
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
@@ -633,7 +633,12 @@ async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool) ->
 
     state = await harness.state()
     kept = {key: state.get(key) for key in stale}
-    assert kept == (stale if resumed else {key: [] for key in stale})
+    fresh = {
+        UNSUPPORTED_STATE_KEY: [],
+        OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
+        COMPILE_FAILURES_STATE_KEY: [],
+    }
+    assert kept == (stale if resumed else fresh)
 
 
 async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
@@ -847,15 +852,14 @@ def _unit_refusal(code: str, *, tool: str = "compare") -> dict[str, Any]:
             ("invalid_input", "decline_unearned"),
             id="compare-facet-mismatch",
         ),
-        pytest.param(None, ("invalid_input", "decline_unearned"), id="no-refusal"),
     ],
 )
 async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
-    decision: Any, requirement: Any, refusal: dict[str, Any] | None, outcome: tuple[str, Any]
+    decision: Any, requirement: Any, refusal: dict[str, Any], outcome: tuple[str, Any]
 ) -> None:
     """A replan entry whose refusal means no operation computes the step may
     decline the ask it served as `no_operation_covers`. With a refusal that
-    offers a choice, or none, the decline is unearned, and the refusal steers to
+    offers a choice, the decline is unearned, and the refusal steers to
     no other output. A `share_of` step refusing its sides on their units earns
     none either: the replan names `quotient_of` as the repair. A step reading one
     measure from two sources earns none, and the replan names one source for it."""
@@ -887,13 +891,64 @@ async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
     assert [(r["outcome"], r.get("code")) for r in answered] == [outcome]
     prompt = _prompt_text(llm.captured_requests[0])
     assert ("`no_operation_covers`" in prompt) is (outcome[0] == "ok")
-    shares = refusal is not None and refusal["tool"] == "share_of"
+    shares = refusal["tool"] == "share_of"
     assert ("`quotient_of`" in prompt) is (shares and refusal["code"] in _SHARE_UNIT_CODES)
-    facets = refusal is not None and refusal["code"] == "cross_frame_facet_mismatch"
+    facets = refusal["code"] == "cross_frame_facet_mismatch"
     assert ("give every requirement on that measure the same source" in prompt) is facets
     if outcome[0] != "ok":
         assert "action" not in answered[0]
         assert "answer the ask" not in answered[0]["message"]
+
+
+@pytest.mark.parametrize("entry", ["first-draft", "amendment"])
+async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
+    decision: Any, requirement: Any, derived_requirement: Any, entry: str
+) -> None:
+    """A first draft may decline as `no_operation_covers` an ask no requirement
+    kind states, with no tool's `unsupported` answer before it, and plan what
+    can still be shown beside it. An amendment entry earns no such decline."""
+    asks = ["the donors whose aid rose in every one of the last five years"]
+    draft = {
+        "question": "donors whose aid rose every year",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [requirement(id="aid").model_dump(mode="json")],
+        "answered": [{"ask": 0, "outputs": ["aid"]}],
+        "declined": [{"ask": asks[0], "code": "no_operation_covers", "ask_ref": 0}],
+    }
+    kwargs: dict[str, Any] = {}
+    if entry == "amendment":
+        seeded = _translated_plan(decision, requirement, derived_requirement, version=1)
+        kwargs = {"prior_plan": seeded.model_dump(mode="json"), "amendment": "show it"}
+        draft = {
+            **{key: value for key, value in draft.items() if key != "question"},
+            "amends_version": 1,
+        }
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=[[("propose_plan", draft)], "Planned."])
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    await harness.run(seam, question="donors whose aid rose every year", readings=[], **kwargs)
+
+    answered = [
+        part.function_response.response
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    if entry == "first-draft":
+        assert [(r["outcome"], r.get("code")) for r in answered] == [("ok", None)]
+        recorded = load_plan(await harness.state())
+        assert recorded is not None
+        assert [(d.code.value, d.ask_ref) for d in recorded.declined] == [
+            ("no_operation_covers", 0)
+        ]
+        assert [(a.ask, a.outputs) for a in recorded.answered] == [(0, ("aid",))]
+    else:
+        assert [(r["outcome"], r.get("code")) for r in answered] == [
+            ("invalid_input", "decline_unearned")
+        ]
 
 
 # -- asking the user (`adk_request_input`) ---------------------------------
