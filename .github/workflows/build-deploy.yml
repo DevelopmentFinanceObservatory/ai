@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Cloud Run service name is dfo-infra's to define; this repo only
+      # Cloud Run service name is infra's to define; this repo only
       # knows about it through vars.SERVICE_AI. See deploy/README.md.
       - name: Resolve image ref
         id: target
@@ -64,30 +64,16 @@ jobs:
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
-      # Dockerfile.ai mounts this read token on ONEcampaign/dfo-spec-kit as a
-      # BuildKit secret to fetch the private dfo-spec-kit git dependencies,
-      # and the build fails without it.
-      - id: spec-kit-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.READER_APP_CLIENT_ID }}
-          private-key: ${{ secrets.READER_APP_PRIVATE_KEY }}
-          owner: ONEcampaign
-          repositories: dfo-spec-kit
-          permission-contents: read
-
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile.ai
           push: true
           tags: ${{ steps.target.outputs.image }}
-          secrets: |
-            spec_kit_token=${{ steps.spec-kit-token.outputs.token }}
 
-      # Image-only update against the service dfo-infra already defined.
+      # Image-only update against the service infra already defined.
       # Deliberately not `gcloud run services replace` -- that takes a full
-      # manifest and would fight dfo-infra for ownership of scaling, secrets,
+      # manifest and would fight infra for ownership of scaling, secrets,
       # and service-account config.
       - name: Point Cloud Run at the new image
         env:

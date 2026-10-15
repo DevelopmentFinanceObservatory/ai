@@ -6,4 +6,4 @@
 
 ## Coordination
 
-Anything that needs a matching change elsewhere: deploy vars, a dfo-infra PR, a new secret. Leave blank if none.
+Anything that needs a matching change elsewhere: deploy vars, an infra PR, a new secret. Leave blank if none.

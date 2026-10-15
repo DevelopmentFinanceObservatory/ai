@@ -5,16 +5,15 @@ data-mcp, analysis-mcp, and presentation-mcp FastMCP apps it mounts
 in-process) and swaps it
 onto an existing Cloud Run service. It never creates or reconfigures a
 service. Dev deploys automatically on every push to `dev` that touches the
-image's inputs, in the ONEcampaign org. Production deploys on every push to
-`main` of the DevelopmentFinanceObservatory copy of this repo, and on manual
-dispatch there. Both run the same steps from `build-deploy.yml`. The sibling
-`dfo-infra` repo owns the Cloud Run service definition (service account,
+image's inputs. Production deploys on every push to `main`, and on manual
+dispatch. Both run the same steps from `build-deploy.yml`. The sibling
+`infra` repo owns the Cloud Run service definition (service account,
 scaling, secrets, env vars) that these workflows target.
 
 The workspace services (harness, data-mcp, analysis-mcp,
 presentation-mcp) deploy as ONE Cloud Run service. See docs/architecture.md for the full rationale.
 
-Until dfo-infra defines the Cloud Run service and someone sets the repo
+Until infra defines the Cloud Run service and someone sets the repo
 variables below, the deploy workflows will fail at the "resolve image ref"
 or `auth` step. `ci.yml` needs none of this and works today.
 
@@ -37,22 +36,22 @@ and secret _names_ in each environment with per-environment values. The
 workflow YAML doesn't change between environments. Only the environment it
 targets does.
 
-| Name           | Kind   | Example value                                                                               | Who provides it                                        |
-| -------------- | ------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `WIF_PROVIDER` | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | dfo-infra's handoff (WIF pool/provider)                |
-| `WIF_SA`       | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | dfo-infra's handoff (deployer service account)         |
-| `REGION`       | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | dfo-infra's handoff                                    |
-| `PROJECT_ID`   | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | dfo-infra's handoff                                    |
-| `AR_REPO`      | var    | `datacommons`                                                                               | dfo-infra's handoff (Artifact Registry repo)           |
-| `SERVICE_AI`   | var    | `dfo-dev-ai`                                                                                | dfo-infra's handoff, once the Cloud Run service exists |
+| Name           | Kind   | Example value                                                                               | Who provides it                                    |
+| -------------- | ------ | ------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `WIF_PROVIDER` | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | infra's handoff (WIF pool/provider)                |
+| `WIF_SA`       | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | infra's handoff (deployer service account)         |
+| `REGION`       | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | infra's handoff                                    |
+| `PROJECT_ID`   | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | infra's handoff                                    |
+| `AR_REPO`      | var    | `datacommons`                                                                               | infra's handoff (Artifact Registry repo)           |
+| `SERVICE_AI`   | var    | `dfo-dev-ai`                                                                                | infra's handoff, once the Cloud Run service exists |
 
 The Cloud Run service itself also needs `STUDIO_API_TOKEN` mounted as a
-secret (dfo-infra, in the service definition next to `GOOGLE_API_KEY`). It
+secret (infra, in the service definition next to `GOOGLE_API_KEY`). It
 is the shared secret the frontend's proxy presents on studio requests. A
 service without it accepts any non-empty bearer token and logs
 `STUDIO AUTH IS OPEN` at startup.
 
-The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (dfo-infra
+The service takes `LIVE_REFRESH_PRINCIPAL` as a second secret (infra
 generates it in the apis stack and mounts one value on dfo-apis, this service,
 and the website). It is the bearer of `POST /api/studio/refresh`, which the
 website calls to redraw a live share's derived card, and the principal this
@@ -65,7 +64,7 @@ holds.
 A refresh answers within 53 seconds, the deadline `LIVE_REFRESH_DEADLINE_S`
 (default 45) plus an 8 second hard stop. The website gives the call 60 seconds, so startup
 fails for a deadline above 52 or below 30, and the Cloud Run request timeout,
-set in dfo-infra, must be above the deadline plus 8. The other
+set in infra, must be above the deadline plus 8. The other
 refresh settings (`LIVE_REFRESH_REQUESTS_PER_S`, `LIVE_REFRESH_BURST`,
 `LIVE_REFRESH_MAX_IN_FLIGHT`, `LIVE_REFRESH_ROWS_IN_FLIGHT_MAX`) have defaults
 sized for one instance and are described in `services/harness/README.md`.
@@ -80,26 +79,23 @@ its own Cloud Run service (see "Splitting a service out later" below).
 loopback, and startup refuses that combination without a shared
 `MCP_API_TOKEN` the split-out service also has.
 
-Every workflow that installs or builds the workspace (`ci.yml` and
-`build-deploy.yml`) also reads the repo variable `READER_APP_CLIENT_ID` and
-the repo secret `READER_APP_PRIVATE_KEY`, the credentials of the read-only
-`dfo-reader` GitHub App. Each run mints a token with `contents: read` on
-`ONEcampaign/dfo-spec-kit` from them to fetch the private dfo-spec-kit git
-dependencies. They are repository-level, so they serve every environment.
+The workspace's `dfo-spec-kit` git dependencies come from the public
+`DevelopmentFinanceObservatory/spec-kit` repo, so `ci.yml`, `build-deploy.yml`,
+and `deploy/Dockerfile.ai` need no token to install them.
 
-The service name value above is a placeholder for illustration. dfo-infra
+The service name value above is a placeholder for illustration. infra
 names the actual service, and whatever they pick goes in this var verbatim.
 
-dfo-infra sets every variable and secret in the Environment: `SERVICE_AI`,
+infra sets every variable and secret in the Environment: `SERVICE_AI`,
 `WIF_PROVIDER`, `WIF_SA`, `REGION`, `PROJECT_ID`, and `AR_REPO`. Run
-`just ENV=dfo-dev handoff ai` from the dfo-infra repo for the `dev`
+`just ENV=dfo-dev handoff ai` from the infra repo for the `dev`
 Environment, and `just ENV=dfo-prod handoff ai` for `production`. The
 script also sets the deployment branch policy. The values stay reproducible
 and the Environment has one writer.
 
-## GCP prerequisites (dfo-infra)
+## GCP prerequisites (infra)
 
-Before the first real deploy, dfo-infra needs to set up, per environment:
+Before the first real deploy, infra needs to set up, per environment:
 
 - A Workload Identity Federation pool and provider trusting this repo's
   GitHub Actions OIDC issuer (no JSON service account keys).
@@ -138,13 +134,11 @@ Before the first real deploy, dfo-infra needs to set up, per environment:
 
 ## Repo-side prerequisites
 
-- A `production` GitHub Environment on the DevelopmentFinanceObservatory
-  repo with `main` as its only deployment branch. The release gate is the
-  approval a sync pull request into `main` needs. Neither environment takes
-  any other protection rule: dfo-infra's `scripts/handoff.sh` refuses to run
-  against an environment with required reviewers or a wait timer.
+- A `dev` GitHub Environment with `dev` as its only deployment branch, and a
+  `production` GitHub Environment with `main` as its only deployment branch
+  and `release` as required reviewers.
 - The vars/secrets table above, populated per environment.
-- Staging is unbuilt. dfo-infra has no staging Terraform tree or GCP
+- Staging is unbuilt. infra has no staging Terraform tree or GCP
   project, and standing one up means a new `infra/<env>/` directory with
   its own backend and state prefix. Once it exists, a `staging` GitHub
   Environment and a `staging` entry in `deploy-dev.yml`'s `deploy` job

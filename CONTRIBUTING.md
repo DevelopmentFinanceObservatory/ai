@@ -84,17 +84,14 @@ nothing. Use `just sync` to install every member into the shared `.venv`.
 ## Branch model
 
 `dev` is the trunk. Branch off it, and open pull requests into it. CI
-(`lint`, `test`, `docker`) runs on every pull request into `dev` or `main` in
-ONEcampaign once it is marked ready, and again on each push to `dev`. A draft
-pull request runs no CI. In the DevelopmentFinanceObservatory copy, the sync
-check admits the pull request instead.
+(`lint`, `test`, `docker`) runs on every pull request into `dev` or `main`
+once it is marked ready, and again on each push to `dev`. A draft pull request
+runs no CI.
 
 Merging to `dev` deploys to the dev Cloud Run service.
 
-A release is a pull request from `dev` into `main`. Production runs from
-the DevelopmentFinanceObservatory copy of this repo, whose `main` is synced
-from a ONEcampaign commit. `deploy-prod.yml` deploys there on every push to
-`main`.
+A release is a pull request from `dev` into `main`. `deploy-prod.yml` deploys
+production on every push to `main`.
 
 ## Conventions
 
@@ -171,7 +168,7 @@ that moves a measured number means running `just context-baseline`, and the diff
 ## Deploying
 
 CI builds one image and updates the dev Cloud Run service on every merge to
-`dev`. Production is a manual `workflow_dispatch`. `dfo-infra` owns the
-service definition, including its runtime secrets -- the `.env` flow above is
-for local development only. See [deploy/README.md](./deploy/README.md) for
+`dev`, and production on every push to `main`. `infra` owns the service
+definition, including its runtime secrets. The `.env` flow above is for local
+development. See [deploy/README.md](./deploy/README.md) for
 the full division and the GitHub Environment setup.

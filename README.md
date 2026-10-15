@@ -12,20 +12,20 @@ They deploy together as a single Cloud Run service.
 
 ## Repo map
 
-| Repo           | What it is                                                                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `dfo-dcp`      | The knowledge graph engine (ONE's fork of Data Commons) that serves the graph over DCP mixer and SDMX APIs.                    |
-| `dfo-apis`     | The Datasets API and Search API that `data-mcp` wraps to query the `dfo-dcp` graph.                                            |
-| `dfo-ai`       | This repository, which houses the agent harness and MCP servers.                                                               |
-| `dfo-spec-kit` | Shared spec models for spec-id hashing, materialisation, manifest schemas, and component specifications.                       |
-| `dfo-website`  | The public Next.js site (chat and canvas workspace, reference pages, and the proxy for harness traffic).                       |
-| `dfo-skills`   | The open repository of domain-knowledge packages (definitions, methodology, analytical recipes) loaded dynamically at runtime. |
-| `dfo-infra`    | Infrastructure as code (Cloud Run service definitions, service accounts, scaling, and secrets).                                |
+| Repo       | What it is                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `dcp`      | The knowledge graph engine (ONE's fork of Data Commons) that serves the graph over DCP mixer and SDMX APIs.                    |
+| `apis`     | The Datasets API and Search API that `data-mcp` wraps to query the `dcp` graph.                                                |
+| `ai`       | This repository, which houses the agent harness and MCP servers.                                                               |
+| `spec-kit` | Shared spec models for spec-id hashing, materialisation, manifest schemas, and component specifications.                       |
+| `website`  | The public Next.js site (chat and canvas workspace, reference pages, and the proxy for harness traffic).                       |
+| `skills`   | The open repository of domain-knowledge packages (definitions, methodology, analytical recipes) loaded dynamically at runtime. |
+| `infra`    | Infrastructure as code (Cloud Run service definitions, service accounts, scaling, and secrets).                                |
 
 ## Layout
 
 ```
-dfo-ai/
+ai/
   packages/
     common/                 # Shared logging, telemetry, settings base, and materialisation store
   services/
@@ -89,6 +89,6 @@ and developer commands.
 
 GitHub Actions builds one container image (`ai`) containing the harness and
 all three mounted MCP servers. Merges to `dev` deploy automatically to the Cloud Run
-development environment. Production deployments trigger manually through `workflow_dispatch`.
-`dfo-infra` defines the Cloud Run service configuration (service accounts, scaling limits,
+development environment. Production deploys on every push to `main`.
+`infra` defines the Cloud Run service configuration (service accounts, scaling limits,
 secrets). Repository CI only updates the container image deployed to that service.
