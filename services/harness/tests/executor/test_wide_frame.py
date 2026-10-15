@@ -101,14 +101,14 @@ _SLOT_COLUMNS = (
     "stat_var_crsTypeOfFlow",
 )
 FRAME_ROLE_KEYS = (PROVIDER, RECIPIENT, *_SLOT_COLUMNS)
-# The coverage dimensions dfo-apis reports for this frame: each declared role
+# The coverage dimensions apis reports for this frame: each declared role
 # column with its flow axis, then `years` with none.
 DIMENSIONS = [
     {"label": PROVIDER, "count": 2, "axis": "origin"},
     {"label": RECIPIENT, "count": 1, "axis": "destination"},
     {"label": "years", "count": 10},
 ]
-# The same dimensions from a dfo-apis that reports no axis.
+# The same dimensions from an apis service that reports no axis.
 DIMENSIONS_WITHOUT_AXES = [{"label": d["label"], "count": d["count"]} for d in DIMENSIONS]
 
 # Three members of one CRS family. `OdaEquity` reports through 2004 only, so
@@ -283,7 +283,7 @@ def retrieved(
     default the donors `source` names, unless `frame` gives another.
     `role_keys` and `stat_var_count` are read off the frame the way `get_data`
     reads them (`data_mcp.frame_materialisation.observed_shape`), and
-    `dimensions` are what dfo-apis reports. `role_keys` overrides the
+    `dimensions` are what apis reports. `role_keys` overrides the
     reported keys. `frame_read=False` leaves both out, as `get_data` does
     when it could not read the frame.
     """
@@ -659,7 +659,7 @@ async def test_a_period_filter_on_a_family_frame_declares_every_frame_column(
     # Germany's bilateral ODA since 2000, filtered from 2005: the plan names
     # Germany alone, under the `origin` column, and the frame carries both
     # declared roles and four `stat_var_*` columns. A period filter names no
-    # role column, so it runs whether or not dfo-apis reports axes.
+    # role column, so it runs whether or not apis reports axes.
     source = _source(entities=_GERMANY_ONLY)
     plan = _since_2005_plan(plan_for, source)
     assert plan.workflow is not None
@@ -823,7 +823,7 @@ async def test_a_rank_over_every_donor_the_source_leaves_open_ranks_the_frames_p
 
 
 def _sector_frame(*, spec_id: str, totals: Mapping[tuple[ResolvedEntity, str], float]) -> Frame:
-    """A frame as dfo-apis rolls a family up to sector groups: `stat_var` is the spec's own
+    """A frame as apis rolls a family up to sector groups: `stat_var` is the spec's own
     ref on every row, the role columns are kept with each party's kind, and
     `stat_var_crsPurpose` names each row's group. A group with no records for a donor has
     no row, never a zero."""
@@ -1181,7 +1181,7 @@ async def test_a_role_the_frame_has_no_column_for_refuses_before_the_call(
     retrieved: Retrieved,
     surface_for: Callable[..., FrameSurface],
 ) -> None:
-    # A dfo-apis that reports no axis leaves `origin` and `destination` with
+    # An apis service that reports no axis leaves `origin` and `destination` with
     # no column to bind to; grouping by them cannot be sent.
     surface = surface_for(
         get_data=[ok(await retrieved(_source(), dimensions=DIMENSIONS_WITHOUT_AXES))]
@@ -1410,7 +1410,7 @@ async def test_a_join_of_one_stat_var_under_two_units_declares_one(
 
 # --- Party totals: a flow retrieval is served without the parties totalling others -----
 
-# DAC2A's donors to Kenya with the kind dfo-apis serves for each: countries, an
+# DAC2A's donors to Kenya with the kind apis serves for each: countries, an
 # organisation and a residual add up; the DAC total and the G7 hold the countries' figures
 # again, and `get_data(without_party_totals=True)` leaves them out.
 _DONORS_TO_KENYA: dict[str, tuple[str, float]] = {

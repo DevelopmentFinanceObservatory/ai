@@ -62,7 +62,7 @@ from summarise import (
 
 DATASET = "harness-planner-entry-v1"
 # "DFO website" on Langfuse Cloud EU: the project the `dfo-dev-langfuse-*` keys in `.env`
-# name, where dfo-apis's search evals keep their experiments too.
+# name, where the apis service's search evals keep their experiments too.
 PROJECT_ID = "cmqpekjoj046iad0e8b3r8psp"
 # How long a push waits for Langfuse to show everything it sent, and how often it looks.
 VISIBLE_WITHIN_S = 180.0

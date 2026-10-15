@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from common.period_note import period_note
 
-# The dimensions of an aid frame as dfo-apis sends them, each with the noun
+# The dimensions of an aid frame as apis sends them, each with the noun
 # it words the role by.
 _DONORS = {
     "label": "financingProvider",
@@ -25,7 +25,7 @@ _CREDITORS = {**_DONORS, "noun": {"singular": "creditor", "plural": "creditors"}
 
 
 def _year(year: int, donors: int) -> dict[str, Any]:
-    """A year's entry as dfo-apis sends it: `role_counts` keyed by dimension label."""
+    """A year's entry as apis sends it: `role_counts` keyed by dimension label."""
     return {
         "year": year,
         "series": donors,
@@ -345,7 +345,7 @@ def test_no_note_when_nothing_can_be_set_beside_the_served_year(coverage: dict[s
         (_RECIPIENTS, 30, 9, ["30 recipients", "9 recipients"]),
         (_CREDITORS, 85, 9, ["85 creditors", "9 creditors"]),
         (_CREDITORS, 85, 1, ["85 creditors", "1 creditor so far"]),
-        # An entry that states no noun, as a dfo-apis without the field sends
+        # An entry that states no noun, as an apis service without the field sends
         # it, whatever its axis.
         ({"label": "financingProvider", "axis": "origin"}, 30, 9, ["30 members", "9 members"]),
         ({"label": "sector"}, 30, 1, ["30 members", "1 member so far"]),

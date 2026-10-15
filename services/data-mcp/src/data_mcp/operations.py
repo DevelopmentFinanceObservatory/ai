@@ -1,10 +1,10 @@
 """Resolving a mint's 202 (`operation submitted`) response to a manifest.
 
-`get_data_tool.py`'s own mint POST answers 202, not 200, once dfo-apis' admission
+`get_data_tool.py`'s own mint POST answers 202, not 200, once apis' admission
 logic (`series_coverage`-keyed) finds a request over its sync budget: the body is an
-`OperationResource` (dfo-apis' own `datasets_api.schema.OperationResource`,
+`OperationResource` (apis' own `datasets_api.schema.OperationResource`,
 mirrored here as this module's own pydantic models rather than imported, since this
-service and dfo-apis do not share a schema package) naming an `operation_id` this
+service and apis do not share a schema package) naming an `operation_id` this
 call can poll: `GET {poll}` (`datasets_api.doors.meta`'s operations route). This
 module is what turns that 202 into the same manifest a synchronous (200) mint would
 have returned, or a refusal if the operation fails, disappears, or does not finish
@@ -62,18 +62,18 @@ _POLL_REPORT_INTERVAL_S = 10.0
 
 
 class OperationEnvelope(BaseModel):
-    """This service's own mirror of dfo-apis' `datasets_api.schema.OperationEnvelope`.
+    """This service's own mirror of apis' `datasets_api.schema.OperationEnvelope`.
 
     `retry_after_ms` is set only on the very first envelope this call ever sees (the
-    202 submit response) -- every poll response after that carries none, by dfo-apis'
+    202 submit response). Every poll response after that carries none, by apis'
     own contract (that field's wire docstring), so a later envelope's `None` here
     means "no pacing guidance", not "no delay".
 
-    `poll` is dfo-apis' own suggested poll path, parsed but never dialled: `_poll_once`
+    `poll` is apis' own suggested poll path, parsed but never dialled: `_poll_once`
     always builds its request path from `operation_id` and `_POLL_ROUTE_TEMPLATE`
     instead, so an upstream-controlled string can never become a request target this
     client's own auth headers would ride along with. `operation_id` is constrained to
-    dfo-apis' own wire format (`op_` plus a sha256 hex digest,
+    apis' own wire format (`op_` plus a sha256 hex digest,
     `datasets_api.operation_store.compute_operation_id`) so a malformed id refuses rather
     than reaching `_POLL_ROUTE_TEMPLATE.format` unchecked.
     """
@@ -87,13 +87,13 @@ class OperationEnvelope(BaseModel):
 
 
 class OperationResource(BaseModel):
-    """This service's own mirror of dfo-apis' `datasets_api.schema.OperationResource`.
+    """This service's own mirror of apis' `datasets_api.schema.OperationResource`.
 
     `manifest` is set only once a poll response's own `operation.status == "done"`;
     the 202 submit response never carries one even when `operation.status` is
     already `"done"` (a resubmit racing a worker's own completion) -- see
     `resolve_operation_response`'s own handling of that case. `error` is declared on
-    the wire but never populated (dfo-apis' own `OperationResource.error` docstring:
+    the wire but never populated (apis' own `OperationResource.error` docstring:
     a `failed` operation raises an RFC 9457 problem instead), so it is not modelled
     here at all.
     """
@@ -123,10 +123,10 @@ class ResolvedOperation:
 
 @dataclass(frozen=True, kw_only=True)
 class QueuedOperation:
-    """A 202 operation dfo-apis has not finished, as `operation_without_waiting`
-    left it. `status` is the last dfo-apis reported. `retry_after_s` is the wait
-    dfo-apis named on the submit response, else the caller's poll interval. Sending
-    the same mint again after it rejoins this operation: dfo-apis derives
+    """A 202 operation apis has not finished, as `operation_without_waiting`
+    left it. `status` is the last apis reported. `retry_after_s` is the wait
+    apis named on the submit response, else the caller's poll interval. Sending
+    the same mint again after it rejoins this operation: apis derives
     `operation_id` from the request, and answers a repeat with the operation it
     already holds."""
 
@@ -266,7 +266,7 @@ def _still_processing_refusal(
 ) -> ToolResult:
     """The refusal for a wait that ended without a manifest.
 
-    `envelope` carries the last status dfo-apis reported, and `last_poll_error` the
+    `envelope` carries the last status apis reported, and `last_poll_error` the
     last of the upstream failures since then, if every poll since failed.
     """
     error_name = None
@@ -306,7 +306,7 @@ async def resolve_operation_response(
         submit_payload: The 202 response's own parsed JSON body -- an
             `OperationResource` with `operation.status` almost always `"pending"`,
             occasionally `"running"`, `"done"`, or `"failed"` (a resubmit racing a
-            worker; see dfo-apis' own `operation_submitted_resource` docstring).
+            worker; see apis' own `operation_submitted_resource` docstring).
         deadline: The `get_data` call's deadline. The wait loop polls until the
             operation reaches `done` with a manifest, and stops once less than the
             current `CallBudget.post_mint_reserve_s` of it remains. A
@@ -316,7 +316,7 @@ async def resolve_operation_response(
         poll_interval_s: Fallback wait between polls when the current envelope
             names no `retry_after_ms` of its own -- `Settings
             .operation_poll_interval_s`. Every poll response but the first carries
-            none, by dfo-apis' own contract (`OperationEnvelope.retry_after_ms`'s
+            none, by apis' own contract (`OperationEnvelope.retry_after_ms`'s
             own docstring).
         sleep: Backoff sleep, replaced in tests to avoid waiting.
         on_poll: Awaited once the submit response is parsed, then again on a

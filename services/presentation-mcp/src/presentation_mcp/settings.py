@@ -55,9 +55,9 @@ def _is_browser_url(url: str) -> bool:
 
 
 class Settings(FrameServiceSettings):
-    """presentation-mcp config: the shared base fields plus the dfo-apis presentation surface it wraps.
+    """presentation-mcp config: the shared base fields plus the apis presentation surface it wraps.
 
-    `dfo_apis_url` is the base URL of dfo-apis, which mounts
+    `dfo_apis_url` is the base URL of apis, which mounts
     `/api/presentation/*` alongside its other surfaces on the same host.
 
     `max_frame_rows` (`common.FrameServiceSettings`, shared with data-mcp and
@@ -105,14 +105,14 @@ class Settings(FrameServiceSettings):
     `presentation_release_required` exactly like every other startup
     admission failure, rather than crashing the lifespan outright.
 
-    `datasets_first_party_principal` is this service's own half of dfo-apis'
+    `datasets_first_party_principal` is this service's own half of apis'
     publish-door authorization (`datasets_api.doors.publish`, mirroring the
     pin door's identical mechanism): sent as the `x-dfo-principal` header
     (`client.PRINCIPAL_HEADER`) on the one call `client.PlatformAssembler
     ._ensure_published_pair` issues to `POST /api/datasets/frames/publish`,
-    and nowhere else -- every other dfo-apis route this service calls never
+    and nowhere else. Every other apis route this service calls never
     reads that header, so sending it there would only add an unused value to
-    the request with no upside. Must equal whatever the dfo-apis deployment's
+    the request with no upside. Must equal whatever the apis deployment's
     own `DATASETS_FIRST_PARTY_PRINCIPAL` env var holds; the two are separate
     deployments; nothing keeps them in sync but a deployer setting the same
     value on both. `None` (the default, including a blank env value) means
@@ -128,7 +128,7 @@ class Settings(FrameServiceSettings):
     reachable from a browser, mount path included: the co-mounted harness
     serves them under `/mcp/presentation`, so a deployment sets it to its
     public `https` URL plus `/mcp/presentation` (the Cloud Run service must set
-    it, in dfo-infra; `just dev` and its siblings pass
+    it, in infra; `just dev` and its siblings pass
     `http://localhost:$PORT/mcp/presentation`).
     Every view's payload names its theme stylesheet as
     `<presentation_public_url>/theme-<hash>.css` (`theme.theme_url`), and the
@@ -175,7 +175,7 @@ class Settings(FrameServiceSettings):
         `BaseServiceSettings._blank_mcp_token_is_unset`'s own precedent --
         an env file that sets `DATASETS_FIRST_PARTY_PRINCIPAL=` (present but
         empty) must degrade the same way as leaving it out entirely, not
-        send an empty header value dfo-apis' own principal check would
+        send an empty header value apis' own principal check would
         refuse as a non-matching principal instead of as "not configured".
         """
         if isinstance(value, str) and not value.strip():
@@ -197,5 +197,5 @@ class Settings(FrameServiceSettings):
             "PRESENTATION_PUBLIC_URL must be the absolute http(s) URL at which a "
             "browser reaches presentation-mcp, mount path included, e.g. "
             f"https://<host>/mcp/presentation ({problem}). The Cloud Run "
-            "service must set it (dfo-infra owns that config); `just dev` sets it for a local run."
+            "service must set it (infra owns that config); `just dev` sets it for a local run."
         )

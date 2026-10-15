@@ -1,4 +1,4 @@
-"""The dfo-website Studio card look, carried by every view's payload by URL.
+"""The website Studio card look, carried by every view's payload by URL.
 
 Prefab's renderer takes its styling only from the payload's `css` and
 `stylesheets`, and some hosts (ChatGPT) pass a tool result's
@@ -32,7 +32,7 @@ wins over every layered rule. Its selectors stay on Prefab's theme tokens
 into each chart series and legend swatch. Views force light mode, so there is
 no dark variant.
 
-Colours, sizes and weights are dfo-website's Default Studio theme
+Colours, sizes and weights are website's Default Studio theme
 (`src/lib/studio/theme.ts`, `Card.module.scss`, `CardChrome.module.scss`,
 `ChartCard.module.scss`, `chartSetup.ts`). The info icon and the DFO logo are
 the website's `src/assets/svg/info.svg` and `logo.svg`, inlined as `data:`

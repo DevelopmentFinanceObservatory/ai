@@ -1,9 +1,9 @@
 """How a source binding a family of StatVars is read, summed or separately.
 
 The spec blocks come from `tests/fixtures/family_spec_blocks.json`: single-part
-`search` envelopes recorded from dfo-apis, cut to the fields a source reads
+`search` envelopes recorded from apis, cut to the fields a source reads
 and converted to the wire that lists no members. Each slot carries `summable`
-as dfo-apis serves it. A test that needs a slot the recordings lack edits a
+as apis serves it. A test that needs a slot the recordings lack edits a
 copy of a recorded block and says what it changed.
 
 A source is one StatVar exactly when `search` states it serves one
@@ -268,7 +268,7 @@ def _donor_open(*, confirmed: int, served: int | None) -> dict[str, Any]:
 
 
 def _stating_no_summable(block: dict[str, Any]) -> dict[str, Any]:
-    """`block` as a dfo-apis that predates `Slot.summable` serves it: no slot states one."""
+    """`block` as an apis service that predates `Slot.summable` serves it: no slot states one."""
     for slot in block["resolved"]["slots"]:
         slot.pop("summable", None)
     return block
@@ -689,7 +689,7 @@ def test_a_family_confirming_one_member_asks_for_its_sum_and_feeds_a_single_meas
     compile_question: Callable[..., CompileResult],
 ) -> None:
     """France's education grants with one member confirmed and no membership
-    settled: the retrieval asks dfo-apis for the family's sum, so the frame
+    settled: the retrieval asks apis for the family's sum, so the frame
     holds one StatVar whichever members hold data, and the yearly total reads it."""
     source = source_from_spec_block(_one_confirmed("france_education_grants"))
     grants = _dataset(
@@ -881,7 +881,7 @@ def test_a_summable_family_the_plan_reads_separately_is_refused_at_compile_time(
 def test_a_family_of_two_the_plan_reads_separately_is_refused_at_compile_time(
     compile_question: Callable[..., CompileResult],
 ) -> None:
-    """Male and female population, read separately and totalled: dfo-apis may
+    """Male and female population, read separately and totalled: apis may
     not sum over sex, so the reason asks for one value of it."""
     source = _source("male_female_population_nigeria")
     people = _dataset(

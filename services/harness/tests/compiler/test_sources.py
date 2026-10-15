@@ -204,7 +204,7 @@ def test_no_data_carries_the_reason_and_the_nearest_real_series() -> None:
 def test_no_data_carries_a_reason_this_service_does_not_yet_recognise() -> None:
     # The reason vocabulary belongs to another service: a value it has not
     # been taught yet is still data to carry, not grounds to refuse the
-    # envelope. `entity_set_too_large` is real on dfo-apis' own feature
+    # envelope. `entity_set_too_large` is real on apis' own feature
     # branch and absent from its published `dev` vocabulary at the time of
     # writing -- exactly the kind of value this has to survive.
     outcome = outcome_from_envelope(
@@ -594,7 +594,7 @@ def test_a_block_stating_no_scope_and_no_role_axis_fact_opens_nothing() -> None:
 
 
 # Africa as a DAC2A recipient, bound to the one party DAC publishes as its
-# total, and the G7 read as its members, as dfo-apis states `entity_groups`.
+# total, and the G7 read as its members, as apis states `entity_groups`.
 _GROUPS = {
     "destination": {
         "ref": "africa",
@@ -638,7 +638,7 @@ def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:
 
 
 def _alternative(spec_id: str, label: str, axis: str) -> dict[str, Any]:
-    """One `resolved.alternative_measures` entry as dfo-apis states it."""
+    """One `resolved.alternative_measures` entry as apis states it."""
     return {
         "definition": {"schema_version": 1, "spec_id": spec_id, "identity": {"stat_var": "y"}},
         "label": label,

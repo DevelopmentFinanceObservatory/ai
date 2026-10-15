@@ -68,8 +68,8 @@ See `services/harness/src/planner/README.md`,
 `services/harness/src/executor/README.md`.
 
 **`services/data-mcp`** is a FastMCP server over the Data seam of the
-`dfo-apis` repo: the Search API (served at `/api/search/*`) today, the
-Datasets API (`/api/datasets/*`) next, both reading from the `dfo-dcp`
+`apis` repo: the Search API (served at `/api/search/*`) today, the
+Datasets API (`/api/datasets/*`) next, both reading from the `dcp`
 graph. Only agent-facing tool definitions belong here; the search and
 dataset logic, ranking, and data access stay behind those HTTP APIs. This
 wrapper exists so the harness gets a stable MCP-shaped interface without

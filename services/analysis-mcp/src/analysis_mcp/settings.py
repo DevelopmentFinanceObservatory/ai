@@ -32,7 +32,7 @@ class Settings(FrameServiceSettings):
     `frame_store_bucket` names the GCS bucket the materialisation store
     persists to; `None` (the default) keeps the in-process, restart-losing
     store. Do not set this on a deployment before the bucket's own lifecycle
-    rule exists: that rule bounds retention, is provisioned in `dfo-infra`,
+    rule exists: that rule bounds retention, is provisioned in `infra`,
     not here, and until it exists a durable store's objects accumulate
     indefinitely.
 

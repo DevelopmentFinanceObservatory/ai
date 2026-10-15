@@ -7,7 +7,7 @@ dependencies = [
     "common",
     # `dfo_frame_grammar.Frame`/`grammar` constants: reading a materialised
     # `ops_`/`ocv_` frame back out of the shared store and rendering it as
-    # the `role_keys`/`rows` pair dfo-apis' publish door re-renders itself
+    # the `role_keys`/`rows` pair the apis service's publish door re-renders itself
     # (`presentation_mcp.frame_publish`). Mirrors data-mcp's and
     # analysis-mcp's own pair of entries for the same package.
     "dfo-spec-kit",

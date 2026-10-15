@@ -24,13 +24,13 @@ A file holds a row per series, so its Parquet-metadata row count is checked
 before a single column is read, unless the mint's estimates continue its
 series (`continuing_method`, off the manifest's `trace.continuations`). A
 continued series holds a row for its reported method and a row for the
-continuing one and counts once, as dfo-apis' producer counts it
+continuing one and counts once, as apis' producer counts it
 (`materialise.statistics.SeriesStatisticsFile`), so such a file's series are
 counted from its rows (`_series_count`).
 
 `fetch_series_statistics_table` returns the verified file as an Arrow table
 in `SERIES_STATISTICS_ARROW_SCHEMA`, the producer's own schema
-(`materialise.statistics.SERIES_STATISTICS_SCHEMA` in dfo-apis'
+(`materialise.statistics.SERIES_STATISTICS_SCHEMA` in apis'
 `dfo-data-tools`): every column cast to its type, every non-nullable field
 free of nulls, and every `facet` a JSON object of the shape
 `SeriesStatisticsModel.facet` accepts. `fetch_series_statistics` converts
@@ -97,7 +97,7 @@ _ENTITY_TYPE = pa.struct(
     [pa.field("role", pa.string(), nullable=False), pa.field("ref", pa.string(), nullable=False)]
 )
 
-# The columns, types and nullability `series-statistics/1` carries, as dfo-apis'
+# The columns, types and nullability `series-statistics/1` carries, as apis'
 # producer writes them. Nullable exactly where `SeriesStatisticsModel` accepts
 # `None`: a series with one observation has no change.
 SERIES_STATISTICS_ARROW_SCHEMA = pa.schema(
@@ -233,7 +233,7 @@ async def fetch_series_statistics_table(
         expected_series: The series count the manifest that named `artifact`
             already promised (`manifest.series_count`) -- checked against the
             file's series once the fetch succeeds. `None` when the manifest
-            carries the artifact but no `series_count` (dfo-apis mints an
+            carries the artifact but no `series_count` (apis mints an
             all-years definition that way): there is no count to check.
         continuing: The method continuing the mint's series
             (`continuing_method(manifest)`), whose rows count no series of
@@ -297,9 +297,9 @@ async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:
     """Read a streamed `response`'s body, refusing before it is buffered in full once
     it exceeds `max_bytes`.
 
-    `artifact.bytes` is dfo-apis' own advertised size for the artifact the link
+    `artifact.bytes` is apis' own advertised size for the artifact the link
     names; a body that outgrows it is refused chunk by chunk, so an
-    artifact whose advertised size understates what dfo-apis actually stored
+    artifact whose advertised size understates what apis actually stored
     never gets fully read into memory here. The request must carry
     `Accept-Encoding: identity`, which keeps the response uncompressed, so a chunk
     `aiter_bytes` yields is never larger than the bytes read off the wire for it --
@@ -388,7 +388,7 @@ def _read(data: bytes, *, expected_series: int | None, continuing: str | None) -
 
 
 def _series_count(table: pa.Table, *, continuing: str) -> int:
-    """The series `table`'s rows hold, counted as dfo-apis' producer counts them
+    """The series `table`'s rows hold, counted as apis' producer counts them
     (`materialise.statistics._FiguresFold`, by `series_index`'s rule)."""
     return len(set(series_index(table, continuing=continuing).to_pylist()))
 
@@ -397,7 +397,7 @@ def series_index(table: pa.Table, *, continuing: str | None) -> pa.Array:
     """The series each row of `table` belongs to, as the position of its series'
     head row: a row of the `continuing` method belongs to the first row of
     another method holding the same variable, entities and facet apart from
-    `measurementMethod`, as dfo-apis' producer folds them
+    `measurementMethod`, as apis' producer folds them
     (`materialise.statistics._FiguresFold`). Every other row heads its own
     series, so with nothing `continuing` each row is its own.
     """

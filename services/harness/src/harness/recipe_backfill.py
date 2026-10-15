@@ -1,7 +1,7 @@
-"""Stores in dfo-apis the recipe of every derived frame the materialisation store
+"""Stores in apis the recipe of every derived frame the materialisation store
 holds. Run as `python -m harness.recipe_backfill`.
 
-A derived frame published to dfo-apis carries its recipe (`common.recipe`) with
+A derived frame published to apis carries its recipe (`common.recipe`) with
 the publish. A frame published before that was the case has its recipe only in the
 materialisation bucket, in its own trace and its ancestors' traces. This job
 rebuilds each recipe from the bucket and writes it through
@@ -13,21 +13,21 @@ The walk is `MaterialisationStore.list_frames`, oldest first, keeping the derive
 
 1. `common.recipe.build_recipe` reads the frame's trace and every derived
    ancestor's, and each root's mint record. A root with no record gets one from
-   `data_mcp.mint_recovery.recover_mint_record` over dfo-apis' versions route. A
+   `data_mcp.mint_recovery.recover_mint_record` over apis' versions route. A
    frame with a missing ancestor, an unreadable trace or an unrecoverable root has
-   no recipe built, and nothing partial is sent. dfo-apis is asked whether it
+   no recipe built, and nothing partial is sent. apis is asked whether it
    already holds a recipe for it.
-2. With `--write`, the recipe is put to dfo-apis, which stores it, answers that
+2. With `--write`, the recipe is put to apis, which stores it, answers that
    the pair already holds it, refuses it as a conflict, or answers that the pair
    was never published. Without `--write` the job reads the stored recipe and
-   compares the two hashes, and writes nothing to dfo-apis or to the store.
+   compares the two hashes, and writes nothing to apis or to the store.
 
 A recovered mint record is kept for the rest of the run, and with `--write` it is
 written to the store, so later frames and later runs read it.
 
 Every frame ends with one `Reason`. The report lists each frame with its reason
 and closes with the counts an operator reads before restoring the bucket's age
-rule. A run is safe to repeat: dfo-apis keeps a pair's first recipe, so a second
+rule. A run is safe to repeat: apis keeps a pair's first recipe, so a second
 `--write` run finds every stored recipe already held.
 
 The job reads traces and mint records. `get_trace` on the bucket-backed store
@@ -45,7 +45,7 @@ Settings come from the environment or `.env`, under the names the services use:
 
 Exit status: 0 when every frame reached a settled reason, 1 when a frame ended
 `apis_failure` or `unexpected_error` and a rerun may settle it, 2 when a setting
-is missing or dfo-apis refused the first call.
+is missing or apis refused the first call.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ _SNAPSHOT_NOT_FOUND = "snapshot_not_found"
 _HASH_CONFLICT = "recipe_requires_matching_normal_form_hash"
 _REPLAY_KEY_CONFLICT = "recipe_requires_matching_replay_key"
 
-# A dataset id no dataset has. dfo-apis answers its versions with an empty list,
+# A dataset id no dataset has. apis answers its versions with an empty list,
 # so reading them tests the URL and the principal and nothing else.
 _PREFLIGHT_SPEC_ID = "spec_" + "0" * 32
 
@@ -121,11 +121,11 @@ class Reason(StrEnum):
     UNEXPECTED_ERROR = "unexpected_error"
 
 
-# dfo-apis holds a recipe for the frame.
+# apis holds a recipe for the frame.
 _HELD = (Reason.STORED, Reason.ALREADY_STORED)
 # A rerun may end the frame differently.
 _UNSETTLED = (Reason.APIS_FAILURE, Reason.UNEXPECTED_ERROR)
-# No recipe could be built, so dfo-apis was not asked whether the frame is published.
+# No recipe could be built, so apis was not asked whether the frame is published.
 _UNBUILT = (
     Reason.MISSING_ANCESTOR,
     Reason.ROOT_UNRECOVERABLE,
@@ -331,7 +331,7 @@ async def _recipe_or_failure(
 async def _unbuilt(
     ref: FrameRef, failure: tuple[Reason, str], *, client: LiveApisClient
 ) -> tuple[Reason, str]:
-    """The outcome of a frame no recipe was built for: `already_stored` when dfo-apis
+    """The outcome of a frame no recipe was built for: `already_stored` when apis
     holds one from the frame's publish, else the build failure."""
     reason, detail = failure
     held = await client.read_recipe(spec_id=ref.spec_id, content_version=ref.content_version)
@@ -343,7 +343,7 @@ async def _unbuilt(
 async def _compare(
     ref: FrameRef, recipe: dict[str, Any], *, client: LiveApisClient
 ) -> tuple[Reason, str | None]:
-    """What a write of `recipe` would meet, from the recipe dfo-apis holds now."""
+    """What a write of `recipe` would meet, from the recipe apis holds now."""
     held = await client.read_recipe(spec_id=ref.spec_id, content_version=ref.content_version)
     if held is None:
         return Reason.WOULD_STORE, None
@@ -410,8 +410,8 @@ async def run_backfill(
 
     Args:
         store: The materialisation store to walk.
-        client: dfo-apis, with the datasets principal set.
-        write: Put recipes to dfo-apis and recovered mint records to `store`. Off,
+        client: apis, with the datasets principal set.
+        write: Put recipes to apis and recovered mint records to `store`. Off,
             the run reads both and writes neither.
         since: Take only frames written at or after this instant.
         until: Take only frames written before this instant.
@@ -419,7 +419,7 @@ async def run_backfill(
         now: The clock the report's ages are measured from.
 
     Raises:
-        LiveApisError: dfo-apis refused or failed the first call, which reads the
+        LiveApisError: apis refused or failed the first call, which reads the
             versions of a dataset id no dataset has. No frame was read.
     """
     await client.list_versions(spec_id=_PREFLIGHT_SPEC_ID)

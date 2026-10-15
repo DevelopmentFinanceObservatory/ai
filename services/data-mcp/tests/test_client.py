@@ -137,7 +137,7 @@ async def test_per_call_timeout_override_reaches_the_request() -> None:
     # Assert all four deadlines, not just `read`. `httpx2` expands a bare
     # float into every deadline at once, so an override that only pinned
     # `read` would silently raise `connect` to match and leave an
-    # unreachable dfo-apis hanging for a full read timeout per attempt.
+    # unreachable apis hanging for a full read timeout per attempt.
     # `read` is `min(attempt_timeout, remaining)` against the call's
     # wall-clock deadline, and 42.5 exceeds the default retry budget, so
     # `remaining` is chosen: 42.5 less the real time elapsed since the
@@ -320,10 +320,10 @@ async def test_unparseable_body_falls_back_to_status_classification() -> None:
 
 
 async def test_json_body_without_retryable_falls_back_to_status_classification() -> None:
-    """A valid-JSON body that isn't a dfo-apis problem document is treated the same as an unparsable one.
+    """A valid-JSON body that isn't an apis service problem document is treated the same as an unparsable one.
 
     An edge or proxy can return well-formed JSON, e.g. `{"error":
-    "unavailable"}`, on a 503 without it being dfo-apis' own problem+json.
+    "unavailable"}`, on a 503 without it being apis' own problem+json.
     Trusting it as one would default `retryable` to `False` and silently
     swallow a genuinely transient failure.
     """

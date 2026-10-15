@@ -5,7 +5,7 @@ envelope carries (`stored_definition`, `put_definitions`). Every write is
 verified first: an identity must hash to the spec_id it is stored under, so
 a write can only ever add the definition its spec_id names.
 `caller_definition` checks a definition this service did not read from
-Search itself, as dfo-apis's registry takes it, and `windowed_identity`
+Search itself, as the apis service's registry takes it, and `windowed_identity`
 computes an identity over other years and the spec_id it hashes to.
 """
 
@@ -37,7 +37,7 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # `data_mcp.definition_store.spec_id_for` mints.
 SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 
-# The largest identity dfo-apis's registry takes, in bytes of compact UTF-8
+# The largest identity the apis service's registry takes, in bytes of compact UTF-8
 # JSON (`spec_registry.identity._MAX_IDENTITY_DOCUMENT_BYTES`): a larger one
 # could never be minted, so it is not stored either.
 MAX_IDENTITY_BYTES = 65_536
@@ -95,11 +95,11 @@ class IdentityUnusable(ValueError):  # noqa: N818 -- named for what it says of t
 
 
 def caller_definition(definition: Mapping[str, Any]) -> StoredDefinition:
-    """A `{schema_version, spec_id, identity}` sidecar a caller handed in, checked as dfo-apis's registry takes it.
+    """A `{schema_version, spec_id, identity}` sidecar a caller handed in, checked as the apis service's registry takes it.
 
     For a definition this service did not read from the Search API itself,
     such as a Studio seed's. The identity's compact JSON is at most
-    `MAX_IDENTITY_BYTES`, measured as dfo-apis's `spec_registry.identity`
+    `MAX_IDENTITY_BYTES`, measured as the apis service's `spec_registry.identity`
     measures it, and it hashes to its spec_id (`identity_definition`).
 
     Raises:
@@ -126,13 +126,13 @@ def windowed_identity(
 
     `window` replaces `requested_window` whole, in the identity's own form
     (`{"kind": "range", "start_year": 2024, "end_year": 2024}`). That is the
-    whole of the scope surgery dfo-apis runs for `get_data`'s `scope.window`
+    whole of the scope surgery apis runs for `get_data`'s `scope.window`
     (`datasets_api.surgery.apply_scope_surgery`), and spec_ids hash the same
     RFC 8785 bytes on both sides, so the spec_id is the one that mint answers
     under; `tests/test_definition_writes.py` pins that against recorded dev
     answers. A served identity is already in the identity core's normal form,
     and a range window of two whole years is too, so hashing it as it stands
-    is hashing what dfo-apis hashes.
+    is hashing what apis hashes.
     """
     windowed = {**identity, "requested_window": dict(window)}
     return spec_id_for(canonicalize(windowed)), windowed

@@ -1,4 +1,4 @@
-"""dfo-apis' canonical frames for the harness tests' fake mints.
+"""apis' canonical frames for the harness tests' fake mints.
 
 data-mcp registers a default mint's frame from the version's canonical frame,
 which the snapshot route lists, and only when that frame mints the version's

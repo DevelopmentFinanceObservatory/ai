@@ -2104,7 +2104,7 @@ def _window_pins(
     before it is retrieved.
 
     A requirement stating `period_end_open` is pinned to that identity over
-    a range with no end year (`_open_window`), which dfo-apis ends at the
+    a range with no end year (`_open_window`), which apis ends at the
     current year at every mint, so its retrieval reaches years published
     after the plan. `shown` are the datasets the planner was shown this
     entry (`planner.plan.pin_sources`) and `read` what `propose_plan` read

@@ -1,6 +1,6 @@
 """The order a search envelope's skills are presented in.
 
-dfo-apis' resolve envelope carries front matter once, on its `skills` map
+apis' resolve envelope carries front matter once, on its `skills` map
 keyed by id, and each spec's `resolved.skills` lists the ids that apply to it,
 most specific first. data-mcp's search digest and the harness planner's brief
 both list those skills, and both read the order from `ordered_skill_ids` so the

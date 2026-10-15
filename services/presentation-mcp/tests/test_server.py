@@ -1677,7 +1677,7 @@ async def test_an_apps_client_gets_a_notice_view_for_a_refusal(
 
 def _write_refusing_platform_assembler() -> Any:
     """A factory for `server.PlatformAssembler` whose platform serves the
-    release and answers every revise with dfo-apis's write_refused body,
+    release and answers every revise with the apis service's write_refused body,
     whose detail names the write-token header and REST routes."""
     problem = {
         "type": "/codes/write_refused",
@@ -1712,7 +1712,7 @@ async def test_a_write_refused_reply_names_tools_and_no_platform_route_or_header
     monkeypatch: pytest.MonkeyPatch, apps_host: bool
 ) -> None:
     """The refusal's content, its structuredContent and an Apps host's
-    notice speak of write_component's arguments, never dfo-apis's REST
+    notice speak of write_component's arguments, never the apis service's REST
     routes or its write-token header."""
     monkeypatch.setattr(server, "PlatformAssembler", _write_refusing_platform_assembler())
 

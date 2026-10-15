@@ -50,7 +50,7 @@ def _frame() -> Frame:
     )
 
 
-# The version's token, minted from its canonical frame as dfo-apis mints it.
+# The version's token, minted from its canonical frame as apis mints it.
 _CONTENT_VERSION = mint_content_version(frame_sha256=frame_sha256(_frame()))
 
 

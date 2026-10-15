@@ -185,7 +185,7 @@ A dataset requirement whose `across` states the place party, such as
 `'country'`, names no place (`planner.plan.names_no_place`). When its source
 leaves `observationAbout` open, the retrieval holds every place with data at
 every level: the world, regions, World Bank groups, countries and their
-subdivisions, or the countries alone when dfo-apis cannot list them all. A rank,
+subdivisions, or the countries alone when apis cannot list them all. A rank,
 an aggregate that does not group by entity, a `share_of` and a `quotient_of`
 over it are refused until a filter with a `PlaceLevel` predicate keeps one
 level, named by its Data Commons type (`PlaceType`: `Country`, `Continent`,
@@ -376,7 +376,7 @@ says which of them are relative to the newest year the data holds
 rule that compares years reads the stated years. A relative period needs
 `period_end_open` on each dataset requirement it rests on, and `propose_plan`
 pins such a requirement to its dataset over a range with no end year
-(`_window_pins`, `planner.plan.period_window`), which dfo-apis ends at the
+(`_window_pins`, `planner.plan.period_window`), which apis ends at the
 current year at every mint. The range starts at the requirement's own first
 year when only ends roll. When a start rolls, the newest year the data holds
 can sit behind the one the plan read, so the range starts at the first year

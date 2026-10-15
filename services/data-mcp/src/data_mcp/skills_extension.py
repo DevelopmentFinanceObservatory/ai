@@ -1,6 +1,6 @@
 """The Skills over MCP extension (SEP-2640, `io.modelcontextprotocol/skills`).
 
-`SkillsExtension` answers two methods from dfo-apis' Skills API:
+`SkillsExtension` answers two methods from apis' Skills API:
 
 - `skills/list` reads `GET /api/skills` once and returns every skill search
   can name, the ones `skills_resources.SkillsProvider` lists, as SEP-2640

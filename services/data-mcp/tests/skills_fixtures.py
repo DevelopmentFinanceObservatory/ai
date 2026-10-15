@@ -1,4 +1,4 @@
-"""A stubbed Skills API in dfo-apis' wire shape, for the skill tool, resource and
+"""A stubbed Skills API in apis' wire shape, for the skill tool, resource and
 extension tests."""
 
 from __future__ import annotations

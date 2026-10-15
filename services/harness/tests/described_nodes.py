@@ -1,4 +1,4 @@
-"""Builder for the `nodes` a `describe` answer carries: dfo-apis' Graph node envelopes, as
+"""Builder for the `nodes` a `describe` answer carries: apis' Graph node envelopes, as
 data-mcp's `describe` tool dumps them from `data_mcp.graph_wire`."""
 
 from __future__ import annotations
