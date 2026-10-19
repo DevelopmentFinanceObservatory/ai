@@ -168,7 +168,7 @@ def test_top_members_ranks_no_row_without_a_member() -> None:
 
 def test_top_members_matches_a_converted_unit_as_the_select_names_it() -> None:
     """A stored frame holds a converted unit as a `UnitRequest`. A select
-    names it as dfo-apis's view does, `currency/prices/base_year`."""
+    names it as the apis service's view does, `currency/prices/base_year`."""
     unit = UnitRequest(currency="USD", prices="constant", base_year=2023)
     rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}}, unit=unit)
 

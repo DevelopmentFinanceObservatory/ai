@@ -55,8 +55,8 @@ _LINE_BREAKING_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 # The wall-clock budget for one call to the Search API's resolve route, retries
 # included. It sits above `Settings.upstream_read_timeout_s` (50 s, itself above
-# dfo-apis' 45 s search deadline) and below the harness's 60 s `search` call
-# timeout (`compiler.capabilities`), so a slow search ends here with dfo-apis' own
+# apis' 45 s search deadline) and below the harness's 60 s `search` call
+# timeout (`compiler.capabilities`), so a slow search ends here with apis' own
 # refusal or a typed transport refusal before the harness gives up on it.
 SEARCH_CALL_BUDGET_S = 55.0
 

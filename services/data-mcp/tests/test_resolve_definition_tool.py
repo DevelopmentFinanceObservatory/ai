@@ -91,7 +91,7 @@ async def test_an_identity_is_posted_alone_and_search_s_answer_is_returned_and_s
             ],
         },
     }
-    # A resubmit's member walk may read a family's whole subject set, which dfo-apis
+    # A resubmit's member walk may read a family's whole subject set, which apis
     # bounds at 90 s, past the read timeout a search waits.
     assert read_timeouts == [pytest.approx(RESUBMIT_READ_TIMEOUT_S, abs=0.01)]
     held = await store.get(_SPEC["spec_id"], schema_version=1)

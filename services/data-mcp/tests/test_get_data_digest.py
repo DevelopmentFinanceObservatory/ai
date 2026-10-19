@@ -1040,7 +1040,7 @@ def test_a_summed_family_is_named_by_its_label() -> None:
 def test_a_summed_family_names_a_role_the_question_left_open() -> None:
     # "Top donors for education aid to Kenya": search binds only the
     # recipient, keyed by its flow axis, and leaves the provider role out of
-    # the identity. dfo-apis keeps every declared role column, so the frame
+    # the identity. apis keeps every declared role column, so the frame
     # holds one summed series per provider.
     digest = _family_digest(
         warnings=[_STAT_VARS_SUMMED_WARNING],
@@ -1090,7 +1090,7 @@ def test_a_sector_breakdown_reads_per_entity_and_code() -> None:
         "Retrieved the OECD DAC2a family for recipient Kenya, "
         "with its StatVars summed into one series per recipient and crsPurpose code at level 0."
     )
-    # dfo-apis computes the statistics from the broken-down frame, so each row is one
+    # apis computes the statistics from the broken-down frame, so each row is one
     # sector's series and carries the code column among its entities.
     for sector in ("Social infrastructure and services", "Humanitarian aid"):
         assert (

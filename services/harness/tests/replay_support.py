@@ -1,5 +1,5 @@
 """What the `harness.recipe_replay` and `harness.live_refresh` tests share:
-dfo-apis' publish door, replay lookup and versions route as a fake behind
+the apis service's publish door, replay lookup and versions route as a fake behind
 `httpx2.MockTransport`, its mint and snapshot of one dataset as a canned upstream,
 and frames of that dataset at two versions, each version named by the token its
 canonical frame mints.
@@ -77,7 +77,7 @@ SECOND_VALUES = {
 
 
 def version_of(values: Mapping[str, Mapping[str, float]]) -> str:
-    """The `content_version` dfo-apis mints for the frame of `values`."""
+    """The `content_version` apis mints for the frame of `values`."""
     return mint_content_version(frame_sha256=frame_sha256(reporter_frame(values)))
 
 
@@ -101,7 +101,7 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
     """data-mcp's upstream client over `handler`.
 
     A version's description (`GET /api/datasets/{id}/{content_version}/description`)
-    answers 404 `not_found`, as dfo-apis does for a version stored without a record, so
+    answers 404 `not_found`, as apis does for a version stored without a record, so
     `get_data` renders its digest without a description. The Datasets capabilities route
     answers 200, so the client's probe after that 404 finds the surface mounted. Every
     other request reaches `handler`.
@@ -119,13 +119,13 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
 
 
 class FakeApis:
-    """dfo-apis' publish door, replay lookup and versions route over plain dicts.
+    """The apis service's publish door, replay lookup and versions route over plain dicts.
 
     `frames` holds each published pair's rows, `recipes` its recipe, `versions`
     each dataset's listed versions, and `enrichment_stamp` the stamp the versions
     answer lists, none when `None`. A pair keeps its first recipe and refuses one
     with another normal form or replay key, and a replay key names one frame, as
-    dfo-apis' recipe store has it.
+    apis' recipe store has it.
     """
 
     def __init__(self) -> None:
@@ -234,7 +234,7 @@ class FakeApis:
 
 
 class Upstream:
-    """dfo-apis' mint for one dataset: the current version's manifest, its frame
+    """apis' mint for one dataset: the current version's manifest, its frame
     file by artifact digest, and the version's snapshot, which lists its canonical
     frame beside the frame file. `move` serves other rows as the next version."""
 

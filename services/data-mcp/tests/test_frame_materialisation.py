@@ -15,6 +15,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import TOKEN_HEADER
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -59,7 +60,8 @@ from dfo_frame_grammar import (
 from google.api_core.exceptions import NotFound
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .test_client import _client
+from .test_client import ID_TOKEN, _client, id_token_auth
+from .test_client import _settings as _upstream_settings
 from .test_operations import _FakeClock
 
 _SPEC_ID = "spec_" + "1" * 32
@@ -75,7 +77,7 @@ def _parquet_bytes(
     values: list[float] | None = None,
     stat_vars: list[str] | None = None,
 ) -> bytes:
-    """A tiny frame in the canonical layout dfo-apis writes a version's canonical
+    """A tiny frame in the canonical layout apis writes a version's canonical
     frame in (`frame_to_parquet_bytes`): `stat_var`, one role column
     (`observationAbout`), `time_period`, `value`, and the null `unit`, facet and
     `status` columns. Every row carries `dcid:Test` unless `stat_vars` names one per
@@ -98,7 +100,7 @@ def _parquet_bytes(
 
 
 def _content_version_of(data: bytes) -> str:
-    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    """The `content_version` apis mints for the canonical frame `data` holds."""
     return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
 
 
@@ -882,7 +884,7 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
     assert outcome.refusal.code.value == "upstream_error"
 
 
-# A done operation lists every rendering dfo-apis stores under the pair. Dev listed
+# A done operation lists every rendering apis stores under the pair. Dev listed
 # another caller's groupby sum first, then the plain rendering and its statistics.
 _SUM_GROUPBY: dict[str, object] = {"by": ["time_period", "crsPurpose"], "op": "sum"}
 _SUM_SIBLING_RENDERING: dict[str, object] = {
@@ -955,7 +957,7 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     assert fetched == [digests[requested_at]]
     ref = FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
     assert outcome.frame_ref == ref
-    # The mint record sits under the frame's pair and names dfo-apis' own.
+    # The mint record sits under the frame's pair and names apis' own.
     assert await get_frame_store().get_mint_record(ref) == MintRecord(
         frame=ref, dataset=_FRAME_REF, options=options, stat_var_count=1
     )
@@ -1074,6 +1076,39 @@ async def test_a_sign_failure_before_any_get_returns_degraded_with_zero_attempts
     assert outcome.refusal is None
 
 
+async def test_an_id_token_that_cannot_mint_fails_each_get_as_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot read takes the first token. Every mint for the link GET fails
+    and is retried as a failed GET is, and the fetch degrades with nothing sent."""
+    monkeypatch.setattr(frame_materialisation, "_ARTIFACT_GET_BACKOFF_S", 0.0)
+    manifest = _manifest()
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload())
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    set_frame_store(InMemoryMaterialisationStore())
+    async with _client(snapshot_handler, auth=id_token_auth(mints=1)) as upstream:
+        client_holder.set_client(upstream)
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=manifest,
+            settings=_settings(),
+            writer="tester",
+            transport=httpx2.MockTransport(get_handler),
+        )
+
+    assert outcome.status == "degraded"
+    assert outcome.degraded_reason == "fetch"
+    assert outcome.attempts == _ARTIFACT_GET_ATTEMPTS
+    assert seen == []
+
+
 async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> None:
     data = _parquet_bytes()
     digest = _digest_for(data)
@@ -1092,7 +1127,11 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     set_frame_store(InMemoryMaterialisationStore())
-    async with _client(snapshot_handler) as upstream:
+    # The site origin is the model-facing one. This fetch must not use it.
+    upstream_settings = _upstream_settings(dfo_site_origin="https://site.example")
+    async with _client(
+        snapshot_handler, settings=upstream_settings, auth=id_token_auth()
+    ) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
             options=_OPTIONS,
@@ -1103,8 +1142,12 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     assert outcome.status == "registered"
-    assert [r.url.path for r in seen] == [_LINK, "/signed"]
-    assert seen[1].url.host == "storage.example"
+    assert [(r.url.host, r.url.path) for r in seen] == [
+        ("localhost", _LINK),
+        ("storage.example", "/signed"),
+    ]
+    assert seen[0].headers[TOKEN_HEADER] == ID_TOKEN
+    assert TOKEN_HEADER not in seen[1].headers
     credential_headers = {"authorization", "cookie", "x-dfo-principal"}
     for request in seen:
         assert credential_headers.isdisjoint(request.headers.keys())
@@ -1737,7 +1780,7 @@ _UNIT_STRUCT = pa.struct(
 
 
 def _unit_struct_parquet(unit: dict[str, object]) -> bytes:
-    """A one-row artifact whose `unit` column is the struct dfo-apis writes for a converted member."""
+    """A one-row artifact whose `unit` column is the struct apis writes for a converted member."""
     table = pa.table(
         {
             "stat_var": pa.array(["dcid:Test"], type=pa.string()),
@@ -2046,7 +2089,7 @@ def test_a_unit_struct_in_the_frame_tagged_form_refuses_as_an_invalid_unit(
 
 
 def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_them() -> None:
-    """dfo-apis writes a ref as its own text and a converted unit as JCS object text."""
+    """apis writes a ref as its own text and a converted unit as JCS object text."""
     unit = pa.array(
         [
             "dcid:USDollar",
@@ -2189,8 +2232,8 @@ def test_an_empty_parquet_file_with_an_int_typed_column_refuses(column: str) -> 
     assert raised.value.category == "schema_violation"
 
 
-# A frame asked for place types: GDP with no place named, as dfo-apis renders it with
-# `observationAbout_type` (dfo-apis `materialise.enrichment`): every `typeOf` sorted and
+# A frame asked for place types: GDP with no place named, as apis renders it with
+# `observationAbout_type` (apis `materialise.enrichment`): every `typeOf` sorted and
 # comma-joined, and an empty cell for a place its graph holds no type for.
 _EVERY_PLACE_ROWS = [
     ("Earth", "Place"),
@@ -2251,7 +2294,7 @@ def test_a_place_type_column_is_a_role_and_an_empty_cell_reads_untyped() -> None
 
 @pytest.mark.parametrize("described", ["financingRecipient_party_kind", "financingRecipient_type"])
 def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> None:
-    # dfo-apis leaves the kind cell empty for a party it declares no kind for. Filled, the
+    # apis leaves the kind cell empty for a party it declares no kind for. Filled, the
     # frame registers, and a sum across the parties refuses `place_levels_mixed`.
     table = pa.table(
         {
@@ -2281,7 +2324,7 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
 
 
 def test_the_private_and_whole_total_kind_cells_pass_through_decoding_unchanged() -> None:
-    """The decoder writes only an empty cell as `untyped`; every kind dfo-apis serves
+    """The decoder writes only an empty cell as `untyped`; every kind apis serves
     reaches the frame as it was served."""
     kinds = sorted(PARTY_KINDS)
     table = pa.table(
@@ -2440,7 +2483,7 @@ _KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
 def test_the_enrichment_stamp_names_only_a_frame_that_asks_for_kinds(
     columns: tuple[str, ...], keyed_by_stamp: bool
 ) -> None:
-    """The kind cells come from dfo-apis's code index, which moves with no change to the
+    """The kind cells come from apis's code index, which moves with no change to the
     version, so a stamp of it names the frame. Types come from the graph at render time,
     and the default frame is the version's canonical one."""
     refs = {
@@ -2547,7 +2590,7 @@ async def test_a_frame_is_named_under_the_stamp_of_the_artifact_it_is_read_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One manifest lists a pinned kind file rendered under an earlier code index, which
-    dfo-apis sends without a stamp, beside a kind file rendered under the current one. Each frame is named
+    apis sends without a stamp, beside a kind file rendered under the current one. Each frame is named
     by its own file's stamp, and the pinned one unsalted."""
     blobs = _bytes_by_digest(2)
     pinned, current = blobs
@@ -2604,7 +2647,7 @@ async def test_a_stamped_default_mint_records_no_stamp() -> None:
 
 
 def test_a_stamped_manifest_selects_the_artifact_whose_rendering_equals_the_options() -> None:
-    """The stamp salts the frame's name and takes no part in the selection: dfo-apis lists
+    """The stamp salts the frame's name and takes no part in the selection: apis lists
     one artifact per rendering, and a rendering is the request's options as sent."""
     digests = list(_bytes_by_digest(3))
     manifest = _manifest(
@@ -2833,7 +2876,7 @@ async def test_a_canonical_frame_whose_rows_no_frame_holds_refuses(order: list[i
 
 def _decoded_column_parquet() -> bytes:
     """`_parquet_bytes()`'s row in the rendering's frame layout, with the decoded
-    `stat_var_dac2aAidType` column dfo-apis adds to it."""
+    `stat_var_dac2aAidType` column apis adds to it."""
     table = pq.read_table(io.BytesIO(_parquet_bytes())).replace_schema_metadata(None)
     table = table.add_column(2, "stat_var_dac2aAidType", pa.array(["A01"], type=pa.string()))
     buf = io.BytesIO()

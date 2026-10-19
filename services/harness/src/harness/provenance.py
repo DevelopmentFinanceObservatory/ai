@@ -102,7 +102,7 @@ class ProvenanceInput:
 
     @property
     def served_ref(self) -> dict[str, str | None]:
-        """The `{spec_id, content_version}` the dfo-apis datasets door serves this
+        """The `{spec_id, content_version}` the apis datasets door serves this
         retrieval under: the manifest's `definition.spec_id` and `content_version`.
 
         The frame key can differ. A frame minted with extra columns is held under a
@@ -164,7 +164,7 @@ class ProvenanceStore:
         (`ProvenanceInput.served_ref`).
 
         The lineage is keyed by `retrieval_frame_ref`, the pair later steps name
-        the frame by, and also by the served pair when it differs: dfo-apis serves
+        the frame by, and also by the served pair when it differs: apis serves
         a final retrieval under that pair, and its card reads its lineage there.
         Both keys hold the one retrieval.
         """
@@ -323,7 +323,7 @@ class ProvenanceStore:
 def retrieval_frame_ref(result: Mapping[str, Any]) -> dict[str, str | None]:
     """The frame reference a successful `get_data` result states beside its manifest.
 
-    The manifest's own `{spec_id, content_version}` names dfo-apis' materialisation.
+    The manifest's own `{spec_id, content_version}` names apis' materialisation.
     A frame minted with extra columns is held under a `content_version` of its own
     (`data_mcp.frame_materialisation.frame_ref_for`), so a retrieval's lineage is
     keyed by `frame_ref`, the reference every later step and `ProvenanceStore.alias`
@@ -338,7 +338,7 @@ def retrieval_frame_ref(result: Mapping[str, Any]) -> dict[str, str | None]:
 
 def served_frame_ref(manifest: Mapping[str, Any]) -> dict[str, str | None]:
     """The manifest's own `{spec_id, content_version}`: its `definition.spec_id` and
-    `content_version`, the pair dfo-apis mints and serves the frame under. A member
+    `content_version`, the pair apis mints and serves the frame under. A member
     the manifest does not state is `None`."""
     definition = manifest.get("definition")
     spec_id = definition.get("spec_id") if isinstance(definition, Mapping) else None
@@ -450,7 +450,7 @@ def _carried_stat_var_count(
     `declared` counts the frame's distinct refs, one per summed family and
     one per sum, and is the answer when no retrieval in `carried` is summed
     and `summed` is empty. A summed retrieval's contributors are the
-    StatVars its trace lists with rows (`_refs_with_rows`), which dfo-apis
+    StatVars its trace lists with rows (`_refs_with_rows`), which apis
     counts as `summed_stat_var_count`. A sum's are the distinct StatVars of
     the retrievals under it, one of its `summed` entries, each named the
     same way (`_named_stat_vars`). The frame's other refs, `declared` less
@@ -534,7 +534,7 @@ def _trace_refs(manifest: dict[str, Any]) -> frozenset[str]:
 def _refs_with_rows(manifest: dict[str, Any]) -> frozenset[str]:
     """The refs the manifest's trace lists with rows in the frame.
 
-    dfo-apis counts each member's rows after filtering as
+    apis counts each member's rows after filtering as
     `observation_count`, and sums exactly the members with rows. An entry
     stating no count is kept, since it may have rows.
     """

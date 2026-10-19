@@ -82,7 +82,7 @@ _MANIFEST_WARNING_CAP = 5
 # naming all of them would let one role's breadth dominate the sentence.
 _ACKNOWLEDGEMENT_ENTITY_CAP = 8
 
-# At most this many group totals are named per role in the line that says which dfo-apis
+# At most this many group totals are named per role in the line that says which apis
 # left out of the frame; the rest are only counted.
 _LEFT_OUT_TOTALS_CAP = 10
 
@@ -116,13 +116,13 @@ _DEPLOYMENT_CONSTANT_RE = re.compile(r"^Constant(?P<currency>[A-Z]{3})_(?P<year>
 
 _MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
 
-# The manifest warning dfo-apis added, on versions stored before descriptions, when a
+# The manifest warning apis added, on versions stored before descriptions, when a
 # summed mint added more than one StatVar into the series it labels `dcid:<spec_id>`.
 # Its message carries the count of StatVars summed, so it renders outside
 # `_MANIFEST_WARNING_CAP`.
 _STAT_VARS_SUMMED = "stat_vars_summed"
 
-# The coverage dimension dfo-apis counts after every declared role column.
+# The coverage dimension apis counts after every declared role column.
 _YEARS_DIMENSION = "years"
 
 # A reader's noun for each flow axis a role column can sit on; a role with no
@@ -132,7 +132,7 @@ _GRAIN_NOUNS = {"origin": "provider", "destination": "recipient"}
 
 @dataclass(frozen=True, kw_only=True)
 class OperationPollNote:
-    """This call's own mint crossed dfo-apis' sync budget and ran as a queued
+    """This call's own mint crossed apis' sync budget and ran as a queued
     operation, polled to completion before this call returned. Built by
     `get_data_tool.py` from `data_mcp.operations.ResolvedOperation`, whose own
     docstring explains why the digest reports this rather than leaving it to be
@@ -177,12 +177,12 @@ def summed_family(
 ) -> SummedFamily | None:
     """The family `manifest`'s version summed, or `None` when it summed nothing.
 
-    dfo-apis gives a summed series the family ref `dcid:<spec_id>` as its `stat_var`,
+    apis gives a summed series the family ref `dcid:<spec_id>` as its `stat_var`,
     and no other series carries it, so a frame holding that ref summed its family.
     `frame_summed` says whether the frame this call read holds it
     (`MaterialisationOutcome.family_summed`); when this call read no frame, the
     fetched statistics rows say instead. The count is the trace's members with rows,
-    the count dfo-apis' `sum_variables` step states. Only the name comes from
+    the count apis' `sum_variables` step states. Only the name comes from
     `description`, its title unless the title is a gap.
     """
     ref = f"dcid:{manifest.definition.spec_id}"
@@ -277,7 +277,7 @@ def render_get_data_digest(
             frame reference above is real, so a sidecar-artifact hiccup
             degrades this section alone, exactly like a degraded frame fetch
             degrades the frame reference's own section.
-        operation_poll: Set when this call's own mint crossed dfo-apis' sync
+        operation_poll: Set when this call's own mint crossed apis' sync
             budget and was queued as an operation, then polled to completion
             here before returning. `None` (the default) renders no note,
             which is every call's outcome except this one -- an ordinary
@@ -286,7 +286,7 @@ def render_get_data_digest(
             code system at one hierarchy level. Renders a line after the
             coverage that names the frame's `stat_var` and
             `stat_var_<code_system>` columns.
-        description: dfo-apis' description of the manifest's version
+        description: apis' description of the manifest's version
             (`data_mcp.version_description.fetch_version_description`), the one
             the version's cards carry. Its citation, which names the sources, and its
             latest period replace the manifest's citation line, and its steps, caveats and gaps
@@ -297,7 +297,7 @@ def render_get_data_digest(
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
-        coverage, the group totals dfo-apis left out of the frame
+        coverage, the group totals apis left out of the frame
         (`trace.party_totals_left_out`), any warnings that qualify that coverage, the period note
         of a one-year frame (`common.period_note.period_note`), the frame
         reference for downstream tools, then the citation, per-series statistics, any
@@ -416,7 +416,7 @@ def _acknowledgement_line(
     was minted, and for whom. A summed mint instead names its `family`
     (`_family_name`) and says the family's StatVars were summed into one total series
     per entity role, or, on a `breakdown` mint, into one series per entity role and code
-    at the breakdown's level. dfo-apis sums away the
+    at the breakdown's level. apis sums away the
     StatVar axis and keeps every declared role column, a role the question
     left open included, so the roles come from `coverage.dimensions`, one per
     frame role column plus `years`, less a breakdown's `stat_var_<code_system>`
@@ -546,7 +546,7 @@ def _citation_line(citation: CitationModel) -> str:
 
 def _description_lines(description: VersionDescription) -> list[str]:
     """The citation line with the latest period, then one line each for the steps,
-    the caveats and the members dfo-apis could not fill, when there are any."""
+    the caveats and the members apis could not fill, when there are any."""
     # `cite.text` is the composer's citation line, which names every source.
     citation = f"Source: {description.cite.text}"
     latest = description.freshness.latest_period
@@ -582,7 +582,7 @@ def _gap_words(path: str) -> str:
 
 
 def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[str, str]) -> str:
-    """The line naming the group totals dfo-apis left out of the frame on one party role
+    """The line naming the group totals apis left out of the frame on one party role
     (`options.without_party_totals`), each by its label when this call resolved it."""
     totals = [entity_labels.get(ref, ref) for ref in left_out.entities]
     noun = "group total" if len(totals) == 1 else "group totals"

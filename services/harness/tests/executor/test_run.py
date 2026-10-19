@@ -141,7 +141,7 @@ async def test_a_run_binds_the_retrieved_frame_into_the_verb_and_is_accepted(
     assert evidence.stat_vars == ("DebtServicePaid",)
     assert evidence.citation.startswith("World Bank")
     # The source's unit states a currency and no price basis, so the run
-    # records that as the one thing it could not confirm (dfo-ai#193).
+    # records that as the one thing it could not confirm.
     assert [gap.code.value for gap in evidence.gaps] == ["unit_price_basis_unverified"]
 
 
@@ -1725,7 +1725,7 @@ async def test_default_fetch_series_stats_passes_the_manifests_series_count_and_
 async def test_default_fetch_series_stats_reads_the_artifact_when_series_count_is_missing(
     monkeypatch: pytest.MonkeyPatch, manifest: ManifestFactory
 ) -> None:
-    """dfo-apis mints an all-years definition with the statistics artifact but no
+    """apis mints an all-years definition with the statistics artifact but no
     `series_count` (seen live 2026-09-28). The artifact is what the check reads, so it
     is fetched, with no row count to hold it to, instead of failing the requirement
     `STATISTICS_UNAVAILABLE`.

@@ -206,7 +206,7 @@ async def test_a_root_is_recovered_from_the_version_that_reproduces_its_pair(
         # Minted with or without a `groupby`, it names the same rows while one StatVar
         # contributes, and the count of 1 lets a replay refuse it once a second does.
         (FrameRef(spec_id=_SPEC_ID, content_version=_OLDER), ("dcid:A",), 1),
-        # dfo-apis recorded the sum's `groupby`, so the options are the mint's.
+        # apis recorded the sum's `groupby`, so the options are the mint's.
         (FrameRef(spec_id=_SPEC_ID, content_version=_SUMMED), (), None),
     ],
     ids=["one-stat-var-under-a-raw-version", "recorded-groupby-no-longer-held"],
@@ -233,7 +233,7 @@ async def test_a_recovered_record_counts_the_stat_vars_of_the_held_frame(
         (_typed(_UNRECORDED), "groupby_unrecorded"),
         # Its StatVar count cannot be read, so whether it was a sum cannot be bounded.
         (FrameRef(spec_id=_SPEC_ID, content_version=_OLDER), "frame_not_held"),
-        # dfo-apis records no groupby on a version a sum kept, and no frame is held.
+        # apis records no groupby on a version a sum kept, and no frame is held.
         (
             frame_ref_for(spec_id=_SPEC_ID, content_version=_OLDER, groupby=_GROUPBY),
             "no_version_matches",
@@ -267,7 +267,7 @@ _KEPT_SUM = _DEFAULT_OPTIONS | {"groupby": _GROUPBY}
 async def test_a_sum_that_kept_its_version_is_recovered_from_its_traces_options(
     without_party_totals: bool,
 ) -> None:
-    """dfo-apis lists the version as unsummed, so only the options the held frame's
+    """apis lists the version as unsummed, so only the options the held frame's
     trace keeps reproduce the pair that names the groupby."""
     kept_sum = _KEPT_SUM | (
         {"columns": ["party_kind"], "without_party_totals": True} if without_party_totals else {}
@@ -388,7 +388,7 @@ async def test_a_kind_root_named_under_an_older_stamp_is_recovered_with_its_trac
 
 @pytest.mark.parametrize("current", [None, "stamp-now"], ids=["no-stamp-served", "a-stamp-served"])
 async def test_an_unsalted_kind_root_is_recovered_without_a_stamp(current: str | None) -> None:
-    """Named before dfo-apis sent a stamp. The record keeps none, so a refresh sees it
+    """Named before apis sent a stamp. The record keeps none, so a refresh sees it
     differ from a stamp its version lists and mints the root again."""
     ref = _typed(_OLDER, _KINDS)
     store = await _holding(ref, "dcid:A")

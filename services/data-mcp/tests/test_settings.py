@@ -4,7 +4,7 @@ import pytest
 from data_mcp.settings import Settings
 from pydantic import ValidationError
 
-_ENV_VARS = ("PORT", "MODEL_NAME", "DFO_APIS_URL")
+_ENV_VARS = ("PORT", "MODEL_NAME", "DFO_APIS_URL", "DFO_SITE_ORIGIN", "K_SERVICE")
 
 # Every float field that bounds a wait, per `Settings`' own docstring: each
 # must reject zero, a negative value, infinity, and NaN. `upstream_backoff_base_s`
@@ -48,6 +48,56 @@ def test_reads_dfo_apis_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings()
 
     assert settings.dfo_apis_url == "https://dfo-apis.internal"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("https://developmentfinance.org", "https://developmentfinance.org"),
+        (" https://developmentfinance.org/ ", "https://developmentfinance.org"),
+        ("http://localhost:3000", "http://localhost:3000"),
+    ],
+)
+def test_site_origin_off_cloud_run(
+    value: str | None, expected: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if value is not None:
+        monkeypatch.setenv("DFO_SITE_ORIGIN", value)
+
+    assert Settings().dfo_site_origin == expected
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "developmentfinance.org",
+        "ftp://developmentfinance.org",
+        "https://developmentfinance.org/api",
+        "https://developmentfinance.org?x=1",
+        "https://user@developmentfinance.org",
+        "https://developmentfinance.org:99999",
+    ],
+)
+def test_site_origin_refuses_anything_but_an_origin(
+    bad_value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DFO_SITE_ORIGIN", bad_value)
+
+    with pytest.raises(ValidationError, match="DFO_SITE_ORIGIN"):
+        Settings()
+
+
+def test_site_origin_is_required_on_cloud_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+
+    with pytest.raises(ValidationError, match="DFO_SITE_ORIGIN"):
+        Settings()
+
+    monkeypatch.setenv("DFO_SITE_ORIGIN", "https://developmentfinance.org")
+
+    assert Settings().dfo_site_origin == "https://developmentfinance.org"
 
 
 def test_still_reads_shared_base_fields_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +173,7 @@ def test_get_data_deadline_must_leave_the_direct_budget_time_to_mint(
 def test_external_mint_concurrency_defaults_to_one_and_refuses_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two harness instances at the default hold at most two of dfo-apis' four mint
+    """Two harness instances at the default hold at most two of apis' four mint
     slots for outside callers."""
     monkeypatch.delenv("EXTERNAL_MINT_CONCURRENCY", raising=False)
     assert Settings().external_mint_concurrency == 1

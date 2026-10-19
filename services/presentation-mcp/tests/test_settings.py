@@ -108,7 +108,7 @@ def test_a_missing_presentation_public_url_fails_naming_the_variable(
     assert "PRESENTATION_PUBLIC_URL" in message
     assert "it is not set" in message
     assert "https://<host>/mcp/presentation" in message
-    assert "dfo-infra" in message
+    assert "infra owns that config" in message
 
 
 @pytest.mark.parametrize(
@@ -153,7 +153,7 @@ def test_a_malformed_presentation_public_url_fails_naming_the_variable_and_the_v
     assert "PRESENTATION_PUBLIC_URL" in message
     assert f"got {value!r}" in message
     assert "https://<host>/mcp/presentation" in message
-    assert "dfo-infra" in message
+    assert "infra owns that config" in message
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import httpx2
 import pytest
+from common.apis_auth import ApisAuthError
 from data_mcp.server import mcp
 from data_mcp.skills_client import PAGE_CHARS
 from fastmcp.client.client import CallToolResult
@@ -178,6 +180,22 @@ async def test_an_index_still_building_refuses_service_unavailable() -> None:
     refusal = refusal_of(result)
     assert refusal["code"] == "service_unavailable"
     assert refusal["retry_mode"] == "retry_after_delay"
+
+
+async def test_a_failed_token_mint_refuses_service_unavailable_and_sends_nothing() -> None:
+    requests: list[httpx2.Request] = []
+
+    async def no_token() -> Mapping[str, str]:
+        raise ApisAuthError("metadata server answered 500")
+
+    result = await call_tool(
+        serving_skill(requests=requests), "get_skill", {"skill_id": SKILL_ID}, auth=no_token
+    )
+
+    refusal = refusal_of(result)
+    assert refusal["code"] == "service_unavailable"
+    assert refusal["retry_mode"] == "retry_after_delay"
+    assert requests == []
 
 
 async def test_a_body_that_is_not_a_skill_refuses_upstream_error() -> None:

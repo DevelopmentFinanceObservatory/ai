@@ -79,7 +79,7 @@ class PartWarning(StrictModel):
     spec_id: str | None = None
 
 
-# The `no_data` reasons (`NoDataReason` in dfo-apis' `search.models.vocab`)
+# The `no_data` reasons (`NoDataReason` in apis' `search.models.vocab`)
 # that refuse a `source_code` itself, whatever dataset is pinned to the
 # requirement stating it.
 SOURCE_CODE_REFUSALS = frozenset(
@@ -94,7 +94,7 @@ class DiscoveryOutcome(StrictModel):
     reading of a `definite` answer, every candidate of a `candidates` one,
     and the nearest real series a `no_data` answer offers instead. `detail`
     is the envelope's own explanation for `no_data` and `unsupported`. `reason`
-    is `no_data`'s own closed reason code (`NoDataReason` in dfo-apis'
+    is `no_data`'s own closed reason code (`NoDataReason` in apis'
     `search.models.vocab`, e.g. `"no_observations"`), kept as a plain string
     rather than a closed set of our own: the vocabulary belongs to another
     service, and a value it does not yet recognise is still data to carry,
@@ -311,7 +311,7 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     value, and a binding kind this reader does not know are open. An open
     slot is summable when it says so (`summable`, read as false when
     absent) and is not listed in `unresolved_slots`, where some member
-    carries a value dfo-apis could not decode and so could not sum.
+    carries a value apis could not decode and so could not sum.
     """
     inapplicable = set(_strings(resolved.get("inapplicable_slots")))
     unresolved = set(_strings(resolved.get("unresolved_slots")))
@@ -555,7 +555,7 @@ def stat_var_count(source: SelectedSource) -> int:
 def member_digest(dcids: Iterable[str]) -> str:
     """Lowercase SHA-256 hex of the RFC 8785 canonical JSON of the sorted `dcids`.
 
-    The digest `search` states as `resolved.shape.member_digest` (dfo-apis
+    The digest `search` states as `resolved.shape.member_digest` (apis
     `statvar_members.digest.member_digest`). Callers pass bare dcids, without
     the `dcid:` prefix.
     """
@@ -566,7 +566,7 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     """How a family is read when the plan does not say: summed when every open axis is summable.
 
     A family with no open axis has nothing to sum over, so it reads
-    separately; so does one with any axis dfo-apis may not sum over (a sex,
+    separately; so does one with any axis apis may not sum over (a sex,
     a netting basis), since its members are different measures.
     """
     if source.open_axes and all(axis.summable for axis in source.open_axes):

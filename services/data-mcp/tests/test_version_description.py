@@ -271,7 +271,7 @@ async def test_the_read_is_keyed_by_dfo_apis_pair_not_the_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A frame minted with `options.columns` is held under a pair of its own; the
-    description is dfo-apis' version's, read under the manifest's pair."""
+    description is apis' version's, read under the manifest's pair."""
 
     async def materialise(*, manifest: Manifest, **_: Any) -> MaterialisationOutcome:
         frame_ref = FrameRef.model_construct(

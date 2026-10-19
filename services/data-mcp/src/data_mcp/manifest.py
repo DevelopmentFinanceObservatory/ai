@@ -1,12 +1,12 @@
 """This service's own manifest model, stripped of every artifact download link.
 
-`get_data` mints a manifest from dfo-apis' mint route
+`get_data` mints a manifest from apis' mint route
 (`datasets_api.manifest_models.Manifest`). That manifest's `artifacts`
 entries carry `url`: a stable, root-relative download link that redirects to
 the underlying bytes. A model gets the link through the artifact resource
 (`artifact_resource.py`) when it needs one, so this module re-validates the
 raw mint payload against a model this service owns rather than reusing
-dfo-apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
+apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
 requires `url` with no default and sets `extra="forbid"`, so there is no way
 to express "the same shape minus the URL" as a subset of it.
 
@@ -48,7 +48,7 @@ def artifact_resource_uri(*, subject_id: str, content_version: str, artifact_dig
 
 
 # Applied to every model in this tree instead of the house `extra="forbid"`
-# (see `search_tool.py`). `forbid` would mean any new field dfo-apis adds to
+# (see `search_tool.py`). `forbid` would mean any new field apis adds to
 # the manifest (`series_count`, for instance) breaks every retrieval until
 # this module catches up. `allow` would
 # forward a field this service has never reviewed straight to the model,
@@ -60,7 +60,7 @@ _UNSEEN_FIELDS_ARE_DROPPED = ConfigDict(extra="ignore")
 
 
 class RoleNoun(BaseModel):
-    """What dfo-apis calls the members of a role, for the frame's kind of
+    """What apis calls the members of a role, for the frame's kind of
     flow: a provider and providers of aid, a creditor and creditors of debt."""
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -73,13 +73,13 @@ class CoverageDimension(BaseModel):
 
     `axis` is the flow axis (`origin`, `destination`) the role column's
     declared property sits on. It is absent for `years`, for a role no flow
-    axis covers (`observationAbout`), and from a dfo-apis that predates the
+    axis covers (`observationAbout`), and from an apis service that predates the
     field. A plain string, so an axis this service has not seen still
     parses.
 
-    `noun` is what dfo-apis calls the role's members
+    `noun` is what apis calls the role's members
     (`common.period_note` counts them by it). It is absent for `years`, for a
-    role dfo-apis words no noun for, and from a dfo-apis that predates the
+    role apis words no noun for, and from an apis service that predates the
     field; a noun of any other shape reads as absent, so it fails no
     retrieval.
     """
@@ -117,8 +117,8 @@ class CoverageModel(BaseModel):
     """What a mint served: its rows, counted dimensions and window.
 
     `recent_years` holds three calendar years, newest first, `elected_year`
-    the year dfo-apis' election chooses among them, and `fullest_year` the
-    fullest of the last ten. dfo-apis sends each only for a frame of one
+    the year apis' election chooses among them, and `fullest_year` the
+    fullest of the last ten. apis sends each only for a frame of one
     year, and `fullest_year` only when it judges the served year thin beside
     it. An absent one stays out of a dump, so a manifest without them
     serialises as it arrived.
@@ -151,8 +151,8 @@ class WarningModel(BaseModel):
     """One manifest warning.
 
     `contributing_member_count` and `stat_var_label` are set on a `stat_vars_summed`
-    warning only: the number of StatVars with rows that dfo-apis added into the family
-    total, and the label dfo-apis' presentation door gives the family ref.
+    warning only: the number of StatVars with rows that apis added into the family
+    total, and the label apis' presentation door gives the family ref.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -209,7 +209,7 @@ class ArtifactEntry(BaseModel):
     an already-stripped document that predates the field.
 
     `enrichment_stamp` is the digest of the code-index facts behind the file's
-    `{role}_party_kind` cells (dfo-apis' `CodeIndex.enrichment_digest`). dfo-apis sends
+    `{role}_party_kind` cells (apis' `CodeIndex.enrichment_digest`). apis sends
     it exactly when the file holds party-kind cells read under the code index serving
     the call. A file with no party-kind cell carries none, and so does a listed file
     rendered under an earlier digest with no current twin (a pinned file, an older
@@ -238,7 +238,7 @@ class DefinitionModel(BaseModel):
 
 
 class PartyTotalsLeftOut(BaseModel):
-    """One party role whose group totals dfo-apis left out of a frame minted with
+    """One party role whose group totals apis left out of a frame minted with
     `options.without_party_totals`, and the refs of those totals in ref order: one entry
     of the manifest's `trace.party_totals_left_out` (`party_totals_left_out`)."""
 
@@ -247,14 +247,14 @@ class PartyTotalsLeftOut(BaseModel):
     entities: list[str]
 
 
-# The trace member dfo-apis lists a cut frame's left-out totals under, present only when
+# The trace member apis lists a cut frame's left-out totals under, present only when
 # the cut left some out (`datasets_api.party_totals.TRACE_KEY`).
 PARTY_TOTALS_LEFT_OUT_KEY = "party_totals_left_out"
 _PARTY_TOTALS_LEFT_OUT = TypeAdapter(list[PartyTotalsLeftOut])
 
 
 def party_totals_left_out(trace: Mapping[str, object]) -> list[PartyTotalsLeftOut]:
-    """The group totals a manifest's `trace` says dfo-apis left out of its frame, one entry
+    """The group totals a manifest's `trace` says apis left out of its frame, one entry
     per party role in role order, and none for a frame that left none out.
 
     Raises:
@@ -344,7 +344,7 @@ def strip_manifest(payload: Mapping[str, Any]) -> Manifest:
     """Validate a raw mint-route response into a URL-free `Manifest`.
 
     Args:
-        payload: The mint route's parsed JSON body, exactly as dfo-apis
+        payload: The mint route's parsed JSON body, exactly as apis
             served it.
 
     Returns:

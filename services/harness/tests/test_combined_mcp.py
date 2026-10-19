@@ -4,7 +4,7 @@ Each MCP test runs once per protocol revision: `mode="legacy"` negotiates
 2025-11-25 through the initialize handshake, and `"2026-07-28"` adopts the
 sessionless revision directly.
 
-Every test runs presentation-mcp against `_StubPlatform` in place of dfo-apis,
+Every test runs presentation-mcp against `_StubPlatform` in place of apis,
 so its three tools mount whatever listens on the platform's address.
 """
 
@@ -115,7 +115,7 @@ REVISIONS = pytest.mark.parametrize(
     ids=["2025-11-25", "2026-07-28"],
 )
 
-# A call `get_data` refuses in its own body, before it reads the store or reaches dfo-apis:
+# A call `get_data` refuses in its own body, before it reads the store or reaches apis:
 # "sum" totals the whole family, which leaves no code to break it down by.
 CONTRADICTORY_GET_DATA = {
     "spec_id": "spec_" + "0" * 32,
@@ -179,8 +179,8 @@ class _StubPlatform:
     any revise, and answers any describe `transient_unavailable`, as the
     assembler does when the platform cannot be reached."""
 
-    def __init__(self, *, settings: object) -> None:
-        del settings
+    def __init__(self, *, settings: object, auth: object = None) -> None:
+        del settings, auth
 
     async def release(self) -> dict[str, Any]:
         return _RELEASE
@@ -1036,7 +1036,7 @@ _UNSTORED_SPEC = "spec_" + "5" * 32
 
 
 class _StalledUpstream:
-    """dfo-apis holding every request until `release` is set, recording the path of
+    """apis holding every request until `release` is set, recording the path of
     each request whose wait was cancelled. Once released, it answers 400."""
 
     def __init__(self) -> None:
@@ -1176,7 +1176,7 @@ async def test_a_get_data_mint_stopped_at_the_limit_keeps_its_mint_ledger_slot(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
-    """dfo-apis keeps running a mint whose client went away, so the slot the
+    """apis keeps running a mint whose client went away, so the slot the
     cancelled POST took stays held, and a repeat of the call refuses rather than
     starting the same mint twice."""
     app = _limited_app()
@@ -1223,7 +1223,7 @@ async def test_get_data_refuses_on_its_own_deadline_before_the_limit_stops_it(
     running_lifespan: Callable[..., Any],
     mounted_mcp_transport: Callable[..., StreamableHttpTransport],
 ) -> None:
-    """dfo-apis accepts the mint as a background operation that never finishes.
+    """apis accepts the mint as a background operation that never finishes.
     When the POST is answered, the call's deadline clock jumps so its poll has
     `poll_time_left_s` of real time left. With that inside the limit, `get_data`
     answers its own refusal; past it, the limit stops the call."""
@@ -1383,7 +1383,7 @@ def _data_refusal(code: data_tool_errors.ToolErrorCode, **fields: Any) -> ToolRe
 
 @_PROBE.tool
 def refuses_upstream() -> ToolResult:
-    """Refuses as data-mcp does when dfo-apis fails the call."""
+    """Refuses as data-mcp does when apis fails the call."""
     return _data_refusal(data_tool_errors.ToolErrorCode.UPSTREAM_ERROR, upstream_code="bad_shape")
 
 
@@ -1999,13 +1999,13 @@ async def test_a_malformed_resource_uri_is_logged_and_the_read_fails_as_usual(
     assert "pw" not in line
 
 
-# A servable artifact, and one whose snapshot dfo-apis refuses.
+# A servable artifact, and one whose snapshot apis refuses.
 _SERVED_PATH = f"spec_{'6' * 32}/cv_served/sha256:{'6' * 64}"
 _REFUSED_PATH = f"spec_{'6' * 32}/cv_refused/sha256:{'7' * 64}"
 
 
 def _snapshot(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis' snapshot route: `cv_served` lists the served artifact
+    """apis' snapshot route: `cv_served` lists the served artifact
     under its stable link, and any other content version is not found."""
     subject_id, content_version, digest = _SERVED_PATH.split("/")
     if not request.url.path.endswith(f"/{content_version}"):

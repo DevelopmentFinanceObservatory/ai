@@ -50,7 +50,7 @@ refused. A revise cannot move a card to another frame, so a select that counts
 other series is refused `rolling_select_needs_new_frame`, and the caller
 writes the merged intent as a new card.
 
-One replay costs a mint request to dfo-apis for each root, one `resolve_anchor`
+One replay costs a mint request to apis for each root, one `resolve_anchor`
 call, one call of each rolling verb and of every verb above it (a population is
 part of an op-spec's identity, so each mints a new frame), one replay-key read,
 and one publish. The frame a replay gave is kept, for the `MAX_REPLAYS_KEPT`

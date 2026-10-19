@@ -146,7 +146,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         input_schema_hash="8919acabbb417da7f9b5c67764d6656d228f7616286ab8cd65a37d25c55552bc",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
-        # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
+        # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.
         call_timeout_s=60.0,
     ),
@@ -167,7 +167,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         input_schema_hash="9d1e4169bddb8a136e8a978928a6eafc79ff19809d0383d05c1d1ecc120647c9",
         # Above data-mcp's resubmit budget
         # (`data_mcp.resolve_definition_tool.RESUBMIT_CALL_BUDGET_S`, 100 s), itself
-        # above dfo-apis's 90 s deadline for a resubmit whose member walk reads a
+        # above the apis service's 90 s deadline for a resubmit whose member walk reads a
         # family's whole subject set.
         call_timeout_s=110.0,
     ),

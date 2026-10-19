@@ -272,10 +272,10 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
 
 
 def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
-    """The open axes of `source`'s family that dfo-apis may not sum over, or `None` when it has none.
+    """The open axes of `source`'s family that apis may not sum over, or `None` when it has none.
 
     A family varying along no open axis differs in something no slot
-    states, so whether dfo-apis can sum it is unknown.
+    states, so whether apis can sum it is unknown.
     """
     if not source.open_axes:
         return None

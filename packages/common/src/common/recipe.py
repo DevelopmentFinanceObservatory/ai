@@ -1,5 +1,5 @@
 """A derived frame's recipe: the tree of op-specs that computed it, down to the
-root datasets, and the two hashes dfo-apis indexes it by.
+root datasets, and the two hashes apis indexes it by.
 
 `build_recipe` walks the materialisation store from a derived frame's pair. Each
 derived frame's stored trace carries the canonical op-spec that produced it
@@ -10,7 +10,7 @@ with an `ops_` id is derived and is followed to its own trace. An input with a
 (`common.materialisation.MintRecord`). `common` does not import `analysis_mcp`,
 so a trace is read by attribute and an op-spec as the parsed JSON object.
 
-The recipe is the JSON object dfo-apis' publish door stores:
+The recipe is the JSON object the apis service's publish door stores:
 
 - `tree`: a node per frame. A derived node is `{"frame", "op_spec", "inputs"}`,
   where `op_spec` is the parsed canonical op-spec and `inputs` maps each of its
@@ -38,7 +38,7 @@ form of `{"identity_version": "rnf1", "recipe": <normal form>}`.
 
 `replay_key` is `rpk_` and 32 hex digits of the SHA-256 of the RFC 8785 form of
 `{"identity_version": "rpk1", "normal_form_hash", "roots", "execution_identities"}`.
-`roots` holds each root's identity (`root_identity`) in `roots` order: its dfo-apis
+`roots` holds each root's identity (`root_identity`) in `roots` order: its apis
 pair, and the enrichment stamp its frame was named under when it has one. A root
 with no stamp is identified by its pair alone. `execution_identities` holds every
 distinct `ExecutionIdentity.canonical_string()` in the tree, sorted. A replay
@@ -284,9 +284,9 @@ def normal_form_hash(normal: Mapping[str, Any]) -> str:
 
 
 def root_identity(dataset: Mapping[str, str], *, enrichment_stamp: str | None) -> dict[str, str]:
-    """A root's identity: the dfo-apis `{spec_id, content_version}` its frame was
+    """A root's identity: the apis `{spec_id, content_version}` its frame was
     minted from, and the enrichment stamp the frame was named under
-    (`MintRecord.enrichment_stamp`) when it has one. dfo-apis keeps a version's
+    (`MintRecord.enrichment_stamp`) when it has one. apis keeps a version's
     `content_version` across a change of party kinds, so the stamp is what tells two
     frames of one version apart (`data_mcp.frame_materialisation.frame_ref_for`).
     Without a stamp the identity is the pair alone."""

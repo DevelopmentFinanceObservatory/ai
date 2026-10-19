@@ -5,7 +5,7 @@ Each derived frame's stored trace carries the step record of its own operation
 (`analysis_mcp.trace.Trace.steps`), whose inputs name the frames it read by
 their pairs. `assemble_steps` walks the store from a derived frame's pair as
 `common.recipe.build_recipe` does: a derived input is followed to its own
-trace, and a root input becomes a `retrieve` step whose input is the dfo-apis
+trace, and a root input becomes a `retrieve` step whose input is the apis
 pair of its mint record (`common.materialisation.MintRecord.dataset`) and whose
 `options` are the mint's. `common` does not import `analysis_mcp`, so a trace's
 steps are read by attribute and handled as their JSON form.

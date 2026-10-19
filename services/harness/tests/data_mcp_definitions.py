@@ -108,7 +108,7 @@ class SearchStub:
 
 
 class GroupsSearchStub(SearchStub):
-    """`SearchStub` answering a resubmit as dfo-apis#1222 does: a block's
+    """`SearchStub` answering a resubmit as the platform does: a block's
     `resolved.entity_groups` is served only when the request posts groups beside
     the identity, and the members alone otherwise."""
 

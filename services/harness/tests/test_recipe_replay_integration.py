@@ -4,7 +4,7 @@ dataset version is replayed after the dataset moves.
 `get_data`, `filter`, `growth` and `resolve_anchor` run through the mounted
 data-mcp and analysis-mcp apps, as in `test_executor_integration.py`. The replay
 mints its root through data-mcp's `mint_recorded_root`, whose upstream is a
-canned dfo-apis mint with the artifact fetch patched at the seam nothing threads
+canned apis mint with the artifact fetch patched at the seam nothing threads
 a transport into, and publishes through presentation-mcp's client over a fake
 publish door, so no socket opens.
 """
@@ -61,7 +61,7 @@ async def _reset_data_mcp_client() -> AsyncIterator[None]:
 
 
 class Services:
-    """The mounted services' tools, the canned upstream, and dfo-apis' publish door."""
+    """The mounted services' tools, the canned upstream, and the apis service's publish door."""
 
     def __init__(self, surface: McpSurface, upstream: Upstream) -> None:
         self.surface = surface
