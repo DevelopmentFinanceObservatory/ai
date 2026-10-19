@@ -2,8 +2,8 @@
 derived frame ends as.
 
 The store is `InMemoryMaterialisationStore`, filled by real analysis-mcp verbs so
-the traces are the ones a deployment stores. dfo-apis is `FakeApis` behind
-`httpx2.MockTransport`: the recipe and versions routes, answering as dfo-apis'
+the traces are the ones a deployment stores. apis is `FakeApis` behind
+`httpx2.MockTransport`: the recipe and versions routes, answering as apis'
 publish door does.
 """
 
@@ -64,7 +64,7 @@ def _listed(version: dict[str, str | None]) -> dict[str, Any]:
 
 
 class FakeApis:
-    """dfo-apis' recipe and versions routes over plain dicts.
+    """apis' recipe and versions routes over plain dicts.
 
     `published` holds the pairs with a version row, `recipes` each pair's stored
     recipe and `versions` each dataset's stored versions. `answers` replaces the
@@ -75,7 +75,7 @@ class FakeApis:
         self.published: set[Pair] = {pair(ref) for ref in published}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, str | None]]] = {}
-        # The stamp the versions answer lists, or none when dfo-apis lists none.
+        # The stamp the versions answer lists, or none when apis lists none.
         self.enrichment_stamp: str | None = None
         self.answers: dict[str, httpx2.Response | Exception] = {}
         self.requests: list[httpx2.Request] = []
@@ -331,7 +331,7 @@ async def test_a_root_with_no_mint_record_is_recovered_once_and_written_back(
     versions_reads = [r for r in apis.requests if r.url.path.endswith(f"{SPEC}/versions")]
     assert len(versions_reads) == 1
 
-    # A later run reads the record from the store and asks dfo-apis for no version.
+    # A later run reads the record from the store and asks apis for no version.
     later = FakeApis(published=[total, change])
     await backfill(store, later, write=True)
     assert [r for r in later.requests if r.url.path.endswith(f"{SPEC}/versions")] == []

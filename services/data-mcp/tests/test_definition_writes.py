@@ -130,7 +130,7 @@ def _hashed(identity: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_a_caller_identity_past_the_registry_cap_is_refused() -> None:
-    """dfo-apis's registry refuses an identity past 65,536 bytes of compact JSON."""
+    """The apis service's registry refuses an identity past 65,536 bytes of compact JSON."""
     identity = {"identity_version": "spec1", "padding": "x" * MAX_IDENTITY_BYTES}
 
     with pytest.raises(IdentityUnusable, match="past the 65,536-byte cap"):
@@ -165,7 +165,7 @@ def test_a_windowed_identity_hashes_as_the_scope_surgery_would() -> None:
 
     spec_id, identity = windowed_identity(spec["definition"]["identity"], window)
 
-    # dfo-apis's `apply_scope_surgery` replaces `requested_window` whole and
+    # The apis service's `apply_scope_surgery` replaces `requested_window` whole and
     # hashes the result, so this is the spec_id `get_data`'s scope mints.
     expected = {**spec["definition"]["identity"], "requested_window": window}
     assert identity == expected
@@ -181,10 +181,10 @@ def test_a_windowed_identity_hashes_as_the_scope_surgery_would() -> None:
 def test_a_windowed_identity_is_the_one_dfo_apis_mints_for_the_scoped_seed(
     answer: dict[str, Any],
 ) -> None:
-    """Recorded from the dev dfo-apis: `get_data(seed, scope={"window": 2024})`.
+    """Recorded from the dev apis: `get_data(seed, scope={"window": 2024})`.
 
     The Kenya mint answered its definition. The every-donor mint refused
-    `entities_unbound` after dfo-apis registered the scoped definition, so
+    `entities_unbound` after apis registered the scoped definition, so
     only its spec_id is recorded: the dev registry answers 422 for that id,
     and 404 for one it never registered.
     """
@@ -207,9 +207,9 @@ def test_a_windowed_identity_is_the_one_dfo_apis_mints_for_the_scoped_seed(
 def test_an_identity_over_a_range_with_no_end_year_is_the_one_dfo_apis_serves(
     fixture: str, start_year: int, minted: str
 ) -> None:
-    """A range stating `start_year` alone hashes as dfo-apis hashes `scope.window` without `end_year`.
+    """A range stating `start_year` alone hashes as apis hashes `scope.window` without `end_year`.
 
-    Each `minted` id is what dfo-apis at b1bb24896 (dfo-spec-kit adbebda, the
+    Each `minted` id is what the apis repository at b1bb24896 (dfo-spec-kit adbebda, the
     commit this repository pins) computes for the fixture's identity under
     `Scope(window=WindowRange(start_year=start_year))`, by the steps of
     `datasets_api.kinds.spec_id._served_identity`: `apply_scope_surgery`,

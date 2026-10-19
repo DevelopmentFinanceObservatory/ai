@@ -1102,7 +1102,7 @@ def test_a_retrieval_matching_the_approved_source_meets_the_requirement(
 
     assert errors(issues) == []
     # The unit names its currency but no price basis, which the surface does
-    # not carry yet (dfo-ai#193), so the basis rides along as a note.
+    # not carry yet, so the basis rides along as a note.
     assert [issue.code for issue in issues] == [
         EvidenceIssueCode.UNIT_MATCHES,
         EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
@@ -1410,7 +1410,7 @@ _BASIS_UNSTATED = ("unit_price_basis_unverified", "warning")
 @pytest.mark.parametrize(
     ("unit", "expected"),
     [
-        # Data Commons unit dcids, as dfo-apis serves the CRS and ONE facets.
+        # Data Commons unit dcids, as apis serves the CRS and ONE facets.
         ("CurrencyUSD", [_MATCHES, _BASIS_UNSTATED]),
         ("dcid:USDollar", [_MATCHES, _BASIS_UNSTATED]),
         ("CurrencyEUR", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
@@ -1867,7 +1867,7 @@ def test_a_place_axis_holding_one_place_needs_no_across(
     )
 
 
-# dfo-apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
+# apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
 # `search` places on a flow axis, and the axis it places it on.
 _SEARCH_ROLE_TEXT_TO_AXIS = {
     "from": "origin",
@@ -2023,7 +2023,7 @@ def _donor_stats(*entities: dict[str, str]) -> pa.Table:
     return _series_stats(_stat("DebtServicePaid", entities=list(entities)))
 
 
-# dfo-apis's mint for education aid to Kenya from every donor: the manifest as
+# The apis service's mint for education aid to Kenya from every donor: the manifest as
 # served and the first rows of its series statistics. The series name each
 # entity's role by declared property (`financingProvider`), where Search names
 # the open donor side `origin`, and the manifest's coverage dimensions state
@@ -2053,7 +2053,7 @@ def _kenya_from(*donors: str) -> pa.Table:
 
 def _recorded_donor_retrieval(*, axes: bool = True) -> RetrievalEvidence:
     """The recorded mint read as evidence; `axes=False` drops each dimension's `axis`,
-    as a dfo-apis that predates the field serves it."""
+    as an apis service that predates the field serves it."""
     manifest = dict(_RECORDED_DONOR_MINT["manifest"])
     if not axes:
         coverage = manifest["coverage"]
@@ -2242,7 +2242,7 @@ def _kenya_from_every_donor(requirement: RequirementFactory) -> DatasetRequireme
 def test_a_summed_retrieval_keeping_its_donors_covers_the_population(
     requirement: RequirementFactory,
 ) -> None:
-    # dfo-apis sums the family and keeps every entity role column, so the
+    # apis sums the family and keeps every entity role column, so the
     # summed frame carries one series per donor under `financingProvider`.
     approved, manifest = _summed_donor_family()
     donors = ("country/FRA", "country/DEU", "country/USA", "country/JPN")
@@ -2723,7 +2723,7 @@ def test_a_retrieval_meets_a_named_set_when_it_holds_a_member_the_approved_sourc
 
 
 # A set Search bound as the one party its dataset publishes as the set's total
-# (dfo-apis `entity_groups[role].total`): the G7 as donor, a resolver group with
+# (apis `entity_groups[role].total`): the G7 as donor, a resolver group with
 # no graph node, and Africa as recipient.
 _TOTAL_GROUPS = (
     ResolvedGroup(role="origin", label="G7", total="GroupOfSeven"),

@@ -1,14 +1,14 @@
 """The `get_data` tool: retrieves the data behind a spec_id a prior `search` minted.
 
 `search` resolves an ask into a spec_id but never fetches the underlying data;
-`get_data` reads the definition for that id -- the local store first, falling
-back to dfo-apis' own permanent registry on a store miss -- mints it through
-dfo-apis' Datasets door, and returns a frame reference plus a digest. Entity
+`get_data` reads the definition for that id (the local store first, falling
+back to apis' own permanent registry on a store miss), mints it through
+apis' Datasets door, and returns a frame reference plus a digest. Entity
 names in the caller's `scope` are resolved to dcids through
 `data_mcp.resolution` before the mint call; the mint call itself and the
 resulting manifest never carry a name, only dcids and, later, a spec_id.
 
-The mint posts the spec_id and its identity only. dfo-apis resolves the
+The mint posts the spec_id and its identity only. apis resolves the
 family's members from the graph on every mint, so no caller supplies them.
 
 Rendering the manifest into a digest lives in `data_mcp.get_data_digest`; the
@@ -52,7 +52,7 @@ from data_mcp.definition_store import (
     get_store,
     verify_write,
 )
-from data_mcp.errors import UpstreamError, UpstreamTransportError
+from data_mcp.errors import UpstreamAuthUnavailable, UpstreamError, UpstreamTransportError
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
     KIND_COLUMNS,
@@ -122,7 +122,7 @@ from data_mcp.version_description import fetch_version_description
 _SCHEMA_VERSION = 1
 
 # The mixer behind a mint request supports at most 3 entity-role slots per
-# observation (`SdmxRoleCeilingError`, dfo-apis' `datasets_api/doors/mint.py`
+# observation (`SdmxRoleCeilingError`, apis' `datasets_api/doors/mint.py`
 # around lines 464-474); a role count beyond that already reaches a clean
 # `request_invalid` refusal from the mint call itself. 8 stays as this
 # tool's own bound rather than matching upstream's 3 exactly -- it exists to
@@ -146,18 +146,18 @@ _SPEC_ID_PATTERN = r"^spec_[0-9a-f]{32}$"
 # An unmarked value other tools' output shows as a dcid (`country/KEN` in a digest, a
 # recall entry or the canvas digest). Namespaced graph dcids are `prefix/segment[/...]`
 # (`country/KEN`, `geoId/13`, `wikidataId/Q30`), each segment `[A-Za-z0-9_.-]+` as
-# dfo-apis' `graph_api.routing` defines the node door's `{dcid}` path, and every
+# apis' `graph_api.routing` defines the node door's `{dcid}` path, and every
 # entity-role namespace is lowercase-initial. A slash alone is not enough:
 # `Congo/Brazzaville` and `Bosnia/Herzegovina` are spoken names a caller types, so a
 # capitalised segment before the slash is a name to resolve. A bare dcid such as
 # `GroupOfSeven` has no slash and passes only behind `ENTITY_DCID_MARKER`.
 _DCID_PATTERN = re.compile(r"^[a-z][A-Za-z0-9_.\-]*(?:/[A-Za-z0-9_.\-]+)+$")
 
-# What `get_data(stat_vars="sum")` asks dfo-apis for: `by` names the columns to keep,
-# and dfo-apis sums away every summable code axis it does not name, `stat_var` first.
+# What `get_data(stat_vars="sum")` asks apis for: `by` names the columns to keep,
+# and apis sums away every summable code axis it does not name, `stat_var` first.
 # `time_period` is a column every frame carries and no code axis, so this keeps no
-# code axis and dfo-apis returns a full collapse: one StatVar ref standing for the
-# family, with every entity role column kept (dfo-apis never sums across a role).
+# code axis and apis returns a full collapse: one StatVar ref standing for the
+# family, with every entity role column kept (apis never sums across a role).
 _SUM_STAT_VARS_GROUPBY: dict[str, Any] = {"by": ["time_period"], "op": "sum"}
 
 StatVarsReading = Literal["sum", "separate"]
@@ -166,7 +166,7 @@ StatVarsReading = Literal["sum", "separate"]
 # `options.groupby.levels` rolls up. A deployment without it serves no `breakdown`.
 _GROUPBY_LEVEL_AXES_FIELD = "groupby_level_axes"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
-# The route that reads a definition out of dfo-apis' registry by `spec_id` and answers its
+# The route that reads a definition out of apis' registry by `spec_id` and answers its
 # identity under `definition`. A GET of a spec rebuilds its stale head, so it may take a
 # materialisation's time.
 _OPTIONS_ROUTE = "/api/datasets/{id}/options"
@@ -187,7 +187,7 @@ _STATISTICS_RESERVE_S = 3.0
 # The clock a call's deadline reads. Tests replace it to move time without sleeping.
 _deadline_clock: Clock = time.monotonic
 
-# The mints this process holds dfo-apis mint slots for on behalf of outside callers,
+# The mints this process holds apis mint slots for on behalf of outside callers,
 # on `_deadline_clock`'s time. Tests replace it with an empty one.
 _mint_ledger = MintLedger()
 
@@ -298,7 +298,7 @@ class Breakdown(BaseModel):
     )
 
     def groupby(self) -> dict[str, Any]:
-        """The `options.groupby` dfo-apis sums this breakdown with: keep the year and the
+        """The `options.groupby` apis sums this breakdown with: keep the year and the
         code axis, roll each code up to its ancestor at `level`, and sum away every other
         summable code axis and `stat_var`."""
         return {
@@ -311,7 +311,7 @@ class Breakdown(BaseModel):
 async def _breakdown_refusal(
     client: UpstreamClient, breakdown: Breakdown, *, deadline: CallDeadline
 ) -> ToolResult | None:
-    """Refuse `breakdown` unless the deployed dfo-apis advertises a level roll-up of its
+    """Refuse `breakdown` unless the deployed apis advertises a level roll-up of its
     code system, or `None` to proceed.
 
     The capabilities document lists the code systems `groupby.levels` accepts under
@@ -428,7 +428,7 @@ async def _resolve_scope_entities(
     usable. `role` always names the failed name's own role, per the platform contract's
     entity-refusal requirement; every pointer this function builds names this tool's own
     `scope.entities.{role}` argument path -- the frame a caller who called `get_data` itself
-    reads pointers in -- never dfo-apis' `/input`-wrapped wire pointer.
+    reads pointers in, not apis' `/input`-wrapped wire pointer.
     """
     names_to_resolve = {
         role: [name for name in names if _entity_dcid(name) is None]
@@ -472,7 +472,7 @@ async def _resolve_scope_entities(
 
 
 class _RegistryIdentity(NamedTuple):
-    """An identity read from dfo-apis' registry, and whether it hashes to the requested id."""
+    """An identity read from apis' registry, and whether it hashes to the requested id."""
 
     identity: dict[str, Any]
     hashes_to_requested_id: bool
@@ -481,7 +481,7 @@ class _RegistryIdentity(NamedTuple):
 async def _registry_identity_or_refuse(
     spec_id: str, *, deadline: CallDeadline
 ) -> _RegistryIdentity | ToolResult:
-    """The identity of `spec_id` read from dfo-apis' registry, for an id the definition
+    """The identity of `spec_id` read from apis' registry, for an id the definition
     store does not hold.
 
     `get_data` chooses the mint's columns from the spec's identity, and a spec it cannot
@@ -581,7 +581,7 @@ async def _resolve_entities_or_refuse(
 
 
 # The prefix an upstream `request_invalid` pointer carries for a scope-entities role, in
-# dfo-apis' own wire envelope (`{input: {scope: {entities: {role: [...]}}}}`) -- distinct
+# apis' own wire envelope (`{input: {scope: {entities: {role: [...]}}}}`), which differs
 # from this tool's own `scope.entities.{role}` argument path, which `InvalidName` above
 # already points into directly.
 _UPSTREAM_ENTITIES_ROLE_POINTER_PREFIX = "/input/scope/entities/"
@@ -591,9 +591,9 @@ def _rebase_entities_role_pointer(refusal: ToolRefusal) -> ToolRefusal:
     """Rewrite an upstream-derived entities-role pointer onto this tool's own argument path.
 
     `invalid_role_ref`/`role_incompatible` map to `request_invalid` with a pointer straight
-    off dfo-apis' wire (`/input/scope/entities/{role}`), while a locally-rejected name
+    off apis' wire (`/input/scope/entities/{role}`), while a locally-rejected name
     (`InvalidName` above) already points at `/scope/entities/{role}` -- this tool's own
-    `scope` argument, with no `/input` wrapper, since that wrapper names dfo-apis' request
+    `scope` argument, with no `/input` wrapper, since that wrapper names apis' request
     envelope, not anything this tool's own caller ever supplied. Same argument, one
     convention: this rebases the upstream-derived pointer onto the local one rather than
     leaving a caller to notice the two never match.
@@ -652,7 +652,7 @@ async def _load_identity_or_refuse(
 
     if stored is not None:
         return json.loads(stored.canonical_bytes)
-    # No local hit, but dfo-apis' own registry may still hold this id: the local store is
+    # No local hit, but apis' own registry may still hold this id: the local store is
     # per-process by default and even its GCS-backed form expires at 30 days, while the
     # upstream registry's rows are never deleted. Only a registry miss too (`spec_not_found`,
     # caught in `get_data`) completes the platform contract's own definition of
@@ -663,13 +663,13 @@ async def _load_identity_or_refuse(
 async def _persist_definition(
     definition: DefinitionModel, *, deadline: CallDeadline, reserve_s: float
 ) -> bool:
-    """Write a definition dfo-apis served to the store, so a later `get_data` call with its id succeeds.
+    """Write a definition apis served to the store, so a later `get_data` call with its id succeeds.
 
     Called for a mint route's own manifest carrying a `spec_id` different from the one
     this call was made with: a scope override changed the identity, and upstream re-minted
     under a new id. That new id is what the digest hands the model as its frame reference, so
     it has to be resolvable by a later `get_data` call the same way any other id is -- without
-    this write, that later call would refuse `definition_not_held` even though dfo-apis' own
+    this write, that later call would refuse `definition_not_held` even though apis' own
     registry now holds this id, which is exactly the case the platform contract's
     `definition_not_held` excludes ("held by neither store nor registry"). Called too for
     the definition of an id this store did not hold (`_registry_identity_or_refuse`). `verify_write`
@@ -845,7 +845,7 @@ async def _mint_payload_or_refusal(
     """The mint route's manifest payload, resolving a 202 operation to completion first.
 
     The mint POST answers 200 with the manifest directly for a request within
-    dfo-apis' own sync budget, or 202 with an operation envelope once that budget
+    apis' own sync budget, or 202 with an operation envelope once that budget
     is crossed (`datasets_api.operations.submit`). This is the one place that tells
     the two apart: a 200 body is returned as-is; a 202 body is handed to
     `data_mcp.operations.resolve_operation_response`, which polls the named
@@ -922,7 +922,7 @@ async def _finish_mint_response(
     canonical frame, read off the snapshot route, and otherwise the artifact whose
     rendering equals `options`. A frame minted with `options.columns` or
     `options.groupby` has a `content_version` of its own, and the manifest keeps
-    dfo-apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed
+    apis' pair, which its artifacts are read under. A failed fetch or an unconfirmed
     store write degrades this call's own digest rather than refusing it (see
     `render_get_data_digest`'s `degraded_frame`); a genuinely unusable artifact or
     manifest still refuses.
@@ -1011,8 +1011,8 @@ async def _finish_mint_response(
     frame_ref = outcome.frame_ref
     assert frame_ref is not None  # set on every outcome but a refusal
 
-    # dfo-apis' pair, not `frame_ref`, keys the description: a frame minted with
-    # `options.columns` or `options.groupby` is held under a pair of its own that dfo-apis
+    # apis' pair, not `frame_ref`, keys the description: a frame minted with
+    # `options.columns` or `options.groupby` is held under a pair of its own that apis
     # never stored.
     (series_stats, statistics_fetch_failed), description = await asyncio.gather(
         _fetch_statistics_for_digest(manifest, deadline=deadline),
@@ -1053,12 +1053,12 @@ async def _finish_mint_response(
     # grow with the family's (`data_mcp.stat_var_list`).
     structured_content = without_long_stat_var_list(manifest.model_dump(mode="json"))
     # The frame's reference sits beside the manifest: the manifest's own pair names
-    # dfo-apis' materialisation, which the statistics artifact is read under, and
+    # apis' materialisation, which the statistics artifact is read under, and
     # this one names the frame the store holds for this rendering.
     structured_content["frame_ref"] = frame_ref.model_dump(mode="json")
     if outcome.role_keys is not None:
         # The frame's own role columns and distinct StatVar count sit beside the
-        # manifest, which is dfo-apis' document; these come from the frame this call
+        # manifest, which is apis' document; these come from the frame this call
         # read. The harness binds a plan's role columns to the first and bounds each
         # later step's declared StatVar count by the second (`compiler.frame_columns`).
         structured_content["role_keys"] = list(outcome.role_keys)
@@ -1078,7 +1078,7 @@ def _narrowed_to_rendering(manifest: Manifest, *, options: Mapping[str, Any]) ->
     """`manifest` listing only the artifact whose `rendering` equals `options`, and the
     statistics artifact.
 
-    A manifest lists every rendering dfo-apis stores under its pair, so other callers'
+    A manifest lists every rendering apis stores under its pair, so other callers'
     groupby sums and column selections sit beside the requested one, in no set order.
     The resource links and the harness's freshness date
     (`harness.provenance.data_artifact`) read the narrowed list, and so does the frame
@@ -1106,14 +1106,16 @@ async def _post_mint(
     The current `CallBudget` sizes it: the POST gets `mint_timeout_s` at most and must
     end with `post_mint_reserve_s` of `deadline` left. With less than
     `min_mint_timeout_s` to offer it, this refuses without sending, so nothing starts
-    upstream. Any POST that gets no response (whether `mint_timeout_s` elapses first,
-    the deadline cuts it, or the connection fails outright, the same
-    `UpstreamTransportError` each way) refuses with `mint_unanswered`: dfo-apis does
-    not cancel a mint whose client went away, so it may still be running it.
+    upstream. An apis ID token that cannot be minted refuses `service_unavailable`
+    the same way, with nothing sent. Any POST that gets no response (whether
+    `mint_timeout_s` elapses first, the deadline cuts it, or the connection fails
+    outright, the same `UpstreamTransportError` each way) refuses with
+    `mint_unanswered`: apis does not cancel a mint whose client went away, so it
+    may still be running it.
 
-    Under a budget that does not wait out dfo-apis' synchronous mint, the POST first
+    Under a budget that does not wait out apis' synchronous mint, the POST first
     takes a slot in `_mint_ledger`, or returns the ledger's refusal without sending.
-    The slot is freed when dfo-apis answers, and otherwise held until dfo-apis has
+    The slot is freed when apis answers, and otherwise held until apis has
     stopped running the mint, including when the call is cancelled while it waits.
 
     Not retried: a timed-out mint upstream refuses cancellation, so a second POST
@@ -1154,6 +1156,14 @@ async def _post_mint(
             retry=False,
             timeout=timeout_s,
             deadline=mint_deadline,
+        )
+    except UpstreamAuthUnavailable as exc:
+        if held is not None:
+            _mint_ledger.answered(held)
+        return ToolRefusal.service_unavailable(
+            service="dfo-apis",
+            detail=f"{exc.detail}; nothing was sent",
+            retry_after_s=DEADLINE_RETRY_AFTER_S,
         )
     except UpstreamTransportError:
         now = deadline.clock()
@@ -1196,7 +1206,7 @@ async def _attempt_mint(
     An identity read from the registry (`_registry_identity_or_refuse`) chooses the
     columns, and goes in the sidecar only when `sends_definition`.
     `stat_vars="sum"` adds `_SUM_STAT_VARS_GROUPBY` to the request's options. The sum
-    sits outside the spec's identity: the manifest keeps `spec_id`, and dfo-apis mints
+    sits outside the spec's identity: the manifest keeps `spec_id`, and apis mints
     the summed frame its own `content_version` whenever more than one StatVar
     contributed rows, so the summed and separate frames never share a frame reference.
     With one contributor the two frames are the same bytes under one `content_version`.
@@ -1210,7 +1220,7 @@ async def _attempt_mint(
     (`_without_unserved_place_type`). A refusal of a flow table's `party_kind` is relayed: a
     flow frame without kinds would let a sum count party totals beside their parties.
     `without_party_totals` on a flow spec asks for the kinds as `place_types` does, and
-    sends `options.without_party_totals`: dfo-apis leaves out the group totals of the
+    sends `options.without_party_totals`: apis leaves out the group totals of the
     party roles the identity it serves leaves open, and mints the frame that remains a
     version of its own, which the manifest's pair names and its trace lists the totals
     left out of (`party_totals_left_out`). On any other spec it changes nothing.
@@ -1248,7 +1258,7 @@ async def _attempt_mint(
 
     def minted(result: ToolResult) -> ToolResult:
         """A `default_facet_undefined` refusal, from the mint or its poll, naming the
-        spec_id and places this call was minting. The cause and retry flag stay dfo-apis'."""
+        spec_id and places this call was minting. The cause and retry flag stay apis'."""
         refused = result.structured_content or {}
         if refused.get("code") != ToolErrorCode.DEFAULT_FACET_UNDEFINED.value:
             return result
@@ -1281,7 +1291,7 @@ async def _attempt_mint(
     except UpstreamError as exc:
         if not sends_definition and exc.code == "spec_not_found":
             # The sidecar-free registry-fallback request above just missed
-            # dfo-apis' own registry too: `mint_spec_id` raises exactly this
+            # apis' own registry too: `mint_spec_id` raises exactly this
             # code in that case, and the platform contract's
             # `definition_not_held` -- "held by neither store nor registry"
             # -- is what this completes.
@@ -1351,7 +1361,7 @@ def _without_unserved_place_type(
 class RootMint:
     """A root frame `mint_recorded_root` confirmed in the materialisation store.
 
-    `frame` is the pair the store holds it under, `dataset` the pair dfo-apis names
+    `frame` is the pair the store holds it under, `dataset` the pair apis names
     the materialisation by, `options` the mint options sent, and `stat_var_count` the
     distinct StatVars its rows hold.
     """
@@ -1383,7 +1393,7 @@ async def mint_recorded_root(
 
     It does not wait on a queued mint. A 202 whose operation is unfinished returns
     the `QueuedOperation` at once (`operations.operation_without_waiting`). The
-    caller sends the same mint again later, and dfo-apis answers with the same
+    caller sends the same mint again later, and apis answers with the same
     operation, or with the manifest once it is done, so a repeat submits nothing new.
 
     A re-mint under a new identity is not written to the definition store. The
@@ -1397,7 +1407,7 @@ async def mint_recorded_root(
 
     Returns:
         A `RootMint` once the store holds the frame. A `QueuedOperation` for a mint
-        dfo-apis queued and has not finished. A refusal `ToolResult` otherwise,
+        apis queued and has not finished. A refusal `ToolResult` otherwise,
         which is `service_unavailable` with a wait when the mint succeeded and the
         frame could not be fetched or stored inside `deadline`.
     """
@@ -1782,7 +1792,7 @@ async def get_data(
             # eventually sees carries the post-scope-surgery identity the
             # registry served, never the base -- so `dropped_roles` stays
             # empty there rather than guessed at. An open role binds no
-            # entity and is not reported dropped. dfo-apis closes one the scope
+            # entity and is not reported dropped. apis closes one the scope
             # binds and keeps every other open.
             base_roles = set((identity.get("entities") or {}).keys())
             dropped_roles = sorted(base_roles - set(scope.entities.keys()))

@@ -1,4 +1,4 @@
-"""Async HTTP client for the dfo-apis surfaces.
+"""Async HTTP client for the apis surfaces.
 
 One `httpx2.AsyncClient` behind a retry loop bounded by wall-clock, problem-body
 parsing that keeps a refusal's `code` intact for #26, a span per call, and a
@@ -15,15 +15,21 @@ import json
 import logging
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Self
 
 import httpx2
+from common.apis_auth import ApisAuthError, AuthProvider
 from opentelemetry import trace
 
 from data_mcp.deadline import CallDeadline
-from data_mcp.errors import UpstreamError, UpstreamSurfaceUnavailable, UpstreamTransportError
+from data_mcp.errors import (
+    UpstreamAuthUnavailable,
+    UpstreamError,
+    UpstreamSurfaceUnavailable,
+    UpstreamTransportError,
+)
 from data_mcp.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -31,11 +37,11 @@ tracer = trace.get_tracer(__name__)
 
 SEARCH_PREFIX = "/api/search"
 DATASETS_PREFIX = "/api/datasets"
-# dfo-apis mounts Graph once that surface lands.
+# apis mounts Graph once that surface lands.
 GRAPH_PREFIX = "/api/graph"
 SKILLS_PREFIX = "/api/skills"
 
-# dfo-apis mounts these behind env flags, so an unmounted one answers
+# apis mounts these behind env flags, so an unmounted one answers
 # `not_found` on every path beneath it. Each maps to the path its probe reads,
 # one the surface serves whenever it is mounted: Datasets and Graph serve
 # `capabilities`, the Skills API serves `healthz`. Search mounts
@@ -84,14 +90,17 @@ _KNOWN_PROBLEM_FIELDS = frozenset(
 # it carries a timeout of its own, clipped to a caller's deadline.
 _PROBE_TIMEOUT_S = 5.0
 
-# dfo-apis' parsed door serves SSE or a buffered body from one route, chosen
+# apis' parsed door serves SSE or a buffered body from one route, chosen
 # by `Accept`. Every caller here wants the buffered body, so this rides as a
 # client default rather than a `request()` parameter — httpx2 merges a
 # per-request header over a client default, so a future caller that genuinely
 # needs SSE can still override it.
 DEFAULT_ACCEPT_HEADER = "application/json"
 
-AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
+# The redirects `stream_link` follows. dfo-apis answers a stable artifact link
+# with 302 to a short-lived signed URL.
+_LINK_REDIRECT_STATUSES = frozenset({302, 303, 307})
+
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -115,10 +124,10 @@ def _spent_limit(budget: CallDeadline, deadline: CallDeadline | None, budget_s: 
 
 
 def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
-    """Parse `body` as a dfo-apis problem document, ignoring `Content-Type`.
+    """Parse `body` as an apis service problem document, ignoring `Content-Type`.
 
     Returns `None` unless `retryable` is present as a real bool, which is what
-    separates a dfo-apis problem (`dfo_platform/problem.py`) from a proxy's
+    separates an apis service problem (`dfo_platform/problem.py`) from a proxy's
     `{"error": "unavailable"}` on the same status. `isinstance` rather than
     truthiness, since `isinstance(True, int)` would admit `retryable: 1`.
     Callers fall back to `_RETRYABLE_STATUS_FALLBACK` on `None`.
@@ -155,7 +164,7 @@ def is_retryable(error: UpstreamError) -> bool:
 
 
 class UpstreamClient:
-    """Async client over dfo-apis' surfaces.
+    """Async client over apis' surfaces.
 
     Holds one `httpx2.AsyncClient` and, per gated surface, the cached
     verdict of its probe once that has fired. Use as an async context
@@ -176,9 +185,9 @@ class UpstreamClient:
             settings: The service's `Settings`, supplying the base URL and
                 the `upstream_*` timeout/retry knobs.
             auth: Async credential provider, called once per call rather than
-                per attempt. Async because its destination is Cloud Run
-                service-to-service auth, where minting an ID token is an
-                async, cached, refreshing call. Injects nothing by default.
+                per attempt. The surface probe sends its headers too. The
+                deployed client gets `common.apis_auth.apis_auth_provider`'s
+                Cloud Run ID token. Injects nothing by default.
             sleep: Backoff sleep, which tests replace to avoid waiting.
             transport: `httpx2` transport override, `httpx2.MockTransport` in
                 tests.
@@ -190,6 +199,7 @@ class UpstreamClient:
         self._connect_timeout_s = settings.upstream_connect_timeout_s
         self._auth = auth
         self._sleep = sleep
+        self._public_origin = settings.dfo_site_origin
         self._client = httpx2.AsyncClient(
             base_url=settings.dfo_apis_url,
             timeout=httpx2.Timeout(
@@ -198,7 +208,7 @@ class UpstreamClient:
             transport=transport,
             headers={"Accept": DEFAULT_ACCEPT_HEADER},
         )
-        # Prefix -> whether dfo-apis has that surface unmounted. Absent means
+        # Prefix -> whether apis has that surface unmounted. Absent means
         # unprobed. See `_probe_surface`.
         self._surface_missing: dict[str, bool] = {}
         self._probe_lock = asyncio.Lock()
@@ -214,9 +224,74 @@ class UpstreamClient:
         """Release the underlying connection pool."""
         await self._client.aclose()
 
-    def absolute_url(self, link: str) -> str:
-        """`link`, a root-relative path, on the dfo-apis origin this client calls."""
-        return str(self._client.base_url.join(link))
+    def public_url(self, link: str) -> str:
+        """`link`, a root-relative apis path, as a caller outside this service reaches it.
+
+        On `Settings.dfo_site_origin` when set, the website that proxies apis'
+        paths with its own ID token, else on the apis origin this client calls.
+        """
+        base = self._client.base_url if self._public_origin is None else self._public_origin
+        return str(httpx2.URL(base).join(link))
+
+    @asynccontextmanager
+    async def stream_link(
+        self,
+        link: str,
+        *,
+        timeout_s: float,
+        headers: Mapping[str, str] | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ) -> AsyncIterator[httpx2.Response]:
+        """GET `link`, a root-relative apis path, and yield the streamed response.
+
+        The first hop goes to the apis origin this client calls, with the auth
+        provider's headers, which win over a header of the same name in `headers`.
+        A 302, 303 or 307 from it is followed once, with `headers` alone. httpx
+        keeps custom headers across a redirect it follows itself, so automatic
+        following would hand the ID token to the signed-URL host. Any other answer,
+        a second redirect included, is yielded as it is.
+
+        Args:
+            link: The root-relative path, e.g. an artifact's stable link.
+            timeout_s: Each hop's timeout.
+            headers: Headers for both hops.
+            transport: `httpx2` transport override, `httpx2.MockTransport` in
+                tests. Separate from this client's own, which carries the
+                snapshot and mint calls.
+
+        Raises:
+            ValueError: `link` resolves off the apis origin, as an absolute or
+                scheme-relative URL for another host does. Nothing was sent and no
+                token was minted.
+            httpx2.TransportError: a hop failed, or the auth provider could not
+                mint a token, in which case nothing was sent.
+        """
+        base = self._client.base_url
+        url = base.join(link)
+        if (url.scheme, url.host, url.port) != (base.scheme, base.host, base.port):
+            raise ValueError(f"link {link!r} is not on the dfo-apis origin")
+        try:
+            auth = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise httpx2.TransportError(f"no dfo-apis ID token: {exc}") from exc
+        hop_headers = dict(headers or {})
+        async with httpx2.AsyncClient(
+            transport=transport, timeout=httpx2.Timeout(timeout_s)
+        ) as client:
+            response = await client.send(
+                client.build_request("GET", url, headers={**hop_headers, **auth}),
+                stream=True,
+            )
+            if response.status_code in _LINK_REDIRECT_STATUSES and "Location" in response.headers:
+                await response.aclose()
+                target = response.url.join(response.headers["Location"])
+                response = await client.send(
+                    client.build_request("GET", target, headers=hop_headers), stream=True
+                )
+            try:
+                yield response
+            finally:
+                await response.aclose()
 
     async def request(
         self,
@@ -230,7 +305,7 @@ class UpstreamClient:
         retry: bool = True,
         deadline: CallDeadline | None = None,
     ) -> httpx2.Response:
-        """Issue one dfo-apis call, retried within a wall-clock budget.
+        """Issue one apis call, retried within a wall-clock budget.
 
         Args:
             method: HTTP method, e.g. "GET" or "POST".
@@ -256,14 +331,19 @@ class UpstreamClient:
             The 2xx `httpx2.Response`.
 
         Raises:
-            UpstreamError: dfo-apis returned a non-2xx response.
+            UpstreamError: apis returned a non-2xx response.
+            UpstreamAuthUnavailable: the auth provider could not mint a token,
+                so nothing was sent. A subclass of `UpstreamTransportError`.
             UpstreamTransportError: no response was ever received, including
                 when `deadline` passed before or during an attempt.
             UpstreamSurfaceUnavailable: a gated-prefix call 404d and the probe
                 confirmed the surface is unmounted.
         """
         attempt_timeout = timeout if timeout is not None else self._read_timeout_s
-        headers = dict(await self._auth()) if self._auth else {}
+        try:
+            headers = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise UpstreamAuthUnavailable(detail=f"no dfo-apis ID token: {exc}") from exc
         # The budget bounds retrying, not one attempt a caller asked for.
         # Mint's 125s exceeds the 120s budget and must survive it.
         call_budget_s = max(self._retry_budget_s, attempt_timeout)
@@ -381,7 +461,7 @@ class UpstreamClient:
 
         `httpx2` expands a bare float into all four deadlines, so passing
         mint's 125s would discard `upstream_connect_timeout_s` and leave an
-        unreachable dfo-apis hanging a full read timeout per attempt.
+        unreachable apis hanging a full read timeout per attempt.
         """
         return httpx2.Timeout(self._connect_timeout_s, read=read)
 

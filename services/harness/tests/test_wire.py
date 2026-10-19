@@ -1,12 +1,11 @@
 """`harness.wire` against the contract's own fixtures.
 
-The fixtures in `wire_fixtures/studio/` are the contract drafts' studio payload
-fixtures verbatim (`dfofrontendpayloads.md`, 2026-08-04) -- the shapes the
-frontend team builds against. Three things are pinned here: every event
+The fixtures in `wire_fixtures/studio/` are the studio payload fixtures
+the frontend team builds against. Three things are pinned here: every event
 fixture round-trips bit-for-bit through `STUDIO_FRAME_ADAPTER` (parse, then
 `model_dump(mode="json", exclude_unset=True)` reproduces the fixture
 exactly); every request fixture parses through `STUDIO_REQUEST_ADAPTER`
-with the docs' `session_id` accepted as the deprecated alias for
+with the fixtures' `session_id` accepted as the deprecated alias for
 `conversation_id` (contract delta 5) and round-trips up to that one rename;
 and the boundary refuses what the contract says it refuses: unknown
 members, unknown discriminators, out-of-vocabulary enum values.
@@ -121,9 +120,8 @@ def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
     """The turn/interrupt fixtures carry `session_id`; v1 parses it as
     the deprecated alias of `conversation_id` (delta 5) and serialisation
     writes `conversation_id`, so their round-trip is exact up to that one
-    rename. The composition.mutate fixture is delta-adjusted on disk (the
-    drafts' shape carried no conversation identifier; delta 5 adds one), so
-    it round-trips exactly as stored."""
+    rename. The composition.mutate fixture is delta-adjusted on disk (delta 5
+    adds a conversation identifier), so it round-trips exactly as stored."""
     raw = _load(name)
 
     request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
@@ -800,7 +798,7 @@ def test_a_target_year_outside_search_s_bounds_refuses_its_seed(target_year: obj
 
 
 def _region_members_block() -> dict[str, Any]:
-    """dfo-apis#1222's spec block for health expenditure per capita over Africa's countries."""
+    """The spec block for health expenditure per capita over Africa's countries."""
     fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
     return json.loads(fixture.read_text())["spec"]
 

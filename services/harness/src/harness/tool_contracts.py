@@ -127,7 +127,7 @@ class HarnessCode(StrEnum):
     # not published. The frame store could not be reached or refused the read,
     # the dataset's versions could not be read, the replay recipe could not be
     # built, the store no longer holds the frame, no publisher is wired, and
-    # dfo-apis holds the frame under a recipe of another normal form.
+    # apis holds the frame under a recipe of another normal form.
     STORE_UNAVAILABLE = "store_unavailable"
     STORE_REFUSED = "store_refused"
     DATASET_VERSIONS_UNAVAILABLE = "dataset_versions_unavailable"

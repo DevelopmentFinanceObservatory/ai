@@ -1,7 +1,7 @@
 """Tests for `data_mcp.manifest`: URL stripping, the `extra="ignore"`
 policy, and the shapes `strip_manifest` accepts.
 
-`_DEFINITION_MANIFEST` was captured by driving dfo-apis' own offline `TestClient`
+`_DEFINITION_MANIFEST` was captured by driving apis' own offline `TestClient`
 (`tests/datasets_api/conftest.py::make_client`) through `POST /api/datasets`, the
 same way `tests/datasets_api/test_mint_spec_id.py` does it, then rewriting each
 artifact's `url` to the stable link `/api/datasets/{id}/{cv}/files/{digest}` --
@@ -9,7 +9,7 @@ pasted as JSON so a real production shape backs every assertion here, including
 ones a hand-built fixture would happily satisfy while describing something
 production never emits. The capture's inline `statistics` array is edited by hand,
 replaced by `series_count` plus a `rendering: {"statistics": "series"}` artifact
-entry -- the shape dfo-apis uses for per-series figures stored in their own Parquet
+entry, the shape apis uses for per-series figures stored in their own Parquet
 artifact; nothing else in the capture is touched by hand."""
 
 from __future__ import annotations

@@ -1849,7 +1849,7 @@ async def resolve_definition(
     Search keeps a posted set when the role binds the one party the dataset
     publishes as its total, and answers with that `total`; otherwise only
     when it names a graph node whose members are the identity's places on
-    that role (dfo-apis `resubmit_request.resubmit_named_groups`). A
+    that role (apis `resubmit_request.resubmit_named_groups`). A
     members-bound set with no node, such as the G7 read as its members, is
     dropped: its places still bind, and its name is lost.
 

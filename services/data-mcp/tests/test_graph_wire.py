@@ -1,10 +1,10 @@
 """`data_mcp.graph_wire` is generated from the committed Graph API schema snapshot.
 
-`fixtures/graph_api_schema.json` is the body of dfo-apis' `GET /api/graph/schema`. The test
+`fixtures/graph_api_schema.json` is the body of apis' `GET /api/graph/schema`. The test
 renders the node and resolve models from it with datamodel-code-generator and fails when the
 committed module differs. `just graph-models` rewrites the module from the snapshot, and the
 diff of that regeneration is the review artifact. `just graph-schema` refreshes the snapshot
-from a deployed dfo-apis.
+from a deployed apis.
 """
 
 from __future__ import annotations

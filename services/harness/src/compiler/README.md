@@ -156,7 +156,7 @@ source, the same way a comparison's side does. A `PlaceLevel` becomes a
 `place_level` predicate on `observationAbout_type`, and the retrieval that filter
 reads, directly or through other filters, asks `get_data` for that column with
 `place_types: true` (`_read_by_level_filter`). Every flow retrieval asks for
-`without_party_totals: true`, so dfo-apis serves a frame holding each open side's parties
+`without_party_totals: true`, so apis serves a frame holding each open side's parties
 without the donors and recipients that total other parties, under a version of its own,
 whichever verb reads it. Every kind gets `mismatches`'s
 proof and its own operation-level checks (`entity_unresolved`,

@@ -81,7 +81,7 @@ def _carried_count(
 
 
 def test_the_recorded_trace_lists_with_rows_exactly_the_stat_vars_dfo_apis_summed() -> None:
-    """France's education grants, summed on dev dfo-apis: the trace lists 183
+    """France's education grants, summed on dev apis: the trace lists 183
     members, the 68 with rows are the 68 the `stat_vars_summed` warning names,
     and a frame carrying the sum counts them."""
     entries = _FRANCE_EDUCATION_GRANTS["trace"]["resolved_stat_vars"]

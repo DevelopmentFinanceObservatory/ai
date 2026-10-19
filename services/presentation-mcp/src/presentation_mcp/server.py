@@ -52,6 +52,7 @@ from dataclasses import asdict
 from enum import StrEnum
 from typing import Any, Literal
 
+from common.apis_auth import apis_auth_provider
 from common.auth import BearerTokenVerifier, apply_gate
 from common.logging import configure_logging
 from common.materialisation import install_store_if_unset
@@ -803,7 +804,9 @@ async def _platform_lifespan() -> AsyncIterator[None]:
             yield
             return
 
-    running = PlatformAssembler(settings=settings)
+    running = PlatformAssembler(
+        settings=settings, auth=apis_auth_provider(base_url=settings.dfo_apis_url)
+    )
     mounted: tuple[str, ...] = ()
     try:
         try:

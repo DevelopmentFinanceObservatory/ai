@@ -14,6 +14,19 @@ just setup    # env file, dependencies, pre-commit hooks
 just dev      # harness on :8080
 ```
 
+Recipes that call dfo-apis (`just dev`, `just studio-live`,
+`just eval-planner-entry-record`, `just graph-schema`) reach it at
+`DFO_APIS_URL`, `http://localhost:8083` by default. Cloud Run IAM guards the
+dev deployment, so serve it there from a second terminal:
+
+```sh
+just apis-proxy   # gcloud run services proxy dfo-dev-apis --region northamerica-northeast1 --project dev-fin-observatory --port 8083
+```
+
+The proxy signs each request as your gcloud account, which needs
+`roles/run.invoker` on `dfo-dev-apis`. A dfo-apis checkout's `just dev` serves
+the same port instead.
+
 `just` on its own lists every recipe. `just doctor` checks the whole local
 setup -- tooling, gcloud auth, which config keys resolved, whether the
 workspace is synced -- and tells you the command to fix anything it finds.
@@ -29,10 +42,10 @@ Two kinds of value live there.
 
 **Secrets** come from Secret Manager in `dev-fin-observatory`:
 
-| Key                                          | Secret                                                          |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dfo-dcp` and `dfo-apis`) |
-| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key`    |
+| Key                                          | Secret                                                       |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| `GOOGLE_API_KEY`                             | `dfo-dev-gemini-api-key` (shared with `dcp` and `apis`)      |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `dfo-dev-langfuse-public-key`, `dfo-dev-langfuse-secret-key` |
 
 **Everything else** (`MODEL_NAME`, `DFO_APIS_URL`, `LANGFUSE_BASE_URL`, `PORT`)
 is a committed default in `.env.example`, so git distributes it.

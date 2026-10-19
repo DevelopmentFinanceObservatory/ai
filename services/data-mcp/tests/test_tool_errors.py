@@ -174,7 +174,7 @@ async def _refusal_from(status: int, **problem_kwargs: object) -> ToolRefusal:
 
 
 async def _refusal_from_body(problem: dict[str, Any]) -> ToolRefusal:
-    """The refusal a dfo-apis response carrying exactly `problem` parses into."""
+    """The refusal an apis service response carrying exactly `problem` parses into."""
     response = httpx2.Response(problem["status"], content=json.dumps(problem).encode())
     _, handler = _counting_handler(response)
     async with _client(handler) as client:
@@ -183,7 +183,7 @@ async def _refusal_from_body(problem: dict[str, Any]) -> ToolRefusal:
     return from_upstream_error(exc_info.value)
 
 
-# dfo-apis' own bodies, rendered through the datasets code catalogue's `Envelope`.
+# apis' own bodies, rendered through the datasets code catalogue's `Envelope`.
 # Each `sync` is the mint door's body for one refusal (`classify_definition_exception`).
 # Its `poll` is the operation poll's body once the worker stored that refusal
 # (`classify_meta_exception` over `OperationFailed(refusal=...)`): `operation_failed`,
@@ -224,7 +224,7 @@ async def test_facet_not_available_maps_through_a_real_parse() -> None:
 
 
 async def test_facet_not_available_aggregates_multiple_axes() -> None:
-    # dfo-apis evaluates all facet axes and aggregates every failing one into
+    # apis evaluates all facet axes and aggregates every failing one into
     # a single `issues` list before raising (`test_facet_goldens.py`
     # `test_mixed_failure_aggregates_into_one_error_prioritising_undefined`).
     refusal = await _refusal_from(
@@ -342,7 +342,7 @@ async def test_default_facet_undefined_relays_the_apis_refusal_without_a_cause_o
 
 
 async def test_each_facet_issue_keeps_its_own_code_and_detail() -> None:
-    """dfo-apis#1221 sends each issue's own code and detail. Both facet refusals keep
+    """The platform sends each issue's own code and detail. Both facet refusals keep
     them, so a multi-axis refusal says why on each axis."""
     issues = [
         {
@@ -389,7 +389,7 @@ async def test_default_facet_undefined_asks_for_a_change_only_when_an_issue_list
 
 @pytest.mark.parametrize(
     ("retryable", "mode"),
-    # `retryable` says whether the same request might succeed (dfo-apis
+    # `retryable` says whether the same request might succeed (apis
     # `dfo_platform/problem.py`), so `true` waits and repeats; it never asks for a change.
     [(False, RetryMode.DO_NOT_RETRY), (True, RetryMode.RETRY_AFTER_DELAY)],
 )
@@ -493,7 +493,7 @@ async def test_a_candidate_window_ceiling_states_its_remedy_and_asks_for_no_stat
     assert refusal.fix["remedy"] in refusal.message
 
 
-# Every `ceiling_kind` dfo-apis' Datasets surface raises (each `OverCeilingError`
+# Every `ceiling_kind` apis' Datasets surface raises (each `OverCeilingError`
 # raise site under `src/datasets_api` and `materialise`, and `mint_errors.py`'s
 # SDMX cap classifier for a mint's `rows` and `bytes` caps), with the kind each
 # reads as here.
@@ -653,7 +653,7 @@ async def test_rollup_not_summable_across_sources_offers_a_breakdown_by_source()
 async def test_an_issues_member_that_holds_no_object_still_reaches_its_refusal(
     code: str, issues: object
 ) -> None:
-    """dfo-apis sends `issues[]` as a list of objects. A body that breaks that
+    """apis sends `issues[]` as a list of objects. A body that breaks that
     shape still refuses with its own code, with the fields an issue would have
     set left empty."""
     refusal = await _refusal_from(422, code=code, retryable=False, issues=issues)
@@ -717,7 +717,7 @@ async def test_facet_alternatives_that_are_not_objects_are_skipped() -> None:
 
 
 async def test_a_failed_operation_caused_by_rollup_not_summable_keeps_the_typed_refusal() -> None:
-    """A summed mint dfo-apis ran as an operation reports its refusal as `cause.code`
+    """A summed mint apis ran as an operation reports its refusal as `cause.code`
     alone, with no `issues` and a `detail` that names the operation."""
     refusal = await _refusal_from(
         500,
@@ -759,7 +759,7 @@ async def test_open_role_unavailable_maps_to_a_fresh_search() -> None:
 
 
 async def test_service_unavailable_maps_through_a_real_parse() -> None:
-    # dfo-apis carries no `store`/`service` extension key at any raise site
+    # apis carries no `store`/`service` extension key at any raise site
     # for this code, so the mapped path uses a fixed label rather than
     # reading one off the wire; most raise sites do name what's backed up
     # in `detail`, which the mapped path threads through.
@@ -964,7 +964,7 @@ async def test_unmapped_upstream_code_surfaces_verbatim() -> None:
 
 
 async def test_unmapped_non_retryable_code_does_not_claim_a_numeric_wait() -> None:
-    # e.g. dfo-apis' real `resolution_ambiguous`, `retryable: false` per
+    # e.g. apis' real `resolution_ambiguous`, `retryable: false` per
     # `src/dfo_platform/codes.py`, so a repeated call won't succeed.
     refusal = await _refusal_from(422, code="resolution_ambiguous", retryable=False)
     assert refusal.code == ToolErrorCode.UPSTREAM_ERROR
@@ -1587,7 +1587,7 @@ def test_each_factory_produces_its_exact_fix_key_set() -> None:
 
 def test_mint_unanswered_is_a_retryable_service_unavailable_refusal() -> None:
     """A mint POST with no answer may have run inline, with no operation for a repeat
-    call to rejoin, or never have reached dfo-apis, so the refusal promises neither."""
+    call to rejoin, or never have reached apis, so the refusal promises neither."""
     refusal = ToolRefusal.mint_unanswered(
         spec_id="spec_" + "a" * 32, elapsed_s=104.26, retry_after_s=5.0, waits_out_sync_mint=True
     )
@@ -1601,7 +1601,7 @@ def test_mint_unanswered_is_a_retryable_service_unavailable_refusal() -> None:
 
 
 def test_mint_unanswered_under_a_short_mint_cap_promises_nothing_of_a_retry() -> None:
-    """A mint cap under dfo-apis' own synchronous mint timeout can cut the same inline
+    """A mint cap under apis' own synchronous mint timeout can cut the same inline
     mint on every repeat, so the message says the same request is refused until the
     mint ends, that a later call runs it again, and names a narrower scope."""
     refusal = ToolRefusal.mint_unanswered(

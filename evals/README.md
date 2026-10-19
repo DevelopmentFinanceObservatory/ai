@@ -33,12 +33,11 @@ in the repo-root `.env`, either `GOOGLE_API_KEY` or the Vertex AI triple from
 For a live turn rather than an eval run, start `just studio-live` in one
 terminal and send a question with `just ask "<question>"` from another.
 The mounts forward every search, describe and presentation call to the
-dfo-apis platform at `DFO_APIS_URL`. `just studio-live` sets it to the dev
-platform. `just dev` reads it from `.env`, where `.env.example` defaults it
-to `http://localhost:8083`, so without a platform running there `just dev` logs a
-404 on `/api/presentation/release` at startup and every data call fails; point
-it at a reachable platform (the dev deployment, or a local one) before starting
-`just dev`.
+apis platform at `DFO_APIS_URL`, `http://localhost:8083` by default. Run
+`just apis-proxy` in a third terminal to serve the dev deployment there, or
+start a local apis on that port. `just studio-live` refuses to start when
+nothing answers. `just dev` starts anyway, logs a failed
+`/api/presentation/release` at startup, and every data call fails.
 
 ## Why the CLI scores
 

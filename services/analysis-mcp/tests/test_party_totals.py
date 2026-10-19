@@ -2,7 +2,7 @@
 that total other parties, and record them as `party_total` exclusions.
 
 The frames carry `financingRecipient_party_kind` as `get_data(place_types=true)` registers it for a
-flow table: the kind dfo-apis serves for each party, `party`, `private`, `residual`, `total` or
+flow table: the kind apis serves for each party, `party`, `private`, `residual`, `total` or
 `whole_total`, and `untyped` where it serves none. A donor-side frame
 (`party_frames.provider_frame`) carries `financingProvider_party_kind` likewise.
 """

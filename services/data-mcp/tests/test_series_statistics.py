@@ -15,6 +15,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import TOKEN_HEADER
 from data_mcp import client_holder
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest, strip_manifest
@@ -22,7 +23,7 @@ from data_mcp.series_statistics import (
     SERIES_STATISTICS_ARROW_SCHEMA,
     SERIES_STATISTICS_SCHEMA,
     SeriesStatisticsSchemaError,
-    _get_bounded,
+    _read_bounded,
     continuing_method,
     fetch_series_statistics,
     fetch_series_statistics_table,
@@ -31,7 +32,7 @@ from data_mcp.series_statistics import (
 )
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .test_client import _client
+from .test_client import ID_TOKEN, _client, _settings, id_token_auth
 
 _SPEC_ID = "spec_" + "1" * 32
 _MEMBER_SPEC_ID = "spec_" + "4" * 32
@@ -126,7 +127,7 @@ class _ChunkedStream(httpx2.AsyncByteStream):
 
 
 class _ExplodingStream(httpx2.AsyncByteStream):
-    """A body `_get_bounded` must never read once `Content-Length` alone refuses it."""
+    """A body `_read_bounded` must never read once `Content-Length` alone refuses it."""
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         raise AssertionError("the body must never be read once Content-Length already refuses it")
@@ -295,7 +296,9 @@ async def test_fetch_series_statistics_follows_the_links_redirect_without_creden
             302, headers={"Location": "https://storage.example/signed?X-Goog-Signature=abc"}
         )
 
-    async with _client(snapshot_handler) as upstream:
+    # The site origin is the model-facing one. This fetch must not use it.
+    settings = _settings(dfo_site_origin="https://site.example")
+    async with _client(snapshot_handler, settings=settings, auth=id_token_auth()) as upstream:
         client_holder.set_client(upstream)
         result = await fetch_series_statistics(
             subject_id=_SPEC_ID,
@@ -307,10 +310,43 @@ async def test_fetch_series_statistics_follows_the_links_redirect_without_creden
         )
 
     assert result == []
-    assert [r.url.path for r in seen] == [_LINK, "/signed"]
+    assert [(r.url.host, r.url.path) for r in seen] == [
+        ("localhost", _LINK),
+        ("storage.example", "/signed"),
+    ]
+    assert seen[0].headers[TOKEN_HEADER] == ID_TOKEN
+    assert TOKEN_HEADER not in seen[1].headers
     credential_headers = {"authorization", "cookie", "x-dfo-principal"}
     for request in seen:
         assert credential_headers.isdisjoint(request.headers.keys())
+
+
+async def test_fetch_series_statistics_fails_as_a_transport_error_when_no_id_token_mints() -> None:
+    """The snapshot read takes the first token and the mint for the link GET fails, so
+    `get_data` drops the statistics as it does for any failed GET."""
+    manifest = _manifest(rendering={"statistics": "series"})
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload())
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    async with _client(snapshot_handler, auth=id_token_auth(mints=1)) as upstream:
+        client_holder.set_client(upstream)
+        with pytest.raises(httpx2.TransportError, match="no dfo-apis ID token"):
+            await fetch_series_statistics(
+                subject_id=_SPEC_ID,
+                content_version=_CONTENT_VERSION,
+                artifact=manifest.artifacts[0],
+                expected_series=0,
+                continuing=None,
+                transport=httpx2.MockTransport(get_handler),
+            )
+
+    assert seen == []
 
 
 async def test_fetch_series_statistics_zero_rows() -> None:
@@ -461,22 +497,25 @@ async def test_fetch_series_statistics_refuses_on_content_length_before_reading_
             )
 
 
-# _get_bounded -- the running total is checked before a chunk is appended, not after
+# _read_bounded -- the running total is checked before a chunk is appended, not after
 
 
-async def test_get_bounded_accepts_a_body_landing_exactly_on_max_bytes() -> None:
+async def test_read_bounded_accepts_a_body_landing_exactly_on_max_bytes() -> None:
     data = b"a" * 10
 
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, content=data)
 
-    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
-        fetched = await _get_bounded(client, "https://artifact.example/blob", max_bytes=len(data))
+    async with (
+        httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client,
+        client.stream("GET", "https://artifact.example/blob") as response,
+    ):
+        fetched = await _read_bounded(response, max_bytes=len(data))
 
     assert fetched == data
 
 
-async def test_get_bounded_refuses_the_chunk_that_would_cross_max_bytes() -> None:
+async def test_read_bounded_refuses_the_chunk_that_would_cross_max_bytes() -> None:
     """A first chunk landing exactly on `max_bytes` is kept; a second chunk of one more byte
     is refused. Checking `len(fetched) + len(chunk) > max_bytes` before the `+=` means the
     buffer never grows past `max_bytes` even transiently -- unlike checking after appending,
@@ -487,9 +526,12 @@ async def test_get_bounded_refuses_the_chunk_that_would_cross_max_bytes() -> Non
     def handler(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(200, stream=_ChunkedStream([first, second]))
 
-    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+    async with (
+        httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client,
+        client.stream("GET", "https://artifact.example/blob") as response,
+    ):
         with pytest.raises(SeriesStatisticsSchemaError, match="advertised size of 10"):
-            await _get_bounded(client, "https://artifact.example/blob", max_bytes=len(first))
+            await _read_bounded(response, max_bytes=len(first))
 
 
 # fetch_series_statistics -- artifact-digest mismatch refuses

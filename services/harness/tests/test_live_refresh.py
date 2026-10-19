@@ -1,5 +1,5 @@
 """`POST /api/studio/refresh`: the credential, each answer and refusal, and the
-route's limits, with dfo-apis as `live_refresh_support.RecordedApis` and the
+route's limits, with apis as `live_refresh_support.RecordedApis` and the
 replayer as a double. `test_live_refresh_integration.py` runs the real replayer.
 """
 
@@ -14,6 +14,7 @@ from typing import Any
 import httpx2
 import pytest
 from analysis_mcp.execution_identity import current_execution_identity
+from common.apis_auth import ApisAuthError, IdTokenProvider
 from common.live_apis import LiveApisClient
 from common.materialisation import FrameRef, MintRecord
 from common.recipe import replay_key, root_identity
@@ -120,7 +121,7 @@ class Replayer:
 
 @pytest.fixture
 def apis() -> RecordedApis:
-    """dfo-apis holding the card on a derived frame whose one dataset has moved."""
+    """apis holding the card on a derived frame whose one dataset has moved."""
     fake = RecordedApis()
     fake.store_card(FrameRef(spec_id=STORED[0], content_version=STORED[1]))
     fake.recipes[STORED] = recipe_of(STORED)
@@ -543,7 +544,7 @@ def listed(*versions: tuple[str, str | None]) -> list[dict[str, Any]]:
 async def test_a_kind_root_of_a_frame_with_no_party_role_is_replayed_once_per_dataset_move(
     apis: RecordedApis,
 ) -> None:
-    # dfo-apis serves the root's kind file unstamped, and its versions answer lists the
+    # apis serves the root's kind file unstamped, and its versions answer lists the
     # code index's stamp at the top and none on any version.
     apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp=None)
     apis.heads[SPEC] = FIRST
@@ -600,7 +601,7 @@ async def test_a_stamped_root_whose_kinds_change_on_a_standing_version_is_replay
 async def test_an_unstamped_kind_root_whose_version_now_holds_a_party_role_is_replayed_once(
     apis: RecordedApis,
 ) -> None:
-    # Recorded from an unstamped file, as a mint under a dfo-apis that sent no stamps
+    # Recorded from an unstamped file, as a mint under an apis that sent no stamps
     # names one, while the version's frame holds a party role whose kinds carry a stamp.
     apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp=None)
     apis.heads[SPEC] = FIRST
@@ -883,6 +884,26 @@ async def test_without_the_datasets_principal_the_route_says_it_is_not_configure
     assert_refused(response, "refresh_not_configured")
 
 
+async def test_a_failed_token_mint_is_upstream_unavailable_and_sends_nothing(
+    apis: RecordedApis,
+) -> None:
+    async def no_token() -> Mapping[str, str]:
+        raise ApisAuthError("metadata server answered 500")
+
+    unauthenticated = LiveApisClient(
+        base_url="http://apis.test",
+        datasets_principal=PRINCIPAL,
+        live_refresh_principal=LIVE_PRINCIPAL,
+        auth=no_token,
+        transport=httpx2.MockTransport(apis),
+    )
+    async with client_of(service_over(apis, Replayer(apis), apis=unauthenticated)) as client:
+        response = await refresh(client)
+
+    assert_refused(response, "upstream_unavailable")
+    assert apis.requests == []
+
+
 # --- time and load --------------------------------------------------------------
 
 
@@ -1011,6 +1032,24 @@ async def test_the_served_refresh_has_a_row_budget_and_a_publisher_of_its_own() 
         assert service.row_budget.max_rows == SETTINGS.live_refresh_rows_in_flight_max
         assert service.row_budget.max_rows < row_budget().max_rows
         assert getattr(service.publish, "__self__", None).__class__ is PlatformAssembler
+    finally:
+        await service.aclose()
+
+
+async def test_on_cloud_run_both_dfo_apis_clients_share_one_id_token_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+    monkeypatch.setenv("DFO_APIS_URL", "https://dfo-dev-apis-abc123.a.run.app/")
+
+    service = build_live_refresh(settings=SETTINGS)
+    try:
+        auth = service._apis._auth
+        assert isinstance(auth, IdTokenProvider)
+        assert auth.audience == "https://dfo-dev-apis-abc123.a.run.app"
+        assembler = getattr(service.publish, "__self__", None)
+        assert isinstance(assembler, PlatformAssembler)
+        assert assembler._auth is auth
     finally:
         await service.aclose()
 

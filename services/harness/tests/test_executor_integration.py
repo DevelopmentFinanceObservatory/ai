@@ -128,7 +128,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 async def publisher() -> AsyncIterator[ResultPublisher]:
     """The completion gate's publisher as the deployed app has it,
     `McpExecutor.publish_result`, publishing each derived frame with the recipe
-    the store's traces build to a fake dfo-apis."""
+    the store's traces build to a fake apis."""
     assembler = FakeApis().assembler()
     yield McpExecutor(settings=Settings(), publish_frame=assembler.publish_frame).publish_result
     await assembler.aclose()
@@ -1549,7 +1549,7 @@ async def studio(
     Two of six donors report 2024, so the run's newest year is 2023. The executor
     is the deployed `McpExecutor` with `_Platform` for its clients, and its
     `card_replay` runs `replay_recipe` over the mounted analysis-mcp and
-    data-mcp's own mint, publishing to a fake dfo-apis.
+    data-mcp's own mint, publishing to a fake apis.
     """
     last_years = _rolling_last_years(reporting_2024=2)
 
@@ -1862,7 +1862,7 @@ async def test_a_surface_reading_the_mounted_services_without_the_token_is_refus
 
 
 # "Top 2 by GDP" with no place named: the mint covers every place with data, at every
-# level, and carries each place's types when asked (dfo-apis `materialise.enrichment`).
+# level, and carries each place's types when asked (apis `materialise.enrichment`).
 GDP_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "Amount_EconomicActivity_GrossDomesticProduction_Nominal", "kind": "stat_var"},
@@ -1870,7 +1870,7 @@ GDP_IDENTITY: dict[str, Any] = {
     "requested_window": {"kind": "all"},
     "slots": [],
 }
-# The id dfo-apis' registry holds the identity under: `get_data` reads an identity the
+# The id apis' registry holds the identity under: `get_data` reads an identity the
 # definition store lacks from the registry and keeps it only when it hashes to its id.
 GDP_SPEC = spec_id_for(canonicalize(GDP_IDENTITY))
 GDP_BY_PLACE: dict[str, tuple[str, float]] = {
@@ -1886,7 +1886,7 @@ GDP_BY_PLACE: dict[str, tuple[str, float]] = {
 
 
 def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
-    """GDP in 2023 at every place, in the column order dfo-apis renders `options.columns`,
+    """GDP in 2023 at every place, in the column order apis renders `options.columns`,
     with each place's types when `place_types`."""
     places = list(GDP_BY_PLACE)
     table = pa.table(
@@ -1910,7 +1910,7 @@ def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
     return buf.getvalue()
 
 
-# When dfo-apis stored each GDP rendering, by whether it carries place types.
+# When apis stored each GDP rendering, by whether it carries place types.
 _GDP_CREATED_AT = {False: "2026-10-01T00:00:00+00:00", True: "2026-10-02T00:00:00+00:00"}
 
 
@@ -1920,7 +1920,7 @@ GDP_CONTENT_VERSION = version_of(_gdp_parquet_bytes(place_types=False))
 
 
 def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
-    """dfo-apis' manifest for GDP. Both renderings come back under one
+    """apis' manifest for GDP. Both renderings come back under one
     `content_version`, each with its own artifact and the request's options as its
     `rendering`."""
     parquet = _gdp_parquet_bytes(place_types=place_types)
@@ -2035,7 +2035,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
 ) -> None:
-    """The retrieval asks dfo-apis for each place's types, the filter keeps the
+    """The retrieval asks apis for each place's types, the filter keeps the
     places typed Country, and the top two are the two largest countries: Earth
     and the World Bank's high-income group, both larger, are left out."""
 
@@ -2095,7 +2095,7 @@ def _serve_gdp_in_both_renderings(
 ) -> list[tuple[str, bool]]:
     """Answer GDP's mint with the type column when `options.columns` asks for it, and
     without otherwise, under one `content_version`. Each manifest lists both renderings,
-    the one not requested first, as dfo-apis lists every rendering stored under a pair.
+    the one not requested first, as apis lists every rendering stored under a pair.
     Returns the frame fetches as `(content_version, typed)`, in order: the plain read
     fetches the version's canonical frame, and the typed read its rendering."""
     renderings = {
@@ -2148,7 +2148,7 @@ async def test_a_level_filtered_rank_after_a_plain_read_of_the_same_mint_keeps_t
     _stats_registry: _StatsRegistry,
 ) -> None:
     """A plain read of GDP is stored first. The rank's retrieval asks for place types,
-    and dfo-apis answers under the same `{spec_id, content_version}`; the typed frame is
+    and apis answers under the same `{spec_id, content_version}`; the typed frame is
     a frame of its own, so the level filter finds its type column."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
@@ -2215,7 +2215,7 @@ async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
     typed: bool,
 ) -> None:
     """The harness dates a retrieval by its manifest's data artifact
-    (`harness.provenance.data_artifact`). dfo-apis lists the other rendering first
+    (`harness.provenance.data_artifact`). apis lists the other rendering first
     with its own `created_at`, and get_data's manifest keeps only the requested one."""
     _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
@@ -2244,7 +2244,7 @@ def _gdp_surface(app: Any, mounted_mcp_transport: Callable[..., Any]) -> McpSurf
     )
 
 
-# --- a flow retrieval that ends a plan, served by dfo-apis without its group totals ---
+# --- a flow retrieval that ends a plan, served by apis without its group totals ---
 
 # "Aid to Kenya from every donor": the definition binds Kenya and leaves the donors open.
 KENYA_DONORS_IDENTITY: dict[str, Any] = {
@@ -2257,7 +2257,7 @@ KENYA_DONORS_IDENTITY: dict[str, Any] = {
     "slots": [],
 }
 KENYA_DONORS_SPEC = spec_id_for(canonicalize(KENYA_DONORS_IDENTITY))
-# Each donor's 2023 aid to Kenya and the kind dfo-apis' code index declares for it. The
+# Each donor's 2023 aid to Kenya and the kind apis' code index declares for it. The
 # DAC total and the G7 hold the two countries' figures again.
 KENYA_DONORS: dict[str, tuple[str, float]] = {
     "country/DEU": ("party", 20.0),
@@ -2266,7 +2266,7 @@ KENYA_DONORS: dict[str, tuple[str, float]] = {
     "GroupOfSeven": ("total", 50.0),
 }
 KENYA_DONOR_TOTALS = sorted(ref for ref, (kind, _) in KENYA_DONORS.items() if kind == "total")
-# dfo-apis' base version of the frame, and the version its cut of the group totals mints.
+# apis' base version of the frame, and the version its cut of the group totals mints.
 KENYA_DONORS_BASE = "cv_" + "b" * 32
 KENYA_DONORS_CUT = "cv_" + "c" * 32
 
@@ -2278,7 +2278,7 @@ def _kenya_donors(*, cut: bool) -> dict[str, tuple[str, float]]:
 
 
 def _kenya_donors_parquet_bytes(*, cut: bool) -> bytes:
-    """The frame dfo-apis renders with the party kinds, of the base or the cut version."""
+    """The frame apis renders with the party kinds, of the base or the cut version."""
     donors = _kenya_donors(cut=cut)
     count = len(donors)
     table = pa.table(
@@ -2299,7 +2299,7 @@ def _kenya_donors_parquet_bytes(*, cut: bool) -> bytes:
 
 
 def _kenya_donors_mint_response(*, cut: bool, options: Mapping[str, Any]) -> dict[str, Any]:
-    """dfo-apis' answer to a mint with `options`: the base version, or the version of the
+    """apis' answer to a mint with `options`: the base version, or the version of the
     frame cut of the donors' group totals, whose coverage, statistics and trace are its
     own."""
     donors = _kenya_donors(cut=cut)
@@ -2407,9 +2407,9 @@ def _kenya_donors_approved_plan(decision: Callable[..., Decision], schemas: dict
 
 
 class _ServedFramePlatform:
-    """The presentation tools `McpExecutor` calls, reading each frame as dfo-apis serves it:
+    """The presentation tools `McpExecutor` calls, reading each frame as apis serves it:
     by its pair, from `served` (a `content_version` to the donors its frame holds), as
-    presentation-mcp reads a retrieval's frame from dfo-apis. Records the pair of every
+    presentation-mcp reads a retrieval's frame from apis. Records the pair of every
     `describe_frame` and every created component."""
 
     def __init__(self, served: Mapping[str, Sequence[str]]) -> None:
@@ -2462,7 +2462,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     publisher: ResultPublisher,
 ) -> None:
     """The compiled retrieval asks get_data for the frame without party totals, which
-    data-mcp asks dfo-apis for. dfo-apis answers with the version of the cut frame, so the
+    data-mcp asks apis for. apis answers with the version of the cut frame, so the
     frame the answer is described and charted by is that version's pair, holding the two
     countries alone, and the digest names the totals left out."""
     minted: list[dict[str, Any]] = []
@@ -2572,13 +2572,13 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
         "country/DEU",
         "country/FRA",
     ]
-    # The digest the agent reads names the totals dfo-apis left out.
+    # The digest the agent reads names the totals apis left out.
     (step,) = outcome.steps
     assert (
         "Left out of the frame: 2 group totals on financingProvider (DACTotal, GroupOfSeven)"
         in step.digest
     )
-    # data-mcp asked dfo-apis for the cut, with the kinds.
+    # data-mcp asked apis for the cut, with the kinds.
     (options,) = minted
     assert options["without_party_totals"] is True
     assert options["columns"] == ["party_kind"]
@@ -2618,7 +2618,7 @@ _WHOLE_TOTAL_IDENTITIES = {
 
 
 def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
-    """Each of `donors`' 2021 aid to Ethiopia as dfo-apis renders it, with the party kinds
+    """Each of `donors`' 2021 aid to Ethiopia as apis renders it, with the party kinds
     (`whole_total` for both) when `kinds`."""
     count = len(donors)
     columns: dict[str, Any] = {
@@ -2641,7 +2641,7 @@ _WHOLE_TOTALS_STAMP = "ens_" + "1" * 16
 
 
 def _whole_totals_mint_response(spec_id: str, *, kinds: bool) -> dict[str, Any]:
-    """dfo-apis' manifest for `spec_id`: one `content_version` for both renderings, the
+    """apis' manifest for `spec_id`: one `content_version` for both renderings, the
     request's options as the artifact's `rendering`, and on the kind file the stamp of
     the code index its kind cells come from."""
     identity, donors = _WHOLE_TOTAL_IDENTITIES[spec_id]
@@ -2699,7 +2699,7 @@ def _serve_whole_totals(
     monkeypatch: pytest.MonkeyPatch, stats_registry: _StatsRegistry
 ) -> list[dict[str, Any]]:
     """Answer the whole-total specs' mints with the kind columns when `options.columns`
-    asks for them, as dfo-apis does. Returns the options of every mint."""
+    asks for them, as apis does. Returns the options of every mint."""
     renderings = {
         (spec_id, kinds): _register_statistics(
             stats_registry, _whole_totals_mint_response(spec_id, kinds=kinds)

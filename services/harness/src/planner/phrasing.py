@@ -67,7 +67,7 @@ def pluralize(word: str) -> str:
 
     A phrase already ending in "s" reads as plural and stays as it is. A
     consonant before a final "y" takes "ies"; every other phrase takes "s".
-    That covers every role noun the planner and dfo-apis's role vocabulary
+    That covers every role noun the planner and the apis service's role vocabulary
     use, none of which is irregular.
     """
     if word.endswith("s"):

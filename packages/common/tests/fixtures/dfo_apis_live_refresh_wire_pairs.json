@@ -1,5 +1,5 @@
 {
-  "about": "Request and response pairs of the dfo-apis live-refresh routes, recorded from the composed test app by tests/live_refresh/wire_pairs.py. Ids are numbered stand-ins in their own grammar, the same id by the same stand-in in every pair. <timestamp>, <date>, <trace_id>, <capability_version>, and the two principal names stand for values that differ between runs or deployments.",
+  "about": "Request and response pairs of the apis live-refresh routes, recorded from the composed test app by tests/live_refresh/wire_pairs.py. Ids are numbered stand-ins in their own grammar, the same id by the same stand-in in every pair. <timestamp>, <date>, <trace_id>, <capability_version>, and the two principal names stand for values that differ between runs or deployments.",
   "pairs": {
     "component_read.at_revision": {
       "request": {

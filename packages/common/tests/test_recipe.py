@@ -489,7 +489,7 @@ def test_only_a_rolling_literal_can_move_without_moving_the_normal_form_hash(
 
 
 def test_the_two_hashes_are_sha256_of_their_documented_preimages() -> None:
-    """Pinned to bytes written out here: dfo-apis indexes both values, so a change to
+    """Pinned to bytes written out here: apis indexes both values, so a change to
     either preimage orphans every stored recipe."""
     normal = {"spec_id": "spec_" + "a" * 32, "rendering": {"layout": "frame"}}
     normal_bytes = (

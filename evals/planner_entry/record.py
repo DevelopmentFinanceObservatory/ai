@@ -1,6 +1,6 @@
 """Record what data-mcp answers for each task: its searches and the skills they name.
 
-Runs data-mcp in process (`data_mcp.server.mcp`) against the dfo-apis at `DFO_APIS_URL`,
+Runs data-mcp in process (`data_mcp.server.mcp`) against the apis service at `DFO_APIS_URL`,
 so that platform has to be reachable. Each task's searches go through the
 orchestrator's own `search` tool, as `entry.orchestrator_state` replays them, so the
 recording holds exactly the calls a replay makes. Then every skill a search names, and

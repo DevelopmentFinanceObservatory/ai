@@ -1,7 +1,7 @@
 """The mint record: how a root frame was minted, kept beside the frame in the
 materialisation store as an object of its own.
 
-A root frame is one data-mcp's `get_data` registered from a dfo-apis mint. Its
+A root frame is one data-mcp's `get_data` registered from an apis service mint. Its
 `MaterialisationTrace` names the pair the frame is held under and nothing about
 the request that produced it, and that trace is written inside the frame's
 insert-only object, so it can gain no field for a frame the store already holds.
@@ -13,15 +13,15 @@ A record holds:
 - `frame`: the pair the store holds the frame under. For a mint with
   `options.columns` or `options.groupby` set this is the pair
   `data_mcp.frame_materialisation.frame_ref_for` derives, whose
-  `content_version` is a one-way hash of the dfo-apis `content_version`, the
+  `content_version` is a one-way hash of the apis `content_version`, the
   columns and the groupby. For any other mint it is `dataset`, and the frame is
   that version's canonical frame.
-- `dataset`: the pair dfo-apis names the materialisation by, which every
+- `dataset`: the pair apis names the materialisation by, which every
   rendering of it shares.
 - `options`: the mint request's `options` as `get_data` sent them. A mint sent
   with them again registers the same rendering under the same derivation.
 - `scope`: the mint request's `scope` as `get_data` sent it. `dataset.spec_id`
-  is the identity dfo-apis served after applying it, and each scope member
+  is the identity apis served after applying it, and each scope member
   replaces a whole member of the identity, so sending the same scope with
   `dataset.spec_id` leaves that identity as it is.
 - `stat_var_count`: how many distinct StatVars the frame's rows hold, read off
@@ -32,7 +32,7 @@ A record holds:
 - `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
   (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
   a `{role}_party_kind` column, else `None`. It is also `None` on a record written
-  before dfo-apis sent one and on a frame read from an artifact without one.
+  before apis sent one and on a frame read from an artifact without one.
   `frame_ref_for` takes it back to reproduce `frame`.
 
 `encode_mint_record` is the RFC 8785 form of the record, so two writers
@@ -68,7 +68,7 @@ MINT_RECORD_SCHEMA_VERSION = 1
 
 # Why a root's mint record could not be rebuilt: no stored version of its dataset
 # reproduces the frame's pair, the version that does is a `groupby` sum whose
-# `groupby` dfo-apis did not record, or the version is unsummed and the store no
+# `groupby` apis did not record, or the version is unsummed and the store no
 # longer holds the frame its StatVar count is read from.
 UnrecoverableReason = Literal["no_version_matches", "groupby_unrecorded", "frame_not_held"]
 
