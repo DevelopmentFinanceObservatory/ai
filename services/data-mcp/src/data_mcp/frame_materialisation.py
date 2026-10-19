@@ -29,7 +29,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import combinations
@@ -103,6 +103,7 @@ __all__ = [
     "MaterialisationOutcome",
     "frame_ref_for",
     "materialise_and_register",
+    "recorded_stamp",
 ]
 
 logger = logging.getLogger(__name__)
@@ -316,13 +317,15 @@ async def materialise_and_register(
     The store write must end with `_AFTER_WRITE_RESERVE_S` left, and one that runs out
     degrades with `degraded_reason="store_write"`.
     """
-    ref = _ref_or_refusal(manifest, options=options)
+    stamp = _named_stamp(manifest, options=options)
+    ref = _ref_or_refusal(manifest, options=options, stamp=stamp)
     if isinstance(ref, MaterialisationOutcome):
         return ref
     outcome = await _register(
         ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         transport=transport,
@@ -341,6 +344,7 @@ async def materialise_and_register(
                 options=dict(options),
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
+                enrichment_stamp=stamp,
             ),
             deadline=deadline,
         )
@@ -372,12 +376,14 @@ async def _register(
     *,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
     deadline: CallDeadline | None,
 ) -> MaterialisationOutcome:
-    """`materialise_and_register` for the frame held under `ref`."""
+    """`materialise_and_register` for the frame held under `ref`, named under `stamp`
+    (`_named_stamp`)."""
     store = get_store()
     checked = await _check_store(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
@@ -446,6 +452,7 @@ async def _register(
         ref=ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         store=store,
@@ -614,6 +621,7 @@ async def _verify_parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     store: MaterialisationStore,
@@ -679,6 +687,7 @@ async def _verify_parse_and_register(
             ref=ref,
             manifest=manifest,
             options=options,
+            stamp=stamp,
             writer=writer,
             store=store,
             claim=claim,
@@ -704,6 +713,7 @@ async def _parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     writer: str,
     store: MaterialisationStore,
     claim: RowClaim,
@@ -722,8 +732,9 @@ async def _parse_and_register(
     is a rendering, validated cell by cell (`_frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
-    The frame's trace keeps the mint's `options`, so `data_mcp.mint_recovery` can
-    rebuild a derived pair from the held frame when its mint record is missing.
+    The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
+    under, so `data_mcp.mint_recovery` can rebuild a derived pair from the held frame
+    when its mint record is missing.
     """
     # `pyarrow.ArrowException` (a 2xx response whose body isn't a valid/complete Parquet
     # file) and `KeyError` (a Parquet file missing its `time_period` or `value` column,
@@ -761,6 +772,7 @@ async def _parse_and_register(
         spec_id=ref.spec_id,
         content_version=ref.content_version,
         options=dict(options),
+        enrichment_stamp=stamp,
     )
     try:
         async with asyncio.timeout(_seconds_left(write_deadline)):
@@ -807,12 +819,24 @@ def _read_outcome(
     )
 
 
+def requests_kinds(columns: Iterable[str]) -> bool:
+    """Whether `columns` asks dfo-apis for the `{column}_party_kind` cells."""
+    return not set(KIND_COLUMNS).isdisjoint(columns)
+
+
+def recorded_stamp(columns: Iterable[str], stamp: str | None) -> str | None:
+    """`stamp` as a frame minted with `columns` is named under (`frame_ref_for`) and its
+    mint record keeps it: only a frame that asks for kinds is named by one."""
+    return stamp if requests_kinds(columns) else None
+
+
 def frame_ref_for(
     *,
     spec_id: str,
     content_version: str,
     columns: tuple[str, ...] = (),
     groupby: Mapping[str, Any] | None = None,
+    enrichment_stamp: str | None = None,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
     minted with `options.columns` set to `columns` and `options.groupby` to `groupby`.
@@ -831,6 +855,14 @@ def frame_ref_for(
     keeps the version: the versions route that says so needs a first-party
     principal this service does not hold.
 
+    A `columns` that asks for `KIND_COLUMNS` also names `enrichment_stamp`, the digest
+    of the code-index facts behind the kind cells of the artifact the frame is read
+    from (`ArtifactEntry.enrichment_stamp`, `_named_stamp`), in the preimage as an
+    `"enrichment_stamp"` member. dfo-apis keeps one
+    `content_version` across a change to a party's kind, so without it the store
+    would serve the frame holding the old kinds for as long as it keeps the entry.
+    With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
+
     `options.without_party_totals` takes no part: dfo-apis mints a frame without
     party totals a version of its own, so `content_version` already names it, and a
     cut that leaves nothing out serves its base's frame under its base's version.
@@ -845,6 +877,8 @@ def frame_ref_for(
     preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
     if groupby is not None:
         preimage["groupby"] = dict(groupby)
+    if enrichment_stamp is not None and requests_kinds(columns):
+        preimage["enrichment_stamp"] = enrichment_stamp
     rendering = rfc8785.dumps(preimage)
     return FrameRef(
         spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"
@@ -852,11 +886,11 @@ def frame_ref_for(
 
 
 def _ref_or_refusal(
-    manifest: Manifest, *, options: Mapping[str, Any]
+    manifest: Manifest, *, options: Mapping[str, Any], stamp: str | None
 ) -> FrameRef | MaterialisationOutcome:
-    """The reference this frame registers under (`frame_ref_for`), or the refused
-    outcome for a manifest whose `spec_id`/`content_version` combination doesn't match
-    `FrameRef`'s own pair shape.
+    """The reference this frame registers under (`frame_ref_for`, named under `stamp`),
+    or the refused outcome for a manifest whose `spec_id`/`content_version` combination
+    doesn't match `FrameRef`'s own pair shape.
     """
     try:
         return frame_ref_for(
@@ -864,6 +898,7 @@ def _ref_or_refusal(
             content_version=manifest.content_version,
             columns=tuple(options.get("columns") or ()),
             groupby=options.get("groupby"),
+            enrichment_stamp=stamp,
         )
     except ValidationError as exc:
         return MaterialisationOutcome(
@@ -874,6 +909,17 @@ def _ref_or_refusal(
                 f"this service expects: {exc}"
             ),
         )
+
+
+def _named_stamp(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
+    """The stamp a frame minted with `options` is named under (`frame_ref_for`): the
+    `enrichment_stamp` of the artifact it is read from (`_select_requested_artifact`),
+    for a frame that asks for kinds (`recorded_stamp`). An artifact without one, such
+    as a pinned file rendered under an earlier code index, names the frame unsalted.
+    The canonical frame asks for no kinds."""
+    artifact = _select_requested_artifact(manifest, options=options)
+    stamp = None if artifact is None else artifact.enrichment_stamp
+    return recorded_stamp(options.get("columns") or (), stamp)
 
 
 def _select_requested_artifact(

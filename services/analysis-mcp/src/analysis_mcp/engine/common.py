@@ -55,6 +55,7 @@ is one matched key, complete on its own, claiming no total over either side.
 from __future__ import annotations
 
 import bisect
+import math
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -64,9 +65,11 @@ import pyarrow as pa
 from common.place_type import (
     PARTY_KINDS,
     PARTY_ROLES,
-    TOTAL_KIND,
+    PRIVATE_KIND,
+    TOTAL_KINDS,
     TYPED_ROLES,
     UNTYPED,
+    WHOLE_TOTAL_KIND,
     at_one_level,
     enrichment_columns,
     enrichment_role,
@@ -150,8 +153,9 @@ class PlaceLevelsMixedError(Exception):
     ranks or pools carries a `{role}_type` column and holds several places
     with no level of `common.place_type.PLACE_LEVELS` among every one's
     levels. For a flow party role (`without_party_totals`), several parties
-    of which one has no kind, every one a total on a pooled role, or
-    several parties with no `{role}_party_kind` column at all. `column` is the type or
+    of which one has no kind, every one a total on a pooled role (all
+    `whole_total` aside), or several parties with no `{role}_party_kind` column at
+    all. `column` is the type or
     kind column, and `types` its distinct cells, sorted and capped at
     `_PLACE_TYPE_CAP`, empty when the frame carries no such column.
     Maps to the tool boundary's `place_levels_mixed` refusal.
@@ -203,17 +207,19 @@ def without_party_totals(
     side: ExclusionSide | None = None,
 ) -> tuple[Frame, Exclusions]:
     """`frame` less the rows of every flow party in `columns` whose
-    `{role}_party_kind` cell is `total`, with one `party_total` exclusion per role
-    that lost rows, naming the totals left out and tagged `side`. Parties of
-    kind `party` and `residual` stay.
+    `{role}_party_kind` cell is `total` or `whole_total`, with one `party_total`
+    exclusion per role that lost rows, naming the totals left out and tagged `side`.
+    Parties of kind `party`, `private` and `residual` stay.
 
     A role outside `common.place_type.PARTY_ROLES` and a role holding one
     party keep every row, and so does a role in `ranked` whose parties are
-    all totals: ranking totals beside each other sums nothing across them.
+    all totals: ranking totals beside each other sums nothing across them. So
+    does a role whose parties are all `whole_total`: two whole totals on one
+    axis hold disjoint populations, so a sum across them counts nothing twice.
     Refuses (`PlaceLevelsMixedError`) when a role's several parties carry no
     kind column or include one with no kind, since no sum or rank across
     them is known to keep a total apart from the parties it holds, and when
-    a role outside `ranked` holds only totals.
+    a role outside `ranked` holds only totals, other than whole totals alone.
     """
     table = frame.table
     exclusions = Exclusions()
@@ -226,14 +232,17 @@ def without_party_totals(
         cells = distinct(table, kinds)
         if not PARTY_KINDS.issuperset(cells):
             raise PlaceLevelsMixedError(column=kinds, types=cells[:_PLACE_TYPE_CAP])
-        if cells == [TOTAL_KIND]:
-            if column in ranked:
+        has_members = not TOTAL_KINDS.issuperset(cells)
+        if not has_members:
+            if column in ranked or cells == [WHOLE_TOTAL_KIND]:
                 continue
             raise PlaceLevelsMixedError(column=kinds, types=cells)
-        if TOTAL_KIND not in cells:
+        if TOTAL_KINDS.isdisjoint(cells):
             continue
         is_total = array_kernel(
-            "equal", table.column(kinds).combine_chunks(), pa.scalar(TOTAL_KIND, pa.string())
+            "is_in",
+            table.column(kinds).combine_chunks(),
+            value_set=pa.array(sorted(TOTAL_KINDS), type=pa.string()),
         )
         dropped = table.filter(is_total)
         totals = distinct(dropped, column)
@@ -249,6 +258,89 @@ def without_party_totals(
     if table is frame.table:
         return frame, exclusions
     return Frame.from_table(columns=frame.columns, table=table), exclusions
+
+
+@dataclass(frozen=True, kw_only=True)
+class PooledParties:
+    """The parties of one flow role a sum pooled: `count` distinct parties over
+    `periods` periods, of which `private_count` are `private` (`common.place_type.
+    PRIVATE_KIND`), holding `private_value` of the summed rows' value. A `private`
+    party sums like any other, so a total over the role includes this value and
+    the digest says so."""
+
+    role: str
+    count: int
+    periods: int
+    private_count: int
+    private_value: float
+
+
+def _private_rows(table: pa.Table, role: str) -> pa.Table | None:
+    """The rows of `table` whose `role` party is `private`, or None when `table`
+    carries no kind column for `role`."""
+    kinds = kind_column(role)
+    if kinds not in table.column_names:
+        return None
+    return table.filter(
+        array_kernel(
+            "equal", table.column(kinds).combine_chunks(), pa.scalar(PRIVATE_KIND, pa.string())
+        )
+    )
+
+
+class PrivateValueOverflowError(OverflowError):
+    """The `private` parties of `role` hold values whose sum exceeds the finite
+    double range (`math.fsum`'s own `OverflowError`)."""
+
+    def __init__(self, role: str) -> None:
+        self.role = role
+        super().__init__(f"the private parties of {role!r} sum past the finite range")
+
+
+def pooled_parties(table: pa.Table, roles: Iterable[str]) -> tuple[PooledParties, ...]:
+    """What a sum over `table`, a verb's narrowed rows, pooled in each flow party
+    role among `roles` that holds several parties and a kind column
+    (`without_party_totals` has left its totals out).
+
+    Raises:
+        PrivateValueOverflowError: A role's `private` values sum past the finite
+            double range. The caller converts it to its own non-finite refusal.
+    """
+    pooled = []
+    for role in dict.fromkeys(roles):
+        if role not in PARTY_ROLES:
+            continue
+        count = count_distinct(table, role)
+        private = _private_rows(table, role) if count > 1 else None
+        if private is None:
+            continue
+        try:
+            private_value = math.fsum(private.column(VALUE_COLUMN).to_pylist())
+        except OverflowError as exc:
+            raise PrivateValueOverflowError(role) from exc
+        pooled.append(
+            PooledParties(
+                role=role,
+                count=count,
+                periods=count_distinct(table, TIME_PERIOD_COLUMN),
+                private_count=count_distinct(private, role) if private.num_rows else 0,
+                private_value=private_value,
+            )
+        )
+    return tuple(pooled)
+
+
+def private_parties(table: pa.Table, roles: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """The `(role, party)` pairs of `table` whose party is `private` in a role
+    among `roles`, sorted, for a ranking to tag."""
+    held: set[tuple[str, str]] = set()
+    for role in dict.fromkeys(roles):
+        if role not in PARTY_ROLES:
+            continue
+        private = _private_rows(table, role)
+        if private is not None and private.num_rows:
+            held.update((role, party) for party in distinct(private, role))
+    return tuple(sorted(held))
 
 
 def role_columns(frame: Frame) -> tuple[str, ...]:

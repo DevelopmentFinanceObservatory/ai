@@ -155,11 +155,12 @@ that type are refused, and one place alone passes whatever its type. It is
 retryable over a `filter` result that keeps one level (`place_level` on the
 type column). On a flow party role (`financingProvider`,
 `financingRecipient`) the verbs leave out the parties whose
-`{role}_party_kind` cell is `total` and record them as `party_total` exclusions;
-the refusal fires there only when several parties include one with no
-kind, are all totals on a role the verb pools, or sit in a frame that
-carries no kind column for their role. `rank` ranks a role holding only
-totals.
+`{role}_party_kind` cell is `total` or `whole_total` and record them as
+`party_total` exclusions; the refusal fires there only when several parties
+include one with no kind or a cell no kind names, are all totals on a role
+the verb pools (a role holding `whole_total` parties alone is summed), or sit
+in a frame that carries no kind column for their role. `rank` ranks a role
+holding only totals.
 
 `service_unavailable` fires when the process's frame row budget
 (`common.row_budget`) has no room for a verb's input rows

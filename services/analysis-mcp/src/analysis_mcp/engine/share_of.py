@@ -95,6 +95,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     combine_exclusions,
     cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
@@ -291,6 +292,8 @@ class ShareOfResult:
 
     `stat_var` labels every output row; `numerator_stat_var` and
     `denominator_stat_var` are the StatVars each side resolved to.
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
     """
 
     frame: Frame
@@ -312,6 +315,8 @@ class ShareOfResult:
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
 
 
 def _exceeding_whole_warnings(period_shares: Sequence[PeriodShare]) -> tuple[str, ...]:
@@ -632,4 +637,6 @@ def run_share_of(
             numerator_by=numerator_by,
             denominator_columns=denominator_columns,
         ),
+        numerator_pooled=numerator.pooled_parties,
+        denominator_pooled=denominator.pooled_parties,
     )

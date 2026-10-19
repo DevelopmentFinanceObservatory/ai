@@ -71,6 +71,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     agreed_facets,
     combine_exclusions,
     facet_columns,
@@ -220,6 +221,9 @@ class QuotientOfResult:
     and not on the other, sorted by key under `numerator_by`'s names. A key
     holding none is absent, and a pooled denominator has no periods of one
     key's own, so `denominator_only_periods` is empty for it.
+
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
     """
 
     frame: Frame
@@ -247,6 +251,8 @@ class QuotientOfResult:
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
 
     @property
     def dropped_key_count(self) -> int:
@@ -542,4 +548,6 @@ def run_quotient_of(
             kept_cells, keyed=bool(numerator_by), denominator=denominator, pooled=pooled
         ),
         exclusions=exclusions,
+        numerator_pooled=numerator.pooled_parties,
+        denominator_pooled=denominator.pooled_parties,
     )

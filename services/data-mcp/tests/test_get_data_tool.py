@@ -24,6 +24,7 @@ from common.materialisation import (
     frame_to_parquet_bytes,
 )
 from common.materialisation import set_store as set_frame_store
+from common.place_type import PARTY_KINDS
 from data_mcp import client_holder, get_data_tool
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
@@ -3890,6 +3891,15 @@ async def test_place_types_asks_for_the_type_column_alone(
             "columns": ["observationAbout_type"],
         }
     ]
+
+
+async def test_place_types_names_every_party_kind_a_flow_frame_can_hold() -> None:
+    """A kind the description leaves out is one an outside model meets as a bare token."""
+    async with Client(mcp) as client:
+        (tool,) = [tool for tool in await client.list_tools() if tool.name == "get_data"]
+
+    description = tool.input_schema["properties"]["place_types"]["description"]
+    assert {kind for kind in PARTY_KINDS if kind not in description} == set()
 
 
 async def test_a_call_without_place_types_sends_no_columns() -> None:

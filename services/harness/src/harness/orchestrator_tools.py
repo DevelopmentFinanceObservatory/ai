@@ -662,8 +662,8 @@ def _cut_note(cut: TopMembers) -> str:
     kind and the members with no value at the cut's period counted apart."""
     return (
         f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
-        f"value in {cut.period}, highest first. Left out as group totals or members of "
-        f"another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
+        f"value in {cut.period}, highest first. Left out as group totals, unallocated amounts "
+        f"or members of another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
         f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
         f"{cut.period}."
     )

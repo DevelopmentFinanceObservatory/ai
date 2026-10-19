@@ -6,18 +6,22 @@ replayer as a double. `test_live_refresh_integration.py` runs the real replayer.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import httpx2
 import pytest
 from analysis_mcp.execution_identity import current_execution_identity
 from common.live_apis import LiveApisClient
-from common.materialisation import FrameRef
-from common.recipe import replay_key
+from common.materialisation import FrameRef, MintRecord
+from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget, row_budget
 from compiler.surface import ToolSurfaceUnavailableError
+from data_mcp.definition_store import InMemoryDefinitionStore, StoredDefinition
+from data_mcp.definition_store import set_store as set_definition_store
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from harness import server as server_module
@@ -83,9 +87,10 @@ def recipe_of(frame: Pair, *datasets: str) -> dict[str, Any]:
 
 class Replayer:
     """`replay_recipe`'s double: counts its entries and answers each from
-    `outcomes`, the last one repeating. A `Replayed` is published to `apis` with
-    the stored recipe's normal form, as the real replayer's publish leaves it.
-    `gate`, when set, holds every entry until it is released."""
+    `outcomes`, the last one repeating. A `Replayed` stores its own recipe on `apis`
+    under its frame, as the real replayer's publish does; one that carries none stores
+    `recipe_of(REPLAYED)`, which has the stored recipe's normal form. `gate`, when set,
+    holds every entry until it is released."""
 
     def __init__(self, apis: RecordedApis, *outcomes: Replayed | Pending | Refused | Exception):
         self.apis = apis
@@ -107,8 +112,8 @@ class Replayer:
         if isinstance(outcome, Exception):
             raise outcome
         if isinstance(outcome, Replayed):
-            self.apis.recipes[(outcome.frame.spec_id, outcome.frame.content_version)] = recipe_of(
-                REPLAYED
+            self.apis.recipes[(outcome.frame.spec_id, outcome.frame.content_version)] = (
+                outcome.recipe or recipe_of(REPLAYED)
             )
         return outcome
 
@@ -386,7 +391,7 @@ async def test_a_card_that_cannot_be_replayed_is_refused_before_any_root_is_aske
 
 
 async def test_a_card_whose_roots_are_all_current_stands_and_nothing_else_is_asked(
-    apis: RecordedApis,
+    apis: RecordedApis, flow_definition: SuspendingDefinitionStore
 ) -> None:
     apis.recipes[STORED] = recipe_of(STORED, SPEC, OTHER_SPEC)
     apis.heads = {SPEC: FIRST, OTHER_SPEC: FIRST}
@@ -396,6 +401,8 @@ async def test_a_card_whose_roots_are_all_current_stands_and_nothing_else_is_ask
 
     assert (response.status_code, response.json()) == (200, {"status": "current"})
     assert len(apis.calls("/frames/refresh")) == 2
+    assert flow_definition.reads == []
+    assert apis.calls("/versions") == []
     assert apis.calls("/recipes/replays/") == []
     assert apis.calls("/render") == []
     assert replayer.entered == 0
@@ -437,6 +444,315 @@ async def test_a_frame_already_replayed_from_these_root_versions_is_rendered_wit
     ]
     assert apis.rendered_on() == [REPLAYED]
     assert replayer.entered == 0
+
+
+@pytest.mark.parametrize(
+    ("served_stamp", "status", "replayed"),
+    [("stamp-old", "current", False), ("stamp-new", "redrawn", True)],
+    ids=["same-stamp", "stamp-moved"],
+)
+async def test_a_kind_root_on_a_standing_version_is_current_only_under_its_own_stamp(
+    apis: RecordedApis, served_stamp: str, status: str, replayed: bool
+) -> None:
+    kinds = {**OPTIONS, "columns": list(KIND_COLUMNS)}
+    recipe = recipe_of(STORED)
+    recipe["roots"][0] |= {
+        "frame": frame_ref_for(
+            spec_id=SPEC, content_version=FIRST, columns=KIND_COLUMNS, enrichment_stamp="stamp-old"
+        ).model_dump(),
+        "options": kinds,
+        "enrichment_stamp": "stamp-old",
+    }
+    apis.recipes[STORED] = recipe
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((FIRST, served_stamp))
+    apis.enrichment_stamp = served_stamp
+    replayer = Replayer(apis)
+    async with client_of(service_over(apis, replayer)) as client:
+        response = await refresh(client)
+
+    key = replay_key(
+        normal_form_hash=NORMAL_FORM,
+        root_datasets=[
+            root_identity(
+                {"spec_id": SPEC, "content_version": FIRST}, enrichment_stamp=served_stamp
+            )
+        ],
+        execution_identities=[current_execution_identity().canonical_string()],
+    )
+    looked_up = [f"/api/datasets/recipes/replays/{key}"] if replayed else []
+
+    assert response.json()["status"] == status
+    assert replayer.entered == int(replayed)
+    assert [request.url.path for request in apis.calls("/recipes/replays/")] == looked_up
+
+
+def kind_recipe(
+    frame: Pair, *, content_version: str, stamp: str | None, keyed: bool = False
+) -> dict[str, Any]:
+    """A recipe of `frame` whose root records the kind columns and `stamp`, the stamp of
+    the kind file its mint read. `keyed` gives it the replay key a replay's publish
+    names it under (`common.recipe.build_recipe`), for a recipe a replay publishes."""
+    recipe = recipe_of(frame)
+    recipe["roots"][0] |= {
+        "frame": frame_ref_for(
+            spec_id=SPEC,
+            content_version=content_version,
+            columns=KIND_COLUMNS,
+            enrichment_stamp=stamp,
+        ).model_dump(),
+        "dataset": {"spec_id": SPEC, "content_version": content_version},
+        "options": {**OPTIONS, "columns": list(KIND_COLUMNS)},
+        **({} if stamp is None else {"enrichment_stamp": stamp}),
+    }
+    if keyed:
+        recipe["replay_key"] = replay_key(
+            normal_form_hash=NORMAL_FORM,
+            root_datasets=[
+                root_identity(
+                    {"spec_id": SPEC, "content_version": content_version}, enrichment_stamp=stamp
+                )
+            ],
+            execution_identities=[current_execution_identity().canonical_string()],
+        )
+    return recipe
+
+
+def replaying(apis: RecordedApis, recipe: dict[str, Any]) -> Replayer:
+    """A replayer whose replay publishes `recipe` on `REPLAYED`."""
+    return Replayer(
+        apis,
+        Replayed(
+            frame=FrameRef(spec_id=REPLAYED[0], content_version=REPLAYED[1]),
+            recipe=recipe,
+            newly_published=True,
+        ),
+    )
+
+
+def listed(*versions: tuple[str, str | None]) -> list[dict[str, Any]]:
+    """Versions answer entries, newest first, each with the stamp a kind file of it
+    carries, or none for a frame with no party role."""
+    return [
+        {"content_version": version, "rendering": "plain"}
+        | ({} if stamp is None else {"enrichment_stamp": stamp})
+        for version, stamp in versions
+    ]
+
+
+async def test_a_kind_root_of_a_frame_with_no_party_role_is_replayed_once_per_dataset_move(
+    apis: RecordedApis,
+) -> None:
+    # dfo-apis serves the root's kind file unstamped, and its versions answer lists the
+    # code index's stamp at the top and none on any version.
+    apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp=None)
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((SECOND, None), (FIRST, None))
+    apis.enrichment_stamp = "stamp-new"
+    replayer = replaying(
+        apis, kind_recipe(REPLAYED, content_version=SECOND, stamp=None, keyed=True)
+    )
+    async with client_of(service_over(apis, replayer)) as client:
+        standing = await refresh(client)
+        apis.heads[SPEC] = SECOND
+        after_move = [(await refresh(client)).json()["status"] for _ in range(3)]
+
+    assert standing.json() == {"status": "current"}
+    assert after_move == 3 * ["redrawn"]
+    assert replayer.entered == 1
+
+
+async def test_a_stamped_root_whose_dataset_moves_is_replayed_once(apis: RecordedApis) -> None:
+    apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp="stamp-new")
+    apis.heads[SPEC] = SECOND
+    apis.versions[SPEC] = listed((SECOND, "stamp-new"), (FIRST, "stamp-new"))
+    apis.enrichment_stamp = "stamp-new"
+    published = kind_recipe(REPLAYED, content_version=SECOND, stamp="stamp-new", keyed=True)
+    replayer = replaying(apis, published)
+    async with client_of(service_over(apis, replayer)) as client:
+        statuses = [(await refresh(client)).json()["status"] for _ in range(3)]
+
+    assert statuses == 3 * ["redrawn"]
+    assert replayer.entered == 1
+    assert [request.url.path for request in apis.calls("/recipes/replays/")] == 3 * [
+        f"/api/datasets/recipes/replays/{published['replay_key']}"
+    ]
+    assert apis.rendered_on() == 3 * [REPLAYED]
+
+
+async def test_a_stamped_root_whose_kinds_change_on_a_standing_version_is_replayed_once(
+    apis: RecordedApis,
+) -> None:
+    apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp="stamp-old")
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((FIRST, "stamp-new"))
+    apis.enrichment_stamp = "stamp-new"
+    replayer = replaying(
+        apis, kind_recipe(REPLAYED, content_version=FIRST, stamp="stamp-new", keyed=True)
+    )
+    async with client_of(service_over(apis, replayer)) as client:
+        statuses = [(await refresh(client)).json()["status"] for _ in range(3)]
+
+    assert statuses == 3 * ["redrawn"]
+    assert replayer.entered == 1
+
+
+async def test_an_unstamped_kind_root_whose_version_now_holds_a_party_role_is_replayed_once(
+    apis: RecordedApis,
+) -> None:
+    # Recorded from an unstamped file, as a mint under a dfo-apis that sent no stamps
+    # names one, while the version's frame holds a party role whose kinds carry a stamp.
+    apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp=None)
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((FIRST, "stamp-new"))
+    apis.enrichment_stamp = "stamp-new"
+    replayer = replaying(
+        apis, kind_recipe(REPLAYED, content_version=FIRST, stamp="stamp-new", keyed=True)
+    )
+    async with client_of(service_over(apis, replayer)) as client:
+        statuses = [(await refresh(client)).json()["status"] for _ in range(3)]
+        apis.store_card(FrameRef(spec_id=REPLAYED[0], content_version=REPLAYED[1]))
+        on_replayed = await refresh(client)
+
+    assert statuses == 3 * ["redrawn"]
+    assert on_replayed.json() == {"status": "current"}
+    assert replayer.entered == 1
+
+
+async def test_a_stamped_root_whose_version_lists_no_stamp_is_replayed_once_and_logged(
+    apis: RecordedApis, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The version's frame holds no party role, so its mint serves an unstamped kind
+    file, and the refresh names the root unstamped too."""
+    apis.recipes[STORED] = kind_recipe(STORED, content_version=FIRST, stamp="stamp-old")
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((FIRST, None))
+    apis.enrichment_stamp = "stamp-new"
+    replayer = replaying(apis, kind_recipe(REPLAYED, content_version=FIRST, stamp=None, keyed=True))
+    with caplog.at_level(logging.WARNING, logger="harness.live_refresh"):
+        async with client_of(service_over(apis, replayer)) as client:
+            statuses = [(await refresh(client)).json()["status"] for _ in range(3)]
+
+    assert statuses == 3 * ["redrawn"]
+    assert replayer.entered == 1
+    assert any("lists no enrichment_stamp" in record.message for record in caplog.records)
+
+
+class SuspendingDefinitionStore(InMemoryDefinitionStore):
+    """A definition store whose read suspends, as `GcsDefinitionStore.get` does in
+    `asyncio.to_thread`, so the read's timeout can fire. `reads` lists the
+    `spec_id` of every read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[str] = []
+
+    async def get(self, spec_id: str, *, schema_version: int) -> StoredDefinition | None:
+        self.reads.append(spec_id)
+        await asyncio.sleep(0)
+        return await super().get(spec_id, schema_version=schema_version)
+
+
+@pytest.fixture
+def flow_definition() -> Iterator[SuspendingDefinitionStore]:
+    """The definition store holding `SPEC` as a flow dataset, so a replay mints its
+    root with party kinds (`data_mcp.frame_materialisation.replayed_mint_options`).
+    Its read suspends, so a refresh that reads it under too small a share of its
+    deadline answers `pending`."""
+    held = SuspendingDefinitionStore()
+    identity = {"entities": {"origin": ["country/FRA"]}}
+    asyncio.run(
+        held.put_many(
+            [
+                StoredDefinition(
+                    spec_id=SPEC, schema_version=1, canonical_bytes=json.dumps(identity).encode()
+                )
+            ]
+        )
+    )
+    set_definition_store(held)
+    yield held
+    set_definition_store(None)
+
+
+def replayed_under(stamp: str, *, content_version: str = FIRST) -> dict[str, Any]:
+    """The recipe a replay of `recipe_of(STORED)` publishes when its flow root mints
+    `content_version` with party kinds under `stamp`: the root states its recorded
+    options and the stamp its mint record holds, and the key names the stamp
+    (`common.recipe.build_recipe`)."""
+    root = MintRecord(
+        frame=frame_ref_for(
+            spec_id=SPEC,
+            content_version=content_version,
+            columns=KIND_COLUMNS,
+            enrichment_stamp=stamp,
+        ),
+        dataset=FrameRef(spec_id=SPEC, content_version=content_version),
+        options=OPTIONS,
+        enrichment_stamp=stamp,
+    )
+    key = replay_key(
+        normal_form_hash=NORMAL_FORM,
+        root_datasets=[
+            root_identity(
+                {"spec_id": SPEC, "content_version": content_version}, enrichment_stamp=stamp
+            )
+        ],
+        execution_identities=[current_execution_identity().canonical_string()],
+    )
+    return recipe_of(REPLAYED) | {"replay_key": key, "roots": [root.model_dump(mode="json")]}
+
+
+async def test_a_flow_root_recorded_without_kinds_stands_until_its_dataset_moves(
+    apis: RecordedApis, flow_definition: SuspendingDefinitionStore
+) -> None:
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((SECOND, "stamp-new"), (FIRST, "stamp-new"))
+    apis.enrichment_stamp = "stamp-new"
+    replayed = replayed_under("stamp-new", content_version=SECOND)
+    replayer = Replayer(apis)
+    async with client_of(service_over(apis, replayer)) as client:
+        standing = await refresh(client)
+        assert flow_definition.reads == []
+        apis.heads[SPEC] = SECOND
+        first = await refresh(client)
+        apis.recipes[REPLAYED] = replayed
+        again = await refresh(client)
+        apis.store_card(FrameRef(spec_id=REPLAYED[0], content_version=REPLAYED[1]))
+        on_replayed = await refresh(client)
+
+    assert standing.json() == {"status": "current"}
+    # Read on the two refreshes that replay or look up a replay key, and not once the
+    # card's root records its stamp.
+    assert flow_definition.reads == [SPEC, SPEC]
+    assert [first.json()["status"], again.json()["status"]] == ["redrawn", "redrawn"]
+    assert on_replayed.json() == {"status": "current"}
+    assert replayer.entered == 1
+    assert [request.url.path for request in apis.calls("/recipes/replays/")] == 2 * [
+        f"/api/datasets/recipes/replays/{replayed['replay_key']}"
+    ]
+    assert apis.rendered_on() == [REPLAYED, REPLAYED]
+
+
+async def test_a_replay_published_under_another_key_is_logged(
+    apis: RecordedApis, caplog: pytest.LogCaptureFixture
+) -> None:
+    published = replayed_under("stamp-other")
+    replayer = Replayer(
+        apis,
+        Replayed(
+            frame=FrameRef(spec_id=REPLAYED[0], content_version=REPLAYED[1]),
+            recipe=published,
+            newly_published=True,
+        ),
+    )
+    with caplog.at_level(logging.WARNING, logger="harness.live_refresh"):
+        async with client_of(service_over(apis, replayer)) as client:
+            response = await refresh(client)
+
+    assert response.json()["status"] == "redrawn"
+    [logged] = [record for record in caplog.records if record.name == "harness.live_refresh"]
+    assert published["replay_key"] in logged.args
 
 
 # --- the replay and the render --------------------------------------------------

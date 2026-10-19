@@ -634,6 +634,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     A group stating no name names nothing a requirement can ask for, so it is
     left out rather than failing the block. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
+    `whole_of` is the kinds of party a whole-population total holds, or a
+    union of such totals, absent for any other set.
     """
     found = []
     for role, raw in groups.items():
@@ -645,6 +647,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     label=label,
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
+                    whole_of=tuple(_strings(group.get("whole_of"))),
                 )
             )
     return tuple(found)
@@ -751,13 +754,53 @@ def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, 
     return definitions
 
 
+# What a whole-population total holds, by flow side and kind of party.
+_WHOLE_OF_HOLDS: dict[tuple[str, str], str] = {
+    ("origin", "party"): "all official donors",
+    ("origin", "private"): "private donors",
+    ("destination", "party"): "every recipient country",
+    ("destination", "residual"): "aid the source allocates to no single country",
+}
+
+
+def _whole_scope(group: ResolvedGroup) -> str:
+    """What `group`'s whole-population total holds, and on the donor side what it leaves out."""
+    held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, kind), kind) for kind in group.whole_of)
+    if group.role == "origin" and "private" not in group.whole_of:
+        return f"{held} (private donors are outside it)"
+    return held
+
+
+def _whole_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str:
+    """The sentence saying `group` is read as the source's total for a whole population."""
+    scope = _whole_scope(group)
+    if group.total is None:
+        return (
+            f"The figure for {group.label} adds up the totals the source publishes for "
+            f"{scope}, not its members' figures."
+        )
+    party = labels.get(group.total, group.total)
+    subject = (
+        group.label if party.casefold() == group.label.casefold() else f"{group.label} are {party}"
+    )
+    return (
+        f"The figures for {subject}, the total the source publishes for {scope}, "
+        "not its members' figures added up."
+    )
+
+
 def total_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str | None:
     """The sentence saying `group` is read as its published total, or `None` when it binds members.
 
     `labels` maps a ref to its label, so the total party is named as the
     source names it ("Africa, Total") where that differs from the set's
-    own name.
+    own name. A group with `whole_of` is read as the source's total for a
+    whole population ("Official Donors, Total, the total the source publishes
+    for all official donors (private donors are outside it)"), or as the sum of such totals when it names no
+    single party.
     """
+    if group.whole_of:
+        return _whole_reading(group, labels)
     if group.total is None:
         return None
     party = labels.get(group.total, group.total)
@@ -790,7 +833,7 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     members leaves out what the source allocates to the group and to no
     single member ("Africa, regional"), which only the group's total counts.
     """
-    if group.total is not None:
+    if group.reads_total:
         return None
     if answer is None:
         return (

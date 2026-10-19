@@ -30,6 +30,7 @@ from common.materialisation import (
     set_store,
 )
 from common.recipe import build_recipe
+from data_mcp.frame_materialisation import frame_ref_for
 from harness import recipe_backfill
 from harness.recipe_backfill import FRAMES_IN_FLIGHT, BackfillReport, Reason, run_backfill
 
@@ -74,6 +75,8 @@ class FakeApis:
         self.published: set[Pair] = {pair(ref) for ref in published}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, str | None]]] = {}
+        # The stamp the versions answer lists, or none when dfo-apis lists none.
+        self.enrichment_stamp: str | None = None
         self.answers: dict[str, httpx2.Response | Exception] = {}
         self.requests: list[httpx2.Request] = []
         self.in_flight = 0
@@ -100,6 +103,11 @@ class FakeApis:
                     "schema_version": 1,
                     "spec_id": parts[0],
                     "versions": [_listed(version) for version in self.versions.get(parts[0], [])],
+                    **(
+                        {}
+                        if self.enrichment_stamp is None
+                        else {"enrichment_stamp": self.enrichment_stamp}
+                    ),
                 },
             )
         _, spec_id, content_version, _ = parts
@@ -327,6 +335,54 @@ async def test_a_root_with_no_mint_record_is_recovered_once_and_written_back(
     later = FakeApis(published=[total, change])
     await backfill(store, later, write=True)
     assert [r for r in later.requests if r.url.path.endswith(f"{SPEC}/versions")] == []
+
+
+@pytest.mark.parametrize(
+    ("served_stamp", "recovers"),
+    [("stamp-now", True), ("stamp-newer", False), (None, False)],
+    ids=["current-stamp", "older-stamp", "no-stamp-served"],
+)
+async def test_a_kind_root_with_no_mint_record_is_recovered_under_the_stamp_the_versions_route_lists(
+    store: InMemoryMaterialisationStore, served_stamp: str | None, recovers: bool
+) -> None:
+    """The root was named with the kind columns under `stamp-now`. The versions route
+    lists the stamp current now, and only a root named under it is the one served."""
+    kinds = ("party_kind",)
+    root = await seed_root(
+        store,
+        frame_ref_for(
+            spec_id=SPEC,
+            content_version=ROOT.content_version,
+            columns=kinds,
+            enrichment_stamp="stamp-now",
+        ),
+        mint_record=False,
+    )
+    total = await summed(root)
+    apis = FakeApis(published=[total])
+    apis.versions[SPEC] = [{"content_version": ROOT.content_version, "base_content_version": None}]
+    apis.enrichment_stamp = served_stamp
+
+    report = await backfill(store, apis, write=True)
+
+    if recovers:
+        assert await store.get_mint_record(root) == MintRecord(
+            frame=root,
+            dataset=ROOT,
+            options=OPTIONS | {"columns": list(kinds)},
+            stat_var_count=1,
+            enrichment_stamp="stamp-now",
+        )
+        assert [outcome.reason for outcome in report.outcomes] == [Reason.STORED]
+    else:
+        assert reasons(report) == [
+            (
+                total,
+                Reason.ROOT_UNRECOVERABLE,
+                f"{root.spec_id} {root.content_version} no_version_matches",
+            )
+        ]
+        assert await store.get_mint_record(root) is None
 
 
 @pytest.mark.parametrize(

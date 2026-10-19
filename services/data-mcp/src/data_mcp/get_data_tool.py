@@ -1454,6 +1454,27 @@ async def mint_recorded_root(
     )
 
 
+async def recorded_mint_request(
+    record: MintRecord, *, deadline: CallDeadline
+) -> tuple[dict[str, Any] | None, Mapping[str, Any]] | ToolResult:
+    """The stored definition identity of `record`'s dataset, `None` when the definition
+    store holds none, and the options a mint of `record` again sends: the recorded ones
+    mapped for that identity (`replayed_mint_options`). A recorded
+    `options.without_party_totals` is sent as recorded.
+
+    `mint_recorded_root` sends these options, and `harness.live_refresh` reads them to
+    decide whether a root is named under an enrichment stamp, so the two cannot differ.
+
+    Returns:
+        The identity and the options, or the refusal `ToolResult` of a definition read
+        that failed (`_load_identity_or_refuse`).
+    """
+    identity = await _load_identity_or_refuse(record.dataset.spec_id, deadline=deadline)
+    if isinstance(identity, ToolResult):
+        return identity
+    return identity, replayed_mint_options(record.options, identity=identity)
+
+
 async def _post_recorded_mint(
     client: UpstreamClient,
     record: MintRecord,
@@ -1462,15 +1483,13 @@ async def _post_recorded_mint(
     deadline: CallDeadline,
 ) -> tuple[httpx2.Response, Mapping[str, Any]] | ToolResult:
     """POST the mint `record` names, as `_attempt_mint` posts `get_data`'s, with the
-    stored definition beside the `spec_id` when the definition store holds one, and
-    return the response with the options it sent: the recorded ones mapped for that
-    definition's identity (`replayed_mint_options`). A recorded
-    `options.without_party_totals` is sent as recorded."""
+    request `recorded_mint_request` builds, and return the response with the options
+    it sent."""
     spec_id = record.dataset.spec_id
-    identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
-    if isinstance(identity, ToolResult):
-        return identity
-    options = replayed_mint_options(record.options, identity=identity)
+    request = await recorded_mint_request(record, deadline=deadline)
+    if isinstance(request, ToolResult):
+        return request
+    identity, options = request
     mint_input: dict[str, Any] = {"kind": "spec_id", "spec_id": spec_id, "scope": record.scope}
     if identity is not None:
         mint_input["definition"] = {
@@ -1600,10 +1619,13 @@ async def get_data(
                 'observationAbout_type column. Values are comma-joined ("Country", '
                 '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
                 "with none. On a flow frame it adds each party's kind instead, as "
-                "financingProvider_party_kind and financingRecipient_party_kind: party, residual, "
-                'or total for a group total such as "Africa, Total", which sums and ranks leave '
-                'out, and "untyped" for a party with none. Set it for a spec that names no place: its '
-                "frame holds every place with data, at every level, so a filter "
+                "financingProvider_party_kind and financingRecipient_party_kind: party; private "
+                "for a private donor, which sums like a party; residual; total for a group total "
+                'such as "Africa, Total", which sums and ranks leave out; whole_total for the '
+                'published total of a whole population such as "Official Donors, Total", which '
+                "sums and ranks leave out beside its members but add up when whole totals are "
+                'the only rows; and "untyped" for a party with none. Set it for a spec that '
+                "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
             )

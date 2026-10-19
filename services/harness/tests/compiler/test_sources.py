@@ -9,12 +9,15 @@ from typing import Any
 import pytest
 from compiler.sources import (
     DiscoveryStatus,
+    MembersAnswer,
     is_family,
     measure_named_by_query,
+    members_reading,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    total_reading,
     wire_groups,
 )
 from planner.records import Period
@@ -626,6 +629,76 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
         "destination": {"label": "Africa", "ref": "africa"},
         "origin": {"label": "G7"},
     }
+
+
+# "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
+# union "all donors including private" binds that total and the private one.
+_WHOLE_ENTITIES = [
+    {"role": "origin", "label": "Official Donors, Total", "ref": "DACOfficialDonors"},
+    {"role": "origin", "label": "Private Donors, Total", "ref": "DACPrivateDonors"},
+]
+_WHOLE_TOTAL = {
+    "origin": {
+        "ref": None,
+        "label": "all donors",
+        "entity_type": None,
+        "total": "DACOfficialDonors",
+        "whole_of": ["party"],
+    }
+}
+_WHOLE_SET = {
+    "origin": {
+        "ref": None,
+        "label": "all donors including private",
+        "entity_type": None,
+        "total": None,
+        "whole_of": ["party", "private"],
+    }
+}
+
+
+def test_a_group_carries_the_kinds_its_whole_total_holds() -> None:
+    single = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
+    union = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET))
+    members = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
+
+    assert [(g.total, g.whole_of) for g in single.groups] == [("DACOfficialDonors", ("party",))]
+    assert [(g.total, g.whole_of) for g in union.groups] == [(None, ("party", "private"))]
+    assert [g.whole_of for g in members.groups] == [(), ()]
+
+
+def test_a_whole_total_is_read_with_the_population_it_holds() -> None:
+    labels = {entity["ref"]: entity["label"] for entity in _WHOLE_ENTITIES}
+    (single,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL)
+    ).groups
+    (union,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET)
+    ).groups
+
+    assert total_reading(single, labels) == (
+        "The figures for all donors are Official Donors, Total, the total the source "
+        "publishes for all official donors (private donors are outside it), "
+        "not its members' figures added up."
+    )
+    assert total_reading(union, labels) == (
+        "The figure for all donors including private adds up the totals the source "
+        "publishes for all official donors and private donors, not its members' figures."
+    )
+
+
+def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
+    (union,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET)
+    ).groups
+
+    assert members_reading(union, answer=MembersAnswer.SUMMED) is None
+
+
+def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:
+    source = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
+
+    assert wire_groups(source.groups) == {"origin": {"label": "all donors"}}
 
 
 def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:

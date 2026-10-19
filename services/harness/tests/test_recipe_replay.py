@@ -114,10 +114,13 @@ class Dataset:
     its groupby by, and writes its mint record. `answers` are returned first, one for each call. `others`
     holds the frame of any other dataset, by spec id. With `names_groupby` off, a
     groupby mint registers under the version's own pair, as data-mcp did before
-    `frame_ref_for` named a groupby."""
+    `frame_ref_for` named a groupby. With an `enrichment_stamp`, a mint also names its
+    columns and the stamp in its pair and keeps the stamp in its record, as data-mcp does
+    for a flow root minted with kinds."""
 
     def __init__(self, store: InMemoryMaterialisationStore) -> None:
         self.names_groupby = True
+        self.enrichment_stamp: str | None = None
         self._store = store
         self.content_version = FIRST
         self.frame: Frame = reporter_frame(FIRST_VALUES)
@@ -136,7 +139,13 @@ class Dataset:
         ref = frame_ref_for(
             spec_id=dataset.spec_id,
             content_version=dataset.content_version,
+            columns=(
+                tuple(record.options.get("columns") or ())
+                if self.enrichment_stamp is not None
+                else ()
+            ),
             groupby=record.options.get("groupby") if self.names_groupby else None,
+            enrichment_stamp=self.enrichment_stamp,
         )
         trace = MaterialisationTrace(
             upstream_trace={
@@ -158,6 +167,7 @@ class Dataset:
                 options=record.options,
                 scope=record.scope,
                 stat_var_count=count,
+                enrichment_stamp=self.enrichment_stamp,
             )
         )
         return RootMint(frame=ref, dataset=dataset, options=record.options, stat_var_count=count)
@@ -610,6 +620,36 @@ async def test_a_root_recorded_with_one_stat_var_that_now_holds_two_is_refused(
     # A record with no count is replayed as recorded, so the verbs are reached.
     assert getattr(uncounted, "code", None) != "root_rendering_ambiguous"
     assert len(scene.tools.calls) > 0
+
+
+@pytest.mark.parametrize("stamp_kept", [True, False], ids=["stamp-kept", "stamp-dropped"])
+async def test_a_kind_column_sum_registered_under_a_salted_pair_is_recognised_as_the_sum(
+    scene: Scene, stamp_kept: bool
+) -> None:
+    """Its pair names the groupby, the columns and the enrichment stamp, so the record
+    must hand the stamp back to `frame_ref_for` to be seen as the sum. Without it the
+    pair is not reproduced and the root reads as unsummed once a second StatVar
+    contributes."""
+    scene.dataset.enrichment_stamp = "stamp-a"
+    options = OPTIONS | {"groupby": _GROUPBY, "columns": ["party_kind"]}
+    _, recipe = await scene.fixed(options)
+    scene.dataset.content_version = SECOND
+    scene.dataset.frame = Frame.build(
+        role_keys=["reporter"],
+        rows=reporter_rows(SECOND_VALUES) + reporter_rows(SECOND_VALUES, stat_var="dcid:Other"),
+    )
+    (root,) = recipe["roots"]
+    assert root["enrichment_stamp"] == "stamp-a"
+    if not stamp_kept:
+        del root["enrichment_stamp"]
+
+    outcome = await scene.replay(recipe)
+
+    # The fake frame holds two StatVars, so a verb refuses it later; the mint stage is
+    # what this test reads.
+    assert isinstance(outcome, Refused)
+    assert (outcome.stage == "mint") is (not stamp_kept)
+    assert (outcome.code == "root_rendering_ambiguous") is (not stamp_kept)
 
 
 async def test_a_recovered_one_stat_var_sum_that_now_holds_two_is_refused(scene: Scene) -> None:

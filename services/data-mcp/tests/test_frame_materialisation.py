@@ -7,7 +7,7 @@ import decimal
 import hashlib
 import io
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -31,6 +31,8 @@ from common.materialisation import (
 from common.materialisation import get_store as get_frame_store
 from common.materialisation import set_store as set_frame_store
 from common.materialisation.memory_store import FRAME_TTL
+from common.materialisation.mint_record import encode_mint_record
+from common.place_type import PARTY_KINDS
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
@@ -126,9 +128,11 @@ def _manifest(
     artifact_digest: str = _ARTIFACT_DIGEST,
     trace: dict[str, Any] | None = None,
     renderings: dict[str, dict[str, object]] | None = None,
+    stamps: Mapping[str, str] | None = None,
 ) -> Manifest:
     """A manifest listing one default-rendering artifact under `artifact_digest`, or one
-    artifact per `renderings` entry (digest to rendering), in its order."""
+    artifact per `renderings` entry (digest to rendering), in its order, each carrying
+    the `enrichment_stamp` `stamps` gives its digest, if any."""
     if renderings is None:
         renderings = {artifact_digest: {"bundle": False, "format": "parquet", "layout": "frame"}}
     payload: dict[str, Any] = {
@@ -146,6 +150,7 @@ def _manifest(
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
+                **({"enrichment_stamp": stamps[digest]} if digest in (stamps or {}) else {}),
             }
             for digest, rendering in renderings.items()
         ],
@@ -2275,6 +2280,29 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     assert set(frame.table.column("financingProvider_party_kind").to_pylist()) == {"untyped"}
 
 
+def test_the_private_and_whole_total_kind_cells_pass_through_decoding_unchanged() -> None:
+    """The decoder writes only an empty cell as `untyped`; every kind dfo-apis serves
+    reaches the frame as it was served."""
+    kinds = sorted(PARTY_KINDS)
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:Oda"] * len(kinds)),
+            "financingProvider": pa.array([f"provider/{kind}" for kind in kinds]),
+            "financingRecipient": pa.array(["country/ETH"] * len(kinds)),
+            "time_period": pa.array(["2021"] * len(kinds)),
+            "value": pa.array([1.0] * len(kinds)),
+            "financingProvider_party_kind": pa.array(kinds),
+            "financingRecipient_party_kind": pa.array(["party"] * len(kinds)),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+
+    frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+
+    assert frame.table.column("financingProvider_party_kind").to_pylist() == kinds
+
+
 @pytest.mark.parametrize(
     "identity",
     [{"entities": {"origin": ["country/FRA"]}}, {"entities": {"recipient": ["country/KEN"]}}, None],
@@ -2360,6 +2388,7 @@ def test_extra_columns_name_a_frame_of_their_own() -> None:
             ("financingRecipient_type", "financingProvider_type"),
             "cv_3b6c33d24aa1d42e0de5d54574aa1ca5",
         ),
+        (("party_kind",), "cv_aa6883b65fa153b6b5fd56e03a5dca14"),
     ],
 )
 def test_a_columns_only_pair_keeps_the_recorded_derivation(
@@ -2394,6 +2423,199 @@ def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> No
         ).hexdigest()[:32]
     )
     assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4
+
+
+_KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
+
+
+@pytest.mark.parametrize(
+    ("columns", "keyed_by_stamp"),
+    [
+        (("party_kind",), True),
+        (("observationAbout_type",), False),
+        ((), False),
+    ],
+    ids=["kinds", "types", "default"],
+)
+def test_the_enrichment_stamp_names_only_a_frame_that_asks_for_kinds(
+    columns: tuple[str, ...], keyed_by_stamp: bool
+) -> None:
+    """The kind cells come from dfo-apis's code index, which moves with no change to the
+    version, so a stamp of it names the frame. Types come from the graph at render time,
+    and the default frame is the version's canonical one."""
+    refs = {
+        stamp: frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=columns,
+            enrichment_stamp=stamp,
+        )
+        for stamp in (None, "stamp-a", "stamp-b")
+    }
+
+    assert (refs["stamp-a"] != refs["stamp-b"]) is keyed_by_stamp
+    assert (refs["stamp-a"] != refs[None]) is keyed_by_stamp
+
+
+def test_a_stamped_groupby_sum_of_kinds_is_named_apart_from_the_unstamped_one() -> None:
+    refs = {
+        frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            groupby=_SUM_GROUPBY,
+            enrichment_stamp=stamp,
+        ).content_version
+        for stamp in (None, "stamp-a", "stamp-b")
+    }
+
+    assert len(refs) == 3
+
+
+async def test_two_manifests_differing_in_the_enrichment_stamp_register_two_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = _parquet_bytes()
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcomes = {
+        stamp: await materialise_and_register(
+            options=_KIND_OPTIONS,
+            manifest=_manifest(
+                renderings={_digest_for(blob): _KIND_OPTIONS},
+                stamps={_digest_for(blob): stamp},
+            ),
+            settings=_settings(),
+            writer="tester",
+        )
+        for stamp in ("stamp-a", "stamp-b")
+    }
+
+    refs = {stamp: outcome.frame_ref for stamp, outcome in outcomes.items()}
+    assert all(outcome.status == "registered" for outcome in outcomes.values())
+    assert refs["stamp-a"] != refs["stamp-b"]
+    for stamp, ref in refs.items():
+        assert ref == frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            enrichment_stamp=stamp,
+        )
+        record = await store.get_mint_record(ref)
+        assert record is not None
+        assert record.enrichment_stamp == stamp
+        _, trace = await store.get(ref)
+        assert trace.enrichment_stamp == stamp
+
+
+async def test_a_manifest_without_a_stamp_keeps_todays_ref_and_a_record_without_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = _parquet_bytes()
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcome = await materialise_and_register(
+        options=_KIND_OPTIONS,
+        manifest=_manifest(renderings={_digest_for(blob): _KIND_OPTIONS}),
+        settings=_settings(),
+        writer="tester",
+    )
+
+    assert outcome.frame_ref == frame_ref_for(
+        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, columns=("party_kind",)
+    )
+    assert outcome.frame_ref is not None
+    record = await store.get_mint_record(outcome.frame_ref)
+    assert record is not None
+    assert record.enrichment_stamp is None
+    assert b"enrichment_stamp" not in encode_mint_record(record)
+
+
+async def test_a_frame_is_named_under_the_stamp_of_the_artifact_it_is_read_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One manifest lists a pinned kind file rendered under an earlier code index, which
+    dfo-apis sends without a stamp, beside a kind file rendered under the current one. Each frame is named
+    by its own file's stamp, and the pinned one unsalted."""
+    blobs = _bytes_by_digest(2)
+    pinned, current = blobs
+    summed = _KIND_OPTIONS | {"groupby": _SUM_GROUPBY}
+
+    async def fake_fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        return blobs[artifact_digest]
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+    manifest = _manifest(
+        renderings={pinned: _KIND_OPTIONS, current: summed}, stamps={current: "stamp-a"}
+    )
+
+    for options, stamp in ((_KIND_OPTIONS, None), (summed, "stamp-a")):
+        outcome = await materialise_and_register(
+            options=options, manifest=manifest, settings=_settings(), writer="tester"
+        )
+        assert outcome.status == "registered"
+        assert outcome.frame_ref == frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            groupby=options.get("groupby"),
+            enrichment_stamp=stamp,
+        )
+        record = await store.get_mint_record(outcome.frame_ref)
+        assert record is not None
+        assert record.enrichment_stamp == stamp
+        _, trace = await store.get(outcome.frame_ref)
+        assert trace.enrichment_stamp == stamp
+
+
+async def test_a_stamped_default_mint_records_no_stamp() -> None:
+    """A default frame is the version's canonical one, so its pair does not depend on the
+    stamp and its record, a function of the pair, does not hold one."""
+    canonical = _parquet_bytes()
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcome, _snapshot_paths, _fetched = await _register_default(
+        snapshot=_snapshot_listing(
+            (_digest_for(canonical), dict(CANONICAL_FRAME_RENDERING), _CANONICAL_LINK)
+        ),
+        served={_CANONICAL_LINK: canonical},
+        manifest=_manifest(stamps={_ARTIFACT_DIGEST: "stamp-a"}),
+    )
+
+    assert outcome.frame_ref == _FRAME_REF
+    assert await store.get_mint_record(_FRAME_REF) == MintRecord(
+        frame=_FRAME_REF, dataset=_FRAME_REF, options=_OPTIONS, stat_var_count=1
+    )
+
+
+def test_a_stamped_manifest_selects_the_artifact_whose_rendering_equals_the_options() -> None:
+    """The stamp salts the frame's name and takes no part in the selection: dfo-apis lists
+    one artifact per rendering, and a rendering is the request's options as sent."""
+    digests = list(_bytes_by_digest(3))
+    manifest = _manifest(
+        renderings=dict(zip(digests, [_OPTIONS, _KIND_OPTIONS, _TYPED_OPTIONS], strict=True)),
+        stamps={digests[1]: "stamp-a"},
+    )
+
+    selected = frame_materialisation._select_requested_artifact(manifest, options=_KIND_OPTIONS)
+
+    assert selected is not None
+    assert selected.artifact_digest == digests[1]
 
 
 # A mint response lists the requested rendering and its statistics. The snapshot of

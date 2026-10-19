@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 import pyarrow as pa
+from common.place_type import PRIVATE_KIND, kind_column
 from common.time_grain import span_label
 from dfo_frame_grammar import Frame, array_kernel
 from dfo_frame_grammar.grammar import (
@@ -71,11 +72,14 @@ from analysis_mcp.engine.columnar import (
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
+    PrivateValueOverflowError,
     combine_exclusions,
     entity_roles,
     facet_columns,
     frame_keeping_role_types,
     narrow_and_resolve,
+    pooled_parties,
     pooled_roles,
     require_one_place_level,
     role_columns,
@@ -246,6 +250,10 @@ class AggregateResult:
     roles outside `group_by`, or of the grouped ones when every one is
     grouped, since each total then pools only its own entity. A place's
     type or a party's kind describes an entity and counts as none.
+
+    `pooled_parties` holds, under `sum`, for each flow party role the call pooled,
+    how many parties it summed and how many of them were `private`, with their
+    value. It is empty under any other aggregation.
     """
 
     frame: Frame
@@ -262,6 +270,7 @@ class AggregateResult:
     entity_count: int | None = None
     period_entities: tuple[tuple[str, int], ...] = ()
     exclusions: Exclusions = field(default_factory=Exclusions)
+    pooled_parties: tuple[PooledParties, ...] = ()
 
 
 def run_aggregate(
@@ -317,6 +326,13 @@ def run_aggregate(
     )
     exclusions = combine_exclusions(party_exclusions, exclusions)
     refuse_sum_over_composed_unit(aggregation, resolved.unit)
+    # Only a sum's digest reports the parties it pooled.
+    try:
+        summed_parties = pooled_parties(table, pooled) if aggregation == "sum" else ()
+    except PrivateValueOverflowError as exc:
+        raise NonFiniteAggregateResultError(
+            group_key={kind_column(exc.role): PRIVATE_KIND}, aggregation=aggregation
+        ) from exc
 
     # Every `group_by` column left after `_DISALLOWED_GROUP_BY_COLUMNS` is
     # stat_var, time_period, or a role, always a plain, non-null string by
@@ -428,4 +444,5 @@ def run_aggregate(
         ),
         period_entities=tuple((period, per_period[(period,)]) for period in members.periods),
         exclusions=exclusions,
+        pooled_parties=summed_parties,
     )

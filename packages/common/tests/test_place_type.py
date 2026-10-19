@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 from common.place_type import (
+    PARTY_KINDS,
+    TOTAL_KINDS,
     UNTYPED,
     at_one_level,
     enrichment_columns,
@@ -106,3 +108,22 @@ def test_an_enrichment_column_names_the_role_it_describes(column: str, role: str
     assert enrichment_role(column, roles=roles) == role
     if role is not None:
         assert column in enrichment_columns(role)
+
+
+@pytest.mark.parametrize(
+    ("cell", "accepted", "holds_others"),
+    [
+        ("party", True, False),
+        ("private", True, False),
+        ("residual", True, False),
+        ("total", True, True),
+        ("whole_total", True, True),
+        (UNTYPED, False, False),
+        ("philanthropy", False, False),
+    ],
+)
+def test_a_party_kind_cell_is_accepted_and_a_total_holds_other_parties(
+    cell: str, accepted: bool, holds_others: bool
+) -> None:
+    assert (cell in PARTY_KINDS) is accepted
+    assert (cell in TOTAL_KINDS) is holds_others

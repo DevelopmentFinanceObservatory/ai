@@ -1963,7 +1963,8 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     assert result["charts"][0]["title"] == intent["title"]
     assert result["charts"][0]["note"] == (
         f"This card draws the {kept} largest of the 20 members with a value in 2024, highest "
-        "first. Left out as group totals or members of another level: 0. Left out with no "
+        "first. Left out as group totals, unallocated amounts or members of another level: 0. "
+        "Left out with no "
         "value in 2024: 10. Say in the reply that it shows the largest of them in 2024."
     )
     # A bar chart is drawn at the period it was cut at. A line chart or table keeps its window.

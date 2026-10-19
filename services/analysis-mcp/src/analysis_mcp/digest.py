@@ -37,6 +37,7 @@ from dfo_frame_grammar.grammar import UnitCell
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.disambiguation import truncate_value
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
+from analysis_mcp.engine.common import PooledParties
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
 from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
@@ -133,6 +134,65 @@ def _key_text(key: Sequence[tuple[str, str]]) -> str:
     if not key:
         return "(all rows)"
     return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
+
+
+# How a flow party role's parties are named in a sum's private-party line: all of them, one
+# private one, and several.
+_PARTY_NOUNS: dict[str, tuple[str, str, str]] = {
+    "financingProvider": ("providers", "private donor", "private donors")
+}
+_OTHER_PARTY_NOUNS = ("parties", "private party", "private parties")
+
+
+def _party_nouns(role: str) -> tuple[str, str, str]:
+    return _PARTY_NOUNS.get(role, _OTHER_PARTY_NOUNS)
+
+
+def _private_count_text(pooled: PooledParties) -> str:
+    """`24 private donors`."""
+    _, one, many = _party_nouns(pooled.role)
+    return f"{pooled.private_count} {one if pooled.private_count == 1 else many}"
+
+
+def _private_clause(pooled: PooledParties) -> str:
+    """`24 private donors (311400000)`: the private parties a sum pooled and their value, over
+    the periods when the sum spans several."""
+    value = _format_number(pooled.private_value)
+    over = f" over {pooled.periods} periods" if pooled.periods > 1 else ""
+    return f"{_private_count_text(pooled)} ({value}{over})"
+
+
+def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str]:
+    """One line per pooled role that held private parties: `subject` is the sum the line
+    describes, and the private parties are in it because they sum like any other."""
+    return [
+        f"{subject} of {entry.count} {_party_nouns(entry.role)[0]} includes "
+        f"{_private_clause(entry)}."
+        for entry in pooled
+        if entry.private_count
+    ]
+
+
+def _two_sided_pooled_lines(
+    result: QuotientOfResult | ShareOfResult, *, keyed_roles: frozenset[str] = frozenset()
+) -> list[str]:
+    """The private-party lines of a two-input verb's sums. A denominator that pools a role the
+    numerator is keyed by ("each donor's share") divides by the sum of the listed parties, and
+    says so, whether or not private parties are among them."""
+    lines = _private_lines(result.numerator_pooled, subject="The numerator sum")
+    listed = [entry for entry in result.denominator_pooled if entry.role in keyed_roles]
+    for entry in listed:
+        text = f"Shares of the sum of the {entry.count} listed {_party_nouns(entry.role)[0]}"
+        if entry.private_count:
+            text += f", which includes {_private_count_text(entry)}"
+        lines.append(f"{text}.")
+    lines.extend(
+        _private_lines(
+            [entry for entry in result.denominator_pooled if entry not in listed],
+            subject="The denominator sum",
+        )
+    )
+    return lines
 
 
 _MAGNITUDE_SELECTION = "kept the largest-magnitude entries"
@@ -436,6 +496,8 @@ def render_aggregate_digest(
     )
 
     sections = [header, groups_block, unit_line, coverage_line]
+    if aggregation == "sum":
+        sections.extend(_private_lines(result.pooled_parties, subject="This sum"))
 
     if result.warnings:
         sections.append(
@@ -781,26 +843,29 @@ def render_sum_of_digest(
     return "\n\n".join(sections)
 
 
-def _rank_line(rank: EntityRank) -> str:
+def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
     key_text = _key_text(rank.entity_key)
+    tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
     return (
-        f"  #{rank.rank} {key_text}: {_format_number(rank.value)} "
+        f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
         f"[n={rank.row_count}, coverage={rank.coverage_fraction:.0%}]"
     )
 
 
-def _rank_block(ranks: Sequence[EntityRank]) -> str:
+def _rank_block(ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]) -> str:
     """`ranks`, already in rank order, as a `_rank_line`-per-entity block
     capped at `_LIST_CAP` -- shared by the collapse mode's own single block
     and by `_per_period_ranks_block`'s block-per-period call, one period's
     own ranking at a time."""
     shown = ranks[:_LIST_CAP]
-    lines = [_rank_line(rank) for rank in shown]
+    lines = [_rank_line(rank, private=private) for rank in shown]
     block = "\n".join([f"{len(ranks)} ranked entit(y/ies):", *lines])
     return block + _truncation_note(shown, len(ranks), selection=_RANK_ORDER_SELECTION)
 
 
-def _per_period_ranks_block(entity_ranks: Sequence[EntityRank]) -> str:
+def _per_period_ranks_block(
+    entity_ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]
+) -> str:
     """One block per period, each capped and truncation-noted exactly like
     the collapse mode's single block. `entity_ranks` is already grouped by
     period -- the engine (`engine.rank._rank_per_period`) emits one
@@ -815,7 +880,8 @@ def _per_period_ranks_block(entity_ranks: Sequence[EntityRank]) -> str:
             periods.append(rank.time_period)
         grouped.setdefault(rank.time_period, []).append(rank)
     blocks = [
-        f"{period}:\n  " + _rank_block(grouped[period]).replace("\n", "\n  ") for period in periods
+        f"{period}:\n  " + _rank_block(grouped[period], private=private).replace("\n", "\n  ")
+        for period in periods
     ]
     return "\n".join(blocks)
 
@@ -865,10 +931,11 @@ def render_rank_digest(
     # period, so the head of each block is what a caller asking for "the 20
     # lowest/highest" wants. A magnitude selection would show the opposite
     # end of the ranking from rank 1.
+    private = frozenset(result.private_parties)
     ranks_block = (
-        _per_period_ranks_block(result.entity_ranks)
+        _per_period_ranks_block(result.entity_ranks, private=private)
         if result.per_period
-        else _rank_block(result.entity_ranks)
+        else _rank_block(result.entity_ranks, private=private)
     )
 
     unit_line = f"unit: {_unit_text(result.resolved_unit)}"
@@ -1001,6 +1068,10 @@ def render_share_of_digest(
         header,
         *lead,
         label_line,
+        *_two_sided_pooled_lines(
+            result,
+            keyed_roles=frozenset(role for share in result.period_shares for role, _ in share.key),
+        ),
         *_periods_left_out_lines(result),
         shares_block,
         coverage_line,
@@ -1184,7 +1255,8 @@ def render_quotient_of_digest(
 
     coverage_line = _coverage_line(result, keyed=any(keys))
 
-    sections = [header, label_line, *_quotient_left_out_lines(result)]
+    sections = [header, label_line, *_two_sided_pooled_lines(result)]
+    sections += _quotient_left_out_lines(result)
     sections += [quotients_block, coverage_line]
     if result.warnings:
         sections.append(

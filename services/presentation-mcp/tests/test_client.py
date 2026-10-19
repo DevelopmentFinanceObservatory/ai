@@ -916,31 +916,39 @@ async def test_a_door_refusal_of_the_steps_fails_the_publish(
 
 
 @pytest.mark.parametrize(
-    ("role", "cell"),
-    [("observationAbout", "Continent"), ("financingRecipient", "total")],
+    ("role", "cells"),
+    [
+        ("observationAbout", ("Continent",)),
+        ("financingRecipient", ("total",)),
+        ("financingProvider", ("party", "private", "whole_total")),
+    ],
+    ids=["place-type", "total-kind", "private-and-whole-total-kinds"],
 )
 async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_published_frame(
-    materialisation_store: InMemoryMaterialisationStore, role: str, cell: str
+    materialisation_store: InMemoryMaterialisationStore, role: str, cells: tuple[str, ...]
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
     sum keyed by a flow party carries `financingRecipient_party_kind`. dfo-apis joins
     every role's value into a series label, so the published frame holds the
     place column alone, and the door's own `Frame.build` accepts it with every
-    row kept.
+    row kept. The kind cells dfo-apis writes for a private provider and a
+    whole-population total are left out with the rest.
     """
     described = f"{role}_type" if role == "observationAbout" else f"{role}_party_kind"
     rows = [
         {
             "stat_var": "dcid:LifeExpectancy_Person",
             role: place,
-            described: cell,
+            described: cells[index % len(cells)],
             "time_period": year,
             "value": value,
         }
-        for place, year, value in (
-            ("africa", "2020", 63.8),
-            ("africa", "2021", 63.2),
-            ("asia", "2020", 74.2),
+        for index, (place, year, value) in enumerate(
+            (
+                ("africa", "2020", 63.8),
+                ("africa", "2021", 63.2),
+                ("asia", "2020", 74.2),
+            )
         )
     ]
     frame = Frame.build(role_keys=[role, described], rows=rows)

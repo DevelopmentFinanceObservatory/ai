@@ -24,12 +24,15 @@ countries typed `Country,Place` share `Place` and no level, and World Bank aggre
 One place alone sits at one level whatever its types.
 
 A flow's parties (`financingProvider`, `financingRecipient`) carry a kind instead, in a
-`{role}_party_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `total` or
-`residual`. DAC tables publish group totals as parties of their own: "Africa, Total", an
-income group, the G7. A total holds other parties' figures, so a sum across a flow role leaves
-it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
-parties. dfo-apis leaves the cell empty for a party it declares no kind for, and data-mcp
-writes that cell as `UNTYPED` too, which no kind names.
+`{role}_party_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `private`,
+`total`, `residual` or `whole_total`. DAC tables publish group totals as parties of their own:
+"Africa, Total", an income group, the G7. A total holds other parties' figures, so a sum across a
+flow role leaves it out. A residual ("Africa, regional") holds figures no other party does, so it
+adds to the parties. A private party (a foundation, a national lottery) sums like a party and is
+counted apart. A `whole_total` is a total that holds a whole population, such as "Official Donors,
+Total": a sum leaves it out beside members, and two of them on one axis hold disjoint populations,
+so a sum across a role of whole totals alone adds them. dfo-apis leaves the cell empty for a party
+it declares no kind for, and data-mcp writes that cell as `UNTYPED` too, which no kind names.
 """
 
 from __future__ import annotations
@@ -72,10 +75,14 @@ _COUNTRY = "Country"
 _NUTS = frozenset({"EurostatNUTS1", "EurostatNUTS2", "EurostatNUTS3"})
 _SEPARATOR = ","
 
-# The kinds dfo-apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
-PartyKind = Literal["party", "residual", "total"]
+# The cells dfo-apis serves in a `{role}_party_kind` column. A total holds other parties' figures.
+PartyKind = Literal["party", "private", "residual", "total", "whole_total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
+PRIVATE_KIND: PartyKind = "private"
 TOTAL_KIND: PartyKind = "total"
+WHOLE_TOTAL_KIND: PartyKind = "whole_total"
+# The cells whose rows hold other rows' figures, so a sum beside members leaves them out.
+TOTAL_KINDS: frozenset[str] = frozenset({TOTAL_KIND, WHOLE_TOTAL_KIND})
 
 _ENRICHMENT_SUFFIXES = ("_type", "_party_kind")
 

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal, cast
 
+from common.time_grain import span_label
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, ComposedUnit, UnitCell
 
@@ -28,9 +29,12 @@ from analysis_mcp.engine.common import (
     ExclusionReason,
     Exclusions,
     FacetSelection,
+    PooledParties,
+    PrivateValueOverflowError,
     combine_exclusions,
     entity_roles,
     narrow_and_resolve,
+    pooled_parties,
     record_counted_exclusion,
     require_one_place_level,
     require_single_stat_var,
@@ -92,7 +96,8 @@ class SideSums:
     shape and holds how many rows each sum read, and `entity_counts` how
     many entities those rows hold: distinct value combinations across the
     entity roles (`common.entity_roles`) outside `by`. `stat_var` is the whole frame's sole
-    `stat_var`.
+    `stat_var`. `pooled_parties` holds what the side's sums pooled in each flow
+    party role outside `by` (`common.PooledParties`).
     """
 
     stat_var: str
@@ -103,6 +108,7 @@ class SideSums:
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     exclusions: Exclusions
+    pooled_parties: tuple[PooledParties, ...] = ()
 
 
 def sum_side(
@@ -179,6 +185,14 @@ def sum_side(
                 raise NonFiniteCellError(time_period=period, reason="overflow") from exc
         summed[key] = summed_periods
 
+    try:
+        pooled = pooled_parties(
+            table, (column for column in role_columns(frame) if column not in (*entity, *by))
+        )
+    except PrivateValueOverflowError as exc:
+        # The private value pools every period the side sums.
+        raise NonFiniteCellError(time_period=span_label(periods), reason="overflow") from exc
+
     entities: dict[tuple[str, ...], dict[str, int]] = {}
     for (*key, period), count in entity_counts(
         table, keys=(*by, TIME_PERIOD_COLUMN), entity_columns=entity_roles(frame)
@@ -194,6 +208,7 @@ def sum_side(
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
         exclusions=exclusions,
+        pooled_parties=pooled,
     )
 
 

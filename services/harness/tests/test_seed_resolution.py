@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp import client_holder
 from data_mcp.client import UpstreamClient
@@ -490,6 +491,41 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
     }
     source = source_from_spec_block(resolved_spec(part, spec_id=block["spec_id"]))
     assert [(group.label, group.total) for group in source.groups] == [("Africa", "DACAfrica")]
+
+
+@pytest.mark.parametrize(
+    ("whole_of", "hashed"),
+    [
+        (
+            ["party"],
+            {"role": "observationAbout", "label": "Africa", "ref": "africa", "whole_of": ["party"]},
+        ),
+        (None, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
+    ],
+    ids=["with-the-marker", "without-the-field"],
+)
+async def test_a_seed_resolves_its_set_with_the_kinds_its_whole_total_holds(
+    monkeypatch: pytest.MonkeyPatch, whole_of: list[str] | None, hashed: dict[str, Any]
+) -> None:
+    # A seed without the field resolves to the group it always did, so a plan hash over
+    # the source does not move.
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    if whole_of is not None:
+        block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = whole_of
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    resolved: list[Any] = []
+
+    async def capture(surface: object, **kwargs: Any) -> dict[str, Any]:
+        resolved.extend(kwargs["groups"])
+        return {}
+
+    monkeypatch.setattr("harness.seeds.resolve_definition", capture)
+
+    await resolve_seed(ScriptedSurface(), taken)
+
+    (group,) = resolved
+    assert revision_content(group) == hashed
 
 
 async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:

@@ -32,7 +32,7 @@ import json
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Self
 from urllib.parse import quote
 
@@ -133,13 +133,20 @@ class DatasetVersion:
     made the collapse, set exactly when `rendering` is `groupby`.
     `without_party_totals` is true when the version's frame leaves out the group totals
     of its open party roles: on every `without_party_totals` rendering, and on a
-    `groupby` one that summed such a frame."""
+    `groupby` one that summed such a frame.
+
+    `enrichment_stamp` is the stamp a file of this version holding party-kind cells
+    carries: the code index's digest when the version's frame holds a party role, and
+    `None` when it holds none, or when dfo-apis lists no stamp on its versions. `served_stamp` is the answer's top-level stamp, the answering code index's
+    digest, the same on every version of one answer, and `None` when it lists none."""
 
     content_version: str
     base_content_version: str | None
     rendering: VersionRendering
     groupby: Mapping[str, Any] | None
     without_party_totals: bool = False
+    enrichment_stamp: str | None = None
+    served_stamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -264,26 +271,38 @@ def _dataset_version(item: dict[str, Any]) -> DatasetVersion | None:
     no `content_version`, a `rendering` that is none of the four, a `groupby` present on
     anything but a `groupby` rendering, or a `without_party_totals` that is not a
     boolean. dfo-apis leaves a false `without_party_totals` out, and a
-    `without_party_totals` rendering implies it."""
+    `without_party_totals` rendering implies it. dfo-apis also leaves out the
+    `enrichment_stamp` of a version that has none."""
     content_version = _text(item.get("content_version"))
     base_content_version = _text(item.get("base_content_version"))
     groupby = item.get("groupby")
     without_party_totals = item.get("without_party_totals", False)
+    stamp = _text(item.get("enrichment_stamp"))
     if content_version is None or not isinstance(without_party_totals, bool):
         return None
     match item.get("rendering"):
         case "groupby" if isinstance(groupby, dict):
             return DatasetVersion(
-                content_version, base_content_version, "groupby", groupby, without_party_totals
+                content_version,
+                base_content_version,
+                "groupby",
+                groupby,
+                without_party_totals,
+                enrichment_stamp=stamp,
             )
         case "without_party_totals" if groupby is None:
             return DatasetVersion(
-                content_version, base_content_version, "without_party_totals", None, True
+                content_version,
+                base_content_version,
+                "without_party_totals",
+                None,
+                True,
+                enrichment_stamp=stamp,
             )
-        case "plain" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "plain", None)
-        case "not_recorded" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "not_recorded", None)
+        case ("plain" | "not_recorded") as rendering if groupby is None:
+            return DatasetVersion(
+                content_version, base_content_version, rendering, None, enrichment_stamp=stamp
+            )
     return None
 
 
@@ -406,21 +425,24 @@ class LiveApisClient:
         return _required_frame(response, _json_object(response, "replay answer"), "replay answer")
 
     async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
-        """The dataset's stored versions, newest first."""
+        """The dataset's stored versions, newest first, each with its own
+        `enrichment_stamp` and the answer's top-level one as `served_stamp`."""
         response = await self._send(
             "GET",
             _VERSIONS_PATH.format(spec_id=_segment(spec_id)),
             headers=self._datasets_headers(),
         )
-        versions = _json_object(response, "versions answer").get("versions")
+        answer = _json_object(response, "versions answer")
+        versions = answer.get("versions")
         if not isinstance(versions, list):
             raise _invalid(response, "versions answer")
+        stamp = _text(answer.get("enrichment_stamp"))
         parsed: list[DatasetVersion] = []
         for item in versions:
             version = _dataset_version(item) if isinstance(item, dict) else None
             if version is None:
                 raise _invalid(response, "versions answer")
-            parsed.append(version)
+            parsed.append(replace(version, served_stamp=stamp))
         return tuple(parsed)
 
     # Refresh and render routes, called with the live-refresh principal.

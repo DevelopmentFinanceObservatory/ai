@@ -207,6 +207,16 @@ class ArtifactEntry(BaseModel):
     pull the link at fetch time. `Manifest._attach_artifact_resource_uris` derives and
     overwrites it after validation, so the default here only has to satisfy
     an already-stripped document that predates the field.
+
+    `enrichment_stamp` is the digest of the code-index facts behind the file's
+    `{role}_party_kind` cells (dfo-apis' `CodeIndex.enrichment_digest`). dfo-apis sends
+    it exactly when the file holds party-kind cells read under the code index serving
+    the call. A file with no party-kind cell carries none, and so does a listed file
+    rendered under an earlier digest with no current twin (a pinned file, an older
+    layout), whose kinds may be out of date. `data_mcp.frame_materialisation.
+    frame_ref_for` salts the name of a frame read from the file with it, so a change
+    to a party's kind names a new frame, and a frame read from a file without one is
+    named unsalted. It stays out of a dump when absent.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -217,6 +227,7 @@ class ArtifactEntry(BaseModel):
     created_at: str
     tier: str
     resource_uri: str | None = None
+    enrichment_stamp: str | None = Field(default=None, exclude_if=_is_none)
 
 
 class DefinitionModel(BaseModel):
@@ -269,6 +280,9 @@ class Manifest(BaseModel):
     inline `statistics` array upstream once sent; this model does not
     declare that field, so `extra="ignore"` (`_UNSEEN_FIELDS_ARE_DROPPED`)
     silently drops it before a reader ever sees it.
+
+    The stamp of the kind cells sits on each artifact (`ArtifactEntry.enrichment_stamp`),
+    since one manifest may list files rendered under different code indexes.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED

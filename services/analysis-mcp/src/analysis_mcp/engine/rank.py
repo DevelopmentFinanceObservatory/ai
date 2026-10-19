@@ -99,6 +99,7 @@ from analysis_mcp.engine.common import (
     facet_columns,
     frame_keeping_role_types,
     narrow_and_resolve,
+    private_parties,
     record_counted_exclusion,
     record_exclusion,
     require_one_place_level,
@@ -175,7 +176,8 @@ class RankResult:
     whether the output frame's `value` is the rank position.
     `window_period_count` is how many periods the window holds before
     unit-less rows are left out, the periods each entity's coverage is
-    measured against.
+    measured against. `private_parties` are the `(role, party)` pairs of the
+    ranked roles whose party is `private`, which the digest tags.
     """
 
     frame: Frame
@@ -194,6 +196,7 @@ class RankResult:
     limit: int | None = None
     exclusions: Exclusions = field(default_factory=Exclusions)
     window_period_count: int = 0
+    private_parties: tuple[tuple[str, str], ...] = ()
 
     @property
     def kept_ranks(self) -> tuple[EntityRank, ...]:
@@ -664,4 +667,5 @@ def run_rank(
         entity_ranks=tuple(entity_ranks),
         exclusions=exclusions,
         window_period_count=pre_exclusion_period_count,
+        private_parties=private_parties(table, entity_columns),
     )

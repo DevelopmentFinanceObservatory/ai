@@ -817,12 +817,57 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
 
 
 @pytest.mark.parametrize(
+    ("group", "kept"),
+    [
+        (
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ["party"]},
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ("party",)},
+        ),
+        (
+            {
+                "label": "all donors including private",
+                "total": None,
+                "whole_of": ["party", "private"],
+            },
+            {"label": "all donors including private", "whole_of": ("party", "private")},
+        ),
+        ({"label": "Africa", "ref": "africa"}, {"label": "Africa", "ref": "africa"}),
+        ({"label": "Africa", "whole_of": []}, {"label": "Africa"}),
+    ],
+    ids=["single-total", "set-of-totals", "without-the-field", "empty-field-is-absent"],
+)
+def test_a_seed_carries_the_kinds_a_whole_total_holds(group: object, kept: dict[str, Any]) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
+
+
+@pytest.mark.parametrize(
+    "whole_of", ["party", [""], list(range(2))], ids=["a-string", "blank-kind", "not-text"]
+)
+def test_a_set_whose_whole_of_is_not_a_list_of_kinds_is_dropped(whole_of: object) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+    }
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is None
+
+
+@pytest.mark.parametrize(
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
         {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"label": "all donors", "whole_total": ["party"]},
     ],
-    ids=["dcid-before-ref", "unknown-member"],
+    ids=["dcid-before-ref", "unknown-member", "near-miss-of-whole-of"],
 )
 def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: object) -> None:
     # A block from the Search wire that named a set's node `dcid` would otherwise

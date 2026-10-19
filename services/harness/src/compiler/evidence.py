@@ -715,11 +715,17 @@ def _group_reading_issues(
     """The issues, if any, with how the source binds `group`, the set `entity` names, against what it asks for.
 
     An entity with `members` set asks for each member, so a set the source
-    binds as its published total does not answer it. One without accepts
+    binds as its published total, or as the totals of a whole population
+    (`ResolvedGroup.reads_total`), does not answer it. One without accepts
     either reading.
     """
-    if not entity.members or group.total is None:
+    if not entity.members or not group.reads_total:
         return []
+    bound = (
+        f"set's published total, {group.total!r}"
+        if group.total is not None
+        else f"published totals of {group.label!r}"
+    )
     return [
         EvidenceIssue(
             code=EvidenceIssueCode.GROUP_READ_AS_TOTAL,
@@ -727,9 +733,9 @@ def _group_reading_issues(
             requirement_id=requirement.id,
             detail=(
                 f"{entity.name!r} is asked for member by member, but the source binds the "
-                f"set's published total, {group.total!r}, and no member"
+                f"{bound}, and no member"
             ),
-            found=group.total,
+            found=group.total if group.total is not None else group.label,
             required=entity.name,
         )
     ]

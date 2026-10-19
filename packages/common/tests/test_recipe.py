@@ -35,6 +35,7 @@ from common.recipe import (
 _IDENTITY = "0.3.0|1.0.0|0.2.0"
 _OPTIONS: dict[str, Any] = {"format": "parquet", "bundle": False, "layout": "frame"}
 _TYPED_OPTIONS = _OPTIONS | {"columns": ["observationAbout_type"]}
+_KIND_OPTIONS = _OPTIONS | {"columns": ["party_kind"]}
 
 
 @dataclass(frozen=True)
@@ -69,18 +70,27 @@ async def _root(
     version: str = "1",
     options: dict[str, Any] = _OPTIONS,
     recorded: bool = True,
+    enrichment_stamp: str | None = None,
 ) -> FrameRef:
     """A root frame's pair, with its mint record in `store` unless `recorded` is off.
-    A column selection gives the frame a `content_version` other than its dataset's."""
+    A column selection gives the frame a `content_version` other than its dataset's,
+    and an enrichment stamp one other again."""
     spec_id = "spec_" + dataset * 32
     dataset_ref = FrameRef(spec_id=spec_id, content_version="cv_" + version * 32)
+    named = (
+        (version, "columns") if enrichment_stamp is None else (version, "columns", enrichment_stamp)
+    )
     ref = (
-        FrameRef(spec_id=spec_id, content_version=f"cv_{_hex(version, 'columns')}")
+        FrameRef(spec_id=spec_id, content_version=f"cv_{_hex(*named)}")
         if "columns" in options
         else dataset_ref
     )
     if recorded:
-        await store.put_mint_record(MintRecord(frame=ref, dataset=dataset_ref, options=options))
+        await store.put_mint_record(
+            MintRecord(
+                frame=ref, dataset=dataset_ref, options=options, enrichment_stamp=enrichment_stamp
+            )
+        )
     return ref
 
 
@@ -212,6 +222,33 @@ async def test_one_recipe_on_two_root_versions_shares_a_normal_form_and_not_a_re
     assert first["tree"]["frame"] != second["tree"]["frame"]
     assert first["normal_form_hash"] == second["normal_form_hash"]
     assert first["replay_key"] != second["replay_key"]
+
+
+async def test_a_roots_enrichment_stamp_enters_the_replay_key_and_no_stamp_keeps_the_old_key() -> (
+    None
+):
+    keys: dict[str | None, str] = {}
+    normal_forms: set[str] = set()
+    for stamp in ("a" * 64, "b" * 64, None):
+        store = InMemoryMaterialisationStore()
+        root = await _root(store, options=_KIND_OPTIONS, enrichment_stamp=stamp)
+        summed = await _derive(
+            store, "aggregate", {"aggregation": "sum", "group_by": ["time_period"]}, frame_ref=root
+        )
+        recipe = await build_recipe(summed, store=store)
+        keys[stamp] = recipe["replay_key"]
+        normal_forms.add(recipe["normal_form_hash"])
+
+    assert len(normal_forms) == 1
+    assert keys["a" * 64] != keys["b" * 64]
+    # A root with no stamp keys on its pair alone.
+    pair_key = {
+        "execution_identities": [_IDENTITY],
+        "identity_version": "rpk1",
+        "normal_form_hash": normal_forms.pop(),
+        "roots": [{"content_version": "cv_" + "1" * 32, "spec_id": "spec_" + "a" * 32}],
+    }
+    assert keys[None] == f"rpk_{hashlib.sha256(rfc8785.dumps(pair_key)).hexdigest()[:32]}"
 
 
 @pytest.mark.parametrize(
