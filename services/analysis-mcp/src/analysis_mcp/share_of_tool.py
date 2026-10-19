@@ -372,9 +372,10 @@ async def share_of(
             default=None,
             description=(
                 "{role_column: value} narrowing the numerator's own rows before summing "
-                "each period. Empty sums every row on this side per period -- the usual "
-                "shape for a deliberate total, e.g. 'all DAC donors'. Role columns only -- "
-                "stat_var and time_period are not accepted selectors."
+                "each period. Empty sums every row on this side per period. A sum of a "
+                "side's members is not the source's published total for all donors or all "
+                "recipients; search returns that total when the question names it. Role "
+                "columns only -- stat_var and time_period are not accepted selectors."
             ),
         ),
     ] = None,

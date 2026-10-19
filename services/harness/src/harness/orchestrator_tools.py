@@ -323,8 +323,9 @@ class AskedOutput(BaseModel):
     over: list[PartyRole] = Field(
         default=[],
         description=(
-            "each party the output totals across, every member summed into one figure: "
-            '["donor"] for "total aid from all donors"'
+            "each party the output totals across into one figure: "
+            '["donor"] for "total aid from all donors". Search returns the source\'s published '
+            "total for a side it is not asked to open, so such a party stays out of open_roles"
         ),
     )
 
@@ -1321,7 +1322,9 @@ def build_orchestrator_tools(
         `entities`, as spoken. Use `to` for a recipient and `from` for a
         donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
         creditor" or "which donors" question leaves that flow side open in
-        `open_roles`. A rank over `origin` or `destination` also opens that
+        `open_roles`. A total across a side ("aid to Ethiopia from all donors")
+        leaves it out of `open_roles`, and search returns the source's
+        published total. A rank over `origin` or `destination` also opens that
         side. Keep `open_roles` when the user explicitly asks to break down
         that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":

@@ -194,7 +194,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from common.place_type import PARTY_ROLES, PLACE_LEVELS, enrichment_role
+from common.place_type import PARTY_KINDS, PARTY_ROLES, PLACE_LEVELS, TOTAL_KINDS, enrichment_role
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
@@ -330,6 +330,10 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # How many of each side's sampled keys a `quotient_of_no_key_matched` message
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
+
+# The party kinds a filter keeps to compare or rank a flow side's members: every kind but
+# the totals, which hold other parties' figures.
+_MEMBER_KINDS = tuple(sorted(PARTY_KINDS - TOTAL_KINDS))
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1286,7 +1290,10 @@ class ToolRefusal:
         the engine that found them, and empty when the frame carries no such
         column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
         message naming the role and the group-total exclusion, since a
-        `place_level` filter is not what its refusal asks for."""
+        `place_level` filter is not what its refusal asks for. It names two
+        repairs: the source's published total for a total across the whole
+        side, and for a comparison of members a filter keeping the member
+        kinds, which a kind column's `fix.member_kinds` lists."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and not types:
             return cls(
@@ -1305,14 +1312,18 @@ class ToolRefusal:
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
                     f"The {role} parties in this frame cannot be pooled: {column!r} holds "
-                    f"{', '.join(types)}. Parties of kind total, such as a DAC regional total "
-                    "or the G7, are excluded from sums and ranks automatically, so this "
-                    "refusal means a party has no kind this server declares, or that every "
-                    f"party is a group total. Filter the frame with a category_match on {role!r} "
-                    f"naming the parties to keep, or a category_match on {column!r} keeping "
-                    "party and residual, then retry with that result's frame_ref."
+                    f"{', '.join(types)}. Parties of kind total or whole_total, such as a DAC "
+                    "regional total or Official Donors, Total, are left out of sums and ranks "
+                    "beside their members automatically, so this refusal means a party has no "
+                    "kind this server declares, or that every party is a group total. For a "
+                    "total across the whole side, use the source's published total: search "
+                    "returns it when the question leaves the side unnamed or names all donors "
+                    "or all recipients, and a whole_total row is that figure. To compare or "
+                    f"rank members, filter the frame with a category_match on {role!r} naming "
+                    f"the parties to keep, or a category_match on {column!r} keeping "
+                    f"{', '.join(_MEMBER_KINDS)}, then retry with that result's frame_ref."
                 ),
-                fix={"column": column, "types": list(types)},
+                fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,

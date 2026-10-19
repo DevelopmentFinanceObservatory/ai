@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="39de2f6a92402cf75bd547315a8d502240e233159b47bece6e2d16bb05aada4c",
+        input_schema_hash="8919acabbb417da7f9b5c67764d6656d228f7616286ab8cd65a37d25c55552bc",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -182,7 +182,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
         # `scope.entities` taking a dcid only behind the `dcid:` marker.
-        input_schema_hash="fb74dd56256d759879df6d098205deadb379f77a0ce8229d3368e8397ee7c126",
+        input_schema_hash="1656fe3719c7bf56d3bd0838ce6d8a0e33a091dc894dc3600ad092d5707978ec",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -242,7 +242,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="d769333e10961aa2b414a0034fbbc13444ab699c3b8f6767b600b8c7c81ed4c5",
+        input_schema_hash="8ae36930c237d30c9191854b288d477a46d3a1bcdf077b1ad0a136c51892ce49",
         output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
     ),
     ToolCapability(

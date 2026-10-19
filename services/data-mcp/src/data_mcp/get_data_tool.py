@@ -1637,9 +1637,12 @@ async def get_data(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
                 "Total or the G7) from each side the spec leaves open, and add the party kinds as "
-                "place_types does; a side the spec names, or one holding only totals, keeps every "
-                "row, and the digest names what was left out. On a spec with no flow side it "
-                "changes nothing."
+                "place_types does, so the side's members can be compared or ranked without "
+                "totals among them. A sum of those members is not the source's published total "
+                "for all donors or all recipients; search returns that total when the question "
+                'names "all donors" or leaves the side unnamed. A side the spec names, or one '
+                "holding only totals, keeps every row, and the digest names what was left out. "
+                "On a spec with no flow side it changes nothing."
             )
         ),
     ] = False,
@@ -1724,8 +1727,8 @@ async def get_data(
         place_types: Whether to add the places' types (`observationAbout_type`), or
             each party's kind on a flow frame, for a spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, and adds the party kinds as `place_types` does. On a spec
-            with no flow side it changes nothing.
+            the spec leaves open, to compare or rank its members, and adds the party kinds as
+            `place_types` does. On a spec with no flow side it changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 

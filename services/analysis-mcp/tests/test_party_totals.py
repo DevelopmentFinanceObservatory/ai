@@ -363,29 +363,28 @@ async def test_the_aggregate_tool_reports_the_totals_it_left_out(store) -> None:
     assert "party_total (totals of other parties" in result.content[0].text
 
 
-_FILTER_RETRY = f"category_match on {_RECIPIENT!r}"
+# The kinds a filter keeps to compare or rank the members: every kind but the totals.
+_MEMBER_KINDS = {"member_kinds": ["party", "private", "residual"]}
 
 
 @pytest.mark.parametrize(
-    ("frame", "kinds", "retry"),
+    ("frame", "fix"),
     [
         (
             lambda: _frame({"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)}),
-            ["party", "untyped"],
-            _FILTER_RETRY,
+            {"types": ["party", "untyped"], **_MEMBER_KINDS},
         ),
         (
             lambda: _frame({"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}),
-            ["total"],
-            _FILTER_RETRY,
+            {"types": ["total"], **_MEMBER_KINDS},
         ),
-        # A filter adds no kind column, so only a retrieval with kinds is offered.
-        (lambda: _frame(kinds=False), [], "place_types=true"),
+        # A frame with no kind column has no kinds to filter on until a retrieval adds them.
+        (lambda: _frame(kinds=False), {"types": []}),
     ],
     ids=["no-kind", "every-one-a-total", "no-kind-column"],
 )
 async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_column(
-    store, frame, kinds: list[str], retry: str
+    store, frame, fix: dict[str, list[str]]
 ) -> None:
     digest = secrets.token_hex(16)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
@@ -400,11 +399,8 @@ async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_colu
     assert result.is_error is True
     refusal = result.structured_content
     assert refusal["code"] == "place_levels_mixed"
-    assert refusal["fix"] == {"column": _KINDS, "types": kinds}
-    # The retry names the party column, not a place_level filter on the kind column, or
-    # the retrieval that adds the kind column; never a filter that keeps several parties.
-    assert retry in result.content[0].text
-    assert (_FILTER_RETRY in result.content[0].text) == (retry == _FILTER_RETRY)
+    assert refusal["retry_mode"] == "correct_and_retry"
+    assert refusal["fix"] == {"column": _KINDS, **fix}
 
 
 _OFFICIAL = "DACOfficialDonors"

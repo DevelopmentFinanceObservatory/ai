@@ -214,9 +214,11 @@ class SearchPart(BaseModel):
             min_length=1,
             max_length=2,
             description=(
-                "a flow side the ask breaks down, as a role word, e.g. ['creditor'] for "
-                "'which creditors' or 'by creditor'; use only for an origin or destination "
-                "side of a flow, never a side one of the entities names"
+                "a flow side the ask lists member by member, as a role word, e.g. ['creditor'] "
+                "for 'which creditors' or 'by creditor'; use only for an origin or destination "
+                "side of a flow, never a side one of the entities names. A total across a side "
+                "sends none, or names the side as an entity ('all donors'), and search returns "
+                "the source's published total for it"
             ),
         )
     )
@@ -512,9 +514,14 @@ async def search(
     which side of the flow the entity is on -- a word for where it originates
     (e.g. donor, provider, creditor, exporter) is "from", a word for where it
     is directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
-    the forms its own description lists. `open_roles` asks for every member
-    of a flow side, in the same role words: send it for a "by creditor" or
-    "which creditors" ask. A rank in `operations` over `origin` or
+    the forms its own description lists. `open_roles` lists each member of
+    a flow side, in the same role words: send it for a "by creditor" or
+    "which creditors" ask. A total across a side sends no `open_roles`, or
+    names the whole side as an entity, and search returns the source's
+    published total: "Total aid to Ethiopia from all donors" is
+    `{"variable": "aid", "entities": [{"text": "Ethiopia", "role":
+    "recipient"}, {"text": "all donors", "role": "donor"}]}`. Summing the
+    listed members gives a different figure. A rank in `operations` over `origin` or
     `destination` also opens that flow side. Keep `open_roles` when the user
     explicitly asks to break down that side.
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",

@@ -589,7 +589,8 @@ def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[s
     names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
     return (
         f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
-        "frame holds that side's other parties."
+        "frame holds that side's other parties, whose sum is not the source's published total "
+        "for the side."
     )
 
 
