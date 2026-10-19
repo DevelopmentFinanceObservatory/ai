@@ -105,7 +105,7 @@
               },
               "warnings": [],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "citation": "OECD_DAC2A (<year>), via the Development Finance Observatory",
               "refreshed_from": null
             },
             "component": {
@@ -661,7 +661,7 @@
               },
               "warnings": [],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "citation": "OECD_DAC2A (<year>), via the Development Finance Observatory",
               "refreshed_from": 1
             },
             "component": {
@@ -1024,7 +1024,7 @@
                 }
               ],
               "generated_at": "<timestamp>",
-              "citation": "OECD_DAC2A via ONE DFO, retrieved <date>",
+              "citation": "OECD_DAC2A (<year>), processed by the Development Finance Observatory",
               "refreshed_from": 1
             },
             "component": {
@@ -1125,7 +1125,7 @@
           "type": "/codes/rendering_not_recorded",
           "title": "Rendering Not Recorded",
           "status": 422,
-          "detail": "the rendering of 'spec_176b1b132147fff98b37810b759f6f90' at content_version 'cv_00000000000000000000000000000002' is ambiguous: the version links a groupby sum and a plain file, and the two renderings of the current data are no longer one frame",
+          "detail": "the rendering of 'spec_176b1b132147fff98b37810b759f6f90' at content_version 'cv_00000000000000000000000000000002' is ambiguous: the version links a groupby sum or party-totals cut and a plain file, and the renderings of the current data are no longer one frame",
           "code": "rendering_not_recorded",
           "trace_id": "<trace_id>",
           "capability_version": "<capability_version>",
@@ -1150,6 +1150,7 @@
         "body": {
           "schema_version": 1,
           "spec_id": "spec_176b1b132147fff98b37810b759f6f90",
+          "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "versions": [
             {
               "content_version": "cv_00000000000000000000000000000003",
@@ -1160,25 +1161,29 @@
                   "recipient"
                 ],
                 "op": "sum"
-              }
+              },
+              "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
             },
             {
               "content_version": "cv_00000000000000000000000000000004",
               "base_content_version": null,
               "rendering": "plain",
-              "groupby": null
+              "groupby": null,
+              "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
             },
             {
               "content_version": "cv_00000000000000000000000000000002",
               "base_content_version": null,
               "rendering": "plain",
-              "groupby": null
+              "groupby": null,
+              "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
             },
             {
               "content_version": "cv_00000000000000000000000000000001",
               "base_content_version": null,
               "rendering": "plain",
-              "groupby": null
+              "groupby": null,
+              "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
             }
           ]
         }
