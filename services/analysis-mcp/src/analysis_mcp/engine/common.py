@@ -266,18 +266,15 @@ def without_party_totals(
     all totals: ranking totals beside each other sums nothing across them. So
     does a role whose parties are all totals with a `{role}_party_whole` cell of
     `true` on every row: whole totals on one axis hold disjoint classes of
-    party, so a sum across them counts nothing twice. A whole total beside
-    members on a pooled role, one outside `ranked` and `keyed`
-    (`_totals_left_out`), stays and is summed with them when its class is one
-    no member has, such as "Official Donors, Total" beside a private
-    foundation: it holds its class's whole population and no member lies
-    inside it. A role in `keyed`, one a verb groups by, sums nothing across
-    its parties, so it leaves every total out beside its members.
+    party, so a sum across them counts nothing twice. Which totals beside
+    members stay on a role outside `ranked` is `_totals_left_out`'s rule, the
+    same whether the role is pooled or in `keyed`, one a verb groups by,
+    except for a whole total that may hold a member.
     Refuses (`PlaceLevelsMixedError`) when a role's several parties carry no
     kind column or include one with no kind, since no sum or rank across
     them is known to keep a total apart from the parties it holds, when
     a role outside `ranked` holds only totals, unless every one is whole, and
-    when a whole total beside members may hold some of them.
+    when a whole total beside members on a pooled role may hold some of them.
     """
     table = frame.table
     exclusions = Exclusions()
@@ -301,8 +298,10 @@ def without_party_totals(
             is_dropped = array_kernel(
                 "equal", table.column(kinds).combine_chunks(), pa.scalar(kind, pa.string())
             )
-            if kind == TOTAL_KIND and column not in ranked and column not in keyed:
-                is_dropped = _totals_left_out(table, role=column, is_total=is_dropped)
+            if kind == TOTAL_KIND and column not in ranked:
+                is_dropped = _totals_left_out(
+                    table, role=column, is_total=is_dropped, keyed=column in keyed
+                )
             dropped = table.filter(is_dropped)
             if not dropped.num_rows:
                 continue
@@ -321,13 +320,16 @@ def without_party_totals(
     return Frame.from_table(columns=frame.columns, table=table), exclusions
 
 
-def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Array:
-    """The rows of `is_total`, the totals of `role`, that a sum leaves out beside the role's
-    members, `table`'s other rows. A total whole on every row (`_agreed_cells`) whose class no
-    member has stays: it holds its class's whole population, and no member lies inside it.
-    Refuses (`PlaceLevelsMixedError`) a whole total that may hold a member: one with no
-    class, or one beside a member of its class or of none, since a sum across them would
-    count that member twice."""
+def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array, keyed: bool) -> pa.Array:
+    """The rows of `is_total`, the totals of `role`, that a verb leaves out beside the role's
+    members, `table`'s other rows. A total not whole on every row (`_agreed_cells`) is left
+    out. A whole total whose class no member has stays, summed with the members on a pooled
+    role and its own key on a `keyed` one: it holds its class's whole population, and no
+    member lies inside it, such as "Official Donors, Total" beside a private foundation.
+    A whole total that may hold a member, one with no class or one beside a member of its
+    class or of none, is left out on a `keyed` role, where each member keeps its own row, and
+    refused (`PlaceLevelsMixedError`) on a pooled one, since a sum across them would count
+    that member twice."""
     if whole_column(role) not in table.column_names:
         return is_total
     totals = table.filter(is_total)
@@ -342,6 +344,7 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
     member_classes = _party_classes(members, role)
     total_classes = _party_classes(totals, role)
     member_names = distinct(members, role)
+    kept = []
     for total in whole.to_pylist():
         total_class = total_classes.get(total)
         overlapping = [
@@ -349,7 +352,9 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
             for member in member_names
             if total_class is None or member_classes.get(member) in (None, total_class)
         ]
-        if overlapping:
+        if not overlapping:
+            kept.append(total)
+        elif not keyed:
             raise PlaceLevelsMixedError(
                 column=kind_column(role),
                 types=distinct(table, kind_column(role))[:_PLACE_TYPE_CAP],
@@ -361,7 +366,11 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
     return array_kernel(
         "and_not",
         is_total,
-        array_kernel("is_in", table.column(role).combine_chunks(), value_set=whole),
+        array_kernel(
+            "is_in",
+            table.column(role).combine_chunks(),
+            value_set=pa.array(kept, type=whole.type),
+        ),
     )
 
 

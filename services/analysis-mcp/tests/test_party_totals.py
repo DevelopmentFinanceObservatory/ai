@@ -11,6 +11,7 @@ whole (`true` or `false`) cells, and the tests that sum whole totals or count pr
 from __future__ import annotations
 
 import secrets
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -23,8 +24,9 @@ from analysis_mcp.engine.quotient_of import run_quotient_of
 from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.engine.share_of import run_share_of
 from analysis_mcp.execution_identity import current_execution_identity
+from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.identity import op_spec_hash_for
-from analysis_mcp.op_spec import AggregateOpSpec
+from analysis_mcp.op_spec import AggregateOpSpec, CategoryMatchPredicate
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
@@ -463,8 +465,15 @@ _RECIPIENT_PHRASES = (
                 "whole_class": None,
                 "member_count": 1,
                 "example_members": ["country/MAR"],
+                "filters": [
+                    {"column": f"{_RECIPIENT}_party_whole", "values": ["true"]},
+                    {"column": _KINDS, "values": ["party", "residual"]},
+                ],
             },
-            (f"category_match on {_KINDS!r} keeping total", "keeping party and residual"),
+            (
+                f"category_match on '{_RECIPIENT}_party_whole' keeping true",
+                f"category_match on {_KINDS!r} keeping party and residual",
+            ),
         ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
         (lambda: _frame(kinds=False), _KINDS, {"types": []}, ("place_types=true",)),
@@ -651,6 +660,62 @@ def test_a_whole_total_that_may_hold_a_member_beside_it_is_refused(
         refused.member_count,
         refused.members,
     ) == (column, whole_total, whole_class, member_count, members)
+
+
+def _handle(content: dict[str, Any] | None) -> dict[str, str]:
+    """The frame_ref of a tool result's `structured_content`."""
+    assert content is not None
+    return {"spec_id": content["spec_id"], "content_version": content["content_version"]}
+
+
+@pytest.mark.parametrize(
+    ("frame", "sums"),
+    [
+        # DAC2A's donors to Ethiopia in 2021 beside the official donors' whole total and two
+        # group totals that are not whole, DAC Countries, Total and the G7.
+        (
+            lambda: provider_frame(
+                {
+                    **_MEMBERS,
+                    _OFFICIAL: (OFFICIAL_WHOLE, 4267.6),
+                    "DACCountries": (GROUP_TOTAL, 3900.0),
+                    "G7Countries": (GROUP_TOTAL, 2100.0),
+                }
+            ),
+            [4267.6, 350.0],
+        ),
+        (
+            lambda: _recipient_frame(
+                {**_ALL_RECIPIENTS, "DACAfrica": (("total", "official", "false"), 5400.0)}
+            ),
+            [12000.0, 600.0],
+        ),
+    ],
+    ids=["donors", "recipients"],
+)
+async def test_each_filter_a_whole_total_refusal_offers_lets_the_sum_answer(
+    store, frame, sums: list[float]
+) -> None:
+    digest = secrets.token_hex(16)
+    held = {"spec_id": f"spec_{digest}", "content_version": f"cv_{digest}"}
+    await store.put(FrameRef(**held), frame=frame(), trace=_trace(), writer="test")
+
+    refused = await aggregate(frame_ref=held, aggregation="sum", group_by=("time_period",))
+    assert refused.is_error is True
+    assert refused.structured_content is not None
+    filters = refused.structured_content["fix"]["filters"]
+
+    answered = []
+    for offered in filters:
+        kept = await filter_verb(frame_ref=held, predicates=(CategoryMatchPredicate(**offered),))
+        assert kept.is_error is False, kept.structured_content
+        retried = await aggregate(
+            frame_ref=_handle(kept.structured_content), aggregation="sum", group_by=("time_period",)
+        )
+        assert retried.is_error is False, retried.structured_content
+        summed, _trace_of_sum = await store.get(FrameRef(**_handle(retried.structured_content)))
+        answered.extend(summed.table.column("value").to_pylist())
+    assert answered == pytest.approx(sums)
 
 
 def test_a_private_donor_is_summed_and_counted_with_its_value() -> None:
@@ -878,16 +943,26 @@ def test_a_verb_pooling_donors_refuses_a_whole_total_beside_members_of_its_class
     )
 
 
-def test_a_quotient_keyed_by_donor_leaves_a_whole_total_out_beside_members_of_its_class() -> None:
-    # Keyed by donor, nothing is summed across donors, so the official donors' whole total is
-    # left out as any other total and each member keeps its own ratio.
-    frame = provider_frame(
-        {
-            _OFFICIAL: (OFFICIAL_WHOLE, 4267.6),
-            **{n: _MEMBERS[n] for n in ("country/FRA", "country/DEU")},
-        }
+def _share_by_donor(frame: Frame) -> list[tuple[str, float, float]]:
+    """Each donor's share of the donors' sum, with that sum."""
+    result = run_share_of(
+        frame,
+        frame,
+        stat_var="dcid:share",
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=(PROVIDER,),
+    )
+    return sorted(
+        (dict(share.key)[PROVIDER], share.percent, share.denominator_value)
+        for share in result.period_shares
     )
 
+
+def _quotient_by_donor(
+    frame: Frame, denominator_by: dict[str, str]
+) -> list[tuple[str, float, float]]:
+    """Each donor's quotient over `denominator_by`'s denominator, with that denominator."""
     result = run_quotient_of(
         frame,
         frame,
@@ -895,21 +970,65 @@ def test_a_quotient_keyed_by_donor_leaves_a_whole_total_out_beside_members_of_it
         numerator_entity={},
         denominator_entity={},
         numerator_by=(PROVIDER,),
-        denominator_by={PROVIDER: PROVIDER},
+        denominator_by=denominator_by,
+    )
+    return sorted(
+        (dict(cell.key)[PROVIDER], cell.quotient, cell.denominator_value)
+        for cell in result.period_quotients
     )
 
-    assert sorted(
-        (dict(cell.key)[PROVIDER], cell.quotient) for cell in result.period_quotients
-    ) == [
-        ("country/DEU", 1.0),
-        ("country/FRA", 1.0),
-    ]
-    assert [
-        (record.side, record.reason, record.entities) for record in result.exclusions.records
-    ] == [
-        ("numerator", "party_total", {PROVIDER: (_OFFICIAL,)}),
-        ("denominator", "party_total", {PROVIDER: (_OFFICIAL,)}),
-    ]
+
+# The official donors' whole total beside France and Germany, whom it holds.
+_OFFICIAL_AND_ITS_MEMBERS = {
+    _OFFICIAL: (OFFICIAL_WHOLE, 4267.6),
+    **{name: _MEMBERS[name] for name in ("country/FRA", "country/DEU")},
+}
+
+
+@pytest.mark.parametrize(
+    ("verb", "donors", "keyed"),
+    [
+        # Disjoint: the official total is its own key, and the shares add up to 100%.
+        (
+            _share_by_donor,
+            {_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), "GatesFoundation": (PRIVATE, 30.0)},
+            [
+                (_OFFICIAL, 4267.6 / 4297.6 * 100, 4297.6),
+                ("GatesFoundation", 30.0 / 4297.6 * 100, 4297.6),
+            ],
+        ),
+        # Overlapping: the total is left out of both sides, so each member's share is of the
+        # members' own sum.
+        (
+            _share_by_donor,
+            _OFFICIAL_AND_ITS_MEMBERS,
+            [("country/DEU", 62.5, 320.0), ("country/FRA", 37.5, 320.0)],
+        ),
+        (
+            lambda frame: _quotient_by_donor(frame, {PROVIDER: PROVIDER}),
+            _OFFICIAL_AND_ITS_MEMBERS,
+            [("country/DEU", 1.0, 200.0), ("country/FRA", 1.0, 120.0)],
+        ),
+        (
+            lambda frame: _quotient_by_donor(frame, {}),
+            _OFFICIAL_AND_ITS_MEMBERS,
+            [("country/DEU", 0.625, 320.0), ("country/FRA", 0.375, 320.0)],
+        ),
+    ],
+    ids=[
+        "share-disjoint",
+        "share-overlapping",
+        "quotient-keyed-denominator",
+        "quotient-pooled-denominator",
+    ],
+)
+def test_a_verb_keyed_by_donor_reads_the_same_donors_on_both_sides(
+    verb, donors: dict[str, tuple[tuple[str, str, str], float]], keyed
+) -> None:
+    # Keyed by donor, a whole total of a class no member has is its own key, and one that may
+    # hold a member is left out as any other total. A denominator that sums across donors
+    # keeps the donors the numerator keeps.
+    assert verb(provider_frame(donors)) == pytest.approx(keyed)
 
 
 def test_a_rank_of_donors_tags_private_ones_and_leaves_out_totals_and_residuals() -> None:

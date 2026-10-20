@@ -116,6 +116,7 @@ def sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """Narrow `frame` to `entity`'s own rows, resolve unit/facets over
     exactly that slice, then sum (`math.fsum`) every remaining row sharing
@@ -132,9 +133,12 @@ def sum_side(
     as the harness's `planner.shapes` refuses either side of a share over such a frame.
     A flow party that totals other parties is left out of the side, whether
     the side sums across its role or keys by it, unless `entity` binds that
-    role (`without_party_totals`). A whole total the side sums across beside
-    members of other classes stays, and one keyed by `by` is left out beside
-    the members as any other total.
+    role (`without_party_totals`). A whole total beside members of other
+    classes stays, summed across or its own key. A whole total that may hold
+    a member is left out of a role in `by` or `numerator_by` and refused on
+    any other. A denominator passes its numerator's `numerator_by`, so a role
+    the numerator keys by keeps the same rows on both sides even where the
+    denominator sums across it.
     """
     stat_var = require_single_stat_var(frame)
     validate_entity_columns(frame, (*entity, *by))
@@ -142,7 +146,7 @@ def sum_side(
     frame, party_exclusions = without_party_totals(
         frame,
         (column for column in role_columns(frame) if column not in entity),
-        keyed=by,
+        keyed=(*by, *numerator_by),
         side=side,
     )
     # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from

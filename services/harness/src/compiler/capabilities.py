@@ -182,7 +182,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
         # `scope.entities` taking a dcid only behind the `dcid:` marker.
-        input_schema_hash="1396c64df4391c767e4cffa3770331685715d531f758025312d7eaf71a6663ef",
+        input_schema_hash="1b100dcf6d4c89841f732737eabe4017ffb8847a354314f50bcabe047079051a",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -242,7 +242,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="8d22de7fcab0c3c9aba0d4e42e66693d01820081583cab5e4026e809d653502c",
+        input_schema_hash="43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
         output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(

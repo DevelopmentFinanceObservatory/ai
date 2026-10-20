@@ -1633,10 +1633,12 @@ async def get_data(
                 "and so on): party_kind is party, residual, or total for a group total such as "
                 '"Africa, Total", which sums and ranks leave out; party_class is official, '
                 'private or residual; party_whole is "true" on the published total of a whole population '
-                'such as "Official Donors, Total", which adds up with the other whole totals '
-                "when they are the only rows, or beside members of a class it does not hold "
-                'on a side a sum pools, and "false" elsewhere. A side an operation groups by '
-                'or ranks leaves every total out beside its members. A cell reads "untyped" '
+                'such as "Official Donors, Total", and "false" elsewhere. Whole totals add up '
+                "with each other when they are the only rows. Beside members of a class a whole "
+                "total does not hold, it stays: summed with them on a side a sum pools, and as "
+                "its own row on a side an operation groups by. A whole total that may hold a "
+                "member is left out of a grouped side and refuses on a pooled one. A side an "
+                'operation ranks leaves every total out beside its members. A cell reads "untyped" '
                 "where the party has no value. Set it for a spec that "
                 "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "

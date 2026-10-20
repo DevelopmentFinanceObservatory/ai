@@ -281,12 +281,20 @@ def _sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """`sum_side` for `side`. A composed side refuses as `_unit_part`
     refuses it (`QuotientOfSideUnitUnsupportedError`) whether its cells hold
     one row or several."""
     try:
-        return sum_side(frame, side=side, entity=entity, by=by, pinned_unit=pinned_unit)
+        return sum_side(
+            frame,
+            side=side,
+            entity=entity,
+            by=by,
+            pinned_unit=pinned_unit,
+            numerator_by=numerator_by,
+        )
     except ComposedUnitSumError as exc:
         raise QuotientOfSideUnitUnsupportedError(
             side=side, reason="composed", unit=exc.unit
@@ -345,6 +353,7 @@ def run_quotient_of(
         entity=denominator_entity,
         by=denominator_columns,
         pinned_unit=denominator_pinned_unit,
+        numerator_by=numerator_by,
     )
     numerator_stat_var = require_single_stat_var(numerator_frame)
     denominator_stat_var = require_single_stat_var(denominator_frame)

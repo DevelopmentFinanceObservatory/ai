@@ -452,10 +452,13 @@ def test_place_levels_mixed_beside_a_whole_total_counts_the_members_and_names_ex
         "whole_class": whole_class,
         "member_count": 30,
         "example_members": ["country/AUT", "country/BEL", "country/DEU"],
+        "filters": [
+            {"column": "financingProvider_party_whole", "values": ["true"]},
+            {"column": "financingProvider_party_kind", "values": ["party", "residual"]},
+        ],
     }
     # The count, not the three examples, is how many members the model is told of.
     assert "30 members" in refusal.message
-    assert "category_match on 'financingProvider_party_kind' keeping total" in refusal.message
 
 
 def test_comparison_periods_disjoint_names_its_sides_by_the_callers_labels() -> None:

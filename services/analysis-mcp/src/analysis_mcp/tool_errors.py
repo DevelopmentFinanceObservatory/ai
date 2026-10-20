@@ -159,10 +159,12 @@ type column). On a flow party role (`financingProvider`,
 exclusions; the refusal fires there only when several parties include one
 with no kind or a cell no kind names, are all totals on a role the verb pools
 (a role of totals alone, each `true` in `{role}_party_whole` on every row, is
-summed), hold a whole total beside members it may hold (one of its
-`{role}_party_class`, or of none, or any member when the total has no class;
-a whole total of a class no member has is summed beside them), or sit in a
-frame that carries no kind column for their role. `rank`
+summed), hold on a pooled role a whole total beside members it may hold (one
+of its `{role}_party_class`, or of none, or any member when the total has no
+class; a whole total of a class no member has is summed beside them), or sit
+in a frame that carries no kind column for their role. On a role the verb
+groups by, a whole total that may hold a member is left out as a
+`party_total` and one that holds none keeps its own row. `rank`
 ranks a role holding only totals, and leaves the residuals of a ranked role
 holding parties out as `party_residual` exclusions.
 
@@ -201,6 +203,7 @@ from typing import Any, Literal, Self
 from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
+    WHOLE_CELL,
     WHOLE_SIDE_POPULATIONS,
     PartyKind,
     class_column,
@@ -346,6 +349,9 @@ _KEY_SAMPLE_IN_MESSAGE = 5
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
 # are of kind `party` too, told apart by their class.
 _MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
+# The kinds a filter keeps to sum the members of a role alone: its parties and the
+# unallocated residuals, which add to a sum though no ranking compares them.
+_POOLED_MEMBER_KINDS: tuple[PartyKind, ...] = ("party", "residual")
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1318,8 +1324,9 @@ class ToolRefusal:
         `fix.member_kinds` lists. `whole_total` names a whole total of
         `whole_class`, or of no class when None, pooled beside `member_count`
         members it may hold, of which `members` are examples. The message asks
-        to keep the totals alone or the members alone, by a filter on
-        `column`."""
+        to keep the whole totals alone, by a filter on the role's whole column,
+        or the members alone, by a filter on `column`, and `fix.filters` holds
+        both."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and whole_total is not None:
             counted = f"{member_count} member{'' if member_count == 1 else 's'}"
@@ -1329,15 +1336,16 @@ class ToolRefusal:
                 if whole_class is not None
                 else f"a whole total of no one class, and it may hold the {counted} beside it"
             )
+            whole = whole_column(role)
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
                     f"The {role} parties in this frame cannot be pooled: {whole_total} is "
                     f"{held}, such as {', '.join(members)}. A sum across them would count "
                     "those members twice. Filter the frame with a category_match on "
-                    f"{column!r} keeping total, to sum the totals alone, or keeping party and "
-                    "residual, to sum the members alone, then retry with that result's "
-                    "frame_ref."
+                    f"{whole!r} keeping {WHOLE_CELL}, to sum the whole totals alone, or a "
+                    f"category_match on {column!r} keeping {' and '.join(_POOLED_MEMBER_KINDS)}, "
+                    "to sum the members alone, then retry with that result's frame_ref."
                 ),
                 fix={
                     "column": column,
@@ -1346,6 +1354,10 @@ class ToolRefusal:
                     "whole_class": whole_class,
                     "member_count": member_count,
                     "example_members": list(members),
+                    "filters": [
+                        {"column": whole, "values": [WHOLE_CELL]},
+                        {"column": column, "values": list(_POOLED_MEMBER_KINDS)},
+                    ],
                 },
             )
         if role is not None and not types:

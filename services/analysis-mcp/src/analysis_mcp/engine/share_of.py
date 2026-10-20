@@ -425,6 +425,7 @@ def run_share_of(
             entity=denominator_entity,
             by=denominator_columns,
             pinned_unit=denominator_pinned_unit,
+            numerator_by=numerator_by,
         )
     numerator_grouped, denominator_grouped = numerator.by_key, denominator.by_key
     numerator_unit, denominator_unit = numerator.unit, denominator.unit
