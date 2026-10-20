@@ -115,6 +115,7 @@ from planner.plan import (
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
+    TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
     PinSource,
@@ -131,6 +132,7 @@ from planner.plan import (
     load_plan,
     load_plan_rounds,
     pin_sources,
+    record_optional_decline,
     record_unsupported,
     save_pin_sources,
     save_plan,
@@ -543,6 +545,14 @@ class PlannerSeam:
                 # already been briefed gets.
                 ctx.session.state[PLAN_STATE_KEY] = None
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
+                # A first draft may decline an ask no requirement kind states,
+                # which no tool's answer could ever earn. A replan or an
+                # amendment earns each decline from a tool's answer.
+                record_optional_decline(
+                    cast(SessionState, ctx.session.state),
+                    UnsupportedOperation.NO_OPERATION_COVERS,
+                    terminal=True,
+                )
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
         # cancelled on the way out (`translator.discovery.CutCalls`).
@@ -684,11 +694,14 @@ class PlannerSeam:
         # guards a direct caller of this seam's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY` and
-        # `COMPILE_FAILURES_STATE_KEY` too. The declines an ask-the-user resume
-        # still owes or may make, and the failures it may repeat, are this
-        # entry's own.
-        for key in (UNSUPPORTED_STATE_KEY, OPTIONAL_DECLINES_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
+        # Decline permissions and compile failures survive an ask-the-user resume
+        # within this entry.
+        for key in (
+            UNSUPPORTED_STATE_KEY,
+            OPTIONAL_DECLINES_STATE_KEY,
+            TERMINAL_DECLINES_STATE_KEY,
+            COMPILE_FAILURES_STATE_KEY,
+        ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
 
@@ -1294,7 +1307,7 @@ def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) 
     )
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
-        "`answered`, or, when an `unsupported` answer earned its decline (see `declined`), "
+        "`answered`, or, when `declined` permits its decline, "
         "decline it in `declined` with its number as `ask_ref`. When the plan computes "
         "part of an ask, do both: answer it with what is computed and decline the rest, "
         "naming that part in the decline's `ask`.\n" + rule + lines
