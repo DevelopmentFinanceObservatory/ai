@@ -658,19 +658,36 @@ _WHOLE_SET = {
 
 
 def test_a_group_carries_the_kinds_its_whole_total_holds() -> None:
-    single = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
+    sided = {"origin": _WHOLE_TOTAL["origin"] | {"side_kinds": ["party", "private"]}}
+    single = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=sided))
     union = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET))
     members = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
 
-    assert [(g.total, g.whole_of) for g in single.groups] == [("DACOfficialDonors", ("party",))]
-    assert [(g.total, g.whole_of) for g in union.groups] == [(None, ("party", "private"))]
-    assert [g.whole_of for g in members.groups] == [(), ()]
+    assert [(g.total, g.whole_of, g.side_kinds) for g in single.groups] == [
+        ("DACOfficialDonors", ("party",), ("party", "private"))
+    ]
+    assert [(g.total, g.whole_of, g.side_kinds) for g in union.groups] == [
+        (None, ("party", "private"), ())
+    ]
+    assert [(g.whole_of, g.side_kinds) for g in members.groups] == [((), ()), ((), ())]
 
 
-def test_a_whole_total_is_read_with_the_population_it_holds() -> None:
+@pytest.mark.parametrize(
+    ("side_kinds", "outside"),
+    [
+        (["party", "private", "residual"], " (private donors are outside it)"),
+        (["party", "residual"], ""),
+        (None, ""),
+    ],
+    ids=["dac2a-publishes-private-donors", "dac2b-publishes-none", "search-without-the-field"],
+)
+def test_a_whole_total_is_read_with_the_population_it_holds(
+    side_kinds: list[str] | None, outside: str
+) -> None:
     labels = {entity["ref"]: entity["label"] for entity in _WHOLE_ENTITIES}
+    total = _WHOLE_TOTAL["origin"] | ({} if side_kinds is None else {"side_kinds": side_kinds})
     (single,) = source_from_spec_block(
-        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL)
+        _spec(entities=_WHOLE_ENTITIES, entity_groups={"origin": total})
     ).groups
     (union,) = source_from_spec_block(
         _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET)
@@ -678,7 +695,7 @@ def test_a_whole_total_is_read_with_the_population_it_holds() -> None:
 
     assert total_reading(single, labels) == (
         "The figures for all donors are Official Donors, Total, the total the source "
-        "publishes for all official donors (private donors are outside it), "
+        f"publishes for all official donors{outside}, "
         "not its members' figures added up."
     )
     assert total_reading(union, labels) == (

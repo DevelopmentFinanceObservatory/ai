@@ -278,15 +278,15 @@ def without_party_totals(
 class PooledParties:
     """The parties of one flow role a sum pooled: `count` distinct parties over
     `periods` periods, of which `private_count` are `private` (`common.place_type.
-    PRIVATE_KIND`), holding `private_value` of the summed rows' value. A `private`
-    party sums like any other, so a total over the role includes this value and
-    the digest says so."""
+    PRIVATE_KIND`), holding `private_value` of the summed rows' value, or None when
+    that value sums past the finite double range. A `private` party sums like any
+    other, so a total over the role includes this value and the digest says so."""
 
     role: str
     count: int
     periods: int
     private_count: int
-    private_value: float
+    private_value: float | None
 
 
 def _private_rows(table: pa.Table, role: str) -> pa.Table | None:
@@ -302,23 +302,14 @@ def _private_rows(table: pa.Table, role: str) -> pa.Table | None:
     )
 
 
-class PrivateValueOverflowError(OverflowError):
-    """The `private` parties of `role` hold values whose sum exceeds the finite
-    double range (`math.fsum`'s own `OverflowError`)."""
-
-    def __init__(self, role: str) -> None:
-        self.role = role
-        super().__init__(f"the private parties of {role!r} sum past the finite range")
-
-
 def pooled_parties(table: pa.Table, roles: Iterable[str]) -> tuple[PooledParties, ...]:
     """What a sum over `table`, a verb's narrowed rows, pooled in each flow party
     role among `roles` that holds several parties and a kind column
     (`without_party_totals` has left its totals out).
 
-    Raises:
-        PrivateValueOverflowError: A role's `private` values sum past the finite
-            double range. The caller converts it to its own non-finite refusal.
+    The private value pools every group and period the sum covers, so it can
+    pass the finite double range where each of the verb's own sums stays
+    within it. It is then None, and the verb's results still return.
     """
     pooled = []
     for role in dict.fromkeys(roles):
@@ -329,9 +320,9 @@ def pooled_parties(table: pa.Table, roles: Iterable[str]) -> tuple[PooledParties
         if private is None:
             continue
         try:
-            private_value = math.fsum(private.column(VALUE_COLUMN).to_pylist())
-        except OverflowError as exc:
-            raise PrivateValueOverflowError(role) from exc
+            private_value: float | None = math.fsum(private.column(VALUE_COLUMN).to_pylist())
+        except OverflowError:
+            private_value = None
         pooled.append(
             PooledParties(
                 role=role,

@@ -20,7 +20,11 @@ from common.materialisation import FrameRef, MintRecord
 from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget, row_budget
 from compiler.surface import ToolSurfaceUnavailableError
-from data_mcp.definition_store import InMemoryDefinitionStore, StoredDefinition
+from data_mcp.definition_store import (
+    DefinitionStoreUnavailable,
+    InMemoryDefinitionStore,
+    StoredDefinition,
+)
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from fastapi import FastAPI, HTTPException
@@ -411,7 +415,12 @@ async def test_a_card_whose_roots_are_all_current_stands_and_nothing_else_is_ask
 
 async def test_a_rebuilding_root_answers_pending_with_the_longest_wait(apis: RecordedApis) -> None:
     third = "spec_" + "d" * 32
-    apis.recipes[STORED] = recipe_of(STORED, SPEC, OTHER_SPEC, third)
+    recipe = recipe_of(STORED, SPEC, OTHER_SPEC, third)
+    recipe["roots"][0] |= {
+        "options": {**OPTIONS, "columns": list(KIND_COLUMNS)},
+        "enrichment_stamp": "stamp-old",
+    }
+    apis.recipes[STORED] = recipe
     apis.heads = {SPEC: SECOND}
     apis.rebuilding = {OTHER_SPEC: 1.5, third: 4.0}
     replayer = Replayer(apis)
@@ -422,13 +431,17 @@ async def test_a_rebuilding_root_answers_pending_with_the_longest_wait(apis: Rec
         200,
         {"status": "pending", "retry_after_s": 4.0},
     )
+    assert apis.calls("/versions") == []
     assert apis.calls("/recipes/replays/") == []
     assert replayer.entered == 0
 
 
 async def test_a_frame_already_replayed_from_these_root_versions_is_rendered_without_a_replay(
-    apis: RecordedApis,
+    apis: RecordedApis, unavailable_definition: SuspendingDefinitionStore
 ) -> None:
+    # The root records neither columns nor a stamp, and its version lists no stamp, so
+    # its pair names it whatever its definition says, and the store is not read.
+    apis.versions[SPEC] = listed((SECOND, None), (FIRST, None))
     key = replay_key(
         normal_form_hash=NORMAL_FORM,
         root_datasets=[{"spec_id": SPEC, "content_version": SECOND}],
@@ -445,15 +458,57 @@ async def test_a_frame_already_replayed_from_these_root_versions_is_rendered_wit
     ]
     assert apis.rendered_on() == [REPLAYED]
     assert replayer.entered == 0
+    assert unavailable_definition.reads == []
 
 
 @pytest.mark.parametrize(
-    ("served_stamp", "status", "replayed"),
+    ("versions_answer", "outcome"),
+    [
+        (None, "current"),
+        (
+            httpx2.Response(
+                503,
+                json={"code": "internal_error", "retryable": False},
+                headers={"content-type": "application/problem+json"},
+            ),
+            None,
+        ),
+    ],
+    ids=["listed", "versions-unavailable"],
+)
+async def test_kind_roots_on_one_dataset_read_its_versions_once(
+    apis: RecordedApis, versions_answer: httpx2.Response | None, outcome: str | None
+) -> None:
+    """Two stamped roots on one dataset whose pairs stand. The listed stamp says
+    whether their kinds still stand, so a refresh that cannot read it is refused."""
+    recipe = recipe_of(STORED, SPEC, SPEC)
+    for root in recipe["roots"]:
+        root.update(
+            options={**OPTIONS, "columns": list(KIND_COLUMNS)}, enrichment_stamp="stamp-old"
+        )
+    apis.recipes[STORED] = recipe
+    apis.heads[SPEC] = FIRST
+    apis.versions[SPEC] = listed((FIRST, "stamp-old"))
+    apis.versions_answer = versions_answer
+    replayer = Replayer(apis)
+    async with client_of(service_over(apis, replayer)) as client:
+        response = await refresh(client)
+
+    if outcome is None:
+        assert_refused(response, "upstream_unavailable")
+    else:
+        assert response.json() == {"status": outcome}
+    assert len(apis.calls("/versions")) == 1
+    assert replayer.entered == 0
+
+
+@pytest.mark.parametrize(
+    ("listed_stamp", "status", "replayed"),
     [("stamp-old", "current", False), ("stamp-new", "redrawn", True)],
     ids=["same-stamp", "stamp-moved"],
 )
 async def test_a_kind_root_on_a_standing_version_is_current_only_under_its_own_stamp(
-    apis: RecordedApis, served_stamp: str, status: str, replayed: bool
+    apis: RecordedApis, listed_stamp: str, status: str, replayed: bool
 ) -> None:
     kinds = {**OPTIONS, "columns": list(KIND_COLUMNS)}
     recipe = recipe_of(STORED)
@@ -466,8 +521,8 @@ async def test_a_kind_root_on_a_standing_version_is_current_only_under_its_own_s
     }
     apis.recipes[STORED] = recipe
     apis.heads[SPEC] = FIRST
-    apis.versions[SPEC] = listed((FIRST, served_stamp))
-    apis.enrichment_stamp = served_stamp
+    apis.versions[SPEC] = listed((FIRST, listed_stamp))
+    apis.enrichment_stamp = listed_stamp
     replayer = Replayer(apis)
     async with client_of(service_over(apis, replayer)) as client:
         response = await refresh(client)
@@ -476,7 +531,7 @@ async def test_a_kind_root_on_a_standing_version_is_current_only_under_its_own_s
         normal_form_hash=NORMAL_FORM,
         root_datasets=[
             root_identity(
-                {"spec_id": SPEC, "content_version": FIRST}, enrichment_stamp=served_stamp
+                {"spec_id": SPEC, "content_version": FIRST}, enrichment_stamp=listed_stamp
             )
         ],
         execution_identities=[current_execution_identity().canonical_string()],
@@ -671,6 +726,23 @@ def flow_definition() -> Iterator[SuspendingDefinitionStore]:
             ]
         )
     )
+    set_definition_store(held)
+    yield held
+    set_definition_store(None)
+
+
+class UnavailableDefinitionStore(SuspendingDefinitionStore):
+    """A definition store that is down: every read raises."""
+
+    async def get(self, spec_id: str, *, schema_version: int) -> StoredDefinition | None:
+        self.reads.append(spec_id)
+        raise DefinitionStoreUnavailable("the definition store is down")
+
+
+@pytest.fixture
+def unavailable_definition() -> Iterator[SuspendingDefinitionStore]:
+    """The definition store as down, so a refresh that reads a definition is refused."""
+    held = UnavailableDefinitionStore()
     set_definition_store(held)
     yield held
     set_definition_store(None)

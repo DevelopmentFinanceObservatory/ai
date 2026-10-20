@@ -56,11 +56,13 @@ def problem(status: int, code: str, **members: object) -> httpx2.Response:
     )
 
 
-def _listed(version: dict[str, str | None]) -> dict[str, Any]:
-    """`version` as the versions route lists it: a raw version is `plain`, and a
-    collapse here has no recorded groupby."""
+def _listed(version: dict[str, str | None], *, stamp: str | None) -> dict[str, Any]:
+    """`version` as the versions route lists it: a raw version is `plain`, a
+    collapse here has no recorded groupby, and `stamp` is the stamp it lists, none
+    when `None`."""
     rendering = "plain" if version["base_content_version"] is None else "not_recorded"
-    return {**version, "rendering": rendering, "groupby": None}
+    listed = {**version, "rendering": rendering, "groupby": None}
+    return listed if stamp is None else listed | {"enrichment_stamp": stamp}
 
 
 class FakeApis:
@@ -75,7 +77,8 @@ class FakeApis:
         self.published: set[Pair] = {pair(ref) for ref in published}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, str | None]]] = {}
-        # The stamp the versions answer lists, or none when apis lists none.
+        # The stamp the versions answer lists at its top and on every version, or
+        # none when apis lists none.
         self.enrichment_stamp: str | None = None
         self.answers: dict[str, httpx2.Response | Exception] = {}
         self.requests: list[httpx2.Request] = []
@@ -102,7 +105,10 @@ class FakeApis:
                 json={
                     "schema_version": 1,
                     "spec_id": parts[0],
-                    "versions": [_listed(version) for version in self.versions.get(parts[0], [])],
+                    "versions": [
+                        _listed(version, stamp=self.enrichment_stamp)
+                        for version in self.versions.get(parts[0], [])
+                    ],
                     **(
                         {}
                         if self.enrichment_stamp is None
@@ -338,12 +344,12 @@ async def test_a_root_with_no_mint_record_is_recovered_once_and_written_back(
 
 
 @pytest.mark.parametrize(
-    ("served_stamp", "recovers"),
+    ("listed_stamp", "recovers"),
     [("stamp-now", True), ("stamp-newer", False), (None, False)],
     ids=["current-stamp", "older-stamp", "no-stamp-served"],
 )
 async def test_a_kind_root_with_no_mint_record_is_recovered_under_the_stamp_the_versions_route_lists(
-    store: InMemoryMaterialisationStore, served_stamp: str | None, recovers: bool
+    store: InMemoryMaterialisationStore, listed_stamp: str | None, recovers: bool
 ) -> None:
     """The root was named with the kind columns under `stamp-now`. The versions route
     lists the stamp current now, and only a root named under it is the one served."""
@@ -361,7 +367,7 @@ async def test_a_kind_root_with_no_mint_record_is_recovered_under_the_stamp_the_
     total = await summed(root)
     apis = FakeApis(published=[total])
     apis.versions[SPEC] = [{"content_version": ROOT.content_version, "base_content_version": None}]
-    apis.enrichment_stamp = served_stamp
+    apis.enrichment_stamp = listed_stamp
 
     report = await backfill(store, apis, write=True)
 

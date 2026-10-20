@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal, cast
 
-from common.time_grain import span_label
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, ComposedUnit, UnitCell
 
@@ -30,7 +29,6 @@ from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     PooledParties,
-    PrivateValueOverflowError,
     combine_exclusions,
     entity_roles,
     narrow_and_resolve,
@@ -185,13 +183,9 @@ def sum_side(
                 raise NonFiniteCellError(time_period=period, reason="overflow") from exc
         summed[key] = summed_periods
 
-    try:
-        pooled = pooled_parties(
-            table, (column for column in role_columns(frame) if column not in (*entity, *by))
-        )
-    except PrivateValueOverflowError as exc:
-        # The private value pools every period the side sums.
-        raise NonFiniteCellError(time_period=span_label(periods), reason="overflow") from exc
+    pooled = pooled_parties(
+        table, (column for column in role_columns(frame) if column not in (*entity, *by))
+    )
 
     entities: dict[tuple[str, ...], dict[str, int]] = {}
     for (*key, period), count in entity_counts(

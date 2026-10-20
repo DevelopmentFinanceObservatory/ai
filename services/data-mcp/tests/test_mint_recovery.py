@@ -3,7 +3,7 @@ its pair, the frame the store holds, and the dataset's stored versions."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -40,12 +40,24 @@ _VERSIONS = (
 
 
 class _Versions:
-    """A fake of `LiveApisClient.list_versions`, recording the datasets asked for."""
+    """A fake of `LiveApisClient.list_versions`, recording the datasets asked for. Each
+    version lists `stamp`, as apis lists its digest on every version whose frame holds a
+    party role, or only the versions in `stamped` when that is given."""
 
     def __init__(
-        self, versions: Sequence[DatasetVersion] = _VERSIONS, *, stamp: str | None = None
+        self,
+        versions: Sequence[DatasetVersion] = _VERSIONS,
+        *,
+        stamp: str | None = None,
+        stamped: Collection[str] | None = None,
     ) -> None:
-        self._versions = tuple(replace(v, served_stamp=stamp) for v in versions)
+        self._versions = tuple(
+            replace(
+                v,
+                enrichment_stamp=stamp if stamped is None or v.content_version in stamped else None,
+            )
+            for v in versions
+        )
         self.asked: list[str] = []
 
     async def __call__(self, *, spec_id: str) -> Sequence[DatasetVersion]:
@@ -324,18 +336,23 @@ def _salted(stamp: str, *, groupby: Mapping[str, Any] | None = None) -> FrameRef
 
 
 @pytest.mark.parametrize("kept_sum", [False, True], ids=["from-a-version", "from-the-trace"])
+@pytest.mark.parametrize(
+    "stamped",
+    [None, {_OLDER}],
+    ids=["every-version-lists-it", "only-the-roots-version-lists-it"],
+)
 async def test_a_kind_root_named_under_the_current_stamp_is_recovered_with_it(
-    kept_sum: bool,
+    kept_sum: bool, stamped: set[str] | None
 ) -> None:
-    """A held frame's pair is reproduced from the stamp the versions route lists, and
-    the record keeps it, so a replay names the same pair."""
+    """A held frame's pair is reproduced from the stamp its own version lists, whatever
+    the other versions list, and the record keeps it, so a replay names the same pair."""
     ref = _salted("stamp-now", groupby=_GROUPBY if kept_sum else None)
     options = _KIND_SUM if kept_sum else _KIND_OPTIONS
     # A version reproduces the pair of an unsummed root without the trace's options.
     store = await _holding(ref, "dcid:A", options=options if kept_sum else None)
 
     record = await recover_mint_record(
-        ref, dataset_versions=_Versions(stamp="stamp-now"), store=store
+        ref, dataset_versions=_Versions(stamp="stamp-now", stamped=stamped), store=store
     )
 
     assert record == MintRecord(

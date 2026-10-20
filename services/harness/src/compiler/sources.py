@@ -635,7 +635,9 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     left out rather than failing the block. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
     `whole_of` is the kinds of party a whole-population total holds, or a
-    union of such totals, absent for any other set.
+    union of such totals, absent for any other set. `side_kinds` is the kinds
+    of party, totals aside, the dataset publishes on such a set's side, absent
+    for any other set and from a Search that predates it.
     """
     found = []
     for role, raw in groups.items():
@@ -648,6 +650,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
                     whole_of=tuple(_strings(group.get("whole_of"))),
+                    side_kinds=tuple(_strings(group.get("side_kinds"))),
                 )
             )
     return tuple(found)
@@ -764,9 +767,11 @@ _WHOLE_OF_HOLDS: dict[tuple[str, str], str] = {
 
 
 def _whole_scope(group: ResolvedGroup) -> str:
-    """What `group`'s whole-population total holds, and on the donor side what it leaves out."""
+    """What `group`'s whole-population total holds, and on the donor side the private
+    donors it leaves out when the source publishes some there (`side_kinds`). A group
+    without `side_kinds` says nothing it leaves out, since nothing says what the side holds."""
     held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, kind), kind) for kind in group.whole_of)
-    if group.role == "origin" and "private" not in group.whole_of:
+    if group.role == "origin" and "private" in group.side_kinds and "private" not in group.whole_of:
         return f"{held} (private donors are outside it)"
     return held
 
@@ -796,7 +801,8 @@ def total_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str | None
     source names it ("Africa, Total") where that differs from the set's
     own name. A group with `whole_of` is read as the source's total for a
     whole population ("Official Donors, Total, the total the source publishes
-    for all official donors (private donors are outside it)"), or as the sum of such totals when it names no
+    for all official donors (private donors are outside it)" where the source
+    publishes private donors), or as the sum of such totals when it names no
     single party.
     """
     if group.whole_of:

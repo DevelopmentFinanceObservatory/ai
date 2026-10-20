@@ -290,13 +290,11 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
 
 
 @pytest.mark.parametrize(
-    ("listed", "stamp"),
-    [({"enrichment_stamp": "ens_1"}, "ens_1"), ({}, None), ({"enrichment_stamp": 7}, None)],
+    "listed",
+    [{"enrichment_stamp": "ens_1"}, {}, {"enrichment_stamp": 7}],
     ids=["stamp-listed", "no-stamp-listed", "stamp-not-text"],
 )
-async def test_list_versions_carries_each_versions_stamp_and_the_answers_on_every_version(
-    listed: dict[str, Any], stamp: str | None
-) -> None:
+async def test_list_versions_carries_each_versions_own_stamp(listed: dict[str, Any]) -> None:
     calls = Calls(
         ok(
             {
@@ -319,7 +317,6 @@ async def test_list_versions_carries_each_versions_stamp_and_the_answers_on_ever
     async with make_client(calls) as client:
         versions = await client.list_versions(spec_id=SPEC)
 
-    assert [version.served_stamp for version in versions] == [stamp, stamp]
     assert [version.enrichment_stamp for version in versions] == ["ens_2", None]
 
 

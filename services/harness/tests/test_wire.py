@@ -831,8 +831,28 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
         ),
         ({"label": "Africa", "ref": "africa"}, {"label": "Africa", "ref": "africa"}),
         ({"label": "Africa", "whole_of": []}, {"label": "Africa"}),
+        (
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ["party"],
+                "side_kinds": ["party", "private", "residual"],
+            },
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ("party",),
+                "side_kinds": ("party", "private", "residual"),
+            },
+        ),
     ],
-    ids=["single-total", "set-of-totals", "without-the-field", "empty-field-is-absent"],
+    ids=[
+        "single-total",
+        "set-of-totals",
+        "without-the-field",
+        "empty-field-is-absent",
+        "with-the-sides-kinds",
+    ],
 )
 def test_a_seed_carries_the_kinds_a_whole_total_holds(group: object, kept: dict[str, Any]) -> None:
     block = _region_members_block()

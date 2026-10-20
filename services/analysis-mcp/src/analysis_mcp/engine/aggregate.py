@@ -47,7 +47,6 @@ from dataclasses import dataclass, field
 from typing import cast
 
 import pyarrow as pa
-from common.place_type import PRIVATE_KIND, kind_column
 from common.time_grain import span_label
 from dfo_frame_grammar import Frame, array_kernel
 from dfo_frame_grammar.grammar import (
@@ -73,7 +72,6 @@ from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
     PooledParties,
-    PrivateValueOverflowError,
     combine_exclusions,
     entity_roles,
     facet_columns,
@@ -327,12 +325,7 @@ def run_aggregate(
     exclusions = combine_exclusions(party_exclusions, exclusions)
     refuse_sum_over_composed_unit(aggregation, resolved.unit)
     # Only a sum's digest reports the parties it pooled.
-    try:
-        summed_parties = pooled_parties(table, pooled) if aggregation == "sum" else ()
-    except PrivateValueOverflowError as exc:
-        raise NonFiniteAggregateResultError(
-            group_key={kind_column(exc.role): PRIVATE_KIND}, aggregation=aggregation
-        ) from exc
+    summed_parties = pooled_parties(table, pooled) if aggregation == "sum" else ()
 
     # Every `group_by` column left after `_DISALLOWED_GROUP_BY_COLUMNS` is
     # stat_var, time_period, or a role, always a plain, non-null string by

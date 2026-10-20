@@ -494,25 +494,34 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
 
 
 @pytest.mark.parametrize(
-    ("whole_of", "hashed"),
+    ("marked", "hashed"),
     [
         (
-            ["party"],
+            {"whole_of": ["party"]},
             {"role": "observationAbout", "label": "Africa", "ref": "africa", "whole_of": ["party"]},
         ),
-        (None, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
+        (
+            {"whole_of": ["party"], "side_kinds": ["party", "residual"]},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "whole_of": ["party"],
+                "side_kinds": ["party", "residual"],
+            },
+        ),
+        ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
     ],
-    ids=["with-the-marker", "without-the-field"],
+    ids=["with-the-marker", "with-the-sides-kinds", "without-the-field"],
 )
 async def test_a_seed_resolves_its_set_with_the_kinds_its_whole_total_holds(
-    monkeypatch: pytest.MonkeyPatch, whole_of: list[str] | None, hashed: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, marked: dict[str, list[str]], hashed: dict[str, Any]
 ) -> None:
     # A seed without the field resolves to the group it always did, so a plan hash over
     # the source does not move.
     fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
     block = json.loads(fixture.read_text())["spec"]
-    if whole_of is not None:
-        block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = whole_of
+    block["resolved"]["entity_groups"]["observationAbout"] |= marked
     (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
     resolved: list[Any] = []
 

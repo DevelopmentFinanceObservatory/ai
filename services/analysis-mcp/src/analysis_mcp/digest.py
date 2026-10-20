@@ -156,7 +156,10 @@ def _private_count_text(pooled: PooledParties) -> str:
 
 def _private_clause(pooled: PooledParties) -> str:
     """`24 private donors (311400000)`: the private parties a sum pooled and their value, over
-    the periods when the sum spans several."""
+    the periods when the sum spans several. A value past the finite range is left out, and the
+    count stands alone."""
+    if pooled.private_value is None:
+        return _private_count_text(pooled)
     value = _format_number(pooled.private_value)
     over = f" over {pooled.periods} periods" if pooled.periods > 1 else ""
     return f"{_private_count_text(pooled)} ({value}{over})"

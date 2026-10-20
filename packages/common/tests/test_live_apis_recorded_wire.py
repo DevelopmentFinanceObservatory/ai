@@ -119,7 +119,6 @@ def _versions(response: dict[str, Any]) -> object:
             version["rendering"],
             version["groupby"],
             enrichment_stamp=version.get("enrichment_stamp"),
-            served_stamp=response["body"].get("enrichment_stamp"),
         )
         for version in response["body"]["versions"]
     )

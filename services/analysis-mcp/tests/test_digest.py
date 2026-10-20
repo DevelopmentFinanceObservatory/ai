@@ -1308,14 +1308,31 @@ def test_a_digest_names_no_private_donors_where_the_sum_holds_none(
     assert "private" not in digest
 
 
-def test_a_sum_over_several_years_states_the_private_value_over_them() -> None:
+@pytest.mark.parametrize(
+    ("donors", "group_by", "line"),
+    [
+        (_DONORS, (), "This sum of 3 providers includes 1 private donor (60 over 2 periods)."),
+        # Each year's sum is finite, and the private donor's value across both years is not.
+        (
+            {"country/FRA": ("party", 1.0), "GatesFoundation": ("private", 1e308)},
+            ("time_period",),
+            "This sum of 2 providers includes 1 private donor.",
+        ),
+    ],
+    ids=["finite", "overflowing"],
+)
+def test_a_sum_over_several_years_states_the_private_value_over_them(
+    donors: dict[str, tuple[str, float]], group_by: tuple[str, ...], line: str
+) -> None:
     result = run_aggregate(
-        provider_frame(_DONORS, years=("2020", "2021")), group_by=(), aggregation="sum"
+        provider_frame(donors, years=("2020", "2021")), group_by=group_by, aggregation="sum"
     )
 
-    digest = render_aggregate_digest(group_by=(), aggregation="sum", result=result, **_identity())
+    digest = render_aggregate_digest(
+        group_by=group_by, aggregation="sum", result=result, **_identity()
+    )
 
-    assert "includes 1 private donor (60 over 2 periods)." in digest
+    assert line in digest.splitlines()
 
 
 def test_a_rank_of_donors_tags_each_private_donor() -> None:
