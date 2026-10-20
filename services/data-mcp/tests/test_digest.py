@@ -68,10 +68,11 @@ def _envelope(
     variable_text: str | None = "malaria grants",
     warnings: list[dict[str, Any]] | None = None,
     parts: list[dict[str, Any]] | None = None,
+    sentence_plan: list[dict[str, Any]] | None = None,
     **status_payload: Any,
 ) -> dict[str, Any]:
     """A single-part envelope, unless `parts` supplies the parts list directly."""
-    return {
+    envelope = {
         "schema_version": 1,
         "query_echo": {"entry_path": "parsed", "extract_skipped": True},
         "diagnostics": {
@@ -84,6 +85,9 @@ def _envelope(
         if parts is not None
         else [_part(status, variable_text=variable_text, **status_payload)],
     }
+    if sentence_plan is not None:
+        envelope["sentence_plan"] = sentence_plan
+    return envelope
 
 
 # Digest rendering, definite status
@@ -353,9 +357,27 @@ def test_single_part_envelope_renders_with_no_part_label() -> None:
     assert "Part 1" not in digest
 
 
-def test_mixed_status_envelope_states_it_is_mixed() -> None:
+_OPENER = [
+    {"kind": "text", "segment": "heading", "text": "Answered 1 of 2 parts."},
+    {"kind": "text", "text": " "},
+]
+
+
+@pytest.mark.parametrize(
+    ("status", "sentence_plan", "leading_line"),
+    [
+        ("mixed", _OPENER, "Answered 1 of 2 parts."),
+        ("mixed", None, None),
+        ("definite", _OPENER, None),
+    ],
+    ids=["mixed_with_opener", "mixed_without_opener", "definite"],
+)
+def test_leading_line_is_the_mixed_opener_token(
+    status: str, sentence_plan: list[dict[str, Any]] | None, leading_line: str | None
+) -> None:
     envelope = _envelope(
-        "mixed",
+        status,
+        sentence_plan=sentence_plan,
         parts=[
             _part("definite", variable_text="health spending", spec=_spec(spec_id="spec_1")),
             _part(
@@ -366,9 +388,21 @@ def test_mixed_status_envelope_states_it_is_mixed() -> None:
         ],
     )
 
-    digest = render_digest(envelope)
+    first_block = render_digest(envelope).split("\n\n")[0]
 
-    assert digest.startswith("Mixed outcome")
+    if leading_line is None:
+        assert not first_block.startswith("Answered")
+    else:
+        assert first_block == leading_line
+
+
+def test_mixed_opener_token_owned_by_a_part_is_not_a_leading_line() -> None:
+    envelope = _envelope(
+        "mixed",
+        sentence_plan=[{"kind": "text", "segment": "heading", "text": "Owned.", "part_index": 0}],
+    )
+
+    assert "Owned." not in render_digest(envelope)
 
 
 def test_part_own_warning_renders_inside_its_block() -> None:
