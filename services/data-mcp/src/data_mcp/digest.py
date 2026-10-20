@@ -94,9 +94,9 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     block bare; an envelope of two or more parts labels each block by its
     `variable_text`. A definite block also names the measure Search elected
     and each sibling measure's own spec_id (`_measure_choice_line`).
-    A mixed envelope's leading line is the text of the first
-    `sentence_plan` token when it is an unowned `heading` token, and a mixed
-    envelope without one has no leading line. A part whose ask named
+    A mixed envelope with a definite part leads with the text of the first
+    `sentence_plan` token when it is an unowned `heading` token
+    (`_mixed_opener`); any other envelope has no leading line. A part whose ask named
     sources ends its block with one line saying which it asked for and
     which it excluded (`_sources_line`). Each
     part's own warnings render inside its block, though a refused part
@@ -128,8 +128,12 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
 
 
 def _mixed_opener(envelope: Mapping[str, Any]) -> str | None:
-    """The unowned heading token the Search API opens a mixed resolution with."""
-    if envelope.get("status") != "mixed":
+    """The unowned heading token the Search API opens a mixed resolution with. Search
+    opens one only when a part is definite; without one, the first unowned heading token
+    is some other sentence's (a refusal frame two parts share)."""
+    if envelope.get("status") != "mixed" or not any(
+        part.get("status") == "definite" for part in envelope.get("parts") or []
+    ):
         return None
     plan = envelope.get("sentence_plan") or []
     if not plan:

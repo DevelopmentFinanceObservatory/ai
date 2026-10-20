@@ -363,23 +363,35 @@ _OPENER = [
 ]
 
 
+_SHARED_REFUSAL = [
+    {"kind": "text", "segment": "heading", "text": "No match for "},
+    {"kind": "text", "segment": "heading", "text": "health spending", "part_index": 0},
+]
+
+
 @pytest.mark.parametrize(
-    ("status", "sentence_plan", "leading_line"),
+    ("status", "first_status", "sentence_plan", "leading_line"),
     [
-        ("mixed", _OPENER, "Answered 1 of 2 parts."),
-        ("mixed", None, None),
-        ("definite", _OPENER, None),
+        ("mixed", "definite", _OPENER, "Answered 1 of 2 parts."),
+        ("mixed", "definite", None, None),
+        ("definite", "definite", _OPENER, None),
+        ("mixed", "candidates", _SHARED_REFUSAL, None),
     ],
-    ids=["mixed_with_opener", "mixed_without_opener", "definite"],
+    ids=["mixed_with_opener", "mixed_without_opener", "definite", "mixed_none_definite"],
 )
 def test_leading_line_is_the_mixed_opener_token(
-    status: str, sentence_plan: list[dict[str, Any]] | None, leading_line: str | None
+    status: str,
+    first_status: str,
+    sentence_plan: list[dict[str, Any]] | None,
+    leading_line: str | None,
 ) -> None:
+    """A mixed envelope with a definite part leads with Search's opener; with no opener,
+    or with no definite part, the digest opens with the first part's block."""
     envelope = _envelope(
         status,
         sentence_plan=sentence_plan,
         parts=[
-            _part("definite", variable_text="health spending", spec=_spec(spec_id="spec_1")),
+            _part(first_status, variable_text="health spending", spec=_spec(spec_id="spec_1")),
             _part(
                 "no_data",
                 variable_text="malaria grants",
@@ -391,7 +403,7 @@ def test_leading_line_is_the_mixed_opener_token(
     first_block = render_digest(envelope).split("\n\n")[0]
 
     if leading_line is None:
-        assert not first_block.startswith("Answered")
+        assert first_block.startswith('Part 1: "health spending"')
     else:
         assert first_block == leading_line
 
