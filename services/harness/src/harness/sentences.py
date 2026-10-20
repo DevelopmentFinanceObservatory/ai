@@ -157,7 +157,6 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SOURCE_WIDER_THAN_REQUIREMENT: (
         "the dataset found covers more than was asked, and the plan did not narrow it"
     ),
-    CompileIssueCode.REQUIREMENT_UNMEETABLE: _NOT_COVERED,
     CompileIssueCode.WINDOW_OUTSIDE_PERIOD: (
         "the years asked for fall outside the period the plan covers"
     ),

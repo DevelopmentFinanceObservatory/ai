@@ -1322,7 +1322,11 @@
       "turns": [
         {
           "message": "Total aid from G7 to Africa since 1965",
-          "elicitation_text": "Add up the seven G7 countries' aid to Africa",
+          "elicitation_answers": [
+            {
+              "text": "Add up the seven G7 countries' aid to Africa"
+            }
+          ],
           "expect": {
             "terminal": "done",
             "min_components": 1
@@ -1344,7 +1348,11 @@
       "turns": [
         {
           "message": "Help me calculate net flows to Ghana combining aid and debt",
-          "elicitation_text": "Keep aid and debt flows as separate series; do not add them",
+          "elicitation_answers": [
+            {
+              "text": "Keep aid and debt flows as separate series; do not add them"
+            }
+          ],
           "expect": {
             "terminal": "done",
             "elicitation": {
@@ -1357,6 +1365,43 @@
         {
           "id": "combination-is-put-to-the-user",
           "property": "Before any figure that combines aid and debt flows is shown, the turn asks the user how to combine them, and the question or the closing message says that official development assistance loans appear in both the aid and the debt flows. Figures shown after the user's answer follow that answer. A combined figure shown before that question, or with no such question, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-count-and-prices-are-asked-in-one-pause",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much aid did France give to Africa between 2015 and 2023?",
+          "elicitation_answers": [
+            {
+              "option": 2
+            },
+            {
+              "option": 2
+            }
+          ],
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "elicitation": {
+              "min_questions": 2,
+              "min_options": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "count-and-prices-are-asked-together",
+          "property": "The turn asks how the aid is counted and whether the amounts are in current or constant prices as separate questions of one pause, before any figure is shown. Two pauses, one choice asked and the other left unasked, or a figure shown before the question, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "the-fetch-follows-both-answers",
+          "property": "The figures shown after the answers are counted the way the answer to the counting question names and are in the prices the answer to the prices question names, as the closing message, a component title or a component source states. A figure counted or priced another way, with no sentence saying the chosen reading was unavailable, is a no. This property always applies and is never inapplicable."
         }
       ]
     },
