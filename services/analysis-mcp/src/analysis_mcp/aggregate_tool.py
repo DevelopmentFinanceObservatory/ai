@@ -121,6 +121,8 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             column=exc.column,
             types=list(exc.types),
             whole_total=exc.whole_total,
+            whole_class=exc.whole_class,
+            member_count=exc.member_count,
             members=list(exc.members),
         )
     elif isinstance(exc, ComposedUnitSumError):

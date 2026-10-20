@@ -132,13 +132,18 @@ def sum_side(
     as the harness's `planner.shapes` refuses either side of a share over such a frame.
     A flow party that totals other parties is left out of the side, whether
     the side sums across its role or keys by it, unless `entity` binds that
-    role (`without_party_totals`).
+    role (`without_party_totals`). A whole total the side sums across beside
+    members of other classes stays, and one keyed by `by` is left out beside
+    the members as any other total.
     """
     stat_var = require_single_stat_var(frame)
     validate_entity_columns(frame, (*entity, *by))
     require_one_place_level(frame, role_columns(frame))
     frame, party_exclusions = without_party_totals(
-        frame, (column for column in role_columns(frame) if column not in entity), side=side
+        frame,
+        (column for column in role_columns(frame) if column not in entity),
+        keyed=by,
+        side=side,
     )
     # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from
     # this side's sum, consistent with the policy `aggregate` applies.

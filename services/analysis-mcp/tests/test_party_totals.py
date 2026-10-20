@@ -435,9 +435,11 @@ _MEMBER_KINDS = {"member_kinds": ["party"]}
             {
                 "types": ["party", "total"],
                 "whole_total": "DACAllRecipients",
-                "members": ["country/MAR"],
+                "whole_class": None,
+                "member_count": 1,
+                "example_members": ["country/MAR"],
             },
-            _FILTER_RETRY,
+            f"category_match on {_KINDS!r} keeping total",
         ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
         (lambda: _frame(kinds=False), {"types": []}, "place_types=true"),
@@ -462,7 +464,8 @@ async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_colu
     assert refusal["code"] == "place_levels_mixed"
     assert refusal["fix"] == {"column": _KINDS, **fix}
     # The retry names the party column, not a place_level filter on the kind column, or
-    # the retrieval that adds the kind column; never a filter that keeps several parties.
+    # the retrieval that adds the kind column, or for a whole total beside members a filter
+    # on the kind column; never a filter that keeps several parties.
     assert retry in result.content[0].text
     assert (_FILTER_RETRY in result.content[0].text) == (retry == _FILTER_RETRY)
 
@@ -560,30 +563,61 @@ _ALL_RECIPIENTS = {
 }
 
 
+# Five official donors beside the official donors' whole total.
+_FIVE_OFFICIAL = {
+    f"country/{code}": (OFFICIAL, 10.0) for code in ("AUT", "BEL", "DEU", "FRA", "ITA")
+}
+
+
 @pytest.mark.parametrize(
-    ("frame", "column", "whole_total", "members"),
+    ("frame", "column", "whole_total", "whole_class", "member_count", "members"),
     [
         (
             lambda: provider_frame({_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), **_MEMBERS}),
             PROVIDER_KINDS,
             _OFFICIAL,
+            "official",
+            2,
             ("country/DEU", "country/FRA"),
         ),
-        (lambda: _recipient_frame(_ALL_RECIPIENTS), _KINDS, "DACAllRecipients", ("country/MAR",)),
+        (
+            lambda: provider_frame({_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), **_FIVE_OFFICIAL}),
+            PROVIDER_KINDS,
+            _OFFICIAL,
+            "official",
+            5,
+            ("country/AUT", "country/BEL", "country/DEU"),
+        ),
+        (
+            lambda: _recipient_frame(_ALL_RECIPIENTS),
+            _KINDS,
+            "DACAllRecipients",
+            None,
+            1,
+            ("country/MAR",),
+        ),
     ],
-    ids=["official-whole-official-party", "no-class-whole-total"],
+    ids=["official-whole-official-party", "more-members-than-named", "no-class-whole-total"],
 )
 def test_a_whole_total_that_may_hold_a_member_beside_it_is_refused(
-    frame, column: str, whole_total: str, members: tuple[str, ...]
+    frame,
+    column: str,
+    whole_total: str,
+    whole_class: str | None,
+    member_count: int,
+    members: tuple[str, ...],
 ) -> None:
     with pytest.raises(PlaceLevelsMixedError) as raised:
         run_aggregate(frame(), group_by=("time_period",), aggregation="sum")
 
-    assert (raised.value.column, raised.value.whole_total, raised.value.members) == (
-        column,
-        whole_total,
-        members,
-    )
+    refused = raised.value
+    assert (
+        refused.column,
+        refused.whole_total,
+        refused.whole_class,
+        refused.member_count,
+        refused.members,
+    ) == (column, whole_total, whole_class, member_count, members)
 
 
 def test_a_private_donor_is_summed_and_counted_with_its_value() -> None:
@@ -692,29 +726,157 @@ def test_a_sum_of_totals_not_all_whole_is_refused(frame) -> None:
     assert (raised.value.column, raised.value.types) == (PROVIDER_KINDS, ("total",))
 
 
+# A donor official in 2020 and of no class in 2021, beside the private donors' whole total.
+_CLASS_IN_SOME_YEARS = {
+    year: provider_frame(
+        {_PRIVATE_TOTAL: (PRIVATE_WHOLE, 600.0), "Mystery": (cells, 15.5)}, years=(year,)
+    )
+    for year, cells in (("2020", OFFICIAL), ("2021", ("party", "untyped", "false")))
+}
+# A donor a group total in 2020 and a member in 2021, beside France.
+_TOTAL_IN_SOME_YEARS = {
+    year: provider_frame(
+        {"country/FRA": (OFFICIAL, 120.0), "DACEurope": (cells, 900.0)}, years=(year,)
+    )
+    for year, cells in (("2020", GROUP_TOTAL), ("2021", OFFICIAL))
+}
+
+
 @pytest.mark.parametrize(
-    "frame_by_year", [_WHOLE_FROM_2021, _UNTYPED_IN_2020], ids=["not-whole", "untyped"]
+    ("frame_by_year", "cells"),
+    [
+        (
+            _WHOLE_FROM_2021,
+            {
+                _OFFICIAL: ("total", "official", "false"),
+                _PRIVATE_TOTAL: ("total", "private", "true"),
+            },
+        ),
+        (
+            _UNTYPED_IN_2020,
+            {
+                _OFFICIAL: ("total", "official", "false"),
+                _PRIVATE_TOTAL: ("total", "private", "true"),
+            },
+        ),
+        (
+            _CLASS_IN_SOME_YEARS,
+            {
+                _PRIVATE_TOTAL: ("total", "private", "true"),
+                "Mystery": ("party", "untyped", "false"),
+            },
+        ),
+        (
+            _TOTAL_IN_SOME_YEARS,
+            {
+                "country/FRA": ("party", "official", "false"),
+                "DACEurope": ("untyped", "official", "false"),
+            },
+        ),
+    ],
+    ids=["not-whole", "untyped", "class-in-some-years", "total-in-some-years"],
 )
-def test_a_total_whole_in_some_years_reads_not_whole_after_a_verb_keyed_by_it(
-    frame_by_year: dict[str, Frame],
+def test_a_donor_whose_cells_differ_between_years_keeps_none_after_a_verb_keyed_by_it(
+    frame_by_year: dict[str, Frame], cells: dict[str, tuple[str, str, str]]
 ) -> None:
-    # Summed per donor first, each donor keeps one class and whole cell. A total whole in
-    # some years only takes `false`, so the later sum across donors stays refused.
+    # Summed per donor first, each donor keeps a kind, class and whole cell only where every
+    # year agrees. A total whole in some years takes `false` and a donor of a class or kind in
+    # some years takes `untyped`, so the later sum across donors stays refused.
     by_donor = run_aggregate(_years(frame_by_year), group_by=(PROVIDER,), aggregation="sum").frame
-    cells = {
-        donor: (party_class, whole)
-        for donor, party_class, whole in zip(
+    held = {
+        donor: tuple(described)
+        for donor, *described in zip(
             *(
                 by_donor.table.column(column).to_pylist()
-                for column in (PROVIDER, PROVIDER_CLASSES, PROVIDER_WHOLE)
+                for column in (PROVIDER, PROVIDER_KINDS, PROVIDER_CLASSES, PROVIDER_WHOLE)
             ),
             strict=True,
         )
     }
 
-    assert cells == {_OFFICIAL: ("official", "false"), _PRIVATE_TOTAL: ("private", "true")}
+    assert held == cells
     with pytest.raises(PlaceLevelsMixedError):
         run_aggregate(by_donor, group_by=(), aggregation="sum")
+
+
+# Each verb pooling the donors, with the value its pool sums to.
+_POOLING_DONORS = {
+    "share_of": lambda frame: (
+        run_share_of(
+            frame, frame, stat_var="dcid:share", numerator_entity={}, denominator_entity={}
+        )
+        .period_shares[0]
+        .denominator_value
+    ),
+    "quotient_of": lambda frame: (
+        run_quotient_of(
+            frame, frame, stat_var="dcid:ratio", numerator_entity={}, denominator_entity={}
+        )
+        .period_quotients[0]
+        .numerator_value
+    ),
+    "rank": lambda frame: _rank(frame, rank_by=("financingRecipient",)).entity_ranks[0].value,
+}
+
+
+@pytest.mark.parametrize("verb", list(_POOLING_DONORS))
+def test_a_verb_pooling_donors_sums_a_whole_total_beside_members_of_other_classes(
+    verb: str,
+) -> None:
+    frame = provider_frame(
+        {_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), "GatesFoundation": (PRIVATE, 30.0)}
+    )
+
+    assert _POOLING_DONORS[verb](frame) == pytest.approx(4297.6)
+
+
+@pytest.mark.parametrize("verb", list(_POOLING_DONORS))
+def test_a_verb_pooling_donors_refuses_a_whole_total_beside_members_of_its_class(
+    verb: str,
+) -> None:
+    frame = provider_frame({_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), **_MEMBERS})
+
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        _POOLING_DONORS[verb](frame)
+
+    assert (raised.value.whole_total, raised.value.members) == (
+        _OFFICIAL,
+        ("country/DEU", "country/FRA"),
+    )
+
+
+def test_a_quotient_keyed_by_donor_leaves_a_whole_total_out_beside_members_of_its_class() -> None:
+    # Keyed by donor, nothing is summed across donors, so the official donors' whole total is
+    # left out as any other total and each member keeps its own ratio.
+    frame = provider_frame(
+        {
+            _OFFICIAL: (OFFICIAL_WHOLE, 4267.6),
+            **{n: _MEMBERS[n] for n in ("country/FRA", "country/DEU")},
+        }
+    )
+
+    result = run_quotient_of(
+        frame,
+        frame,
+        stat_var="dcid:ratio",
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=(PROVIDER,),
+        denominator_by={PROVIDER: PROVIDER},
+    )
+
+    assert sorted(
+        (dict(cell.key)[PROVIDER], cell.quotient) for cell in result.period_quotients
+    ) == [
+        ("country/DEU", 1.0),
+        ("country/FRA", 1.0),
+    ]
+    assert [
+        (record.side, record.reason, record.entities) for record in result.exclusions.records
+    ] == [
+        ("numerator", "party_total", {PROVIDER: (_OFFICIAL,)}),
+        ("denominator", "party_total", {PROVIDER: (_OFFICIAL,)}),
+    ]
 
 
 def test_a_rank_of_donors_tags_private_ones_and_leaves_out_totals_and_residuals() -> None:

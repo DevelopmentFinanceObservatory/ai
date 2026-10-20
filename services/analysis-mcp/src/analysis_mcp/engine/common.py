@@ -153,6 +153,9 @@ _FIXED_COLUMNS = frozenset(
 # How many of a place-type column's distinct cells a `PlaceLevelsMixedError` names.
 _PLACE_TYPE_CAP = 10
 
+# How many of the members a whole total may hold a `PlaceLevelsMixedError` names as examples.
+_EXAMPLE_MEMBER_CAP = 3
+
 # The kind of a flow role's members, which a ranking keeps, and of the unallocated residuals
 # it leaves out beside them.
 _MEMBER_KIND: PartyKind = "party"
@@ -177,8 +180,10 @@ class PlaceLevelsMixedError(Exception):
     type or kind column, and `types` its distinct cells, sorted and capped at
     `_PLACE_TYPE_CAP`, empty when the frame carries no such column.
     `whole_total` names the whole total pooled beside members it may hold, and
-    `members` those members, sorted and capped at `_PLACE_TYPE_CAP`: the members
-    of its class or of none, or every member when the total has no class.
+    `whole_class` its class, None when it has none. The members it may hold are
+    those of its class or of none, or every member when it has no class:
+    `member_count` of them, of which `members` names the first
+    `_EXAMPLE_MEMBER_CAP`, sorted, as examples.
     Maps to the tool boundary's `place_levels_mixed` refusal.
     """
 
@@ -188,15 +193,26 @@ class PlaceLevelsMixedError(Exception):
         column: str,
         types: Sequence[str],
         whole_total: str | None = None,
+        whole_class: str | None = None,
+        member_count: int = 0,
         members: Sequence[str] = (),
     ) -> None:
         self.column = column
         self.types = tuple(types)
         self.whole_total = whole_total
+        self.whole_class = whole_class
+        self.member_count = member_count
         self.members = tuple(members)
-        super().__init__(
-            f"the places typed in {column!r} share no level a filter can keep: {self.types!r}"
-        )
+        if whole_total is not None:
+            message = (
+                f"the whole total {whole_total!r} is pooled beside {member_count} members "
+                f"it may hold, such as {self.members!r}"
+            )
+        else:
+            message = (
+                f"the places typed in {column!r} share no level a filter can keep: {self.types!r}"
+            )
+        super().__init__(message)
 
 
 def pooled_roles(frame: Frame, keys: Iterable[str]) -> tuple[str, ...]:
@@ -234,6 +250,7 @@ def without_party_totals(
     columns: Iterable[str],
     *,
     ranked: Collection[str] = (),
+    keyed: Collection[str] = (),
     side: ExclusionSide | None = None,
 ) -> tuple[Frame, Exclusions]:
     """`frame` less the rows of every flow party in `columns` whose
@@ -250,10 +267,12 @@ def without_party_totals(
     does a role whose parties are all totals with a `{role}_party_whole` cell of
     `true` on every row: whole totals on one axis hold disjoint classes of
     party, so a sum across them counts nothing twice. A whole total beside
-    members on a role outside `ranked` (`_totals_left_out`) stays and is
-    summed with them when its class is one no member has, such as "Official
-    Donors, Total" beside a private foundation: it holds its class's whole
-    population and no member lies inside it.
+    members on a pooled role, one outside `ranked` and `keyed`
+    (`_totals_left_out`), stays and is summed with them when its class is one
+    no member has, such as "Official Donors, Total" beside a private
+    foundation: it holds its class's whole population and no member lies
+    inside it. A role in `keyed`, one a verb groups by, sums nothing across
+    its parties, so it leaves every total out beside its members.
     Refuses (`PlaceLevelsMixedError`) when a role's several parties carry no
     kind column or include one with no kind, since no sum or rank across
     them is known to keep a total apart from the parties it holds, when
@@ -282,7 +301,7 @@ def without_party_totals(
             is_dropped = array_kernel(
                 "equal", table.column(kinds).combine_chunks(), pa.scalar(kind, pa.string())
             )
-            if kind == TOTAL_KIND and column not in ranked:
+            if kind == TOTAL_KIND and column not in ranked and column not in keyed:
                 is_dropped = _totals_left_out(table, role=column, is_total=is_dropped)
             dropped = table.filter(is_dropped)
             if not dropped.num_rows:
@@ -304,7 +323,7 @@ def without_party_totals(
 
 def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Array:
     """The rows of `is_total`, the totals of `role`, that a sum leaves out beside the role's
-    members, `table`'s other rows. A total whole on every row (`_whole_cells`) whose class no
+    members, `table`'s other rows. A total whole on every row (`_agreed_cells`) whose class no
     member has stays: it holds its class's whole population, and no member lies inside it.
     Refuses (`PlaceLevelsMixedError`) a whole total that may hold a member: one with no
     class, or one beside a member of its class or of none, since a sum across them would
@@ -313,9 +332,12 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
         return is_total
     totals = table.filter(is_total)
     names = totals.column(role).unique()
-    whole = names.filter(
-        array_kernel("equal", _whole_cells(totals, role=role, places=names), pa.scalar(WHOLE_CELL))
+    whole_cells = _agreed_cells(
+        totals, role=role, column=whole_column(role), places=names, disagreed=_NOT_WHOLE_CELL
     )
+    whole = names.filter(array_kernel("equal", whole_cells, pa.scalar(WHOLE_CELL)))
+    if not len(whole):
+        return is_total
     members = table.filter(array_kernel("invert", is_total))
     member_classes = _party_classes(members, role)
     total_classes = _party_classes(totals, role)
@@ -332,7 +354,9 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
                 column=kind_column(role),
                 types=distinct(table, kind_column(role))[:_PLACE_TYPE_CAP],
                 whole_total=total,
-                members=overlapping[:_PLACE_TYPE_CAP],
+                whole_class=total_class,
+                member_count=len(overlapping),
+                members=overlapping[:_EXAMPLE_MEMBER_CAP],
             )
     return array_kernel(
         "and_not",
@@ -342,20 +366,18 @@ def _totals_left_out(table: pa.Table, *, role: str, is_total: pa.Array) -> pa.Ar
 
 
 def _party_classes(table: pa.Table, role: str) -> dict[str, str | None]:
-    """The class of each `role` party in `table`: its one `{role}_party_class` cell, or None
-    when it carries a cell outside `common.place_type.PartyClass`, such as `untyped`, or
-    several cells. Empty when `table` carries no class column."""
+    """The class of each `role` party in `table`: the `{role}_party_class` cell every one of
+    its rows agrees on (`_agreed_cells`), or None when its rows disagree or agree on a cell
+    outside `common.place_type.PartyClass`, such as `untyped`. Empty when `table` carries no
+    class column."""
     classes = class_column(role)
     if classes not in table.column_names:
         return {}
-    held: dict[str, set[str | None]] = {}
-    for party, party_class in zip(
-        table.column(role).to_pylist(), table.column(classes).to_pylist(), strict=True
-    ):
-        held.setdefault(party, set()).add(party_class)
+    parties = table.column(role).unique()
+    cells = _agreed_cells(table, role=role, column=classes, places=parties)
     return {
-        party: next(iter(cells)) if len(cells) == 1 and cells <= _PARTY_CLASSES else None
-        for party, cells in held.items()
+        party: cell if cell in _PARTY_CLASSES else None
+        for party, cell in zip(parties.to_pylist(), cells.to_pylist(), strict=True)
     }
 
 
@@ -517,12 +539,14 @@ def frame_keeping_role_types(
     places at different levels (`require_one_place_level`). The harness
     predicts the same columns from the input's role keys
     (`compiler.frame_columns.bound_role_keys`). Each output row's cell is
-    read off `source` for its place. A place reads whole only when every one
-    of its `source` rows is whole, and `false` otherwise, so a total whole in
-    some years is summed beside no other total. A place `source` describes
-    twice in another column takes the cell that sorts first. A place `source`
-    lacks takes `UNTYPED`, which both checks refuse to pool beside other
-    places and which no whole or private cell reads as."""
+    read off `source` for its place by one rule (`_agreed_cells`): a place
+    keeps a cell only when every one of its `source` rows carries it. A place
+    whose rows disagree reads `false` in the whole column, so a total whole in
+    some years is summed beside no other total, and `UNTYPED` in the others,
+    so a party that is a total in some years or of no one class is pooled
+    beside no other party. A place `source` lacks takes `UNTYPED` too, which
+    both checks refuse to pool beside other places and which no whole or
+    private cell reads as."""
     described: dict[str, pa.Array] = {}
     for role in role_keys:
         cells = columns[role]
@@ -530,38 +554,39 @@ def frame_keeping_role_types(
         for enrichment in enrichment_columns(role):
             if enrichment in role_keys or enrichment not in source.columns:
                 continue
-            if enrichment == whole_column(role):
-                described[enrichment] = _whole_cells(source.table, role=role, places=places)
-                continue
-            cells_by_place = group_rows(source.table, (role, enrichment)).keys.sort_by(
-                [(role, "ascending"), (enrichment, "ascending")]
-            )
-            positions = array_kernel(
-                "index_in", places, value_set=cells_by_place.column(role).combine_chunks()
-            )
-            described[enrichment] = (
-                cells_by_place.column(enrichment)
-                .combine_chunks()
-                .take(positions)
-                .fill_null(UNTYPED)
+            described[enrichment] = _agreed_cells(
+                source.table,
+                role=role,
+                column=enrichment,
+                places=places,
+                disagreed=_NOT_WHOLE_CELL if enrichment == whole_column(role) else UNTYPED,
             )
     return frame_from_columns({**columns, **described}, role_keys=(*role_keys, *described))
 
 
-def _whole_cells(table: pa.Table, *, role: str, places: pa.Array) -> pa.Array:
-    """The `{role}_party_whole` cell of each of `places`, read off `table`'s rows:
-    `WHOLE_CELL` where every row naming the place is whole, `false` where any is
-    not, and `UNTYPED` where no row names it."""
-    is_whole = array_kernel(
-        "equal", table.column(whole_column(role)).combine_chunks(), pa.scalar(WHOLE_CELL)
-    ).fill_null(False)
-    not_whole = table.filter(array_kernel("invert", is_whole)).column(role).unique()
-    named = array_kernel("is_in", places, value_set=table.column(role).unique())
+def _agreed_cells(
+    table: pa.Table, *, role: str, column: str, places: pa.Array, disagreed: str = UNTYPED
+) -> pa.Array:
+    """The `column` cell of each of `places`, read off `table`'s rows: the one cell every row
+    naming the place carries, `disagreed` where those rows carry several cells (a null among
+    them), and `UNTYPED` where no row names the place or its one cell is null."""
+    pairs = group_rows(table, (role, column)).keys
+    names = pairs.column(role).combine_chunks()
+    counts = array_kernel("value_counts", names)
+    disputed = counts.field("values").filter(
+        array_kernel("greater", counts.field("counts"), pa.scalar(1, pa.int64()))
+    )
+    agreed = (
+        pairs.column(column)
+        .combine_chunks()
+        .take(array_kernel("index_in", places, value_set=names))
+        .fill_null(UNTYPED)
+    )
     return array_kernel(
         "if_else",
-        array_kernel("is_in", places, value_set=not_whole),
-        pa.scalar(_NOT_WHOLE_CELL),
-        array_kernel("if_else", named, pa.scalar(WHOLE_CELL), pa.scalar(UNTYPED)),
+        array_kernel("is_in", places, value_set=disputed),
+        pa.scalar(disagreed, pa.string()),
+        agreed,
     )
 
 
