@@ -191,7 +191,7 @@ The module ships in the image (`services/harness/src/harness/recipe_backfill.py`
 | Setting                          | Use                                                           |
 | -------------------------------- | ------------------------------------------------------------- |
 | `DFO_APIS_URL`                   | apis' origin                                                  |
-| `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe and versions routes |
+| `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe routes              |
 | `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
 
 The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.

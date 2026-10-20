@@ -90,9 +90,8 @@ class FakeApis:
             self.in_flight -= 1
 
     def _answer(self, request: httpx2.Request) -> httpx2.Response:
-        if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
-            return problem(403, "publish_not_permitted")
         parts = request.url.path.removeprefix("/api/datasets/").split("/")
+        # The versions route is open to every caller and answers in one page here.
         if parts[-1] == "versions":
             return httpx2.Response(
                 200,
@@ -100,8 +99,12 @@ class FakeApis:
                     "schema_version": 1,
                     "spec_id": parts[0],
                     "versions": [_listed(version) for version in self.versions.get(parts[0], [])],
+                    "next_cursor": None,
+                    "complete": True,
                 },
             )
+        if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
+            return problem(403, "publish_not_permitted")
         _, spec_id, content_version, _ = parts
         override = self.answers.get(spec_id)
         if isinstance(override, Exception):

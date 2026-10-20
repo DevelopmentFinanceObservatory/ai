@@ -100,9 +100,10 @@ _SNAPSHOT_NOT_FOUND = "snapshot_not_found"
 _HASH_CONFLICT = "recipe_requires_matching_normal_form_hash"
 _REPLAY_KEY_CONFLICT = "recipe_requires_matching_replay_key"
 
-# A dataset id no dataset has. apis answers its versions with an empty list,
-# so reading them tests the URL and the principal and nothing else.
-_PREFLIGHT_SPEC_ID = "spec_" + "0" * 32
+# A derived pair no frame has. apis answers a read of its recipe `recipe_not_found`
+# after checking the principal, so the read tests the URL and the principal and
+# nothing else.
+_PREFLIGHT_FRAME = FrameRef(spec_id="ops_" + "0" * 32, content_version="ocv_" + "0" * 32)
 
 
 class Reason(StrEnum):
@@ -420,9 +421,11 @@ async def run_backfill(
 
     Raises:
         LiveApisError: apis refused or failed the first call, which reads the
-            versions of a dataset id no dataset has. No frame was read.
+            recipe of a derived pair no frame has. No frame was read.
     """
-    await client.list_versions(spec_id=_PREFLIGHT_SPEC_ID)
+    await client.read_recipe(
+        spec_id=_PREFLIGHT_FRAME.spec_id, content_version=_PREFLIGHT_FRAME.content_version
+    )
     held = await store.list_frames()
     derived = [
         listing for listing in held if listing.ref.spec_id.startswith(_DERIVED_SPEC_ID_PREFIX)
