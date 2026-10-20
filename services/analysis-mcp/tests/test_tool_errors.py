@@ -432,6 +432,32 @@ def test_composed_unit_sum_unsupported_names_the_unit_and_the_way_to_pool(
     assert "quotient_of" in refusal.message
 
 
+@pytest.mark.parametrize("whole_class", ["official", None], ids=["class", "no-class"])
+def test_place_levels_mixed_beside_a_whole_total_counts_the_members_and_names_examples(
+    whole_class: str | None,
+) -> None:
+    refusal = ToolRefusal.place_levels_mixed(
+        column="financingProvider_party_kind",
+        types=["party", "total"],
+        whole_total="DACOfficialDonors",
+        whole_class=whole_class,
+        member_count=30,
+        members=["country/AUT", "country/BEL", "country/DEU"],
+    )
+
+    assert refusal.fix == {
+        "column": "financingProvider_party_kind",
+        "types": ["party", "total"],
+        "whole_total": "DACOfficialDonors",
+        "whole_class": whole_class,
+        "member_count": 30,
+        "example_members": ["country/AUT", "country/BEL", "country/DEU"],
+    }
+    # The count, not the three examples, is how many members the model is told of.
+    assert "30 members" in refusal.message
+    assert "category_match on 'financingProvider_party_kind' keeping total" in refusal.message
+
+
 def test_comparison_periods_disjoint_names_its_sides_by_the_callers_labels() -> None:
     """`compare` and `sum_of` keep `left`/`right`; `quotient_of` passes its own."""
     default = ToolRefusal.comparison_periods_disjoint(left_periods=["2020"], right_periods=["2021"])

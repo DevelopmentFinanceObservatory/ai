@@ -1303,6 +1303,8 @@ class ToolRefusal:
         column: str,
         types: Sequence[str],
         whole_total: str | None = None,
+        whole_class: str | None = None,
+        member_count: int = 0,
         members: Sequence[str] = (),
     ) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
@@ -1313,27 +1315,37 @@ class ToolRefusal:
         search naming the population for a total across the whole side, a
         filter keeping party and residual for a sum of members, and for a
         comparison of members a filter keeping the kinds a kind column's
-        `fix.member_kinds` lists. `whole_total` names a whole total pooled
-        beside `members` it may hold, and the message asks to drop one or the
-        other."""
+        `fix.member_kinds` lists. `whole_total` names a whole total of
+        `whole_class`, or of no class when None, pooled beside `member_count`
+        members it may hold, of which `members` are examples. The message asks
+        to keep the totals alone or the members alone, by a filter on
+        `column`."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and whole_total is not None:
+            counted = f"{member_count} member{'' if member_count == 1 else 's'}"
+            held = (
+                f"a whole total of the {whole_class} {role} parties, and {counted} beside "
+                "it are of that class or of none"
+                if whole_class is not None
+                else f"a whole total of no one class, and it may hold the {counted} beside it"
+            )
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
-                    f"The {role} parties in this frame cannot be pooled: {whole_total} is a "
-                    "whole total, and it may already hold "
-                    f"{', '.join(members)}, so a sum across them would count those parties "
-                    f"twice. A whole total is summed beside members only when its "
-                    f"{class_column(role)!r} names a class no member has. Filter the frame "
-                    f"with a category_match on {role!r} that leaves out {', '.join(members)}, "
-                    f"or that leaves out {whole_total}, then retry with that result's frame_ref."
+                    f"The {role} parties in this frame cannot be pooled: {whole_total} is "
+                    f"{held}, such as {', '.join(members)}. A sum across them would count "
+                    "those members twice. Filter the frame with a category_match on "
+                    f"{column!r} keeping total, to sum the totals alone, or keeping party and "
+                    "residual, to sum the members alone, then retry with that result's "
+                    "frame_ref."
                 ),
                 fix={
                     "column": column,
                     "types": list(types),
                     "whole_total": whole_total,
-                    "members": list(members),
+                    "whole_class": whole_class,
+                    "member_count": member_count,
+                    "example_members": list(members),
                 },
             )
         if role is not None and not types:
