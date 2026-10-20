@@ -201,6 +201,7 @@ from typing import Any, Literal, Self
 from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
+    WHOLE_CELL,
     PartyKind,
     class_column,
     enrichment_role,
@@ -345,6 +346,9 @@ _KEY_SAMPLE_IN_MESSAGE = 5
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
 # are of kind `party` too, told apart by their class.
 _MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
+# The kinds a filter keeps to sum the members of a role alone: its parties and the
+# unallocated residuals, which add to a sum though no ranking compares them.
+_POOLED_MEMBER_KINDS: tuple[PartyKind, ...] = ("party", "residual")
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1315,7 +1319,8 @@ class ToolRefusal:
         or rank members. `whole_total` names a whole total of `whole_class`, or
         of no class when None, pooled beside `member_count` members it may
         hold, of which `members` are examples. The message asks to keep the
-        totals alone or the members alone, by a filter on `column`."""
+        whole totals alone, by a filter on the role's whole column, or the members
+        alone, by a filter on `column`, and `fix.filters` holds both."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and whole_total is not None:
             counted = f"{member_count} member{'' if member_count == 1 else 's'}"
@@ -1325,15 +1330,16 @@ class ToolRefusal:
                 if whole_class is not None
                 else f"a whole total of no one class, and it may hold the {counted} beside it"
             )
+            whole = whole_column(role)
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
                     f"The {role} parties in this frame cannot be pooled: {whole_total} is "
                     f"{held}, such as {', '.join(members)}. A sum across them would count "
                     "those members twice. Filter the frame with a category_match on "
-                    f"{column!r} keeping total, to sum the totals alone, or keeping party and "
-                    "residual, to sum the members alone, then retry with that result's "
-                    "frame_ref."
+                    f"{whole!r} keeping {WHOLE_CELL}, to sum the whole totals alone, or a "
+                    f"category_match on {column!r} keeping {' and '.join(_POOLED_MEMBER_KINDS)}, "
+                    "to sum the members alone, then retry with that result's frame_ref."
                 ),
                 fix={
                     "column": column,
@@ -1342,6 +1348,10 @@ class ToolRefusal:
                     "whole_class": whole_class,
                     "member_count": member_count,
                     "example_members": list(members),
+                    "filters": [
+                        {"column": whole, "values": [WHOLE_CELL]},
+                        {"column": column, "values": list(_POOLED_MEMBER_KINDS)},
+                    ],
                 },
             )
         if role is not None and not types:
