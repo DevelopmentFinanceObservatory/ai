@@ -533,36 +533,33 @@ class LiveApisClient:
     async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
         """Every stored version of the dataset, newest first, read page by page.
 
-        A dataset id apis registers no dataset under (`spec_not_found`) has no
-        versions, so it returns `()`.
+        A dataset id apis registers no dataset under (`spec_not_found` on the
+        first page) has no versions, so it returns `()`.
 
         Raises:
-            LiveApisError: apis refused or failed a page, or answered one outside
-                the contract (`response_invalid`): a page that is not complete and
-                names no new cursor, or a walk that would read past
-                `VERSIONS_MAX_PAGES` pages.
+            LiveApisError: apis refused or failed a page, `spec_not_found` on a
+                later page included, or answered one outside the contract
+                (`response_invalid`): a page that is not complete and names no new
+                cursor, or a walk that would read past `VERSIONS_MAX_PAGES` pages.
         """
         path = _VERSIONS_PATH.format(spec_id=_segment(spec_id))
-        versions: list[DatasetVersion] = []
-        cursor: str | None = None
-        followed: set[str] = set()
         try:
-            while True:
-                response = await self._send(
-                    "GET", path, params=None if cursor is None else {"cursor": cursor}
-                )
-                page, cursor = _versions_page(response)
-                versions.extend(page)
-                if cursor is None:
-                    return tuple(versions)
-                # `followed` holds one cursor per page read but the first.
-                if cursor in followed or len(followed) + 1 >= VERSIONS_MAX_PAGES:
-                    raise _invalid(response, "versions answer")
-                followed.add(cursor)
+            response = await self._send("GET", path)
         except LiveApisError as exc:
             if exc.code == SPEC_NOT_FOUND:
                 return ()
             raise
+        versions, cursor = _versions_page(response)
+        # `followed` holds one cursor per page read but the first.
+        followed: set[str] = set()
+        while cursor is not None:
+            if cursor in followed or len(followed) + 1 >= VERSIONS_MAX_PAGES:
+                raise _invalid(response, "versions answer")
+            followed.add(cursor)
+            response = await self._send("GET", path, params={"cursor": cursor})
+            page, cursor = _versions_page(response)
+            versions.extend(page)
+        return tuple(versions)
 
     async def read_component(
         self, *, component_id: str, revision: int | None = None

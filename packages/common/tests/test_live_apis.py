@@ -389,6 +389,19 @@ async def test_list_versions_of_an_id_apis_registers_no_dataset_under_is_empty()
         assert await client.list_versions(spec_id=SPEC) == ()
 
 
+async def test_list_versions_raises_a_dataset_gone_after_its_first_page() -> None:
+    calls = Calls(
+        versions_page([plain("cv_1")], next_cursor="c1", complete=False),
+        problem(404, SPEC_NOT_FOUND),
+    )
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.list_versions(spec_id=SPEC)
+
+    assert (raised.value.status, raised.value.code) == (404, SPEC_NOT_FOUND)
+
+
 @pytest.mark.parametrize(
     ("status", "code"), [(409, "identity_quarantined"), (400, "request_invalid")]
 )
