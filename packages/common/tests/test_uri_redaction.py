@@ -20,7 +20,7 @@ from opentelemetry.trace import Status, StatusCode
 
 _ARTIFACT = f"dfo://artifact/spec_{'1' * 32}/cv_2/sha256:{'3' * 64}"
 _SECRET = _ARTIFACT.removeprefix("dfo://artifact")
-# A V4 signed URL of the shape dfo-apis mints, and a V2 one.
+# A V4 signed URL of the shape apis mints, and a V2 one.
 _SIGNED_PATH = "https://storage.googleapis.com/dfo-artifacts/working/abc.csv"
 _SIGNED_V4 = (
     f"{_SIGNED_PATH}?X-Goog-Algorithm=GOOG4-RSA-SHA256"

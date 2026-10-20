@@ -11,7 +11,7 @@ def _admit(ledger: MintLedger, key: str, *, now: float) -> HeldMint | ToolRefusa
 
 def test_a_full_ledger_waits_for_a_running_post_until_it_must_have_ended() -> None:
     """While the held mint's POST may still be waiting, its slot may free as soon as
-    dfo-apis answers, so the wait runs to the end of that POST's deadline."""
+    apis answers, so the wait runs to the end of that POST's deadline."""
     ledger = MintLedger()
     assert isinstance(_admit(ledger, "a", now=0.0), HeldMint)
 
@@ -32,7 +32,7 @@ def test_an_answered_mint_frees_its_slot_at_once() -> None:
 
 
 def test_an_unanswered_mint_holds_its_slot_past_dfo_apis_own_timeout() -> None:
-    """dfo-apis' rendering and store writes after the fetch its timeout bounds can run a
+    """apis' rendering and store writes after the fetch its timeout bounds can run a
     few seconds past it, so the slot stays held for that margin too."""
     ledger = MintLedger()
     _admit(ledger, "a", now=0.0)

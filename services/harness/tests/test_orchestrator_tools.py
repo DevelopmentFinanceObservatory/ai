@@ -1780,7 +1780,7 @@ WIDE_VIEW: dict[str, Any] = {
 }
 
 
-# The pair dfo-apis serves the retrieval under, whatever its rendering.
+# The pair apis serves the retrieval under, whatever its rendering.
 WIDE_REF = {"spec_id": SPEC_AID, "content_version": "cv_" + "c" * 32}
 SUMMED = {"by": ["time_period"], "op": "sum"}
 # The pair the store holds the summed retrieval under, as data-mcp names a
@@ -1993,7 +1993,7 @@ TEN_PROVIDERS: dict[str, dict[str, float]] = {
 
 
 class BarPlatform(WideFrameExecutor):
-    """Draws a bar chart of `values` as dfo-apis binds one. Each selected
+    """Draws a bar chart of `values` as apis binds one. Each selected
     provider's points inside the intent's window, at the latest period every
     one of them holds, written into the catalogue's `bar_chart` payload, whose
     input frame is the one the intent names."""
@@ -2111,7 +2111,7 @@ async def test_make_charts_pins_a_cut_bar_chart_to_the_period_it_ranked_at(
 async def test_a_cut_bar_chart_draws_every_bar_at_the_period_in_its_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A and B share 2024 as well, the period dfo-apis draws two bars at when
+    """A and B share 2024 as well, the period apis draws two bars at when
     no window names another. The payload holds their 2023 values."""
     executor = await _draw_ten(monkeypatch)
 
@@ -2293,7 +2293,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     monkeypatch: pytest.MonkeyPatch, role: str, carried: bool
 ) -> None:
     """Group totals (the largest values here) are left out of the top N, and
-    out of its count, by the kind dfo-apis serves for the same retrieval; the
+    out of its count, by the kind apis serves for the same retrieval; the
     chart is drawn on the frame the model chose. A frame whose rows carry the
     kind or type column is ranked from those rows, with no second retrieval.
     That means parties among totals, or countries typed `Country` and
@@ -2452,7 +2452,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 async def test_make_charts_keeps_the_listed_order_unless_asked_to_rank(
     monkeypatch: pytest.MonkeyPatch, chart: dict[str, Any]
 ) -> None:
-    """dfo-apis orders a bar chart's bars itself, so `order_by_value` leaves
+    """apis orders a bar chart's bars itself, so `order_by_value` leaves
     its select as listed."""
     listed = ["donor/00", "donor/03", "donor/01"]
     select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
@@ -2566,7 +2566,7 @@ SIX_RECIPIENTS = [f"country/R{number}" for number in range(6)]
 
 
 class SixSeriesExecutor(FakeExecutor):
-    """Describes a frame of six series, one for each recipient, as dfo-apis
+    """Describes a frame of six series, one for each recipient, as apis
     lists a dimension, its values with the empty cells dropped. Five series
     are the United States' and the sixth, a total, has no provider."""
 
@@ -3569,7 +3569,7 @@ _COUNTS = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
     ("counts_result", "counts"),
     [
         (ToolCallResult(is_error=False, text=_COUNTS), _COUNTS),
-        # dfo-apis answers 503 while no search catalogue is published.
+        # apis answers 503 while no search catalogue is published.
         (
             ToolCallResult(is_error=True, structured_content={"code": "service_unavailable"}),
             COUNTS_UNAVAILABLE,
@@ -3767,7 +3767,7 @@ async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation
 
 
 class EmptyExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real zero-row mint (Kenya health spending,
+    """get_data's outcome for apis' real zero-row mint (Kenya health spending,
     1960-1970, on dev 2026-10-07): 200, `coverage.rows` 0 and an `empty_result` warning."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
@@ -3831,7 +3831,7 @@ async def test_fetch_of_empty_data_through_an_equivalent_spec_records_it_under_i
 
 
 class FacetRefusingExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real refusal of a Euro unit on Kenya and Ghana
+    """get_data's outcome for apis' real refusal of a Euro unit on Kenya and Ghana
     health spending (dev, 2026-10-07)."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):

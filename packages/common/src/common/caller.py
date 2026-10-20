@@ -78,7 +78,7 @@ def conversation_caller(conversation: str) -> str:
     the first 32 hex characters of the key's SHA-256.
 
     The key holds the principal and a client-minted conversation id, and the
-    caller reaches GCS metadata, dfo-apis' lease records and logs, so only
+    caller reaches GCS metadata, apis' lease records and logs, so only
     the digest leaves the process. It has a fixed length and is always a
     valid header value.
     """

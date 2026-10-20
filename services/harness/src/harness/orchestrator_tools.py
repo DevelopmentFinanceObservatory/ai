@@ -382,7 +382,7 @@ _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do.
 
 def _periods_covered(view: Mapping[str, Any]) -> int:
     """The periods a table of a frame with `view` draws rows at: every period
-    from the first to the last the frame covers, gaps included, as dfo-apis
+    from the first to the last the frame covers, gaps included, as apis
     binds a table's window. A day counts as up to 31 a month, so the count
     errs high, never low. A span frame (`2020/2024`) has one period."""
     coverage = view.get("coverage") or []
@@ -603,7 +603,7 @@ async def _top_select(
     `MAX_TABLE_ROWS`. A cut of a place or flow party dimension ranks only the
     members one ranking compares (`_ranked`), by the frame's kind read
     (`_member_cells`) when its rows carry no kind or type cell. Otherwise it
-    lists every member, those with no value at the period last. dfo-apis
+    lists every member, those with no value at the period last. apis
     draws a table's and a line chart's series in the order the select lists
     them.
 
@@ -1152,7 +1152,7 @@ def _unresolved_refusal(
 
 def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     """`data`, a `get_data` outcome that served no observations, as the refusal `fetch`
-    gives for it, with dfo-apis' own `empty_result` warning when it sent one."""
+    gives for it, with apis' own `empty_result` warning when it sent one."""
     warning = next(
         (w for w in data.get("warnings") or [] if w.get("code") == HarnessCode.EMPTY_RESULT), {}
     )
@@ -1738,7 +1738,7 @@ def build_orchestrator_tools(
                         )
                 cut = None
                 over_cap = issue is not None and issue["code"] == HarnessCode.SERIES_LIMIT_EXCEEDED
-                # dfo-apis sorts a bar chart's bars itself, at the period it draws.
+                # apis sorts a bar chart's bars itself, at the period it draws.
                 ordered = chart.order_by_value and chart.type != "bar_chart"
                 if over_cap or (issue is None and ordered):
                     narrowed = await _top_select(
@@ -1771,7 +1771,7 @@ def build_orchestrator_tools(
                     intent["window"] = _latest_window(chart.latest_periods)
                 elif cut is not None and chart.type == "bar_chart":
                     # The card's title and members are of the cut's period, so
-                    # its bars stay at it. dfo-apis draws a bar chart at the
+                    # its bars stay at it. apis draws a bar chart at the
                     # latest period every selected series holds inside its
                     # window, which without one moves when the frame gains a
                     # newer period.

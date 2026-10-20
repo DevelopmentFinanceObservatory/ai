@@ -552,7 +552,7 @@ async def test_a_fetch_that_states_no_frame_ref_logs_which_spec_was_read_by_its_
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A `get_data` result with no `frame_ref` leaves the store pair unstated, so
-    the frame is opened by the pair dfo-apis serves, and the executor warns."""
+    the frame is opened by the pair apis serves, and the executor warns."""
     spec_id = "spec_" + "1" * 32
     manifest = {
         "definition": {"spec_id": spec_id},
@@ -1354,7 +1354,7 @@ async def test_a_card_over_a_derived_frame_counts_that_frames_stat_vars() -> Non
 
 
 async def test_a_card_over_a_summed_family_counts_the_stat_vars_the_sum_added() -> None:
-    """A summed retrieval of 74 StatVars, with dfo-apis's trace still naming
+    """A summed retrieval of 74 StatVars, with the apis service's trace still naming
     all 80 the definition resolved, and its frame aggregated by period: a
     card over either frame counts the 74 the sum added, not the one family
     ref the frame holds or the trace's 80."""
@@ -1811,7 +1811,7 @@ async def test_the_executor_retries_a_get_data_refusal_that_asks_for_a_delay(
 ) -> None:
     # A frame minted with extra columns is held under a content_version of its own,
     # which `get_data` states as `frame_ref` beside the manifest. The result names the
-    # manifest's own pair, which dfo-apis serves to describe_frame and charts.
+    # manifest's own pair, which apis serves to describe_frame and charts.
     frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_typed"}
     manifest = {
         "definition": {"spec_id": "spec_" + "1" * 32},
@@ -2081,7 +2081,7 @@ async def test_a_write_retry_cut_off_at_the_call_deadline_raises_the_timeout_not
 async def test_a_retrieval_with_no_observations_reports_its_row_count_and_warnings(
     scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
 ) -> None:
-    """dfo-apis serves a mint whose places or window hold nothing as 200 with zero rows
+    """apis serves a mint whose places or window hold nothing as 200 with zero rows
     and an `empty_result` warning; the outcome carries both, so a caller can tell it
     from data."""
     frame_ref = {"spec_id": "spec_" + "1" * 32, "content_version": "cv_" + "1" * 32}

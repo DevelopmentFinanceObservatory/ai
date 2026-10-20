@@ -576,7 +576,7 @@ class _Build:
     def _check_summable(
         self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
     ) -> None:
-        """Report a family read summed over an axis dfo-apis may not sum over.
+        """Report a family read summed over an axis apis may not sum over.
 
         `stat_var_reading` reads a family summed by the rule only when every
         open axis is summable, but the plan may ask for `sum` over any family;
@@ -1314,8 +1314,8 @@ class _Build:
         basis (`_denoted_unit`) and only the form differs, a ref against a
         request: every side whose source binds no unit is named (both, when
         both are refs), with what to change so it is retrieved by request too.
-        dfo-apis writes a natively satisfied request as the request object and
-        an unbound definition as its ref (ONEcampaign/dfo-apis#1179).
+        apis writes a natively satisfied request as the request object and
+        an unbound definition as its ref.
 
         A requirement may ask for current prices or for constant prices of
         one base year, and a pinned side is always served in its source's own
@@ -2073,12 +2073,12 @@ class _Build:
     def _retrieve_arguments(self, operation: RetrieveOperation) -> Arguments | None:
         """Write `spec_id` and `stat_vars` for a family.
 
-        `stat_vars` is the source's `stat_var_reading`: `sum` asks dfo-apis
+        `stat_vars` is the source's `stat_var_reading`: `sum` asks apis
         to sum the family's members into one series, `separate` keeps one
         per member. It sits outside the definition's identity, so it
         re-mints nothing.
 
-        `breakdown` is the requirement's, as its code system and level: dfo-apis
+        `breakdown` is the requirement's, as its code system and level: apis
         sums the family within each code rolled up to that level, so the frame
         carries one series per code under the family's own ref.
 
@@ -2835,7 +2835,7 @@ def _denoted_unit(source: SelectedSource, unit: JsonValue) -> Unit | None:
     structure (`compiler.evidence.read_unit_dcid`), and its price basis
     either the same way or, for a bare currency such as `CurrencyUSD`,
     through the StatVar shape's `measurement_qualifier`: `Nominal` is
-    current prices, which is how dfo-apis decides a request for current
+    current prices, which is how apis decides a request for current
     prices is natively satisfied.
     """
     if isinstance(unit, dict):

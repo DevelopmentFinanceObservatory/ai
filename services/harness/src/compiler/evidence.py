@@ -134,7 +134,7 @@ class RetrievalEvidence(StrictModel):
     `trace`'s account of the family the mint admitted before it reduced it
     to `resolved_stat_vars`: the digest `search` states as
     `resolved.shape.member_digest`, over the same population. Both are
-    `None` when the trace states none, as a dfo-apis that predates the
+    `None` when the trace states none, as an apis service that predates the
     fields does and as one that cannot state the whole family does.
 
     `series` is the manifest's statistics artifact itself, in
@@ -158,7 +158,7 @@ class RetrievalEvidence(StrictModel):
     axes are.
 
     `axis_by_column` is the manifest's alone: each coverage dimension's label
-    and the flow axis dfo-apis states for it. A source names a flow
+    and the flow axis apis states for it. A source names a flow
     dataset's role columns by flow axis (`origin`), and the series
     statistics name each entity's role by the column the frame carries
     (`financingProvider`), so this is what ties the two together. `None` at
@@ -1985,7 +1985,7 @@ def _series_issues(
     says.
 
     Reading a count above the span as a finer grain rests on one series
-    covering one entity per role. `compute_series_statistics` in dfo-apis'
+    covering one entity per role. `compute_series_statistics` in apis'
     `dfo-data-tools` groups frame rows by every column but time_period,
     value and status, so two entities of the same role land in separate
     entries and a single entry's count is one entity's observations. A

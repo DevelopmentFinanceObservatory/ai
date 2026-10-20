@@ -923,7 +923,7 @@ async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(
 
 class _BreakdownRefusingSurface(ScriptedSurface):
     """`ScriptedSurface` whose `get_data` refuses the breakdown it was asked for,
-    as dfo-apis refuses a code system it cannot read."""
+    as apis refuses a code system it cannot read."""
 
     async def call_tool(self, **kwargs: Any) -> ToolCallResult:
         if kwargs["tool"].name != "get_data":

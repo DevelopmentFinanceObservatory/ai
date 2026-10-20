@@ -439,7 +439,7 @@ def _fixture_ref(name: str) -> FrameRef:
     """A deterministic, validly-shaped `FrameRef` standing in for "the pair
     a real `get_data` materialisation would register this fixture's frame
     under" -- real spec_id/content_version minting happens upstream
-    (dfo-apis), out of reach for a fixture; this only needs to satisfy
+    (apis), out of reach for a fixture; this only needs to satisfy
     `FrameRef`'s own patterns."""
     digest = hashlib.sha256(name.encode()).hexdigest()[:32]
     return FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
@@ -481,7 +481,7 @@ def _fixture_trace(name: str, frame: Frame) -> MaterialisationTrace:
 
 
 def live_shaped_trace(name: str, frame: Frame) -> MaterialisationTrace:
-    """A `MaterialisationTrace` for `frame`, shaped like a real dfo-apis
+    """A `MaterialisationTrace` for `frame`, shaped like a real apis
     manifest's own `trace` field rather than `_fixture_trace`'s already-closed
     shape: each `facets` entry carries bookkeeping members
     (`default_policy`, `default_policy_version`, `dispatch_facet_id`,

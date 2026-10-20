@@ -1,8 +1,8 @@
 """The sentence that says what a one-year frame's year holds beside nearby years.
 
 A mint manifest's `coverage` states the year served (`window`), the members
-the frame holds of each role (`dimensions`, each entry with the `noun` dfo-apis
-calls that role's members by, where it states one), and, when dfo-apis sends them,
+the frame holds of each role (`dimensions`, each entry with the `noun` apis
+calls that role's members by, where it states one), and, when apis sends them,
 the members other years hold: `recent_years`, three calendar years newest
 first, and `fullest_year`, the fullest of the last ten, each an entry of
 `year`, `series` and `role_counts`, with `elected_year`, the year its
@@ -45,7 +45,7 @@ def period_note(coverage: Mapping[str, Any]) -> str | None:
 
     A frame of one year is noted for each of three facts: a newer year in
     `recent_years` holds data (the newest such year is named), the year
-    served is not `elected_year`, the year dfo-apis' election chooses over
+    served is not `elected_year`, the year apis' election chooses over
     `recent_years` (that year is named), and `coverage` carries a
     `fullest_year` (it is named). A recent year that holds more members than
     the frame is not otherwise mentioned. "So far" is said only of the newer
@@ -63,7 +63,7 @@ def period_note(coverage: Mapping[str, Any]) -> str | None:
     dimension is the first in `dimensions` order that a `role_counts` key
     names and that holds more than one member in the frame or in a listed
     year. Its members are called by its `noun`, the singular and plural
-    dfo-apis words the role with for the frame's kind of flow (providers and
+    apis words the role with for the frame's kind of flow (providers and
     recipients of aid, creditors and debtors of debt), and are "members"
     where the entry states none. With no such dimension, there is no note.
     """

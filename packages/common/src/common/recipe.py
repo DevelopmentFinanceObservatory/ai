@@ -1,5 +1,5 @@
 """A derived frame's recipe: the tree of op-specs that computed it, down to the
-root datasets, and the two hashes dfo-apis indexes it by.
+root datasets, and the two hashes apis indexes it by.
 
 `build_recipe` walks the materialisation store from a derived frame's pair. Each
 derived frame's stored trace carries the canonical op-spec that produced it
@@ -10,7 +10,7 @@ with an `ops_` id is derived and is followed to its own trace. An input with a
 (`common.materialisation.MintRecord`). `common` does not import `analysis_mcp`,
 so a trace is read by attribute and an op-spec as the parsed JSON object.
 
-The recipe is the JSON object dfo-apis' publish door stores:
+The recipe is the JSON object the apis service's publish door stores:
 
 - `tree`: a node per frame. A derived node is `{"frame", "op_spec", "inputs"}`,
   where `op_spec` is the parsed canonical op-spec and `inputs` maps each of its
@@ -38,7 +38,7 @@ form of `{"identity_version": "rnf1", "recipe": <normal form>}`.
 
 `replay_key` is `rpk_` and 32 hex digits of the SHA-256 of the RFC 8785 form of
 `{"identity_version": "rpk1", "normal_form_hash", "roots", "execution_identities"}`.
-`roots` holds each root's dfo-apis pair in `roots` order, and
+`roots` holds each root's apis pair in `roots` order, and
 `execution_identities` every distinct `ExecutionIdentity.canonical_string()` in
 the tree, sorted. A replay computes the key before it runs: the hash from the
 stored recipe, the roots' current pairs, and the one identity of the engine
@@ -290,7 +290,7 @@ def replay_key(
 
     Args:
         normal_form_hash: The recipe's `normal_form_hash`.
-        root_datasets: Each root's dfo-apis `{spec_id, content_version}`, in the
+        root_datasets: Each root's apis `{spec_id, content_version}`, in the
             recipe's `roots` order.
         execution_identities: The `ExecutionIdentity.canonical_string()` of every
             frame in the tree. Order and repeats do not matter.

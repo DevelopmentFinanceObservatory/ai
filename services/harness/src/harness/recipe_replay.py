@@ -2,18 +2,18 @@
 
 A recipe (`common.recipe`) is the tree of op-specs that computed a derived frame,
 down to the mint records of its root datasets. `replay_recipe` computes that tree
-again on the data dfo-apis holds now:
+again on the data apis holds now:
 
 1. Every root is minted again with its recorded `options` and `scope`
    (`data_mcp.get_data_tool.mint_recorded_root`), which registers the current
    frame of that rendering in the materialisation store. The mint may send other
    options than the recorded ones: a flow root recorded with its parties' types
    or with no columns is minted with their kinds. A root recorded with
-   `without_party_totals` sends it to dfo-apis as recorded, and comes back as the
+   `without_party_totals` sends it to apis as recorded, and comes back as the
    current frame without the group totals of its open party roles. Every root is
    minted, moved or not, because a frame older than the store's retention has left it.
-   A mint dfo-apis queues does not wait: the replay answers `Pending`, and the
-   next call sends the same mint, which dfo-apis answers from the operation it
+   A mint apis queues does not wait: the replay answers `Pending`, and the
+   next call sends the same mint, which apis answers from the operation it
    already holds.
 2. A root recorded with one StatVar that now holds more, or that comes back as a
    groupby sum with a version of its own when it was recorded under a raw
@@ -39,8 +39,8 @@ again on the data dfo-apis holds now:
    recipe keeps the stored `normal_form_hash`. The store's mint record keeps the
    options sent, since a `get_data` call minting the same pair shares it. The
    frame is published with the recipe through the caller's `publish`
-   (`presentation_mcp.client.PlatformAssembler.publish_frame`), unless dfo-apis
-   already holds that pair under the recipe's `replay_key`. dfo-apis keeps a
+   (`presentation_mcp.client.PlatformAssembler.publish_frame`), unless apis
+   already holds that pair under the recipe's `replay_key`. apis keeps a
    pair's first recipe, so a pair another card published first under a recipe of
    another normal form refuses `recipe_normal_form_changed`: no render draws this
    card on it.
@@ -49,7 +49,7 @@ The module calls no model and holds no state between calls. It imports nothing
 from `planner`, `compiler`, `executor`, `translator`, `orchestrator` or the
 conversation and session modules of `harness`, so it runs in a request with no
 conversation. Its dependencies arrive as arguments: the verbs through a callable
-over the tool surface the executor uses, the store, the dfo-apis client, the
+over the tool surface the executor uses, the store, the apis client, the
 publisher, and a row budget.
 
 Three things reach the process-wide holders instead of the arguments, because
@@ -161,8 +161,8 @@ class MintRoot(Protocol):
 
 
 class PublishFrame(Protocol):
-    """Publishes a derived frame the store holds to dfo-apis with `recipe`, and
-    says whether dfo-apis newly recorded it, or that it holds the frame under a
+    """Publishes a derived frame the store holds to apis with `recipe`, and
+    says whether apis newly recorded it, or that it holds the frame under a
     recipe of another normal form.
     `presentation_mcp.client.PlatformAssembler.publish_frame` is one."""
 
@@ -173,10 +173,10 @@ class PublishFrame(Protocol):
 
 @dataclass(frozen=True, kw_only=True)
 class Replayed:
-    """The recipe was computed on current data and dfo-apis holds the result.
+    """The recipe was computed on current data and apis holds the result.
 
     `frame` is the new derived pair and `recipe` its recipe. `newly_published` is
-    whether this call made dfo-apis record the frame, and is false when it held it
+    whether this call made apis record the frame, and is false when it held it
     already. `normal_form_changed` is true only for a replay given replacement
     populations, whose recipe then has another `normal_form_hash` than the stored one.
     """
@@ -190,7 +190,7 @@ class Replayed:
 @dataclass(frozen=True, kw_only=True)
 class Pending:
     """The replay has not finished and the same call may be made again after
-    `retry_after_s`. `reason` is `mint_queued` for a root dfo-apis is still
+    `retry_after_s`. `reason` is `mint_queued` for a root apis is still
     building, `deadline` for a replay that ran out of time between steps,
     `row_budget` for rows the refresh budget has no room for while other replays
     hold theirs, and `busy` for a service that refused with a wait."""
@@ -402,7 +402,7 @@ class _Replay:
         """Mint every root and keep its new frame in `root_frames`, in `roots` order.
 
         The roots are minted one after another: data-mcp admits one mint at a time
-        under a budget that does not wait out dfo-apis' synchronous mint
+        under a budget that does not wait out apis' synchronous mint
         (`data_mcp.mint_ledger`), and would refuse a second sent beside the first.
         A root that stops the replay does not stop the mints after it, so every
         queued root is submitted by the first call.
@@ -466,9 +466,9 @@ class _Replay:
         always held several StatVars. Such a record either holds the `options` the
         mint sent, written before the count was kept, or was rebuilt by
         `data_mcp.mint_recovery` for a `groupby` sum with a version of its own,
-        whose `groupby` dfo-apis recorded. Recovery counts or refuses every root
+        whose `groupby` apis recorded. Recovery counts or refuses every root
         under an unsummed version, where the first case arises. The second case
-        reads dfo-apis' versions and needs no count, and dfo-apis' own frame refresh
+        reads apis' versions and needs no count, and apis' own frame refresh
         refuses a version that links both renderings.
 
         A record whose frame is held under the pair that names its `groupby`
@@ -684,8 +684,8 @@ class _Replay:
     # Publishing
 
     async def publish(self, frame: _Frame, recipe: dict[str, Any], publish: PublishFrame) -> bool:
-        """Whether this call made dfo-apis record `frame`, publishing it with
-        `recipe` unless dfo-apis already holds the pair under the recipe's replay key."""
+        """Whether this call made apis record `frame`, publishing it with
+        `recipe` unless apis already holds the pair under the recipe's replay key."""
         self.check_deadline()
         try:
             held = await self.apis.find_replay(replay_key=recipe["replay_key"])
@@ -715,9 +715,9 @@ class _Replay:
     async def _held_under_other_normal_form(
         self, frame: _Frame, recipe: Mapping[str, Any]
     ) -> _Stopped:
-        """`recipe_normal_form_changed` for `frame`, which dfo-apis holds under a
+        """`recipe_normal_form_changed` for `frame`, which apis holds under a
         recipe of another normal form than `recipe`'s: no card of `recipe` is drawn
-        on it. The detail names the normal form dfo-apis holds."""
+        on it. The detail names the normal form apis holds."""
         try:
             held = await self.apis.read_recipe(
                 spec_id=frame.ref.spec_id, content_version=frame.ref.content_version
@@ -795,7 +795,7 @@ async def _replayed(
         ) from exc
     changed = replayed["normal_form_hash"] != recipe.get("normal_form_hash")
     if changed and populations is None:
-        # dfo-apis renders a card on a frame only when the two recipes share a
+        # apis renders a card on a frame only when the two recipes share a
         # normal form, so this frame could be drawn by no card of the recipe.
         raise _Stopped(
             Refused(
@@ -832,7 +832,7 @@ async def replay_recipe(
     See the module docstring for the steps.
 
     Args:
-        recipe: A recipe as dfo-apis returns it from
+        recipe: A recipe as apis returns it from
             `GET /api/datasets/frames/{spec_id}/{content_version}/recipe`.
         deadline: When the replay must stop. It is read before each mint, each
             verb call, the anchor call and the publish: a step in flight runs to
@@ -841,7 +841,7 @@ async def replay_recipe(
         call_tool: Calls an analysis-mcp tool by name: the eight verbs and
             `resolve_anchor`.
         store: The process's materialisation store, `common.materialisation.get_store()`.
-        apis: The dfo-apis client. `list_versions`, `find_replay` and
+        apis: The apis client. `list_versions`, `find_replay` and
             `read_recipe` are called, all under the datasets principal.
         publish: Publishes the final frame with its recipe.
         row_budget: The rows replays may hold at once. Each verb call claims its
@@ -863,7 +863,7 @@ async def replay_recipe(
         `populations_not_applicable`, `rolling_populations_differ`,
         `rolling_period_invalid`, `rows_over_refresh_budget`, `recipe_unbuildable`,
         and `recipe_normal_form_changed`. Any other code is the mint's, the verb's, the
-        publish's or dfo-apis' own.
+        publish's or apis' own.
 
     Raises:
         LiveApisNotConfigured: `apis` has no datasets principal.

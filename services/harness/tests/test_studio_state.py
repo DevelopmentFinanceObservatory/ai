@@ -1088,7 +1088,7 @@ def test_a_closed_turn_keeps_no_block_for_a_spec_id_only_offered_as_a_candidate(
     assert state.earlier_block(candidate) is None
 
 
-# The definitions dfo-apis served for Guatemala's nominal GDP over every year
+# The definitions apis served for Guatemala's nominal GDP over every year
 # (turn 0's orchestrator search) and over 1960 to 2024 (turn 2's translator
 # discovery) in a recorded Studio session. They differ only in
 # `requested_window`.

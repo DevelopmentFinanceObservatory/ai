@@ -4735,7 +4735,7 @@ _DONOR_FAMILY_AXES = ("crsCooperationModality", "crsPurpose", "crsTypeOfFinance"
 
 
 def _donor_family_stating_no_summable(role_open_block: dict[str, Any]) -> SelectedSource:
-    """The recorded education-aid block as a dfo-apis that predates `Slot.summable` serves it.
+    """The recorded education-aid block as an apis service that predates `Slot.summable` serves it.
 
     Every slot loses its `summable`, which `compiler.sources` reads as false,
     so no axis the family varies along may be summed. Nothing else changes.
@@ -4996,7 +4996,7 @@ def test_a_rank_over_a_donor_family_the_plan_reads_summed_asks_for_the_sum(
     role_open_block: dict[str, Any],
 ) -> None:
     # The plan states `stat_vars='sum'` over the same recorded block, so the
-    # retrieval asks dfo-apis for the sum and the rank reads one measure over
+    # retrieval asks apis for the sum and the rank reads one measure over
     # the open `origin` axis.
     result = _rank_donors(
         build,

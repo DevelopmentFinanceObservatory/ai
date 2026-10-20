@@ -2,8 +2,7 @@
 
 > Frontend developers: read [`frontend-interface.md`](frontend-interface.md)
 > first. It is the self-contained integration guide. This document records
-> the contract's design decisions and its deltas against the original
-> drafts.
+> the contract's design decisions and its numbered deltas.
 
 The interface between the DFO harness (this repo) and the website's Studio
 experience (chat + canvas). This document and the pydantic models in
@@ -13,11 +12,9 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 implements the contract drafts of 2026-08-04 (`dfowebsitecontractv1`
-appendix A3 and `dfofrontendpayloads`, "Studio" sections) with numbered
-deltas (1–21; 16 is folded into 11) where the drafts were ambiguous,
-silent, or stale. The deltas are marked where they apply; every unmarked
-shape is the drafts' shape.
+v1 records its design decisions as numbered deltas (1–21; 16 is folded
+into 11). The deltas are marked where they apply and listed in the delta
+index at the end.
 
 The contract is frozen at `schema_version: 1`. Agent internals (planning,
 tool selection, models) will keep moving underneath it; a
@@ -32,7 +29,7 @@ breaking structural change bumps the version and ships a migration note.
 | POST   | `/api/studio/cancel`      | 204; aborts the conversation's in-flight segment (delta 14) |
 | POST   | `/api/studio/composition` | the new composition manifest, as a JSON body                |
 
-The drafts' other routes (`/api/sources`, `/api/datasets/{spec_id}`,
+The Studio's other routes (`/api/sources`, `/api/datasets/{spec_id}`,
 gallery, published views) are website/platform reads served outside the
 harness.
 
@@ -48,7 +45,7 @@ Every studio request carries:
   verification seam is one function in `harness/auth.py`, where full JWT
   validation plugs in later without touching routes.
 - `conversation_id` in the body: client-minted, stable for one
-  conversation. `session_id`, the drafts' name for it, parses as a
+  conversation. `session_id`, its earlier name, parses as a
   deprecated alias in v1 (the fixtures still use it). Sending both
   spellings in one body is refused.
 
@@ -324,7 +321,7 @@ same words.
 ## Seeds from Search (delta 18, v1.3)
 
 `TurnRequest.seed_spec` is a list of 1 to `MAX_SEEDS` (6) `Seed`s, each
-`{spec, operations}`, or `null`. The drafts reserved the member as one
+`{spec, operations}`, or `null`. The member was first reserved as one
 `{spec_id, content_version}` reference, which the server parsed and did
 not act on. That shape still parses and still seeds nothing, since a
 reference carries no Spec block to start from: the turn runs from the
@@ -391,7 +388,7 @@ Fixture: `request-11-turn-seeded.json`.
 
 A dataset that names no place covers every place with data, at every
 level: the world, regions, World Bank groups, countries and their
-subdivisions. dfo-apis falls back to the countries when the full list is
+subdivisions. apis falls back to the countries when the full list is
 over 5,000 places or unavailable, and says so in a `coverage_below_scope`
 warning. A plan that ranks, totals, averages or shares such a dataset
 keeps one level first, so "top 10 by GDP" never ranks World beside the
@@ -491,9 +488,9 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
-## Corrections to the drafts (delta 10)
+## Sample fixture values (delta 10)
 
-Fixture values that are samples, corrected here:
+Fixture values that are samples:
 
 - The fixtures' `interrupt_id: "approve"` literal is a sample value (see delta 7).
 - Forward-dated catalogue versions in fixtures (e.g. `2026.10.0`) are
@@ -542,7 +539,7 @@ Fixture values that are samples, corrected here:
 1. `suggestions` may be empty in v1.
 1. The harness owns the minimal composition manifest;
    `expected_revision` → `edit_conflict` on mismatch.
-1. Stale draft artefacts corrected (see above).
+1. Sample fixture values named (see above).
 1. `turn.request.auto_add` (default `true`) decouples component creation
    from composition membership; `component.created` on an auto_add=false
    turn does not imply a composition block; `composition.mutate` gains the

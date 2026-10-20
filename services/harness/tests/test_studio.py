@@ -1420,7 +1420,7 @@ async def test_a_stream_fatal_error_closes_the_activity_lines_left_running_first
 
 async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running() -> None:
     """A takeover ends the stream mid-step, same as a Stop: the step's line
-    would otherwise stay pending forever in Studio, since dfo-website
+    would otherwise stay pending forever in Studio, since website
     matches a later frame to an already-open line by `step_id` and patches
     it in place -- nothing ever resends this step's frame on THIS stream.
     The stream closes the line as failed before the stream-fatal
@@ -3483,7 +3483,7 @@ async def test_an_edit_patch_on_a_card_holding_no_write_token_recreates_it_in_it
     manifest = _frame(frames, "done")["composition"]
     assert [b["component_id"] for b in manifest["blocks"]] == ["cmp_01test0002"]
     # A create: the stored intent with the patch merged in at the top
-    # level, as dfo-apis `merge_intent` merges a revise, so `select` is
+    # level, as apis `merge_intent` merges a revise, so `select` is
     # replaced whole, and no component_id or token.
     assert executor.calls[-1] == {
         "tool": "write_component",

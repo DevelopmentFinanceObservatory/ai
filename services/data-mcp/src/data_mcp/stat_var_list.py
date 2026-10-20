@@ -8,7 +8,7 @@ than `MAX_LISTED_STAT_VARS` from the result and records how many entries it
 held under `STAT_VARS_OMITTED_KEY`, beside the manifest. Code that reads the
 list (the harness's evidence checks and provenance) calls
 `with_stat_var_list` on the result first, which reads the list back off
-dfo-apis' snapshot of the same `{spec_id, content_version}` pair. No model
+apis' snapshot of the same `{spec_id, content_version}` pair. No model
 ever reads the list.
 """
 
@@ -47,7 +47,7 @@ def without_long_stat_var_list(result: Mapping[str, Any]) -> dict[str, Any]:
 
 async def with_stat_var_list(result: Mapping[str, Any]) -> dict[str, Any]:
     """`result` with the `trace.resolved_stat_vars` `without_long_stat_var_list` left
-    out read back from dfo-apis' snapshot route, or `result` as is when none was.
+    out read back from apis' snapshot route, or `result` as is when none was.
 
     Raises:
         fastmcp.exceptions.ResourceError: The snapshot could not be read, or its

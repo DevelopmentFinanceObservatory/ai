@@ -22,8 +22,8 @@ from typing import Literal, get_args
 
 # The words a requirement's role phrase or a source's role column may use for
 # each side of a flow, as `search` places them: its role-text lexicon
-# (dfo-apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`) plus the role
-# columns `origin` and `destination` it resolves a flow entity under (dfo-apis
+# (apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`) plus the role
+# columns `origin` and `destination` it resolves a flow entity under (apis
 # `search/models/vocab.py`, `EntityRoleKey`). `flow_side` matches each token of
 # a word against them, as written or as its singular.
 # `tests/compiler/test_evidence.py` pins this copy against that lexicon. A

@@ -8,7 +8,7 @@ stored frame decodes to.
 
 Single stages:
 
-- decode: data-mcp's parse of a Parquet artifact shaped like dfo-apis's.
+- decode: data-mcp's parse of a Parquet artifact shaped like the apis service's.
 - store_put, store_get: `GcsMaterialisationStore` over an in-memory fake bucket, so the
   Parquet codec runs exactly as in production.
 - frame_sha256: the grammar's content hash of the frame.
@@ -269,7 +269,7 @@ def _sector_frame(n: int, *, stat_var: str) -> Frame:
 
 
 def _artifact_bytes(n: int) -> bytes:
-    """A Parquet file laid out like dfo-apis's artifact: string columns, a float64 `value`,
+    """A Parquet file laid out like the apis service's artifact: string columns, a float64 `value`,
     a string `unit`, and an all-null `status`."""
     table = _crs_table(n)
     table = table.append_column("status", pa.nulls(n, type=pa.string()))

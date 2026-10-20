@@ -438,12 +438,12 @@ Notes on specific fields:
 
 A client that wants the raw frame behind a card takes its reference from `payload.provenance.inputs[0]` = `{spec_id, content_version}` (a note has none) and fetches it from the datasets door:
 
-1. Send `GET /api/datasets/{spec_id}/{content_version}` to `dfo-apis`.
-   How your app reaches `dfo-apis` (direct, through your proxy, or another
+1. Send `GET /api/datasets/{spec_id}/{content_version}` to `apis`.
+   How your app reaches `apis` (direct, through your proxy, or another
    way) is your decision; the reference pages already talk to the same
    service.
 1. Read `artifacts[0].url` from the response. It is a root-relative link
-   that does not expire. Resolve it against the `dfo-apis` origin.
+   that does not expire. Resolve it against the `apis` origin.
 1. Fetch that link and follow its 302 redirect to the file. The redirect
    target is a signed URL that lasts five minutes, so follow it at once.
    The body is a Parquet file. Each row is one point:

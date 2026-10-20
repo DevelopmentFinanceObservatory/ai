@@ -1,7 +1,7 @@
 [project]
 name = "data_mcp"
 version = "0.1.0"
-description = "Thin FastMCP wrapper over the dfo-apis Data seam: the Search API today, the Datasets API next."
+description = "Thin FastMCP wrapper over the apis Data seam: the Search API today, the Datasets API next."
 requires-python = ">=3.13"
 dependencies = [
     "common",

@@ -66,7 +66,7 @@ default) computes a single total, with no key.
 
 Every result row states what it holds. Its `value` is the share in per cent
 (numerator / denominator x 100), its `unit` is
-`common.unit_refs.PERCENT_UNIT`, the ref dfo-apis writes on a published
+`common.unit_refs.PERCENT_UNIT`, the ref apis writes on a published
 share such as a "% of GDP" series, and its `stat_var` is the caller-supplied
 `stat_var`, the operation's own minted ref, as `quotient_of` labels its
 rows. A computed share and a published one therefore compare and plot
