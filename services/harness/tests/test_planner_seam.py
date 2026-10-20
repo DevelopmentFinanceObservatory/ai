@@ -84,6 +84,7 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AggregateRequirement,
     AskBreakdown,
@@ -611,31 +612,39 @@ async def test_an_unknown_tool_name_keeps_adks_answer_listing_the_tools(
 
 
 @pytest.mark.parametrize("resumed", [False, True])
-async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool) -> None:
-    """A new first-draft entry starts with no `unsupported` answer to decline, no
-    compile failure to call repeated, and only the optional decline every first draft
-    may make; an ask-the-user resume inside one entry keeps all three."""
+@pytest.mark.parametrize("entry", ["first-draft", "amendment", "replan"])
+async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, entry: str) -> None:
+    """Fresh entries clear old declines and failures; only first drafts permit an
+    unearned terminal decline. A user-input resume keeps the entry's state."""
     stale = {
         UNSUPPORTED_STATE_KEY: ["calculation_over_combined"],
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
+        TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(script=["Which years did you have in mind?"] * 4)
+    kwargs: dict[str, Any] = {}
+    if entry == "amendment":
+        kwargs["amendment"] = "show it"
+    elif entry == "replan":
+        kwargs["refusal"] = _unit_refusal("cross_frame_unit_mismatch")
 
     await harness.run(
         seam,
         question="kenya debt",
         readings=[],
         resume_inputs={"ask": {"result": "since 2015"}} if resumed else None,
+        **kwargs,
     )
 
     state = await harness.state()
     kept = {key: state.get(key) for key in stale}
     fresh = {
         UNSUPPORTED_STATE_KEY: [],
-        OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
+        OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
+        TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
         COMPILE_FAILURES_STATE_KEY: [],
     }
     assert kept == (stale if resumed else fresh)
@@ -949,6 +958,44 @@ async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
         assert [(r["outcome"], r.get("code")) for r in answered] == [
             ("invalid_input", "decline_unearned")
         ]
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused: bool) -> None:
+    """A first-draft decline can close the entry, including after a user-input pause."""
+    asks = ["the donors whose aid rose in every one of the last five years"]
+    draft = {
+        "question": "donors whose aid rose every year",
+        "answer_mode": "series",
+        "declined": [{"ask": asks[0], "code": "no_operation_covers", "ask_ref": 0}],
+    }
+    script = [[("propose_plan", draft)]]
+    if paused:
+        script.insert(0, [("adk_request_input", {"message": "Which period?"})])
+    llm = ScriptedPlannerLlm(script=script)
+    seam = _seam()
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    result = await harness.run(seam, question=draft["question"], readings=[])
+    if paused:
+        assert result is None
+        interrupt_id = _pending_ask_interrupt_id(await harness.events())
+        result = await harness.run(
+            seam,
+            question=draft["question"],
+            readings=[],
+            new_message=types.Content(
+                role="user",
+                parts=[create_request_input_response(interrupt_id, {"result": "last five years"})],
+            ),
+        )
+
+    assert result is not None
+    assert result["refused"]["final"] is True
+    assert asks[0] in result["refused"]["text"]
+    assert len(llm.captured_requests) == (2 if paused else 1)
+    assert load_plan(await harness.state()) is None
 
 
 # -- asking the user (`adk_request_input`) ---------------------------------

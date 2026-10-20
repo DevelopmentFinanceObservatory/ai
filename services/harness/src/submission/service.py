@@ -98,6 +98,7 @@ from planner.plan import (
     load_optional_declines,
     load_plan,
     load_plan_rounds,
+    load_terminal_declines,
     load_unsupported,
     open_window,
     period_window,
@@ -1021,12 +1022,12 @@ def _sides_covered(
 def _nothing_to_plan(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the answer for a plan that declines every ask and states nothing else.
 
-    Only declines this entry's `unsupported` answers required count: the
-    question is wholly beyond what the system computes, so the entry ends
-    on the declines, which the caller tells the user.
+    The entry's required declines and terminal optional declines can close
+    it. An optional decline of incompatible sources still leaves their
+    separate figures to show, so that permission alone cannot close it.
     """
     codes = {decline.code for decline in plan.declined}
-    if not codes or not codes <= load_unsupported(view.state):
+    if not codes or not codes <= load_unsupported(view.state) | load_terminal_declines(view.state):
         return None
     return problem(
         ProblemCode.NOTHING_TO_PLAN,

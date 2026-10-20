@@ -115,6 +115,7 @@ from planner.plan import (
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
+    TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
     PinSource,
@@ -548,7 +549,9 @@ class PlannerSeam:
                 # which no tool's answer could ever earn. A replan or an
                 # amendment earns each decline from a tool's answer.
                 record_optional_decline(
-                    cast(SessionState, ctx.session.state), UnsupportedOperation.NO_OPERATION_COVERS
+                    cast(SessionState, ctx.session.state),
+                    UnsupportedOperation.NO_OPERATION_COVERS,
+                    terminal=True,
                 )
         # A `resolve_definition` the request's wall-clock bound cuts keeps running here
         # for a later proposal in the same entry to be served, and is
@@ -691,11 +694,14 @@ class PlannerSeam:
         # guards a direct caller of this seam's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY` and
-        # `COMPILE_FAILURES_STATE_KEY` too. The declines an ask-the-user resume
-        # still owes or may make, and the failures it may repeat, are this
-        # entry's own.
-        for key in (UNSUPPORTED_STATE_KEY, OPTIONAL_DECLINES_STATE_KEY, COMPILE_FAILURES_STATE_KEY):
+        # Decline permissions and compile failures survive an ask-the-user resume
+        # within this entry.
+        for key in (
+            UNSUPPORTED_STATE_KEY,
+            OPTIONAL_DECLINES_STATE_KEY,
+            TERMINAL_DECLINES_STATE_KEY,
+            COMPILE_FAILURES_STATE_KEY,
+        ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
 
