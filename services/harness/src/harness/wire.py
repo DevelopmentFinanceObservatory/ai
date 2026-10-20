@@ -624,9 +624,9 @@ class SpecBlock(BaseModel):
 MAX_SEED_GROUP_LABEL_CHARS = 120
 
 
-# The most kinds a whole total's `whole_of` names: the party kinds a total can hold, `party`,
-# `private` and `residual`. (The frame cell `whole_total`, `common.place_type.PartyKind`, marks the
-# total itself and is no kind `whole_of` names.)
+# The most kinds a whole total's `whole_of` or its side's `side_kinds` names: the party kinds a
+# total can hold, `party`, `private` and `residual`. (The frame cell `whole_total`,
+# `common.place_type.PartyKind`, marks the total itself and is no kind either names.)
 MAX_SEED_WHOLE_KINDS = 3
 
 
@@ -637,7 +637,10 @@ class SeedEntityGroup(BaseModel):
     when it bound the members (`planner.workflow.ResolvedGroup.total`).
     `whole_of` names the kinds of party that total, or the set of totals the
     role bound, holds in full, absent for any other set
-    (`planner.workflow.ResolvedGroup.whole_of`). The
+    (`planner.workflow.ResolvedGroup.whole_of`). `side_kinds` names the kinds of
+    party, totals aside, the dataset publishes on that set's side, absent for any
+    other set and from a Search that predates it
+    (`planner.workflow.ResolvedGroup.side_kinds`). The
     members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     """
@@ -655,6 +658,9 @@ class SeedEntityGroup(BaseModel):
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
     )
     whole_of: tuple[Annotated[str, Field(min_length=1, max_length=MAX_SEED_TEXT_CHARS)], ...] = (
+        Field(default=(), max_length=MAX_SEED_WHOLE_KINDS, exclude_if=lambda kinds: not kinds)
+    )
+    side_kinds: tuple[Annotated[str, Field(min_length=1, max_length=MAX_SEED_TEXT_CHARS)], ...] = (
         Field(default=(), max_length=MAX_SEED_WHOLE_KINDS, exclude_if=lambda kinds: not kinds)
     )
 

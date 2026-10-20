@@ -38,7 +38,7 @@ import json
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal, Self
 from urllib.parse import quote
 
@@ -144,9 +144,8 @@ class DatasetVersion:
     `groupby` one that summed such a frame.
 
     `enrichment_stamp` is the stamp a file of this version holding party-kind cells
-    carries: the code index's digest when the version's frame holds a party role, and
-    `None` when it holds none, or when apis lists no stamp on its versions. `served_stamp` is the answer's top-level stamp, the answering code index's
-    digest, the same on every version of one answer, and `None` when it lists none."""
+    carries: the answering code index's digest when the version's frame holds a party
+    role, and `None` when it holds none, or when apis lists no stamp on its versions."""
 
     content_version: str
     base_content_version: str | None
@@ -154,7 +153,6 @@ class DatasetVersion:
     groupby: Mapping[str, Any] | None
     without_party_totals: bool = False
     enrichment_stamp: str | None = None
-    served_stamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -437,23 +435,21 @@ class LiveApisClient:
 
     async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
         """The dataset's stored versions, newest first, each with its own
-        `enrichment_stamp` and the answer's top-level one as `served_stamp`."""
+        `enrichment_stamp`."""
         response = await self._send(
             "GET",
             _VERSIONS_PATH.format(spec_id=_segment(spec_id)),
             headers=self._datasets_headers(),
         )
-        answer = _json_object(response, "versions answer")
-        versions = answer.get("versions")
+        versions = _json_object(response, "versions answer").get("versions")
         if not isinstance(versions, list):
             raise _invalid(response, "versions answer")
-        stamp = _text(answer.get("enrichment_stamp"))
         parsed: list[DatasetVersion] = []
         for item in versions:
             version = _dataset_version(item) if isinstance(item, dict) else None
             if version is None:
                 raise _invalid(response, "versions answer")
-            parsed.append(replace(version, served_stamp=stamp))
+            parsed.append(version)
         return tuple(parsed)
 
     # Refresh and render routes, called with the live-refresh principal.

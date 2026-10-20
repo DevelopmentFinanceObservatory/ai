@@ -13,13 +13,13 @@ import secrets
 
 import pytest
 from analysis_mcp.aggregate_tool import aggregate
-from analysis_mcp.engine.aggregate import NonFiniteAggregateResultError, run_aggregate
+from analysis_mcp.engine.aggregate import run_aggregate
 from analysis_mcp.engine.common import PlaceLevelsMixedError
 from analysis_mcp.engine.growth import run_growth
 from analysis_mcp.engine.join import run_join
 from analysis_mcp.engine.quotient_of import run_quotient_of
 from analysis_mcp.engine.rank import run_rank
-from analysis_mcp.engine.share_of import ShareOfNonFiniteResultError, run_share_of
+from analysis_mcp.engine.share_of import run_share_of
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
@@ -448,23 +448,28 @@ def test_a_mean_reports_no_pooled_parties() -> None:
     assert result.pooled_parties == ()
 
 
-def test_private_parties_whose_pooled_value_overflows_are_refused() -> None:
+def test_private_parties_whose_pooled_value_overflows_are_counted_without_a_value() -> None:
     # Each year's sum is finite, and the private donor's value across both years is not.
     frame = provider_frame(
         {"country/FRA": ("party", 1.0), "GatesFoundation": ("private", 1e308)},
         years=("2020", "2021"),
     )
 
-    with pytest.raises(NonFiniteAggregateResultError):
-        run_aggregate(frame, group_by=("time_period",), aggregation="sum")
-    with pytest.raises(ShareOfNonFiniteResultError):
-        run_share_of(
-            frame,
-            frame,
-            stat_var="dcid:share",
-            numerator_entity={PROVIDER: "country/FRA"},
-            denominator_entity={},
-        )
+    result = run_aggregate(frame, group_by=("time_period",), aggregation="sum")
+    share = run_share_of(
+        frame,
+        frame,
+        stat_var="dcid:share",
+        numerator_entity={PROVIDER: "country/FRA"},
+        denominator_entity={},
+    )
+
+    assert [summary.value for summary in result.group_summaries] == [1e308 + 1.0] * 2
+    (pooled,) = result.pooled_parties
+    assert (pooled.private_count, pooled.private_value) == (1, None)
+    assert [(entry.private_count, entry.private_value) for entry in share.denominator_pooled] == [
+        (1, None)
+    ]
 
 
 def test_a_pool_of_whole_totals_alone_is_summed_and_kept() -> None:

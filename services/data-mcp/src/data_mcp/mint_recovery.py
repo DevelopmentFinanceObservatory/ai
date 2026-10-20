@@ -16,11 +16,12 @@ Recoverable:
   recorded for the version, and takes the one that matches.
 - `options.columns`, by the same match.
 - `enrichment_stamp` of a frame minted with `KIND_COLUMNS`: the stamp its pair is named
-  under. Each candidate above is tried under the stamp the versions answer lists at its
-  top and under none, the pair of a frame minted before apis sent a stamp, which
-  recovers with none. A frame named under another stamp is matched from its held
-  trace, which keeps the stamp (`MaterialisationTrace.enrichment_stamp`), as in the
-  next entry. A record under a stamp other than the one its version lists marks the
+  under. Each candidate above is tried under the stamp the versions answer lists on its
+  version and under none, the pair of a frame minted before apis sent a stamp or of one
+  whose frame holds no party role, which recovers with none. A frame named under
+  another stamp is matched from its held trace, which keeps the stamp
+  (`MaterialisationTrace.enrichment_stamp`), as in the next entry. A record under a
+  stamp other than the one its version lists marks the
   root as moved to `harness.live_refresh`, which replays it with the kinds served now.
 - A sum that kept its version, held under the pair that names its groupby. apis
   records no groupby on an unsummed version, so no candidate above reproduces the
@@ -28,7 +29,7 @@ Recoverable:
   (`MaterialisationTrace.options`) and the stamp its pair is named under, and the
   pair `frame_ref_for` derives from them and a listed version is the match. The
   record holds those options and that stamp. A trace that keeps no stamp is tried under
-  the stamp listed now and under none.
+  the stamp each version lists and under none.
 - `options.groupby` of a summed frame with a `content_version` of its own. apis
   records the version it was summed from as `base_content_version`, and its
   versions route returns the `groupby` the mint sent whenever a file stored under
@@ -100,7 +101,6 @@ __all__ = [
     "RECOVERABLE_COLUMNS",
     "DatasetVersion",
     "DatasetVersions",
-    "current_stamp",
     "recover_mint_record",
 ]
 
@@ -111,9 +111,9 @@ class DatasetVersion(Protocol):
     a version summed from another by a `groupby` or cut from it by
     `without_party_totals`. `groupby` is that mint's `options.groupby` when apis
     recorded it, and `without_party_totals` is true when apis recorded the cut.
-    `served_stamp` is the stamp the versions answer lists at its top, the answering code
-    index's digest, or `None` when it lists none. `common.live_apis.DatasetVersion` is
-    one."""
+    `enrichment_stamp` is the stamp a party-kind file of the version carries, the
+    answering code index's digest, or `None` when its frame holds no party role or apis
+    lists none. `common.live_apis.DatasetVersion` is one."""
 
     @property
     def content_version(self) -> str: ...
@@ -128,7 +128,7 @@ class DatasetVersion(Protocol):
     def without_party_totals(self) -> bool: ...
 
     @property
-    def served_stamp(self) -> str | None: ...
+    def enrichment_stamp(self) -> str | None: ...
 
 
 class DatasetVersions(Protocol):
@@ -179,10 +179,11 @@ async def recover_mint_record(
             version is unsummed and `store` no longer holds the frame.
     """
     versions = await dataset_versions(spec_id=ref.spec_id)
-    stamps = _listed_or_none(versions)
     for version in versions:
         groupbys = (None,) if version.groupby is None else (None, version.groupby)
-        for groupby, columns, stamp in product(groupbys, RECOVERABLE_COLUMNS, stamps):
+        for groupby, columns, stamp in product(
+            groupbys, RECOVERABLE_COLUMNS, _listed_or_none(version)
+        ):
             candidate = frame_ref_for(
                 spec_id=ref.spec_id,
                 content_version=version.content_version,
@@ -215,16 +216,10 @@ async def recover_mint_record(
     return await _recover_from_trace(ref, versions=versions, store=store)
 
 
-def current_stamp(versions: Sequence[DatasetVersion]) -> str | None:
-    """The stamp the versions answer lists at its top, the answering code index's
-    digest, or `None` when it lists none."""
-    return next((v.served_stamp for v in versions if v.served_stamp), None)
-
-
-def _listed_or_none(versions: Sequence[DatasetVersion]) -> tuple[str | None, ...]:
-    """The stamps a frame's pair may be named under when nothing records its own: the
-    one `versions` lists, and none, for a frame minted before apis sent one."""
-    return tuple(dict.fromkeys((current_stamp(versions), None)))
+def _listed_or_none(version: DatasetVersion) -> tuple[str | None, ...]:
+    """The stamps a frame of `version` may be named under when nothing records its own:
+    the one the version lists, and none, for a frame minted before apis sent one."""
+    return tuple(dict.fromkeys((version.enrichment_stamp, None)))
 
 
 async def _recover_from_trace(
@@ -232,33 +227,34 @@ async def _recover_from_trace(
 ) -> MintRecord:
     """The mint record of `ref` rebuilt from the options and stamp its held frame's
     trace keeps, matched against `versions` by `frame_ref_for`. A trace that keeps no
-    stamp is tried under `_listed_or_none`."""
+    stamp is tried under each version's `_listed_or_none`."""
     held = await _held(store, ref)
     trace = None if held is None else held[1]
     if held is None or not isinstance(trace, MaterialisationTrace) or trace.options is None:
         raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
     options = trace.options
-    stamps = (
-        (trace.enrichment_stamp,)
-        if trace.enrichment_stamp is not None
-        else _listed_or_none(versions)
-    )
-    for version, stamp in product(versions, stamps):
-        candidate = frame_ref_for(
-            spec_id=ref.spec_id,
-            content_version=version.content_version,
-            columns=tuple(options.get("columns") or ()),
-            groupby=options.get("groupby"),
-            enrichment_stamp=stamp,
+    for version in versions:
+        stamps = (
+            (trace.enrichment_stamp,)
+            if trace.enrichment_stamp is not None
+            else _listed_or_none(version)
         )
-        if candidate == ref:
-            return MintRecord(
-                frame=ref,
-                dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
-                options=dict(options),
-                stat_var_count=observed_shape(held[0])[1],
-                enrichment_stamp=recorded_stamp(options.get("columns") or (), stamp),
+        for stamp in stamps:
+            candidate = frame_ref_for(
+                spec_id=ref.spec_id,
+                content_version=version.content_version,
+                columns=tuple(options.get("columns") or ()),
+                groupby=options.get("groupby"),
+                enrichment_stamp=stamp,
             )
+            if candidate == ref:
+                return MintRecord(
+                    frame=ref,
+                    dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
+                    options=dict(options),
+                    stat_var_count=observed_shape(held[0])[1],
+                    enrichment_stamp=recorded_stamp(options.get("columns") or (), stamp),
+                )
     raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
 
 
