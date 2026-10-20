@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="8919acabbb417da7f9b5c67764d6656d228f7616286ab8cd65a37d25c55552bc",
+        input_schema_hash="e08f1562f80f6c81a93ae1961825555485839dee975571bdfb36d72e423615be",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -182,7 +182,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
         # `scope.entities` taking a dcid only behind the `dcid:` marker.
-        input_schema_hash="1656fe3719c7bf56d3bd0838ce6d8a0e33a091dc894dc3600ad092d5707978ec",
+        input_schema_hash="3bd8126f0b4011333ddb84fe0702a281c0a5cea8f1bef8855354b4e357c73eaa",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -197,7 +197,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("growth"),
@@ -208,7 +208,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `change`, `rolling` and `anchor_key` parameters.
         input_schema_hash="7be1cf6034ecf528d931b4f568700bebb821c69ead44cfaaad8e0e1a1715d1dd",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("compare"),
@@ -218,7 +218,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="da9ed37fe1dad12d15928195c44f7b06d1cdbb45d2fd859b9c03f86b94a30ba1",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("rank"),
@@ -229,7 +229,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
         input_schema_hash="f66afdbb23f66fe5e5c225d99b87f4fc8fab0f0b7aa24c3bcc767392f929d591",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("share_of"),
@@ -242,8 +242,8 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="8ae36930c237d30c9191854b288d477a46d3a1bcdf077b1ad0a136c51892ce49",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        input_schema_hash="dc6679bbefda7db202c360eec59c396dfdfbee2ed85d7aac8debd53a249ff369",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("quotient_of"),
@@ -256,7 +256,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="47d9a33d100c3666504e3eaafd6c95d214772a8b420b598bf6c90a0343819734",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("join"),
@@ -266,7 +266,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="3a089d99fce6ec543ad5a20da4679dc3cc888ccfa293df4dd3af45df36e4ae48",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
         tool=_analysis("filter"),
@@ -278,7 +278,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         # Pins the `place_level` predicate, the 21-character period operand, a
         # threshold's `rolling`, and the `rolling` and `anchor_key` parameters.
         input_schema_hash="b647cd47142035a50d5e42427a27354779a2546769ccbc474b90b398832b6ffc",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
         empty_is_an_answer=True,
     ),
     ToolCapability(
@@ -289,7 +289,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="34835d1f9f2caea89d276d3532fcf293c6fded1559addcad7bd37c292ac3e8c1",
-        output_schema_hash="b04b40c5344c30a44621a9706235f8df1a96ebc82b1ed3bf0219d2856842aa8f",
+        output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     # Finds the latest period a workflow's rolling steps follow. It implements no
     # operation and returns no frame. It takes every root frame at once, in `roots`,

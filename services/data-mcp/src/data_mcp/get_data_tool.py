@@ -1648,10 +1648,14 @@ async def get_data(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
                 "Total or the G7) from each side the spec leaves open, and add the party kinds as "
                 "place_types does, so the side's members can be compared or ranked without "
-                "totals among them. A sum of those members is not the source's published total "
-                "for all donors or all recipients; search returns that total when the question "
-                'names "all donors" or leaves the side unnamed. A side the spec names, or one '
-                "holding only totals, keeps every row, and the digest names what was left out. "
+                "totals among them. A sum of these members can differ from the source's "
+                "published total. For a total across the whole side, search naming the "
+                'population ("all donors") with no operation over that side: search binds the '
+                "published total, or, where the source publishes none, departs "
+                "whole_total_unpublished and returns the members, whose sum is the total, or, where "
+                "the source holds no series of that total, finds no data. A side "
+                "the spec names, or one holding only totals, keeps every row, and the digest "
+                "names what was left out. "
                 "On a spec with no flow side it changes nothing."
             )
         ),

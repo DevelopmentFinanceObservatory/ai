@@ -470,11 +470,8 @@ def test_each_role_that_lost_totals_is_named_with_at_most_ten_of_them() -> None:
     ] * 3
     # A total this call resolved is named by its label.
     assert "(G7)" in lines["financingRecipient"]
-    # The parties left are not the side's published total once summed.
-    assert all(
-        line.endswith("whose sum is not the source's published total for the side.")
-        for line in lines.values()
-    )
+    # The line names the departure by which search says no total is published for the side.
+    assert all("whole_total_unpublished" in line for line in lines.values())
     assert "GroupOfSeven" not in lines["financingRecipient"]
 
 

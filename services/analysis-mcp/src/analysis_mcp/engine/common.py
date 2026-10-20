@@ -63,6 +63,7 @@ from typing import Literal, cast
 
 import pyarrow as pa
 from common.place_type import (
+    MEMBER_KINDS,
     PARTY_KINDS,
     PARTY_ROLES,
     PRIVATE_KIND,
@@ -108,7 +109,8 @@ from analysis_mcp.engine.columnar import (
 # `engine.rank`'s limit (`beyond_limit`), `engine.quotient_of`'s matched
 # cells whose denominator sums to zero (`zero_denominator`), and the flow
 # parties `without_party_totals` leaves out of a sum or a rank because they
-# total other parties (`party_total`). A heterogeneous facet always refuses
+# total other parties (`party_total`) or, on a ranked role, because they are
+# unallocated residuals (`party_residual`). A heterogeneous facet always refuses
 # with `FacetHeterogeneousError`, so this set carries no facet reason.
 ExclusionReason = Literal[
     "unit_unbound",
@@ -124,6 +126,7 @@ ExclusionReason = Literal[
     "beyond_limit",
     "zero_denominator",
     "party_total",
+    "party_residual",
 ]
 
 # Which of a two-input verb's two sides a dropped row came from. `None` for
@@ -146,6 +149,9 @@ _FIXED_COLUMNS = frozenset(
 
 # How many of a place-type column's distinct cells a `PlaceLevelsMixedError` names.
 _PLACE_TYPE_CAP = 10
+
+# The party kinds that are neither totals nor members: the residuals a ranking leaves out.
+_RESIDUAL_KINDS = PARTY_KINDS - MEMBER_KINDS - TOTAL_KINDS
 
 
 class PlaceLevelsMixedError(Exception):
@@ -209,7 +215,11 @@ def without_party_totals(
     """`frame` less the rows of every flow party in `columns` whose
     `{role}_party_kind` cell is `total` or `whole_total`, with one `party_total`
     exclusion per role that lost rows, naming the totals left out and tagged `side`.
-    Parties of kind `party`, `private` and `residual` stay.
+    Parties of kind `party`, `private` and `residual` stay, except that a role in
+    `ranked` holding parties of a kind in `common.place_type.MEMBER_KINDS` keeps only
+    those, as a chart's ranking does: a residual holds unallocated amounts, so it adds
+    to a sum but is no member to rank. Its residuals are one `party_residual`
+    exclusion.
 
     A role outside `common.place_type.PARTY_ROLES` and a role holding one
     party keep every row, and so does a role in `ranked` whose parties are
@@ -237,24 +247,28 @@ def without_party_totals(
             if column in ranked or cells == [WHOLE_TOTAL_KIND]:
                 continue
             raise PlaceLevelsMixedError(column=kinds, types=cells)
-        if TOTAL_KINDS.isdisjoint(cells):
-            continue
-        is_total = array_kernel(
-            "is_in",
-            table.column(kinds).combine_chunks(),
-            value_set=pa.array(sorted(TOTAL_KINDS), type=pa.string()),
-        )
-        dropped = table.filter(is_total)
-        totals = distinct(dropped, column)
-        exclusions = record_counted_exclusion(
-            exclusions,
-            reason="party_total",
-            row_count=dropped.num_rows,
-            entities={column: totals},
-            parties=tuple(totals),
-            side=side,
-        )
-        table = table.filter(array_kernel("invert", is_total))
+        left_out: list[tuple[ExclusionReason, frozenset[str]]] = [("party_total", TOTAL_KINDS)]
+        if column in ranked and not MEMBER_KINDS.isdisjoint(cells):
+            left_out.append(("party_residual", _RESIDUAL_KINDS))
+        for reason, dropped_kinds in left_out:
+            if dropped_kinds.isdisjoint(cells):
+                continue
+            is_dropped = array_kernel(
+                "is_in",
+                table.column(kinds).combine_chunks(),
+                value_set=pa.array(sorted(dropped_kinds), type=pa.string()),
+            )
+            dropped = table.filter(is_dropped)
+            parties = distinct(dropped, column)
+            exclusions = record_counted_exclusion(
+                exclusions,
+                reason=reason,
+                row_count=dropped.num_rows,
+                entities={column: parties},
+                parties=tuple(parties),
+                side=side,
+            )
+            table = table.filter(array_kernel("invert", is_dropped))
     if table is frame.table:
         return frame, exclusions
     return Frame.from_table(columns=frame.columns, table=table), exclusions

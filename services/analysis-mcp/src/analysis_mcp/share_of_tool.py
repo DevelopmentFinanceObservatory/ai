@@ -372,10 +372,15 @@ async def share_of(
             default=None,
             description=(
                 "{role_column: value} narrowing the numerator's own rows before summing "
-                "each period. Empty sums every row on this side per period. A sum of a "
-                "side's members is not the source's published total for all donors or all "
-                "recipients; search returns that total when the question names it. Role "
-                "columns only -- stat_var and time_period are not accepted selectors."
+                "each period. Empty sums every row on this side per period except group "
+                "totals, residuals included. A filter to member_kinds is for comparing or "
+                "ranking members; before a sum it leaves out the residuals. For a total "
+                'across a whole side, search naming the population ("all donors") with no '
+                "operation over that side: search binds the source's published total, or, "
+                "where the source publishes none, departs whole_total_unpublished and returns "
+                "the members, whose sum is the total, or, where the source holds no series of "
+                "that total, finds no data. Role columns only -- stat_var and "
+                "time_period are not accepted selectors."
             ),
         ),
     ] = None,

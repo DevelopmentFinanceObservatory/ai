@@ -15,7 +15,8 @@ unmatched-key sets (`unmatched_key`), `compare`'s unintersected periods
 (`period_unmatched`), `rank`'s limit (`beyond_limit`), `quotient_of`'s
 matched cells whose denominator sums to zero (`zero_denominator`), and the
 flow parties a sum or a rank leaves out because they total other parties
-(`party_total`). A heterogeneous facet always refuses
+(`party_total`) or, on a ranked role, because they are unallocated residuals
+(`party_residual`). A heterogeneous facet always refuses
 (`analysis_mcp.engine.common.FacetHeterogeneousError`); this set carries no
 facet reason.
 

@@ -83,6 +83,10 @@ TOTAL_KIND: PartyKind = "total"
 WHOLE_TOTAL_KIND: PartyKind = "whole_total"
 # The cells whose rows hold other rows' figures, so a sum beside members leaves them out.
 TOTAL_KINDS: frozenset[str] = frozenset({TOTAL_KIND, WHOLE_TOTAL_KIND})
+# The cells of the members a ranking of a flow side compares, in the rank verb and in a
+# chart alike. A residual holds unallocated amounts, so a sum keeps it and a ranking
+# leaves it out.
+MEMBER_KINDS: frozenset[str] = frozenset({"party", PRIVATE_KIND})
 
 _ENRICHMENT_SUFFIXES = ("_type", "_party_kind")
 

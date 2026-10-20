@@ -589,8 +589,11 @@ def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[s
     names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
     return (
         f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
-        "frame holds that side's other parties, whose sum is not the source's published total "
-        "for the side."
+        "frame holds that side's other parties. For the total across the whole side, search "
+        'again naming the population ("all donors", "all recipients") with no operation over '
+        "that side: search binds the source's published total, or, where the source publishes "
+        "none, departs whole_total_unpublished and returns the members, whose sum is the "
+        "total, or, where the source holds no series of that total, finds no data."
     )
 
 

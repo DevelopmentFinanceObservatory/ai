@@ -217,8 +217,12 @@ class SearchPart(BaseModel):
                 "a flow side the ask lists member by member, as a role word, e.g. ['creditor'] "
                 "for 'which creditors' or 'by creditor'; use only for an origin or destination "
                 "side of a flow, never a side one of the entities names. A total across a side "
-                "sends none, or names the side as an entity ('all donors'), and search returns "
-                "the source's published total for it"
+                "sends none, runs no operation over it, and names the population the user asked "
+                "for as an entity: 'all donors' covers official and private donors, and a donor "
+                "side left unnamed on DAC2a covers official donors only. For a named population "
+                "search binds the source's published total, or, where the source publishes "
+                "none, returns the members and departs whole_total_unpublished, so their sum is "
+                "the total, or, where the source holds no series of that total, finds no data"
             ),
         )
     )
@@ -516,14 +520,25 @@ async def search(
     is directed (e.g. recipient, debtor, importer) is "to"; `time` takes only
     the forms its own description lists. `open_roles` lists each member of
     a flow side, in the same role words: send it for a "by creditor" or
-    "which creditors" ask. A total across a side sends no `open_roles`, or
-    names the whole side as an entity, and search returns the source's
-    published total: "Total aid to Ethiopia from all donors" is
-    `{"variable": "aid", "entities": [{"text": "Ethiopia", "role":
-    "recipient"}, {"text": "all donors", "role": "donor"}]}`. Summing the
-    listed members gives a different figure. A rank in `operations` over `origin` or
-    `destination` also opens that flow side. Keep `open_roles` when the user
-    explicitly asks to break down that side.
+    "which creditors" ask. A total across a side sends no `open_roles` and
+    names the population the user asked for. "Total aid to Ethiopia from all
+    donors" is `{"variable": "aid", "entities": [{"text": "Ethiopia", "role":
+    "recipient"}, {"text": "all donors", "role": "donor"}]}`, which covers
+    official and private donors. A donor side left unnamed on DAC2a covers
+    official donors only, and "official donors" stays official. For a named
+    population search binds the source's published total, or, where the
+    source publishes none, returns the members and departs
+    `whole_total_unpublished`, naming what their sum covers, and that sum is
+    the total, or, where the source holds no series of that total ("official
+    donors" on the CRS), finds no data. A published total stands in only where no operation runs over
+    its side: any operation whose `over` is `origin` or `destination`,
+    `aggregate` included, opens that flow side and keeps its members, so a
+    total leaves `over` off that side. Keep `open_roles` when the user
+    explicitly asks to break down that side. Search lists "official donors"
+    member by member only where the dataset holds no private donors, and
+    otherwise refuses `entity_role_not_admitted`: open the donor side, read it
+    with get_data and `place_types` set, and keep the rows whose
+    `financingProvider_party_kind` is `party`.
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
     "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
     ["creditor"], "operations": [{"verb": "rank",

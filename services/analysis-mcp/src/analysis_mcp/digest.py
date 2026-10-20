@@ -229,6 +229,7 @@ _EXCLUSION_REASON_TEXT: dict[str, str] = {
     "unmatched_key": "had no matching key on the other side",
     "beyond_limit": "ranked beyond the limit",
     "party_total": "totals of other parties, left out so no figure counts twice",
+    "party_residual": "unallocated residuals, left out of a ranking of members",
 }
 
 # `entity_not_selected` and `period_unmatched` are excluded here: a

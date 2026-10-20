@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from analysis_mcp.rolling_tool import coordinate_text
-from common.place_type import PARTY_ROLES, PLACE_LEVELS, PRIVATE_KIND, levels_of
+from common.place_type import MEMBER_KINDS, PARTY_ROLES, PLACE_LEVELS, levels_of
 from dfo_frame_grammar.grammar import FACET_IDENTITY_COLUMNS, UNIT_COLUMN
 from dfo_frame_grammar.rolling import latest_anchor
 
@@ -388,10 +388,6 @@ def top_members(
     )
 
 
-# The kinds of flow party one ranking compares: a private donor ranks beside the others.
-_RANKED_KINDS = frozenset({"party", PRIVATE_KIND})
-
-
 def comparable_members(cells: Mapping[str, str], *, dimension: str) -> frozenset[str]:
     """The members of `dimension` that one ranking compares, from each member's
     served kind or type cell (`common.place_type`): on a flow party role, the
@@ -400,7 +396,7 @@ def comparable_members(cells: Mapping[str, str], *, dimension: str) -> frozenset
     place role, the members at the level in `PLACE_LEVELS` most of them sit
     at, so a World Bank aggregate or a region among countries is left out."""
     if dimension in PARTY_ROLES:
-        return frozenset(member for member, kind in cells.items() if kind in _RANKED_KINDS)
+        return frozenset(member for member, kind in cells.items() if kind in MEMBER_KINDS)
     levels = {member: levels_of(cell) & PLACE_LEVELS for member, cell in cells.items()}
     counts = Counter(level for member_levels in levels.values() for level in member_levels)
     if not counts:

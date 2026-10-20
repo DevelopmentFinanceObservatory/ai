@@ -160,7 +160,8 @@ type column). On a flow party role (`financingProvider`,
 include one with no kind or a cell no kind names, are all totals on a role
 the verb pools (a role holding `whole_total` parties alone is summed), or sit
 in a frame that carries no kind column for their role. `rank` ranks a role
-holding only totals.
+holding only totals, and leaves the residuals of a ranked role holding parties
+out as `party_residual` exclusions.
 
 `service_unavailable` fires when the process's frame row budget
 (`common.row_budget`) has no room for a verb's input rows
@@ -194,7 +195,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from common.place_type import PARTY_KINDS, PARTY_ROLES, PLACE_LEVELS, TOTAL_KINDS, enrichment_role
+from common.place_type import (
+    MEMBER_KINDS,
+    PARTY_ROLES,
+    PLACE_LEVELS,
+    WHOLE_TOTAL_KIND,
+    enrichment_role,
+)
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
@@ -331,9 +338,11 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
 
-# The party kinds a filter keeps to compare or rank a flow side's members: every kind but
-# the totals, which hold other parties' figures.
-_MEMBER_KINDS = tuple(sorted(PARTY_KINDS - TOTAL_KINDS))
+# The party kinds a filter keeps to compare or rank a flow side's members, in sorted order.
+_MEMBER_KINDS = tuple(sorted(MEMBER_KINDS))
+
+# The population a search names for the total across each flow party role's whole side.
+_WHOLE_SIDE = {"financingProvider": "all donors", "financingRecipient": "all recipients"}
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1292,8 +1301,9 @@ class ToolRefusal:
         message naming the role and the group-total exclusion, since a
         `place_level` filter is not what its refusal asks for. It names two
         repairs: the source's published total for a total across the whole
-        side, and for a comparison of members a filter keeping the member
-        kinds, which a kind column's `fix.member_kinds` lists."""
+        side, or the member sum where search reports none published, and for
+        a comparison of members a filter keeping `MEMBER_KINDS`, which a kind
+        column's `fix.member_kinds` lists."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and not types:
             return cls(
@@ -1308,6 +1318,15 @@ class ToolRefusal:
                 fix={"column": column, "types": []},
             )
         if role is not None:
+            whole_total = (
+                "this frame's whole_total rows are the source's published totals, and the "
+                "side's total is their sum"
+                if WHOLE_TOTAL_KIND in types
+                else f'search naming the population ("{_WHOLE_SIDE[role]}") with no operation over '
+                "that side: search binds the source's published total, or, where the source "
+                "publishes none, departs whole_total_unpublished and returns the members, or, "
+                "where the source holds no series of that total, finds no data"
+            )
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
@@ -1316,10 +1335,9 @@ class ToolRefusal:
                     "regional total or Official Donors, Total, are left out of sums and ranks "
                     "beside their members automatically, so this refusal means a party has no "
                     "kind this server declares, or that every party is a group total. For a "
-                    "total across the whole side, use the source's published total: search "
-                    "returns it when the question leaves the side unnamed or names all donors "
-                    "or all recipients, and a whole_total row is that figure. To compare or "
-                    f"rank members, filter the frame with a category_match on {role!r} naming "
+                    f"total across the whole side, {whole_total}. A sum of members adds every "
+                    "row except group totals, residuals included. To compare or rank members, "
+                    f"filter the frame with a category_match on {role!r} naming "
                     f"the parties to keep, or a category_match on {column!r} keeping "
                     f"{', '.join(_MEMBER_KINDS)}, then retry with that result's frame_ref."
                 ),
