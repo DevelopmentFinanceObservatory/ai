@@ -117,7 +117,12 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     elif isinstance(exc, FacetHeterogeneousError):
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     elif isinstance(exc, PlaceLevelsMixedError):
-        refusal = ToolRefusal.place_levels_mixed(column=exc.column, types=list(exc.types))
+        refusal = ToolRefusal.place_levels_mixed(
+            column=exc.column,
+            types=list(exc.types),
+            whole_total=exc.whole_total,
+            members=list(exc.members),
+        )
     elif isinstance(exc, ComposedUnitSumError):
         refusal = ToolRefusal.composed_unit_sum_unsupported(verb="aggregate", unit=exc.unit)
     else:

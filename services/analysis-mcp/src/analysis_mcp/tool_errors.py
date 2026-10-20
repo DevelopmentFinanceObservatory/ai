@@ -159,7 +159,10 @@ type column). On a flow party role (`financingProvider`,
 exclusions; the refusal fires there only when several parties include one
 with no kind or a cell no kind names, are all totals on a role the verb pools
 (a role of totals alone, each `true` in `{role}_party_whole` on every row, is
-summed), or sit in a frame that carries no kind column for their role. `rank`
+summed), hold a whole total beside members it may hold (one of its
+`{role}_party_class`, or of none, or any member when the total has no class;
+a whole total of a class no member has is summed beside them), or sit in a
+frame that carries no kind column for their role. `rank`
 ranks a role holding only totals, and leaves the residuals of a ranked role
 holding parties out as `party_residual` exclusions.
 
@@ -1293,15 +1296,42 @@ class ToolRefusal:
         )
 
     @classmethod
-    def place_levels_mixed(cls, *, column: str, types: Sequence[str]) -> Self:
+    def place_levels_mixed(
+        cls,
+        *,
+        column: str,
+        types: Sequence[str],
+        whole_total: str | None = None,
+        members: Sequence[str] = (),
+    ) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
         the engine that found them, and empty when the frame carries no such
         column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
         message naming the role and the group-total exclusion, since a
         `place_level` filter is not what its refusal asks for, and a kind
         column's `fix.member_kinds` lists the kinds a filter keeps to compare
-        or rank members."""
+        or rank members. `whole_total` names a whole total pooled beside
+        `members` it may hold, and the message asks to drop one or the other."""
         role = enrichment_role(column, roles=PARTY_ROLES)
+        if role is not None and whole_total is not None:
+            return cls(
+                code=ToolErrorCode.PLACE_LEVELS_MIXED,
+                message=(
+                    f"The {role} parties in this frame cannot be pooled: {whole_total} is a "
+                    "whole total, and it may already hold "
+                    f"{', '.join(members)}, so a sum across them would count those parties "
+                    f"twice. A whole total is summed beside members only when its "
+                    f"{class_column(role)!r} names a class no member has. Filter the frame "
+                    f"with a category_match on {role!r} that leaves out {', '.join(members)}, "
+                    f"or that leaves out {whole_total}, then retry with that result's frame_ref."
+                ),
+                fix={
+                    "column": column,
+                    "types": list(types),
+                    "whole_total": whole_total,
+                    "members": list(members),
+                },
+            )
         if role is not None and not types:
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,

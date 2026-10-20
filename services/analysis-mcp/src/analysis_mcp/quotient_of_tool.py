@@ -175,7 +175,12 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
             available=list(exc.available),
         )
     elif isinstance(exc, PlaceLevelsMixedError):
-        refusal = ToolRefusal.place_levels_mixed(column=exc.column, types=list(exc.types))
+        refusal = ToolRefusal.place_levels_mixed(
+            column=exc.column,
+            types=list(exc.types),
+            whole_total=exc.whole_total,
+            members=list(exc.members),
+        )
     else:
         refusal = ToolRefusal.facet_heterogeneous(axis=exc.axis, values=list(exc.values))
     return refusal
