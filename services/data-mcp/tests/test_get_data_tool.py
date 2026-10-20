@@ -38,6 +38,7 @@ from data_mcp.definition_store import (
 )
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
+    KIND_COLUMNS,
     MaterialisationOutcome,
     frame_ref_for,
 )
@@ -4036,7 +4037,7 @@ async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
     )
 
     assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [["party_kind"]]
+    assert [sent["columns"] for sent in options] == [list(KIND_COLUMNS)]
 
 
 async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_retry() -> None:
@@ -4236,21 +4237,32 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["financingProvider_type", "financingRecipient_type"]},
-            {"format": "parquet", "columns": ["party_kind"]},
+            {"format": "parquet", "columns": list(KIND_COLUMNS)},
         ),
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["kind"]},
+            {"format": "parquet", "columns": list(KIND_COLUMNS)},
+        ),
+        (
+            {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["party_kind"]},
+            {"format": "parquet", "columns": list(KIND_COLUMNS)},
         ),
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet"},
-            {"format": "parquet", "columns": ["party_kind"]},
+            {"format": "parquet", "columns": list(KIND_COLUMNS)},
         ),
         ({"recipient": ["country/KEN"]}, {"format": "parquet"}, {"format": "parquet"}),
     ],
-    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns", "place-no-columns"],
+    ids=[
+        "flow-party-types",
+        "flow-retired-kind",
+        "flow-kind-without-sector-and-whole",
+        "flow-no-columns",
+        "place-no-columns",
+    ],
 )
 async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_them(
     monkeypatch: pytest.MonkeyPatch,
@@ -4259,7 +4271,7 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     minted: dict[str, Any],
 ) -> None:
     # A flow root recorded before kinds were served holds no kinds, and a sum across its
-    # parties would refuse; the replay mints and registers it with `["party_kind"]`.
+    # parties would refuse; the replay mints and registers it with `KIND_COLUMNS`.
     stored = _stored_definition(entities=entities)
     registered: list[Mapping[str, Any]] = []
 
@@ -4314,7 +4326,7 @@ async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_opt
             200, json=_manifest_response(spec_id=stored.spec_id, content_version="cv_" + "2" * 32)
         )
 
-    recorded = {"format": "parquet", "columns": ["party_kind"], "without_party_totals": True}
+    recorded = {"format": "parquet", "columns": list(KIND_COLUMNS), "without_party_totals": True}
     root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
 
     minted = await _mint_recorded_root(
@@ -4435,8 +4447,8 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
 @pytest.mark.parametrize(
     ("identity", "arguments", "columns", "cut"),
     [
-        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, ["party_kind"], True),
-        (_FLOW_OPEN_PROVIDER, {"place_types": True}, ["party_kind"], False),
+        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, list(KIND_COLUMNS), True),
+        (_FLOW_OPEN_PROVIDER, {"place_types": True}, list(KIND_COLUMNS), False),
         (_FLOW_OPEN_PROVIDER, {}, None, False),
         (_PLACE_SPEC, {"without_party_totals": True}, None, False),
         (
@@ -4594,7 +4606,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     # kinds derive from that version.
     assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
     assert cut_ref == frame_ref_for(
-        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=("party_kind",)
+        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=KIND_COLUMNS
     )
     assert cut_ref != kept_ref
     # The repeat is a store hit: it fetches nothing and names the same frame.
@@ -4623,7 +4635,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         "format": "parquet",
         "bundle": False,
         "layout": "frame",
-        "columns": ["party_kind"],
+        "columns": list(KIND_COLUMNS),
         "without_party_totals": True,
     }
     # The digest names the totals the manifest's trace lists, on the fresh mint and the hit.
@@ -4757,7 +4769,7 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
         (path, body and body["options"].get("columns")) for path, body in upstream.requests
     ] == [
         (f"/api/datasets/{_REGISTRY_SPEC_ID}/options", None),
-        ("/api/datasets", ["party_kind"]),
+        ("/api/datasets", list(KIND_COLUMNS)),
     ]
     mint = upstream.requests[1][1]
     assert mint is not None
@@ -4792,7 +4804,7 @@ async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_
     assert result.is_error is False, result.structured_content
     mint = upstream.requests[1][1]
     assert mint is not None
-    assert mint["options"]["columns"] == ["party_kind"]
+    assert mint["options"]["columns"] == list(KIND_COLUMNS)
     assert "definition" not in mint["input"]
     # Only the manifest's own definition is kept, as for any re-mint under another id.
     assert [put.spec_id for put in definitions.put_calls] == [_REGISTRY_SPEC_ID]

@@ -136,41 +136,53 @@ def _key_text(key: Sequence[tuple[str, str]]) -> str:
     return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
 
 
-# How a flow party role's parties are named in a sum's private-party line: all of them, one
-# private one, and several.
+# How a flow party role's pooled rows are named in a sum's private-party line: all of them,
+# one private one, and several. Parties first, then whole totals, which a sum across a role of
+# whole totals alone pools.
 _PARTY_NOUNS: dict[str, tuple[str, str, str]] = {
     "financingProvider": ("providers", "private donor", "private donors")
 }
 _OTHER_PARTY_NOUNS = ("parties", "private party", "private parties")
+_TOTAL_NOUNS: dict[str, tuple[str, str, str]] = {
+    "financingProvider": (
+        "whole totals of providers",
+        "total of private donors",
+        "totals of private donors",
+    )
+}
+_OTHER_TOTAL_NOUNS = ("whole totals", "private total", "private totals")
 
 
-def _party_nouns(role: str) -> tuple[str, str, str]:
-    return _PARTY_NOUNS.get(role, _OTHER_PARTY_NOUNS)
+def _party_nouns(pooled: PooledParties) -> tuple[str, str, str]:
+    if pooled.whole_totals:
+        return _TOTAL_NOUNS.get(pooled.role, _OTHER_TOTAL_NOUNS)
+    return _PARTY_NOUNS.get(pooled.role, _OTHER_PARTY_NOUNS)
 
 
-def _private_count_text(pooled: PooledParties) -> str:
+def _private_count_text(pooled: PooledParties, count: int) -> str:
     """`24 private donors`."""
-    _, one, many = _party_nouns(pooled.role)
-    return f"{pooled.private_count} {one if pooled.private_count == 1 else many}"
+    _, one, many = _party_nouns(pooled)
+    return f"{count} {one if count == 1 else many}"
 
 
-def _private_clause(pooled: PooledParties) -> str:
-    """`24 private donors (311400000)`: the private parties a sum pooled and their value, over
-    the periods when the sum spans several. A value past the finite range is left out, and the
-    count stands alone."""
+def _private_clause(pooled: PooledParties, count: int) -> str:
+    """`24 private donors (311400000)`: the `count` private parties a sum pooled and their
+    value, over the periods when the sum spans several. A value past the finite range is left
+    out, and the count stands alone."""
     if pooled.private_value is None:
-        return _private_count_text(pooled)
+        return _private_count_text(pooled, count)
     value = _format_number(pooled.private_value)
     over = f" over {pooled.periods} periods" if pooled.periods > 1 else ""
-    return f"{_private_count_text(pooled)} ({value}{over})"
+    return f"{_private_count_text(pooled, count)} ({value}{over})"
 
 
 def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str]:
     """One line per pooled role that held private parties: `subject` is the sum the line
-    describes, and the private parties are in it because they sum like any other."""
+    describes, and the private parties are in it because they sum like any other. A role whose
+    frame carries no sector column gets no line."""
     return [
-        f"{subject} of {entry.count} {_party_nouns(entry.role)[0]} includes "
-        f"{_private_clause(entry)}."
+        f"{subject} of {entry.count} {_party_nouns(entry)[0]} includes "
+        f"{_private_clause(entry, entry.private_count)}."
         for entry in pooled
         if entry.private_count
     ]
@@ -185,9 +197,9 @@ def _two_sided_pooled_lines(
     lines = _private_lines(result.numerator_pooled, subject="The numerator sum")
     listed = [entry for entry in result.denominator_pooled if entry.role in keyed_roles]
     for entry in listed:
-        text = f"Shares of the sum of the {entry.count} listed {_party_nouns(entry.role)[0]}"
+        text = f"Shares of the sum of the {entry.count} listed {_party_nouns(entry)[0]}"
         if entry.private_count:
-            text += f", which includes {_private_count_text(entry)}"
+            text += f", which includes {_private_count_text(entry, entry.private_count)}"
         lines.append(f"{text}.")
     lines.extend(
         _private_lines(
@@ -232,6 +244,7 @@ _EXCLUSION_REASON_TEXT: dict[str, str] = {
     "unmatched_key": "had no matching key on the other side",
     "beyond_limit": "ranked beyond the limit",
     "party_total": "totals of other parties, left out so no figure counts twice",
+    "party_residual": "unallocated residuals, left out of a ranking of members",
 }
 
 # `entity_not_selected` and `period_unmatched` are excluded here: a

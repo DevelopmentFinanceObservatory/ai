@@ -1628,13 +1628,14 @@ async def get_data(
                 "Add the Data Commons types of each place the frame names as an "
                 'observationAbout_type column. Values are comma-joined ("Country", '
                 '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
-                "with none. On a flow frame it adds each party's kind instead, as "
-                "financingProvider_party_kind and financingRecipient_party_kind: party; private "
-                "for a private donor, which sums like a party; residual; total for a group total "
-                'such as "Africa, Total", which sums and ranks leave out; whole_total for the '
-                'published total of a whole population such as "Official Donors, Total", which '
-                "sums and ranks leave out beside its members but add up when whole totals are "
-                'the only rows; and "untyped" for a party with none. Set it for a spec that '
+                "with none. On a flow frame it adds three cells for each party side instead, "
+                "named for the side (financingProvider_party_kind, financingRecipient_party_kind "
+                "and so on): party_kind is party, residual, or total for a group total such as "
+                '"Africa, Total", which sums and ranks leave out; party_sector is official or '
+                'private; party_whole is "true" on the published total of a whole population '
+                'such as "Official Donors, Total", which adds up with the other whole totals '
+                'when they are the only rows, and "false" elsewhere. A cell reads "untyped" '
+                "where the party has no value. Set it for a spec that "
                 "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
@@ -1714,8 +1715,10 @@ async def get_data(
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds the `observationAbout_type` column,
     so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's kind
-    (`financingProvider_party_kind`, `financingRecipient_party_kind`) instead.
+    beside the places inside it. On a flow frame it adds each party's kind, sector
+    and whole-population mark (`financingProvider_party_kind`,
+    `financingProvider_party_sector`, `financingProvider_party_whole` and the
+    recipient's three) instead.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got

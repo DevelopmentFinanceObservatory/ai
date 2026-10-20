@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast, get_args
 
+from common.place_type import MemberClass
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -624,10 +625,9 @@ class SpecBlock(BaseModel):
 MAX_SEED_GROUP_LABEL_CHARS = 120
 
 
-# The most kinds a whole total's `whole_of` or its side's `side_kinds` names: the party kinds a
-# total can hold, `party`, `private` and `residual`. (The frame cell `whole_total`,
-# `common.place_type.PartyKind`, marks the total itself and is no kind either names.)
-MAX_SEED_WHOLE_KINDS = 3
+# The most classes a whole total's `whole_of` or its side's `side_classes` names: every
+# `common.place_type.MemberClass`.
+MAX_SEED_MEMBER_CLASSES = len(get_args(MemberClass))
 
 
 class SeedEntityGroup(BaseModel):
@@ -635,12 +635,12 @@ class SeedEntityGroup(BaseModel):
 
     `total` is the published total party the role bound for the set, absent
     when it bound the members (`planner.workflow.ResolvedGroup.total`).
-    `whole_of` names the kinds of party that total, or the set of totals the
+    `whole_of` names the classes of party that total, or the set of totals the
     role bound, holds in full, absent for any other set
-    (`planner.workflow.ResolvedGroup.whole_of`). `side_kinds` names the kinds of
-    party, totals aside, the dataset publishes on that set's side, absent for any
-    other set and from a Search that predates it
-    (`planner.workflow.ResolvedGroup.side_kinds`). The
+    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
+    of party, totals aside, the dataset publishes on that set's side, absent for
+    any other set and from a Search that predates it
+    (`planner.workflow.ResolvedGroup.side_classes`). The
     members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     """
@@ -657,11 +657,11 @@ class SeedEntityGroup(BaseModel):
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
     )
-    whole_of: tuple[Annotated[str, Field(min_length=1, max_length=MAX_SEED_TEXT_CHARS)], ...] = (
-        Field(default=(), max_length=MAX_SEED_WHOLE_KINDS, exclude_if=lambda kinds: not kinds)
+    whole_of: tuple[MemberClass, ...] = Field(
+        default=(), max_length=MAX_SEED_MEMBER_CLASSES, exclude_if=lambda classes: not classes
     )
-    side_kinds: tuple[Annotated[str, Field(min_length=1, max_length=MAX_SEED_TEXT_CHARS)], ...] = (
-        Field(default=(), max_length=MAX_SEED_WHOLE_KINDS, exclude_if=lambda kinds: not kinds)
+    side_classes: tuple[MemberClass, ...] = Field(
+        default=(), max_length=MAX_SEED_MEMBER_CLASSES, exclude_if=lambda classes: not classes
     )
 
 

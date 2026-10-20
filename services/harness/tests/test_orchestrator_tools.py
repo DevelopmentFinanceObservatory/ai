@@ -22,7 +22,13 @@ import httpx2
 import pyarrow as pa
 import pytest
 from common.materialisation import FrameTooLarge
-from common.place_type import PARTY_ROLES, kind_column, type_column
+from common.place_type import (
+    PARTY_ROLES,
+    kind_column,
+    sector_column,
+    type_column,
+    whole_column,
+)
 from common.row_budget import RowBudget
 from compiler.evidence import EvidenceIssueCode, check_evidence, evidence_from_source
 from compiler.sources import source_from_spec_block
@@ -1867,6 +1873,11 @@ class HeldFrames:
             column = (kind_column if self.role in PARTY_ROLES else type_column)(self.role)
             rows = [{**row, column: self.cell(row[self.role])} for row in rows]
             roles.append(column)
+            if self.role in PARTY_ROLES:
+                # apis serves a party's sector and whole cells beside its kind.
+                sector, whole = sector_column(self.role), whole_column(self.role)
+                rows = [{**row, sector: "official", whole: "false"} for row in rows]
+                roles += [sector, whole]
         frame = Frame.build(role_keys=roles, rows=rows)
 
         async def read(*, max_rows: int) -> tuple[Frame, Any]:

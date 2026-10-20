@@ -818,16 +818,16 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
     ("group", "kept"),
     [
         (
-            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ["party"]},
-            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ("party",)},
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ["official"]},
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ("official",)},
         ),
         (
             {
                 "label": "all donors including private",
                 "total": None,
-                "whole_of": ["party", "private"],
+                "whole_of": ["official", "private"],
             },
-            {"label": "all donors including private", "whole_of": ("party", "private")},
+            {"label": "all donors including private", "whole_of": ("official", "private")},
         ),
         ({"label": "Africa", "ref": "africa"}, {"label": "Africa", "ref": "africa"}),
         ({"label": "Africa", "whole_of": []}, {"label": "Africa"}),
@@ -835,14 +835,14 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
             {
                 "label": "all donors",
                 "total": "DACOfficialDonors",
-                "whole_of": ["party"],
-                "side_kinds": ["party", "private", "residual"],
+                "whole_of": ["official"],
+                "side_classes": ["official", "private", "residual"],
             },
             {
                 "label": "all donors",
                 "total": "DACOfficialDonors",
-                "whole_of": ("party",),
-                "side_kinds": ("party", "private", "residual"),
+                "whole_of": ("official",),
+                "side_classes": ("official", "private", "residual"),
             },
         ),
     ],
@@ -851,10 +851,12 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
         "set-of-totals",
         "without-the-field",
         "empty-field-is-absent",
-        "with-the-sides-kinds",
+        "with-the-sides-classes",
     ],
 )
-def test_a_seed_carries_the_kinds_a_whole_total_holds(group: object, kept: dict[str, Any]) -> None:
+def test_a_seed_carries_the_classes_a_whole_total_holds(
+    group: object, kept: dict[str, Any]
+) -> None:
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {"observationAbout": group}
 
@@ -865,9 +867,11 @@ def test_a_seed_carries_the_kinds_a_whole_total_holds(group: object, kept: dict[
 
 
 @pytest.mark.parametrize(
-    "whole_of", ["party", [""], list(range(2))], ids=["a-string", "blank-kind", "not-text"]
+    "whole_of",
+    ["official", [""], list(range(2)), ["party"]],
+    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
 )
-def test_a_set_whose_whole_of_is_not_a_list_of_kinds_is_dropped(whole_of: object) -> None:
+def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
     block = _region_members_block()
     block["resolved"]["entity_groups"] = {
         "observationAbout": {"label": "Africa", "whole_of": whole_of}
@@ -883,9 +887,9 @@ def test_a_set_whose_whole_of_is_not_a_list_of_kinds_is_dropped(whole_of: object
     [
         {"dcid": "africa", "label": "Africa"},
         {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
-        {"label": "all donors", "whole_total": ["party"]},
+        {"label": "all donors", "side_kinds": ["official"]},
     ],
-    ids=["dcid-before-ref", "unknown-member", "near-miss-of-whole-of"],
+    ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],
 )
 def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: object) -> None:
     # A block from the Search wire that named a set's node `dcid` would otherwise

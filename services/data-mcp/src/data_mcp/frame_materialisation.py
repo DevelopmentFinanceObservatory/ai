@@ -165,15 +165,17 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The `options.columns` of a flow table's mint. apis expands a bare `party_kind` to a
-# `{column}_party_kind` column for every entity column the table has, the sides its identity
-# leaves unnamed among them.
-KIND_COLUMNS: tuple[str, ...] = ("party_kind",)
+# The `options.columns` of a flow table's mint. apis expands each bare token to a
+# `{column}_{token}` column for every entity column the table has, the sides its identity
+# leaves unnamed among them: the party's kind, sector and whole-population mark
+# (`common.place_type`).
+KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_sector", "party_whole")
 
 # The columns a recorded selection may hold that `replayed_mint_options` replaces with
-# `KIND_COLUMNS`: a flow party's type column, and `kind`, the earlier token for the
-# party kind that old recorded selections carry.
-_REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind"))
+# `KIND_COLUMNS`: a flow party's type column, `kind`, the earlier token for the party kind,
+# and `party_kind`, which recorded selections from before the sector and whole tokens hold
+# alone.
+_REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind", "party_kind"))
 
 # The mint option that asks apis for a flow frame without the group totals of the
 # party roles its identity leaves open (apis' `MintOptions.without_party_totals`). A
@@ -202,10 +204,10 @@ def replayed_mint_options(
     """`options` as `get_data` sends them for a root of `identity`.
 
     A flow root (`place_type_columns_for(identity)` is `KIND_COLUMNS`) recorded with no
-    `columns`, and any root recorded with a flow party's type column or the earlier
-    token `kind`, mint with `KIND_COLUMNS`. Every other selection is unchanged. A flow
-    frame minted without kinds holds none, and a sum across its parties refuses without
-    them.
+    `columns`, and any root recorded with a selection holding a flow party's type column,
+    the earlier token `kind` or `party_kind`, mint with `KIND_COLUMNS`. Every other
+    selection is unchanged. A flow frame minted without kinds holds none, and a sum
+    across its parties refuses without them.
     """
     columns = options.get("columns")
     if columns:
@@ -822,7 +824,7 @@ def _read_outcome(
 
 
 def requests_kinds(columns: Iterable[str]) -> bool:
-    """Whether `columns` asks apis for the `{column}_party_kind` cells."""
+    """Whether `columns` asks apis for any of a flow party's kind, sector or whole cells."""
     return not set(KIND_COLUMNS).isdisjoint(columns)
 
 
@@ -1286,8 +1288,10 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`).
 
-    A `{role}_type` or `{role}_party_kind` column, which `get_data(place_types=True)` asks for,
-    is a role key too, with each empty cell written `UNTYPED` (`_with_untyped_places`).
+    A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_sector` or
+    `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
+    `get_data(place_types=True)` asks for, is a role key too, with each empty cell
+    written `UNTYPED` (`_with_untyped_places`).
     """
     table = _with_untyped_places(pq.read_table(io.BytesIO(data)))
     role_keys = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]
@@ -1306,12 +1310,12 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
 
 
 def _with_untyped_places(table: pa.Table) -> pa.Table:
-    """`table` with each empty or null cell of every type or kind column of a role it
+    """`table` with each empty or null cell of every enrichment column of a role it
     carries (`common.place_type.enrichment_role`) written as `common.place_type.UNTYPED`.
 
-    apis leaves the cell empty for a place its graph holds no type for and for a
-    party it declares no kind for, and `build_frame_from_arrow` refuses an empty role
-    cell. A column typed null holds no value at all. A column of another type is left
+    apis leaves the cell empty for a place its graph holds no type for, for a party it
+    declares no kind for, and in the sector column of a residual or of a total holding
+    parties of both sectors, and `build_frame_from_arrow` refuses an empty role cell. A column typed null holds no value at all. A column of another type is left
     unchanged, for `build_frame_from_arrow` to refuse.
     """
     roles = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]

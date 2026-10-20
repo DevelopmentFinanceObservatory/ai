@@ -2,15 +2,17 @@
 that total other parties, and record them as `party_total` exclusions.
 
 The frames carry `financingRecipient_party_kind` as `get_data(place_types=true)` registers it for a
-flow table: the kind apis serves for each party, `party`, `private`, `residual`, `total` or
-`whole_total`, and `untyped` where it serves none. A donor-side frame
-(`party_frames.provider_frame`) carries `financingProvider_party_kind` likewise.
+flow table: the kind apis serves for each party, `party`, `residual` or `total`, and `untyped`
+where it serves none. A donor-side frame (`party_frames.provider_frame`) carries
+`financingProvider_party_kind` likewise, beside the sector (`official` or `private`) and whole
+(`true` or `false`) cells, and the tests that sum whole totals or count private donors read it.
 """
 
 from __future__ import annotations
 
 import secrets
 
+import pyarrow as pa
 import pytest
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.engine.aggregate import run_aggregate
@@ -26,7 +28,19 @@ from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, set_store
 from dfo_frame_grammar import Frame
-from party_frames import PROVIDER, provider_frame
+from party_frames import (
+    GROUP_TOTAL,
+    OFFICIAL,
+    OFFICIAL_WHOLE,
+    PRIVATE,
+    PRIVATE_WHOLE,
+    PROVIDER,
+    PROVIDER_KINDS,
+    PROVIDER_SECTORS,
+    PROVIDER_WHOLE,
+    RESIDUAL,
+    provider_frame,
+)
 
 _ODA = "dcid:Amount_FinancialFlow_Gross_Disbursement_DAC2aAidType206_Nominal"
 _RECIPIENT = "financingRecipient"
@@ -106,11 +120,10 @@ def test_a_sum_across_recipients_leaves_out_the_totals_and_names_them(
     "recipients",
     [
         {"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)},
-        {"country/MAR": ("party", 600.0), "geoId/06": ("philanthropy", 1.0)},
+        {"country/MAR": ("party", 600.0), "geoId/06": ("whole_total", 1.0)},
         {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)},
-        {"DACAfrica": ("total", 5400.0), "DACAllRecipients": ("whole_total", 9000.0)},
     ],
-    ids=["no-kind", "unknown-cell", "every-one-a-total", "total-beside-whole-total"],
+    ids=["no-kind", "unknown-cell", "every-one-a-total"],
 )
 def test_a_sum_across_parties_of_no_kind_or_all_totals_is_refused(
     recipients: dict[str, tuple[str, float]],
@@ -170,8 +183,12 @@ def test_a_rank_of_recipient_growth_leaves_out_the_totals() -> None:
     result = _rank(growth)
 
     ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
-    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND", "DACAfricaUnallocated"]
-    assert [record.reason for record in result.exclusions.records] == ["party_total"]
+    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND"]
+    assert [record.reason for record in result.exclusions.records] == [
+        "party_total",
+        "party_residual",
+    ]
+    assert result.exclusions.records[1].entities == {_RECIPIENT: ("DACAfricaUnallocated",)}
 
 
 _KEYED_BY_RECIPIENT = {
@@ -210,7 +227,8 @@ _KEYED_BY_RECIPIENT = {
 
 @pytest.mark.parametrize("verb", list(_KEYED_BY_RECIPIENT))
 def test_a_verb_keyed_by_recipient_keeps_each_recipients_kind(verb: str) -> None:
-    output = _KEYED_BY_RECIPIENT[verb]().frame
+    result = _KEYED_BY_RECIPIENT[verb]()
+    output = result.frame
 
     assert _KINDS in output.columns
     kinds = dict(
@@ -220,8 +238,14 @@ def test_a_verb_keyed_by_recipient_keeps_each_recipients_kind(verb: str) -> None
             strict=True,
         )
     )
-    assert kinds["DACAfricaUnallocated"] == "residual"
     assert kinds["EuropeanCommission"] == "party"
+    if verb == "rank":
+        # A ranking compares members, so the residual is left out as a residual.
+        assert "DACAfricaUnallocated" not in kinds
+        residual = [r for r in result.exclusions.records if r.reason == "party_residual"]
+        assert [record.entities for record in residual] == [{_RECIPIENT: ("DACAfricaUnallocated",)}]
+    else:
+        assert kinds["DACAfricaUnallocated"] == "residual"
 
 
 @pytest.mark.parametrize(
@@ -248,8 +272,12 @@ def test_a_rank_of_recipients_leaves_out_the_totals() -> None:
     )
 
     ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
-    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND", "DACAfricaUnallocated"]
-    assert [record.reason for record in result.exclusions.records] == ["party_total"]
+    assert ranked == ["EuropeanCommission", "country/MAR", "country/IND"]
+    assert [record.reason for record in result.exclusions.records] == [
+        "party_total",
+        "party_residual",
+    ]
+    assert result.exclusions.records[1].entities == {_RECIPIENT: ("DACAfricaUnallocated",)}
 
 
 def _rank(frame: Frame, rank_by: tuple[str, ...] = (_RECIPIENT,)):
@@ -263,15 +291,35 @@ def _rank(frame: Frame, rank_by: tuple[str, ...] = (_RECIPIENT,)):
     )
 
 
-def test_a_rank_of_recipients_that_are_all_totals_ranks_them() -> None:
+@pytest.mark.parametrize(
+    ("recipients", "ranked", "excluded"),
+    [
+        (
+            {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)},
+            ["DACAfrica", "DACAsia"],
+            [],
+        ),
+        # A role holding no party keeps its residuals: they are all there is to rank.
+        (
+            {
+                "DACAfricaUnallocated": ("residual", 100.0),
+                "DACAsiaUnallocated": ("residual", 50.0),
+                "DACAfrica": ("total", 5400.0),
+            },
+            ["DACAfricaUnallocated", "DACAsiaUnallocated"],
+            ["party_total"],
+        ),
+    ],
+    ids=["all-totals", "residuals-and-a-total"],
+)
+def test_a_rank_of_recipients_holding_no_party_ranks_what_it_holds(
+    recipients: dict[str, tuple[str, float]], ranked: list[str], excluded: list[str]
+) -> None:
     # "Which regions receive the most French aid?" ranks DACGroup rows side by side.
-    regions = {"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}
+    result = _rank(_frame(recipients))
 
-    result = _rank(_frame(regions))
-
-    ranked = [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks]
-    assert ranked == ["DACAfrica", "DACAsia"]
-    assert result.exclusions.records == ()
+    assert [dict(rank.entity_key)[_RECIPIENT] for rank in result.entity_ranks] == ranked
+    assert [record.reason for record in result.exclusions.records] == excluded
 
 
 def test_a_rank_pooling_recipients_that_are_all_totals_is_refused() -> None:
@@ -364,28 +412,31 @@ async def test_the_aggregate_tool_reports_the_totals_it_left_out(store) -> None:
 
 
 _FILTER_RETRY = f"category_match on {_RECIPIENT!r}"
+# The kinds a filter keeps to compare or rank the members, leaving out the totals and the
+# unallocated residuals.
+_MEMBER_KINDS = {"member_kinds": ["party"]}
 
 
 @pytest.mark.parametrize(
-    ("frame", "kinds", "retry"),
+    ("frame", "fix", "retry"),
     [
         (
             lambda: _frame({"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)}),
-            ["party", "untyped"],
+            {"types": ["party", "untyped"], **_MEMBER_KINDS},
             _FILTER_RETRY,
         ),
         (
             lambda: _frame({"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}),
-            ["total"],
+            {"types": ["total"], **_MEMBER_KINDS},
             _FILTER_RETRY,
         ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
-        (lambda: _frame(kinds=False), [], "place_types=true"),
+        (lambda: _frame(kinds=False), {"types": []}, "place_types=true"),
     ],
     ids=["no-kind", "every-one-a-total", "no-kind-column"],
 )
 async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_column(
-    store, frame, kinds: list[str], retry: str
+    store, frame, fix: dict[str, list[str]], retry: str
 ) -> None:
     digest = secrets.token_hex(16)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
@@ -400,7 +451,7 @@ async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_colu
     assert result.is_error is True
     refusal = result.structured_content
     assert refusal["code"] == "place_levels_mixed"
-    assert refusal["fix"] == {"column": _KINDS, "types": kinds}
+    assert refusal["fix"] == {"column": _KINDS, **fix}
     # The retry names the party column, not a place_level filter on the kind column, or
     # the retrieval that adds the kind column; never a filter that keeps several parties.
     assert retry in result.content[0].text
@@ -413,17 +464,18 @@ _PRIVATE_TOTAL = "DACPrivateDonors"
 # Ethiopia's 2021 ODA in USD millions: France and Germany, the Gates Foundation, and the two
 # whole-population totals DAC2A publishes beside them.
 _DONORS = {
-    "country/FRA": ("party", 120.0),
-    "country/DEU": ("party", 200.0),
-    "GatesFoundation": ("private", 30.0),
-    _OFFICIAL: ("whole_total", 4267.6),
-    _PRIVATE_TOTAL: ("whole_total", 310.8),
+    "country/FRA": (OFFICIAL, 120.0),
+    "country/DEU": (OFFICIAL, 200.0),
+    "GatesFoundation": (PRIVATE, 30.0),
+    _OFFICIAL: (OFFICIAL_WHOLE, 4267.6),
+    _PRIVATE_TOTAL: (PRIVATE_WHOLE, 310.8),
 }
+_WHOLE_TOTALS = {name: _DONORS[name] for name in (_OFFICIAL, _PRIVATE_TOTAL)}
 
 
-@pytest.mark.parametrize("total_kind", ["total", "whole_total"])
-def test_a_whole_total_beside_members_is_left_out_like_a_total(total_kind: str) -> None:
-    donors = {**_DONORS, _OFFICIAL: (total_kind, 4267.6)}
+@pytest.mark.parametrize("official", [GROUP_TOTAL, OFFICIAL_WHOLE], ids=["total", "whole-total"])
+def test_a_total_beside_members_is_left_out_whole_or_not(official: tuple[str, str, str]) -> None:
+    donors = {**_DONORS, _OFFICIAL: (official, 4267.6)}
 
     result = run_aggregate(provider_frame(donors), group_by=("time_period",), aggregation="sum")
 
@@ -437,8 +489,8 @@ def test_a_private_donor_is_summed_and_counted_with_its_value() -> None:
     result = run_aggregate(provider_frame(_DONORS), group_by=("time_period",), aggregation="sum")
 
     (pooled,) = result.pooled_parties
-    assert (pooled.role, pooled.count, pooled.private_count) == (PROVIDER, 3, 1)
-    assert pooled.private_value == 30.0
+    assert (pooled.role, pooled.count, pooled.whole_totals) == (PROVIDER, 3, False)
+    assert (pooled.private_count, pooled.private_value) == (1, 30.0)
     assert result.group_summaries[0].value == pytest.approx(350.0)
 
 
@@ -451,7 +503,7 @@ def test_a_mean_reports_no_pooled_parties() -> None:
 def test_private_parties_whose_pooled_value_overflows_are_counted_without_a_value() -> None:
     # Each year's sum is finite, and the private donor's value across both years is not.
     frame = provider_frame(
-        {"country/FRA": ("party", 1.0), "GatesFoundation": ("private", 1e308)},
+        {"country/FRA": (OFFICIAL, 1.0), "GatesFoundation": (PRIVATE, 1e308)},
         years=("2020", "2021"),
     )
 
@@ -472,46 +524,128 @@ def test_private_parties_whose_pooled_value_overflows_are_counted_without_a_valu
     ]
 
 
-def test_a_pool_of_whole_totals_alone_is_summed_and_kept() -> None:
+def test_a_pool_of_whole_totals_alone_is_summed_with_the_private_total_counted() -> None:
     # "All donors including private": the official and the private total hold disjoint
-    # populations, so Ethiopia's 2021 sum is 4,267.6m + 310.8m.
-    totals = {name: _DONORS[name] for name in (_OFFICIAL, _PRIVATE_TOTAL)}
-
-    result = run_aggregate(provider_frame(totals), group_by=("time_period",), aggregation="sum")
+    # populations, so Ethiopia's 2021 sum is 4,267.6m + 310.8m, of which the private
+    # donors' total is 310.8m.
+    result = run_aggregate(
+        provider_frame(_WHOLE_TOTALS), group_by=("time_period",), aggregation="sum"
+    )
 
     assert result.group_summaries[0].value == pytest.approx(4578.4)
     assert result.exclusions.records == ()
-    assert [pooled.private_count for pooled in result.pooled_parties] == [0]
+    (pooled,) = result.pooled_parties
+    assert (pooled.count, pooled.whole_totals) == (2, True)
+    assert (pooled.private_count, pooled.private_value) == (1, 310.8)
 
 
-def test_a_rank_of_donors_tags_private_ones_and_leaves_out_whole_totals() -> None:
-    result = _rank(provider_frame(_DONORS), rank_by=(PROVIDER,))
+@pytest.mark.parametrize("donors", [_DONORS, _WHOLE_TOTALS], ids=["members", "whole-totals"])
+def test_a_frame_with_no_sector_column_reports_nothing_about_private_parties(
+    donors: dict[str, tuple[tuple[str, str, str], float]],
+) -> None:
+    # A frame minted before the sector column cannot tell a private party apart, so it
+    # reports no private count at all rather than a count of zero.
+    frame = provider_frame(donors, sectors=False)
+
+    summed = run_aggregate(frame, group_by=("time_period",), aggregation="sum")
+    ranked = _rank(frame, rank_by=(PROVIDER,))
+
+    (pooled,) = summed.pooled_parties
+    assert (pooled.private_count, pooled.private_value) == (None, None)
+    assert ranked.private_parties == ()
+
+
+def _years(frame_by_year: dict[str, Frame]) -> Frame:
+    """One frame holding each year's rows of `frame_by_year`."""
+    first = next(iter(frame_by_year.values()))
+    table = pa.concat_tables(frame.table for frame in frame_by_year.values())
+    return Frame.from_table(columns=first.columns, table=table)
+
+
+# DAC2A's official total is whole from 2021 on in this frame, and a group total in 2020.
+_WHOLE_FROM_2021 = {
+    "2020": provider_frame({**_WHOLE_TOTALS, _OFFICIAL: (GROUP_TOTAL, 4000.0)}, years=("2020",)),
+    "2021": provider_frame(_WHOLE_TOTALS, years=("2021",)),
+}
+# The same, with DAC2A's official total carrying no whole cell in 2020.
+_UNTYPED_IN_2020 = {
+    **_WHOLE_FROM_2021,
+    "2020": provider_frame(
+        {**_WHOLE_TOTALS, _OFFICIAL: (("total", "official", "untyped"), 4000.0)}, years=("2020",)
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        lambda: provider_frame({**_WHOLE_TOTALS, _OFFICIAL: (GROUP_TOTAL, 4267.6)}),
+        lambda: _years(_WHOLE_FROM_2021),
+    ],
+    ids=["one-not-whole", "whole-in-some-years"],
+)
+def test_a_sum_of_totals_not_all_whole_is_refused(frame) -> None:
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        run_aggregate(frame(), group_by=("time_period",), aggregation="sum")
+
+    assert (raised.value.column, raised.value.types) == (PROVIDER_KINDS, ("total",))
+
+
+@pytest.mark.parametrize(
+    "frame_by_year", [_WHOLE_FROM_2021, _UNTYPED_IN_2020], ids=["not-whole", "untyped"]
+)
+def test_a_total_whole_in_some_years_reads_not_whole_after_a_verb_keyed_by_it(
+    frame_by_year: dict[str, Frame],
+) -> None:
+    # Summed per donor first, each donor keeps one sector and whole cell. A total whole in
+    # some years only takes `false`, so the later sum across donors stays refused.
+    by_donor = run_aggregate(_years(frame_by_year), group_by=(PROVIDER,), aggregation="sum").frame
+    cells = {
+        donor: (sector, whole)
+        for donor, sector, whole in zip(
+            *(
+                by_donor.table.column(column).to_pylist()
+                for column in (PROVIDER, PROVIDER_SECTORS, PROVIDER_WHOLE)
+            ),
+            strict=True,
+        )
+    }
+
+    assert cells == {_OFFICIAL: ("official", "false"), _PRIVATE_TOTAL: ("private", "true")}
+    with pytest.raises(PlaceLevelsMixedError):
+        run_aggregate(by_donor, group_by=(), aggregation="sum")
+
+
+def test_a_rank_of_donors_tags_private_ones_and_leaves_out_totals_and_residuals() -> None:
+    donors = {**_DONORS, "DACUnallocated": (RESIDUAL, 15.0)}
+
+    result = _rank(provider_frame(donors), rank_by=(PROVIDER,))
 
     ranked = [dict(rank.entity_key)[PROVIDER] for rank in result.entity_ranks]
     assert ranked == ["country/DEU", "country/FRA", "GatesFoundation"]
     assert result.private_parties == ((PROVIDER, "GatesFoundation"),)
-    assert [record.reason for record in result.exclusions.records] == ["party_total"]
+    assert [(record.reason, record.entities) for record in result.exclusions.records] == [
+        ("party_total", {PROVIDER: (_OFFICIAL, _PRIVATE_TOTAL)}),
+        ("party_residual", {PROVIDER: ("DACUnallocated",)}),
+    ]
 
 
-def test_a_rank_of_whole_totals_alone_ranks_them() -> None:
-    totals = {name: _DONORS[name] for name in (_OFFICIAL, _PRIVATE_TOTAL)}
-
-    result = _rank(provider_frame(totals), rank_by=(PROVIDER,))
+def test_a_rank_of_whole_totals_alone_ranks_them_and_tags_the_private_one() -> None:
+    result = _rank(provider_frame(_WHOLE_TOTALS), rank_by=(PROVIDER,))
 
     assert [dict(rank.entity_key)[PROVIDER] for rank in result.entity_ranks] == [
         _OFFICIAL,
         _PRIVATE_TOTAL,
     ]
+    assert result.private_parties == ((PROVIDER, _PRIVATE_TOTAL),)
 
 
 def test_a_share_of_whole_totals_pools_them_in_its_denominator() -> None:
     # The private share of "all donors including private": the numerator sits inside its
     # denominator.
-    frame = provider_frame(_DONORS)
-
     result = run_share_of(
-        frame,
-        provider_frame({k: _DONORS[k] for k in (_OFFICIAL, _PRIVATE_TOTAL)}),
+        provider_frame(_DONORS),
+        provider_frame(_WHOLE_TOTALS),
         stat_var="dcid:share",
         numerator_entity={PROVIDER: _PRIVATE_TOTAL},
         denominator_entity={},

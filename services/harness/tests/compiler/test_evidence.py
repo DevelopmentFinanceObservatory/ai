@@ -2799,7 +2799,7 @@ def test_a_union_of_whole_totals_meets_a_bare_name_and_refuses_members(
             ResolvedEntity(role="origin", ref="DACOfficialDonors", label="Official Donors, Total"),
             ResolvedEntity(role="origin", ref="DACPrivateDonors", label="Private Donors, Total"),
         ),
-        groups=(ResolvedGroup(role="origin", label=label, whole_of=("party", "private")),),
+        groups=(ResolvedGroup(role="origin", label=label, whole_of=("official", "private")),),
         identity=None,
     )
 

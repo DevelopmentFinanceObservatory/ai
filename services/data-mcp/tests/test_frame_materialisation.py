@@ -33,13 +33,13 @@ from common.materialisation import get_store as get_frame_store
 from common.materialisation import set_store as set_frame_store
 from common.materialisation.memory_store import FRAME_TTL
 from common.materialisation.mint_record import encode_mint_record
-from common.place_type import PARTY_KINDS
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     _ARTIFACT_GET_ATTEMPTS,
     CANONICAL_FRAME_RENDERING,
+    KIND_COLUMNS,
     MaterialisationOutcome,
     frame_ref_for,
     materialise_and_register,
@@ -2323,19 +2323,22 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     assert set(frame.table.column("financingProvider_party_kind").to_pylist()) == {"untyped"}
 
 
-def test_the_private_and_whole_total_kind_cells_pass_through_decoding_unchanged() -> None:
-    """The decoder writes only an empty cell as `untyped`; every kind apis serves
-    reaches the frame as it was served."""
-    kinds = sorted(PARTY_KINDS)
+def test_a_partys_sector_and_whole_cells_pass_through_and_an_empty_sector_reads_untyped() -> None:
+    """apis leaves the sector cell empty for a residual and for a total holding both
+    sectors. The decoder writes that cell as `untyped` and every served cell reaches
+    the frame as it was served."""
     table = pa.table(
         {
-            "stat_var": pa.array(["dcid:Oda"] * len(kinds)),
-            "financingProvider": pa.array([f"provider/{kind}" for kind in kinds]),
-            "financingRecipient": pa.array(["country/ETH"] * len(kinds)),
-            "time_period": pa.array(["2021"] * len(kinds)),
-            "value": pa.array([1.0] * len(kinds)),
-            "financingProvider_party_kind": pa.array(kinds),
-            "financingRecipient_party_kind": pa.array(["party"] * len(kinds)),
+            "stat_var": pa.array(["dcid:Oda"] * 4),
+            "financingProvider": pa.array(
+                ["country/FRA", "GatesFoundation", "DACOfficialDonors", "DACUnspecified"]
+            ),
+            "financingRecipient": pa.array(["country/ETH"] * 4),
+            "time_period": pa.array(["2021"] * 4),
+            "value": pa.array([1.0] * 4),
+            "financingProvider_party_kind": pa.array(["party", "party", "total", "residual"]),
+            "financingProvider_party_sector": pa.array(["official", "private", "official", ""]),
+            "financingProvider_party_whole": pa.array(["false", "false", "true", "false"]),
         }
     )
     buf = io.BytesIO()
@@ -2343,7 +2346,15 @@ def test_the_private_and_whole_total_kind_cells_pass_through_decoding_unchanged(
 
     frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
 
-    assert frame.table.column("financingProvider_party_kind").to_pylist() == kinds
+    rows = frame.table.select(
+        ["financingProvider", "financingProvider_party_sector", "financingProvider_party_whole"]
+    ).to_pylist()
+    assert {row["financingProvider"]: tuple(row.values())[1:] for row in rows} == {
+        "country/FRA": ("official", "false"),
+        "GatesFoundation": ("private", "false"),
+        "DACOfficialDonors": ("official", "true"),
+        "DACUnspecified": ("untyped", "false"),
+    }
 
 
 @pytest.mark.parametrize(
@@ -2352,7 +2363,9 @@ def test_the_private_and_whole_total_kind_cells_pass_through_decoding_unchanged(
     ids=["flow", "place", "unheld"],
 )
 @pytest.mark.parametrize(
-    "recorded", (*frame_materialisation.TYPE_COLUMN_SELECTIONS, ("kind",)), ids="+".join
+    "recorded",
+    (*frame_materialisation.TYPE_COLUMN_SELECTIONS, ("kind",), ("party_kind",), KIND_COLUMNS),
+    ids="+".join,
 )
 def test_a_replayed_selection_asks_a_flow_root_for_kinds(
     recorded: tuple[str, ...], identity: dict[str, Any] | None
@@ -2363,10 +2376,15 @@ def test_a_replayed_selection_asks_a_flow_root_for_kinds(
 
     replayed = frame_materialisation.replayed_mint_options(options, identity=identity)
 
-    party_typed = {"financingProvider_type", "financingRecipient_type", "kind"} & set(recorded)
+    party_typed = {
+        "financingProvider_type",
+        "financingRecipient_type",
+        "kind",
+        "party_kind",
+    } & set(recorded)
     flow_unselected = not recorded and identity is not None and "origin" in identity["entities"]
     if party_typed or flow_unselected:
-        assert replayed == options | {"columns": ["party_kind"]}
+        assert replayed == options | {"columns": list(KIND_COLUMNS)}
     else:
         assert replayed == options
 
@@ -2432,6 +2450,7 @@ def test_extra_columns_name_a_frame_of_their_own() -> None:
             "cv_3b6c33d24aa1d42e0de5d54574aa1ca5",
         ),
         (("party_kind",), "cv_aa6883b65fa153b6b5fd56e03a5dca14"),
+        (KIND_COLUMNS, "cv_8709a6cc44ecef86361ea58f408d749e"),
     ],
 )
 def test_a_columns_only_pair_keeps_the_recorded_derivation(
@@ -2475,10 +2494,13 @@ _KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
     ("columns", "keyed_by_stamp"),
     [
         (("party_kind",), True),
+        (KIND_COLUMNS, True),
+        (("party_sector",), True),
+        (("party_whole",), True),
         (("observationAbout_type",), False),
         ((), False),
     ],
-    ids=["kinds", "types", "default"],
+    ids=["kind", "kind-sector-whole", "sector", "whole", "types", "default"],
 )
 def test_the_enrichment_stamp_names_only_a_frame_that_asks_for_kinds(
     columns: tuple[str, ...], keyed_by_stamp: bool

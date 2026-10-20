@@ -24,15 +24,20 @@ countries typed `Country,Place` share `Place` and no level, and World Bank aggre
 One place alone sits at one level whatever its types.
 
 A flow's parties (`financingProvider`, `financingRecipient`) carry a kind instead, in a
-`{role}_party_kind` column (`kind_column`) apis fills from its code index: `party`, `private`,
-`total`, `residual` or `whole_total`. DAC tables publish group totals as parties of their own:
-"Africa, Total", an income group, the G7. A total holds other parties' figures, so a sum across a
-flow role leaves it out. A residual ("Africa, regional") holds figures no other party does, so it
-adds to the parties. A private party (a foundation, a national lottery) sums like a party and is
-counted apart. A `whole_total` is a total that holds a whole population, such as "Official Donors,
-Total": a sum leaves it out beside members, and two of them on one axis hold disjoint populations,
-so a sum across a role of whole totals alone adds them. apis leaves the cell empty for a party
-it declares no kind for, and data-mcp writes that cell as `UNTYPED` too, which no kind names.
+`{role}_party_kind` column (`kind_column`) apis fills from its code index: `party`, `total` or
+`residual`. DAC tables publish group totals as parties of their own: "Africa, Total", an
+income group, the G7. A total holds other parties' figures, so a sum across a flow role leaves
+it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
+parties. apis leaves the cell empty for a party it declares no kind for, and data-mcp
+writes that cell as `UNTYPED` too, which no kind names.
+
+Two attribute columns sit beside the kind. `{role}_party_sector` (`sector_column`) holds a
+party's `Sector`, `official` or `private` (a foundation, a national lottery), and a total's
+when every party it holds shares one; it is empty, so `UNTYPED`, for a residual and for a
+total holding both. `{role}_party_whole` (`whole_column`) is `WHOLE_CELL` on a total that holds
+a whole population in the row's dataset and year, such as "Official Donors, Total", and
+`false` on every other row. Two whole totals on one axis hold disjoint classes of party
+(`MemberClass`), so a sum across a role of whole totals alone adds them.
 """
 
 from __future__ import annotations
@@ -75,16 +80,23 @@ _COUNTRY = "Country"
 _NUTS = frozenset({"EurostatNUTS1", "EurostatNUTS2", "EurostatNUTS3"})
 _SEPARATOR = ","
 
-# The cells apis serves in a `{role}_party_kind` column. A total holds other parties' figures.
-PartyKind = Literal["party", "private", "residual", "total", "whole_total"]
+# The kinds apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
+PartyKind = Literal["party", "residual", "total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
-PRIVATE_KIND: PartyKind = "private"
 TOTAL_KIND: PartyKind = "total"
-WHOLE_TOTAL_KIND: PartyKind = "whole_total"
-# The cells whose rows hold other rows' figures, so a sum beside members leaves them out.
-TOTAL_KINDS: frozenset[str] = frozenset({TOTAL_KIND, WHOLE_TOTAL_KIND})
 
-_ENRICHMENT_SUFFIXES = ("_type", "_party_kind")
+# The sectors apis serves in a `{role}_party_sector` cell.
+Sector = Literal["official", "private"]
+PRIVATE_SECTOR: Sector = "private"
+
+# The classes of party a whole total can hold in full: a party of either sector, or a residual.
+MemberClass = Literal["official", "private", "residual"]
+
+# The `{role}_party_whole` cell of a total holding a whole population; every other row's is
+# `false`.
+WHOLE_CELL = "true"
+
+_ENRICHMENT_SUFFIXES = ("_type", "_party_kind", "_party_sector", "_party_whole")
 
 
 def type_column(role: str) -> str:
@@ -97,14 +109,25 @@ def kind_column(role: str) -> str:
     return f"{role}_party_kind"
 
 
-def enrichment_columns(role: str) -> tuple[str, str]:
-    """The columns that can describe `role`'s places: its type and its kind column."""
-    return type_column(role), kind_column(role)
+def sector_column(role: str) -> str:
+    """The enrichment column naming each `role` party's sector: `financingProvider_party_sector`."""
+    return f"{role}_party_sector"
+
+
+def whole_column(role: str) -> str:
+    """The enrichment column marking each `role` total that holds a whole population:
+    `financingProvider_party_whole`."""
+    return f"{role}_party_whole"
+
+
+def enrichment_columns(role: str) -> tuple[str, str, str, str]:
+    """The columns that can describe `role`'s places: its type, kind, sector and whole column."""
+    return type_column(role), kind_column(role), sector_column(role), whole_column(role)
 
 
 def enrichment_role(column: str, *, roles: Collection[str]) -> str | None:
-    """The role among `roles` whose type or kind column `column` is, or None when it is
-    neither."""
+    """The role among `roles` one of whose enrichment columns (`enrichment_columns`)
+    `column` is, or None when it is none of them."""
     for suffix in _ENRICHMENT_SUFFIXES:
         role = column.removesuffix(suffix)
         if role != column and role in roles:
