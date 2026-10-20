@@ -4,8 +4,8 @@ The keys and statuses the workflow's nodes and the orchestrator's tools
 (`harness.orchestrator_tools`) read and write, the session-state schema
 (`GraphState`), the one pending action the agent leaves for `route`, the
 tools' budgets, and the helpers more than one node reads: the stored plan
-(`readable_plan`), a JSON slot (`state_json`) and the interrupt event
-(`interrupt_event`).
+(`readable_plan`), a JSON slot (`state_json`), the interrupt event
+(`interrupt_event`) and the answers to a clarify interrupt (`resume_answers`).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from google.adk.events import RequestInput
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from planner.plan import AskBreakdown, SessionState, stored_plan
 from planner.plan import Plan as PlannerPlan
-from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_validator
 
 from harness.tool_contracts import (
     reading_facts,
@@ -112,13 +112,13 @@ def interrupt_event(request: RequestInput) -> Event:
 
 
 class AskOption(BaseModel):
-    """One answer `ask_user` offers: its wording and, for a count, its spec_id."""
+    """One answer `ask_user` offers: its wording and, for a count or prices, its spec_id."""
 
     label: str = Field(description="the answer as the user reads it")
     spec_id: str | None = Field(
         default=None,
         description=(
-            "for a way of counting the result names, the spec_id it gives that count; "
+            "for a count or prices the result names, the spec_id it gives that reading; "
             "leave it out for any other answer"
         ),
     )
@@ -131,12 +131,32 @@ def ask_options(options: list[Any]) -> list[dict[str, Any]]:
     return [{"label": option} if isinstance(option, str) else option for option in options]
 
 
+class AskQuestion(BaseModel):
+    """One question `ask_user` puts to the user, with the answers it offers."""
+
+    question: str = Field(description="the question as the user reads it")
+    options: Annotated[list[AskOption], BeforeValidator(ask_options)] = Field(
+        description="the likely answers, at least one; the user may also write their own"
+    )
+
+
 class PendingAsk(BaseModel):
-    """`ask_user` asked: the workflow pauses with the question."""
+    """`ask_user` asked: the workflow pauses with its questions, in order."""
 
     kind: Literal["ask"] = "ask"
-    question: str
-    options: Annotated[list[AskOption], BeforeValidator(ask_options)]
+    questions: list[AskQuestion]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_question(cls, data: Any) -> Any:
+        """A stored single-question action, `{kind, question, options}`, reads
+        as a call with that one question."""
+        if isinstance(data, dict) and "questions" not in data and "question" in data:
+            return {
+                "kind": data.get("kind", "ask"),
+                "questions": [{"question": data["question"], "options": data.get("options")}],
+            }
+        return data
 
 
 class PendingPlan(BaseModel):
@@ -150,14 +170,50 @@ class PendingPlan(BaseModel):
     ask_breakdowns: list[AskBreakdown] = []
 
 
-def ask_candidates(options: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """`PendingAsk.options` as the clarify interrupt's candidates: a count under
-    its own spec_id, so a pick returns it, and any other answer under `o{n}`,
-    its place in the list."""
+def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:
+    """One question's options as the clarify interrupt's candidates: a count
+    under its own spec_id, so a pick returns it, and any other answer under
+    `o{n}`, its place in the question's list."""
     return [
-        {"spec_id": option.get("spec_id") or f"o{index + 1}", "label": option["label"]}
-        for index, option in enumerate(ask_options(options))
+        {"spec_id": option.spec_id or f"o{index + 1}", "label": option.label}
+        for index, option in enumerate(options)
     ]
+
+
+def ask_questions(questions: list[AskQuestion]) -> list[dict[str, Any]]:
+    """`PendingAsk.questions` as the clarify interrupt's payload entries: each
+    under `q{n}`, its place in the call, with its candidates (`ask_candidates`)."""
+    return [
+        {
+            "id": f"q{index + 1}",
+            "question": question.question,
+            "candidates": ask_candidates(question.options),
+        }
+        for index, question in enumerate(questions)
+    ]
+
+
+def resume_answers(result: Any) -> dict[str, dict[str, Any]] | None:
+    """The clarify interrupt's resume value as one answer per question id, or
+    None when the user dismissed the whole pause (`{"skip": True}`).
+
+    The value is `{"answers": {question id: answer}}`, each answer
+    `{"kind": "option", "spec_id"}`, `{"kind": "text", "text"}` or
+    `{"kind": "skipped"}`. A single-question reply is the answer for `q1`:
+    `{"spec_id"}` for a pick, `{"text"}` for the user's own words, or a bare
+    candidate id.
+    """
+    if not isinstance(result, dict):
+        return {"q1": {"kind": "option", "spec_id": str(result)}}
+    if result.get("skip"):
+        return None
+    if "answers" in result:
+        return dict(result["answers"] or {})
+    if result.get("text"):
+        return {"q1": {"kind": "text", "text": result["text"]}}
+    if result.get("spec_id"):
+        return {"q1": {"kind": "option", "spec_id": result["spec_id"]}}
+    return {"q1": {"kind": "skipped"}}
 
 
 _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discriminator="kind")])

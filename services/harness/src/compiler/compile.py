@@ -157,7 +157,6 @@ class CompileIssueCode(StrEnum):
     SOURCE_PIN_VIOLATED = "source_pin_violated"
     SOURCE_UNUSABLE = "source_unusable"
     SOURCE_WIDER_THAN_REQUIREMENT = "source_wider_than_requirement"
-    REQUIREMENT_UNMEETABLE = "requirement_unmeetable"
     WINDOW_OUTSIDE_PERIOD = "window_outside_period"
     ROLLING_NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
     ROLLING_POPULATION_UNUSABLE = "rolling_population_unusable"
@@ -349,7 +348,6 @@ class _Build:
         self._check_requirements_satisfied()
         self._check_graph()
         self._check_sources()
-        self._check_requirements_meetable()
         self._build_shapes()
         self._check_operations()
         self._check_source_width()
@@ -638,18 +636,6 @@ class _Build:
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
             self._issue(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, detail, operation_id=operation_id)
-
-    def _check_requirements_meetable(self) -> None:
-        for requirement in self.requirements.values():
-            if not isinstance(requirement, DatasetRequirement):
-                continue
-            if requirement.unit is not None and requirement.unit.prices == "constant":
-                self._issue(
-                    CompileIssueCode.REQUIREMENT_UNMEETABLE,
-                    f"requirement {requirement.id!r} asks for constant {requirement.unit.base_year} "
-                    f"prices, and no operation restates a series in another year's prices",
-                    requirement_id=requirement.id,
-                )
 
     def _check_operations(self) -> None:
         for operation in self.operations.values():
@@ -1283,14 +1269,17 @@ class _Build:
         apis writes a natively satisfied request as the request object and
         an unbound definition as its ref.
 
-        No requirement may ask for constant prices (`_check_requirements_meetable`),
-        so the one unit two sides can both be stated in is a current-price
-        one. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins its
-        source and that source cannot serve current prices, as `check_evidence`
-        reads its unit: no requirement change pairs the two, and the issue
-        names the pinned side's requirement. `FRAME_PRICE_BASES_DIFFER` when
-        either side states constant prices otherwise, whose repair is current
-        prices on both sides. `FRAME_UNITS_DIFFER` for any other pair.
+        A requirement may ask for current prices or for constant prices of
+        one base year, and a pinned side is always served in its source's own
+        unit. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins a
+        source in constant prices and no requirement change states the other
+        side in that unit, because the pinned unit states no base year by
+        request or unit id or the other side is pinned too
+        (`_report_irreconcilable_units`); the issue names the pinned side's
+        requirement. `FRAME_PRICE_BASES_DIFFER` when either side states
+        constant prices otherwise, whose repair is one unit on both sides,
+        in current prices or in constant prices of one base year.
+        `FRAME_UNITS_DIFFER` for any other pair.
 
         A `share_of` reports `SHARE_UNITS_DIFFER` in place of
         `FRAME_UNIT_UNBOUND` and `FRAME_UNITS_DIFFER`: `quotient_of` divides
@@ -1503,34 +1492,42 @@ class _Build:
         )
 
     def _report_irreconcilable_units(self, op_id: str, left: _SideUnit, right: _SideUnit) -> bool:
-        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side whose source cannot serve current prices.
+        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side in constant prices no other side can match.
 
-        A current-price unit is the one unit two sides can both be stated
-        in, and a pinned requirement is always served by its own source.
-        Each pinned side's source unit is read as `check_evidence` reads it
-        (`read_source_unit`). A source unit that reads as constant prices
-        cannot be stated at current prices in any currency, so no
-        requirement change pairs the two. A pinned side bound to a unit by
-        request is skipped, because its frame is converted on fetch and its
-        own reading already states the basis it serves. Returns whether it
-        reported.
+        A pinned requirement is always served in its source's own unit: the
+        request object when its definition binds one by request, else its
+        unit ref. A side in constant prices (`_SideUnit.reading`) cannot be
+        restated in current prices, so the other side has to be retrieved in
+        that same unit. A requirement may ask for constant prices only of a
+        base year the source's unit id or request states (`check_evidence`),
+        which `_SideUnit.denoted` reads. So the pair is irreconcilable when
+        the pinned side denotes no such unit, or when the other side is
+        pinned too and keeps a unit of its own. Returns whether it reported.
         """
         for pinned, other in ((left, right), (right, left)):
             requirement = pinned.requirement
             if (
                 requirement is None
                 or requirement.source_spec_id is None
-                or isinstance(pinned.unit, dict)
-                or read_source_unit(pinned.source).prices != "constant"
+                or pinned.reading.prices != "constant"
             ):
+                continue
+            other_pin = other.requirement
+            if other_pin is not None and other_pin.source_spec_id is not None:
+                why = f"requirement {other_pin.id!r} pins its source too"
+            elif pinned.denoted is None:
+                why = (
+                    "its unit states no base year by unit id or by request, so no "
+                    "requirement can ask for those prices"
+                )
+            else:
                 continue
             self._issue(
                 CompileIssueCode.FRAME_UNITS_IRRECONCILABLE,
                 f"operation {op_id!r} pairs requirement {requirement.id!r}, whose pinned source "
                 f"{pinned.source.spec_id} serves {pinned.words()}, with a side in "
-                f"{other.words()}. No operation restates a series in other prices and no "
-                "requirement may ask for constant prices, so the two sides can never be "
-                "stated in one unit",
+                f"{other.words()}. No operation restates a series in other prices and "
+                f"{why}, so the two sides can never be stated in one unit",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )

@@ -121,13 +121,18 @@ discovered again for a requirement that states `across`
 
 What a source cannot confirm -- no entities resolved at all, no coverage
 window, coverage stated as breadth rather than an exact window, no
-recognisable currency, no price basis in its unit text, no provenance to check
-a stated source against -- comes back as a warning for the approval summary,
+recognisable currency, no price basis for a current-price requirement, no
+provenance to check a stated source against -- comes back as a warning for the approval summary,
 at the severity `coverage.on_missing` asks for. A source stating no identity
 document at all is an error: nothing was written to the definition store for
-it, so no retrieval could serve it and no drift check could protect it. A
-requirement no operation can meet at all -- constant prices, with no operation
-that restates a series -- is `requirement_unmeetable` regardless of source.
+it, so no retrieval could serve it and no drift check could protect it. No
+operation restates a series in other prices, so a requirement in constant
+prices is met only by a source already in constant prices of that base year,
+stated by the unit the definition binds by request or by the unit id. A
+retrieved series states its unit in those two forms alone, so `get_data`'s
+manifest is checked against the same reading. A source in current prices, in
+another base year, stating no basis or no base year, or stating constant
+prices only in its label, is `source_unusable`.
 
 **Each step is checked against the tool it will call.** Its literal arguments
 validate against the live `inputSchema`, with bound arguments held out of
@@ -180,18 +185,19 @@ several members with no `axis` is `quotient_axis_required`, and a key its frame
 carries no column for is `quotient_key_unknown`; both are repairs the planner makes.
 
 **`compare` and `sum_of` pair two sides in one unit.** analysis-mcp sets two
-frames against each other only when their `unit` cells are equal, and no
-requirement may ask for constant prices, so the one unit two sides can both be
-stated in is a current-price one. A side whose requirement pins its source is
-always served in that source's own unit. When the pinned source's unit states
-constant prices, read the way `check_evidence` reads it (the unit id, then its
-label), the pair is `frame_units_irreconcilable`: it names the pinned side's
-requirement, the translator refers it as `requirement_unmeetable` so the
-planner asks the user, and it records a `no_operation_covers` answer so a plan
-that then shows the two series apart may decline the pairing. Any other pair
-with a side in constant prices is `frame_price_bases_differ`, repaired by
-stating one currency at current prices on both sides; `frame_unit_forms_differ`
-and `frame_units_differ` cover the rest.
+frames against each other only when their `unit` cells are equal. A
+requirement may ask for current prices or for constant prices of one base year,
+and a side whose requirement pins its source is always served in that source's
+own unit. When the pinned source serves constant prices, and either states no
+base year by request or unit id or the other side is pinned too, no
+requirement change states both sides in one unit. The pair is then `frame_units_irreconcilable`:
+it names the pinned side's requirement, the translator refers it as
+`requirement_unmeetable` so the planner asks the user, and it records a
+`no_operation_covers` answer so a plan that then shows the two series apart may
+decline the pairing. Any other pair with a side in constant prices is
+`frame_price_bases_differ`, repaired by stating one unit on both sides, in
+current prices or in constant prices of one base year;
+`frame_unit_forms_differ` and `frame_units_differ` cover the rest.
 
 **Every issue is reported in one pass.** `compile_plan` never stops at the
 first problem: a failed attempt returns the whole list, each issue naming the

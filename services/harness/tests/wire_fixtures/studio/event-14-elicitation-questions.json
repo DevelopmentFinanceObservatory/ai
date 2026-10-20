@@ -1,0 +1,41 @@
+{
+  "event": "elicitation.request",
+  "seq": 5,
+  "interrupt_id": "elc_7a1c0e5b42d94f18",
+  "questions": [
+    {
+      "id": "q1",
+      "question": "How should the aid be counted?",
+      "input": "single_select",
+      "options": [
+        {
+          "id": "spec_3c4d5e6f22222222",
+          "label": "Net disbursements"
+        },
+        {
+          "id": "spec_4d5e6f7a33333333",
+          "label": "Gross disbursements"
+        }
+      ],
+      "allow_free_text": true,
+      "skippable": true
+    },
+    {
+      "id": "q2",
+      "question": "Should the amounts be in current or constant prices?",
+      "input": "single_select",
+      "options": [
+        {
+          "id": "o1",
+          "label": "Constant 2023 US dollars"
+        },
+        {
+          "id": "o2",
+          "label": "Current US dollars"
+        }
+      ],
+      "allow_free_text": true,
+      "skippable": true
+    }
+  ]
+}

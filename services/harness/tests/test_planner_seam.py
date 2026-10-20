@@ -84,6 +84,7 @@ from planner.plan import (
     MAX_PLAN_ROUNDS,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
+    TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AggregateRequirement,
     AskBreakdown,
@@ -611,29 +612,42 @@ async def test_an_unknown_tool_name_keeps_adks_answer_listing_the_tools(
 
 
 @pytest.mark.parametrize("resumed", [False, True])
-async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool) -> None:
-    """A new planner entry starts with no `unsupported` answer to decline, no optional
-    decline earned and no compile failure to call repeated; an ask-the-user resume
-    inside one entry keeps all three."""
+@pytest.mark.parametrize("entry", ["first-draft", "amendment", "replan"])
+async def test_an_entry_owes_nothing_an_earlier_entry_recorded(resumed: bool, entry: str) -> None:
+    """Fresh entries clear old declines and failures; only first drafts permit an
+    unearned terminal decline. A user-input resume keeps the entry's state."""
     stale = {
         UNSUPPORTED_STATE_KEY: ["calculation_over_combined"],
         OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"],
+        TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"],
         COMPILE_FAILURES_STATE_KEY: ["fingerprint"],
     }
     harness = _SeamHarness(state=stale)
     seam = _seam()
     seam._agent.model = ScriptedPlannerLlm(script=["Which years did you have in mind?"] * 4)
+    kwargs: dict[str, Any] = {}
+    if entry == "amendment":
+        kwargs["amendment"] = "show it"
+    elif entry == "replan":
+        kwargs["refusal"] = _unit_refusal("cross_frame_unit_mismatch")
 
     await harness.run(
         seam,
         question="kenya debt",
         readings=[],
         resume_inputs={"ask": {"result": "since 2015"}} if resumed else None,
+        **kwargs,
     )
 
     state = await harness.state()
     kept = {key: state.get(key) for key in stale}
-    assert kept == (stale if resumed else {key: [] for key in stale})
+    fresh = {
+        UNSUPPORTED_STATE_KEY: [],
+        OPTIONAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
+        TERMINAL_DECLINES_STATE_KEY: ["no_operation_covers"] if entry == "first-draft" else [],
+        COMPILE_FAILURES_STATE_KEY: [],
+    }
+    assert kept == (stale if resumed else fresh)
 
 
 async def test_a_question_with_nothing_left_after_a_decline_ends_on_the_decline(
@@ -847,15 +861,14 @@ def _unit_refusal(code: str, *, tool: str = "compare") -> dict[str, Any]:
             ("invalid_input", "decline_unearned"),
             id="compare-facet-mismatch",
         ),
-        pytest.param(None, ("invalid_input", "decline_unearned"), id="no-refusal"),
     ],
 )
 async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
-    decision: Any, requirement: Any, refusal: dict[str, Any] | None, outcome: tuple[str, Any]
+    decision: Any, requirement: Any, refusal: dict[str, Any], outcome: tuple[str, Any]
 ) -> None:
     """A replan entry whose refusal means no operation computes the step may
     decline the ask it served as `no_operation_covers`. With a refusal that
-    offers a choice, or none, the decline is unearned, and the refusal steers to
+    offers a choice, the decline is unearned, and the refusal steers to
     no other output. A `share_of` step refusing its sides on their units earns
     none either: the replan names `quotient_of` as the repair. A step reading one
     measure from two sources earns none, and the replan names one source for it."""
@@ -887,13 +900,102 @@ async def test_a_replan_over_a_refusal_no_operation_covers_earns_the_decline(
     assert [(r["outcome"], r.get("code")) for r in answered] == [outcome]
     prompt = _prompt_text(llm.captured_requests[0])
     assert ("`no_operation_covers`" in prompt) is (outcome[0] == "ok")
-    shares = refusal is not None and refusal["tool"] == "share_of"
+    shares = refusal["tool"] == "share_of"
     assert ("`quotient_of`" in prompt) is (shares and refusal["code"] in _SHARE_UNIT_CODES)
-    facets = refusal is not None and refusal["code"] == "cross_frame_facet_mismatch"
+    facets = refusal["code"] == "cross_frame_facet_mismatch"
     assert ("give every requirement on that measure the same source" in prompt) is facets
     if outcome[0] != "ok":
         assert "action" not in answered[0]
         assert "answer the ask" not in answered[0]["message"]
+
+
+@pytest.mark.parametrize("entry", ["first-draft", "amendment"])
+async def test_a_first_draft_may_decline_an_ask_no_requirement_kind_states(
+    decision: Any, requirement: Any, derived_requirement: Any, entry: str
+) -> None:
+    """A first draft may decline as `no_operation_covers` an ask no requirement
+    kind states, with no tool's `unsupported` answer before it, and plan what
+    can still be shown beside it. An amendment entry earns no such decline."""
+    asks = ["the donors whose aid rose in every one of the last five years"]
+    draft = {
+        "question": "donors whose aid rose every year",
+        "answer_mode": "series",
+        "decisions": [decision().model_dump(mode="json")],
+        "evidence_requirements": [requirement(id="aid").model_dump(mode="json")],
+        "answered": [{"ask": 0, "outputs": ["aid"]}],
+        "declined": [{"ask": asks[0], "code": "no_operation_covers", "ask_ref": 0}],
+    }
+    kwargs: dict[str, Any] = {}
+    if entry == "amendment":
+        seeded = _translated_plan(decision, requirement, derived_requirement, version=1)
+        kwargs = {"prior_plan": seeded.model_dump(mode="json"), "amendment": "show it"}
+        draft = {
+            **{key: value for key, value in draft.items() if key != "question"},
+            "amends_version": 1,
+        }
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=[[("propose_plan", draft)], "Planned."])
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    await harness.run(seam, question="donors whose aid rose every year", readings=[], **kwargs)
+
+    answered = [
+        part.function_response.response
+        for content in llm.captured_requests[-1].contents
+        for part in content.parts
+        if part.function_response and part.function_response.name == "propose_plan"
+    ]
+    if entry == "first-draft":
+        assert [(r["outcome"], r.get("code")) for r in answered] == [("ok", None)]
+        recorded = load_plan(await harness.state())
+        assert recorded is not None
+        assert [(d.code.value, d.ask_ref) for d in recorded.declined] == [
+            ("no_operation_covers", 0)
+        ]
+        assert [(a.ask, a.outputs) for a in recorded.answered] == [(0, ("aid",))]
+    else:
+        assert [(r["outcome"], r.get("code")) for r in answered] == [
+            ("invalid_input", "decline_unearned")
+        ]
+
+
+@pytest.mark.parametrize("paused", [False, True])
+async def test_a_first_draft_with_only_declines_ends_on_the_declined_asks(paused: bool) -> None:
+    """A first-draft decline can close the entry, including after a user-input pause."""
+    asks = ["the donors whose aid rose in every one of the last five years"]
+    draft = {
+        "question": "donors whose aid rose every year",
+        "answer_mode": "series",
+        "declined": [{"ask": asks[0], "code": "no_operation_covers", "ask_ref": 0}],
+    }
+    script = [[("propose_plan", draft)]]
+    if paused:
+        script.insert(0, [("adk_request_input", {"message": "Which period?"})])
+    llm = ScriptedPlannerLlm(script=script)
+    seam = _seam()
+    seam._agent.model = llm
+    harness = _SeamHarness(state={ASKS_STATE_KEY: asks})
+
+    result = await harness.run(seam, question=draft["question"], readings=[])
+    if paused:
+        assert result is None
+        interrupt_id = _pending_ask_interrupt_id(await harness.events())
+        result = await harness.run(
+            seam,
+            question=draft["question"],
+            readings=[],
+            new_message=types.Content(
+                role="user",
+                parts=[create_request_input_response(interrupt_id, {"result": "last five years"})],
+            ),
+        )
+
+    assert result is not None
+    assert result["refused"]["final"] is True
+    assert asks[0] in result["refused"]["text"]
+    assert len(llm.captured_requests) == (2 if paused else 1)
+    assert load_plan(await harness.state()) is None
 
 
 # -- asking the user (`adk_request_input`) ---------------------------------
@@ -937,7 +1039,7 @@ async def test_a_planner_ask_pauses_the_run_and_elects_nothing_until_answered() 
 
     assert output is None, "a pausing turn resolves no output -- the run is suspended, not done"
     events = await harness.events()
-    fake_tool_context = SimpleNamespace(session=SimpleNamespace(events=events))
+    fake_tool_context = SimpleNamespace(state={}, session=SimpleNamespace(events=events))
     assert _elected_spec_ids(fake_tool_context) == frozenset()
 
 
@@ -1722,12 +1824,14 @@ def test_the_plan_section_names_the_source_a_requirement_s_evidence_came_from(
     )
 
 
-def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spec_id(
+def test_the_plan_section_names_each_other_count_and_prices_of_a_source_with_its_spec_id(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """An amendment asking for net disbursements pins the spec_id named here,
-    unless the search readings above already name it."""
+    unless the search readings above already name it. Other prices are named
+    the same way."""
     net = "spec_" + "e" * 32
+    constant = "spec_" + "f" * 32
     dumped = _translated_plan(decision, requirement, derived_requirement).model_dump(mode="json")
     dumped["workflow"]["sources"] = [
         {
@@ -1737,7 +1841,7 @@ def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spe
                 "label": "gross disbursements",
                 "alternatives": [
                     {"spec_id": net, "label": "net disbursements", "axis": "what"},
-                    {"spec_id": "spec_" + "f" * 32, "label": "constant prices", "axis": "unit"},
+                    {"spec_id": constant, "label": "constant prices", "axis": "unit"},
                 ],
             },
         }
@@ -1747,9 +1851,9 @@ def test_the_plan_section_names_each_other_way_of_counting_a_source_with_its_spe
 
     assert (
         f"{SPEC} -- official development assistance; counted as gross disbursements; "
-        f"other counts: net disbursements [{net}]\n"
+        f"other counts: net disbursements [{net}]; other prices: constant prices [{constant}]\n"
     ) in rendered
-    assert "other counts" not in _plan_context(dumped, stated={net})
+    assert "other counts" not in _plan_context(dumped, stated={net, constant})
 
 
 # Search's answer to "Bilateral plus imputed multilateral aid from France to
@@ -3635,7 +3739,9 @@ async def test_a_budget_closing_on_a_referral_with_candidates_asks_the_user_and_
         new_message=resume_message,
     )
 
-    fake_tool_context = SimpleNamespace(session=SimpleNamespace(events=await harness.events()))
+    fake_tool_context = SimpleNamespace(
+        state={}, session=SimpleNamespace(events=await harness.events())
+    )
     assert _elected_spec_ids(fake_tool_context) == frozenset({SPEC_B})
 
 

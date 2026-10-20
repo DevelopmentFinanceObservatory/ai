@@ -59,6 +59,7 @@ from harness.studio_state import (
     _digest_entry,
     _next_manifest,
     _PendingInterrupt,
+    _PendingQuestion,
     land_component,
     make_recall_part,
     remove_cards,
@@ -1771,7 +1772,12 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
         kind="plan",
         plan_version=2,
         plan_revision="rev_1",
-        option_ids=frozenset({"spec_b", "spec_a"}),
+        questions=(
+            _PendingQuestion(
+                id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
+            ),
+        ),
+        skippable=True,
         step_order=("step_b", "step_a"),
         step_labels={"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"},
         resuming_segment="seg_1",
@@ -1813,7 +1819,12 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     assert pending.kind == "plan"
     assert pending.plan_version == 2
     assert pending.plan_revision == "rev_1"
-    assert pending.option_ids == frozenset({"spec_a", "spec_b"})
+    assert pending.questions == (
+        _PendingQuestion(
+            id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
+        ),
+    )
+    assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")
     assert pending.step_labels == {"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"}
     assert pending.resuming_segment == "seg_1"
@@ -2663,6 +2674,20 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
+    assert (pending.questions, pending.legacy) == ((), False)
+
+
+def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:
+    """Its flat `option_ids` become question `q1`'s options with no labels,
+    and the pause is skippable as a whole."""
+    entry = {"adk_id": "clarify", "kind": "elicitation", "option_ids": ["spec_a", "o2"]}
+
+    pending = studio_state._deserialize_pending({"int_1": entry})["int_1"]
+
+    assert pending.questions == (
+        _PendingQuestion(id="q1", question="", options={"spec_a": None, "o2": None}),
+    )
+    assert (pending.skippable, pending.legacy) == (True, True)
 
 
 def test_a_recorded_identity_keeps_the_set_its_places_were_asked_for_as():

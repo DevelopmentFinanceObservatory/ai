@@ -508,7 +508,8 @@ async def test_requirement_unmeetable_action_refers(
 ) -> None:
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
     context = context_holding(draft(evidence_requirements=[constant, derived_requirement()]))
-    _discovered(context, source(), status=DiscoveryStatus.DEFINITE)
+    # A source in current prices cannot serve a requirement in constant ones.
+    _discovered(context, source(unit_ref="SDG_CU_USD"), status=DiscoveryStatus.DEFINITE)
     core = _core(FixtureSurface(schemas=real_schemas))
 
     result = await core.propose_operations(

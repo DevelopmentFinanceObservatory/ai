@@ -659,7 +659,13 @@ def test_a_constant_price_requirement_is_met_by_the_same_base_year(
 ) -> None:
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
-    assert _basis_codes(constant, source(unit_label="constant 2015 US dollars")) == []
+    assert (
+        _basis_codes(
+            constant,
+            source(unit_ref="ConstantUSD_2015", unit_label="constant 2015 US dollars"),
+        )
+        == []
+    )
 
 
 def test_a_constant_price_requirement_fails_on_another_base_year(
@@ -675,13 +681,15 @@ def test_a_constant_price_requirement_fails_on_another_base_year(
     assert (issue.found, issue.required) == (2010, 2015)
 
 
-def test_a_constant_price_requirement_is_unverified_without_a_base_year(
+def test_a_constant_price_requirement_is_refused_without_a_base_year(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
+    # An answer over a source of unknown base year would claim a year it
+    # does not have.
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
     assert _basis_codes(constant, source(unit_label="real US dollars")) == [
-        ("unit_price_basis_unverified", "warning")
+        ("unit_price_basis_unverified", "error")
     ]
 
 
@@ -1107,6 +1115,74 @@ def test_a_retrieval_matching_the_approved_source_meets_the_requirement(
         EvidenceIssueCode.UNIT_MATCHES,
         EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
     ]
+
+
+@pytest.mark.parametrize(
+    ("unit_ref", "unit_label", "request_unit", "refused_by"),
+    [
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant 2024 prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            "ConstantUSD_2024",
+            "Constant 2024 US dollars",
+            None,
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            "CurrencyUSD",
+            "US Dollar",
+            {"currency": "USD", "prices": "constant", "base_year": 2024},
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+    ],
+)
+def test_discovery_and_the_manifest_read_a_price_basis_alike(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    unit_ref: str,
+    unit_label: str,
+    request_unit: dict[str, object] | None,
+    refused_by: EvidenceIssueCode | None,
+) -> None:
+    # A retrieved series states its unit as dfo-apis writes it, a request
+    # object or a ref with no label, so a plan accepted at approval is
+    # accepted once retrieved, and one refused at run time never compiles.
+    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2024))
+    identity: dict[str, Any] = {"stat_var": "DebtServicePaid"}
+    if request_unit is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": request_unit}}
+    discovered = source(unit_ref=unit_ref, unit_label=unit_label, identity=identity)
+    retrieved = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", facet={"unit": request_unit or unit_ref})
+        ),
+    )
+
+    def refusals(evidence: RetrievalEvidence) -> list[EvidenceIssueCode]:
+        return [
+            issue.code
+            for issue in errors(check_evidence(constant, evidence))
+            if issue.code.value.startswith("unit")
+        ]
+
+    at_approval = refusals(evidence_from_source(discovered))
+    assert at_approval == refusals(retrieved)
+    assert at_approval == ([refused_by] if refused_by is not None else [])
 
 
 def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(

@@ -98,6 +98,7 @@ from planner.plan import (
     load_optional_declines,
     load_plan,
     load_plan_rounds,
+    load_terminal_declines,
     load_unsupported,
     open_window,
     period_window,
@@ -664,8 +665,7 @@ def _asks_unaccounted(exc: AsksUnaccountedError, proposer: Proposer) -> dict[str
     return problem(
         ProblemCode.ASKS_UNACCOUNTED,
         f"{exc}. Answer an ask in `answered` with the ids of the requirements whose results "
-        "answer it, or, when an `unsupported` answer or a `requirement_unmeetable` whose "
-        "reason names a decline earned it (see `declined`), "
+        "answer it, or, when `declined` permits it, "
         "decline it in `declined` with its number as `ask_ref`; an ask the plan computes in "
         "part takes one "
         "of each. A patch that answers or declines an ask replaces whatever accounted for it "
@@ -749,11 +749,12 @@ def _decline_unearned(
     recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
     its translation's, or one a replan's run-time refusal stands for
     (`harness.planner_seam._earned_by_refusal`); or among its optional
-    declines (`load_optional_declines`). A decline carried unchanged from `previous`, the
-    plan this one amends, was earned when it was recorded; one restated with
-    the same `Decline.key` in other words is the same decline. A
-    `BREAKDOWN_NOT_KEPT` decline is earned by its own rule, which checks a
-    carried one too (`_breakdown_decline_unearned`).
+    declines (`load_optional_declines`), which hold `no_operation_covers`
+    in a first-draft entry (`harness.planner_seam`). A decline carried
+    unchanged from `previous`, the plan this one amends, was earned when it
+    was recorded; one restated with the same `Decline.key` in other words is
+    the same decline. A `BREAKDOWN_NOT_KEPT` decline is earned by its own
+    rule, which checks a carried one too (`_breakdown_decline_unearned`).
     """
     earned = load_unsupported(view.state) | load_optional_declines(view.state)
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
@@ -1021,12 +1022,12 @@ def _sides_covered(
 def _nothing_to_plan(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the answer for a plan that declines every ask and states nothing else.
 
-    Only declines this entry's `unsupported` answers required count: the
-    question is wholly beyond what the system computes, so the entry ends
-    on the declines, which the caller tells the user.
+    The entry's required declines and terminal optional declines can close
+    it. An optional decline of incompatible sources still leaves their
+    separate figures to show, so that permission alone cannot close it.
     """
     codes = {decline.code for decline in plan.declined}
-    if not codes or not codes <= load_unsupported(view.state):
+    if not codes or not codes <= load_unsupported(view.state) | load_terminal_declines(view.state):
         return None
     return problem(
         ProblemCode.NOTHING_TO_PLAN,

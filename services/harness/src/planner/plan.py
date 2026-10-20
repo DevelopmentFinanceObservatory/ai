@@ -142,11 +142,15 @@ UNSUPPORTED_STATE_KEY = "planner:unsupported"
 
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
-# need not: a translation that refers a requirement back as unmeetable
-# (`translator.tool._earned_decline`) earns one. It holds for the rest of the
+# need not: a first-draft entry or a translation that refers a requirement
+# back as unmeetable (`translator.tool._earned_decline`) earns one. It holds for the rest of the
 # entry, whatever later plans change, and no plan owes it. Cleared and kept
 # with `UNSUPPORTED_STATE_KEY`.
 OPTIONAL_DECLINES_STATE_KEY = "planner:optional_declines"
+
+# Optional declines that may end the entry when every ask is declined and
+# no evidence requirements remain, including first-draft asks no kind states.
+TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
@@ -3625,7 +3629,9 @@ class PinSource(StrictModel):
     is the spec_id of the source that offered this one as another way of
     counting its flow, when only a `fetch` of it settled it
     (`harness.turn_records.SearchReading.other_count_of`): its block then
-    names its own measure, which search did not elect. `asked_roles` are the
+    names its own measure, which search did not elect. A source offered as
+    the same count in other prices has none: its block elects the count
+    search elected for the source that offered it. `asked_roles` are the
     flow parties the search part that settled on it asked for, each a
     `planner.parties.PARTY_ROLES` word, empty when it named none.
     """
@@ -3731,13 +3737,27 @@ def load_optional_declines(state: SessionState) -> frozenset[UnsupportedOperatio
     )
 
 
-def record_optional_decline(state: SessionState, operation: UnsupportedOperation) -> None:
-    """Add `operation` to the declines the planner's current entry earned without requiring."""
+def load_terminal_declines(state: SessionState) -> frozenset[UnsupportedOperation]:
+    """Return the optional declines that may close this planner entry on their own."""
+    return frozenset(
+        UnsupportedOperation(code) for code in state.get(TERMINAL_DECLINES_STATE_KEY) or ()
+    )
+
+
+def record_optional_decline(
+    state: SessionState, operation: UnsupportedOperation, *, terminal: bool = False
+) -> None:
+    """Permit `operation` optionally, and with `terminal` allow it to close the entry alone."""
     recorded = load_optional_declines(state) | {operation}
     state[OPTIONAL_DECLINES_STATE_KEY] = sorted(code.value for code in recorded)
+    if terminal:
+        state[TERMINAL_DECLINES_STATE_KEY] = sorted(
+            code.value for code in load_terminal_declines(state) | {operation}
+        )
 
 
 def clear_unsupported(state: SessionState) -> None:
     """Forget the `unsupported` answers and optional declines, as a new planner entry starts."""
     state[UNSUPPORTED_STATE_KEY] = []
     state[OPTIONAL_DECLINES_STATE_KEY] = []
+    state[TERMINAL_DECLINES_STATE_KEY] = []
