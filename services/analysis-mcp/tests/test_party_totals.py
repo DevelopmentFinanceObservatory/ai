@@ -4,8 +4,8 @@ that total other parties, and record them as `party_total` exclusions.
 The frames carry `financingRecipient_party_kind` as `get_data(place_types=true)` registers it for a
 flow table: the kind apis serves for each party, `party`, `residual` or `total`, and `untyped`
 where it serves none. A donor-side frame (`party_frames.provider_frame`) carries
-`financingProvider_party_kind` likewise, beside the sector (`official` or `private`) and whole
-(`true` or `false`) cells, and the tests that sum whole totals or count private donors read it.
+`financingProvider_party_kind` likewise, beside the class (`official`, `private` or `residual`) and
+whole (`true` or `false`) cells, and the tests that sum whole totals or count private donors read it.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ from party_frames import (
     PRIVATE,
     PRIVATE_WHOLE,
     PROVIDER,
+    PROVIDER_CLASSES,
     PROVIDER_KINDS,
-    PROVIDER_SECTORS,
     PROVIDER_WHOLE,
     RESIDUAL,
     provider_frame,
@@ -454,10 +454,26 @@ _RECIPIENT_PHRASES = (
                 "to sum the members, keep party and residual",
             ),
         ),
+        (
+            lambda: _recipient_frame(_ALL_RECIPIENTS),
+            _KINDS,
+            {
+                "types": ["party", "total"],
+                "whole_total": "DACAllRecipients",
+                "members": ["country/MAR"],
+            },
+            ("category_match on 'financingRecipient'", "'financingRecipient_party_class'"),
+        ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
         (lambda: _frame(kinds=False), _KINDS, {"types": []}, ("place_types=true",)),
     ],
-    ids=["no-kind", "every-one-a-total", "no-kind-donor-side", "no-kind-column"],
+    ids=[
+        "no-kind",
+        "every-one-a-total",
+        "no-kind-donor-side",
+        "whole-total-beside-members",
+        "no-kind-column",
+    ],
 )
 async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_column(
     store, frame, column: str, fix: dict[str, list[str]], phrases: tuple[str, ...]
@@ -500,29 +516,121 @@ _DONORS = {
 _WHOLE_TOTALS = {name: _DONORS[name] for name in (_OFFICIAL, _PRIVATE_TOTAL)}
 
 
-@pytest.mark.parametrize("official", [GROUP_TOTAL, OFFICIAL_WHOLE], ids=["total", "whole-total"])
-def test_a_total_beside_members_is_left_out_whole_or_not(official: tuple[str, str, str]) -> None:
-    donors = {**_DONORS, _OFFICIAL: (official, 4267.6)}
+_MEMBERS = {name: _DONORS[name] for name in ("country/FRA", "country/DEU", "GatesFoundation")}
 
+
+@pytest.mark.parametrize(
+    ("donors", "value", "left_out"),
+    [
+        # The reviewer's frame: the official donors' whole total and a private foundation hold
+        # disjoint populations, so 4,267.6m + 30m.
+        (
+            {_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), "GatesFoundation": (PRIVATE, 30.0)},
+            4297.6,
+            (),
+        ),
+        (
+            {_PRIVATE_TOTAL: (PRIVATE_WHOLE, 310.8), "country/FRA": (OFFICIAL, 120.0)},
+            430.8,
+            (),
+        ),
+        (
+            {_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), "DACUnallocated": (RESIDUAL, 15.0)},
+            4282.6,
+            (),
+        ),
+        (
+            {**_MEMBERS, _OFFICIAL: (GROUP_TOTAL, 4267.6)},
+            350.0,
+            (_OFFICIAL,),
+        ),
+    ],
+    ids=[
+        "official-whole-private-party",
+        "private-whole-official-party",
+        "official-whole-residual",
+        "not-whole",
+    ],
+)
+def test_a_whole_total_of_a_class_no_member_has_is_summed_with_them(
+    donors: dict[str, tuple[tuple[str, str, str], float]],
+    value: float,
+    left_out: tuple[str, ...],
+) -> None:
     result = run_aggregate(provider_frame(donors), group_by=("time_period",), aggregation="sum")
 
-    assert result.group_summaries[0].value == pytest.approx(350.0)
-    (excluded,) = result.exclusions.records
-    assert excluded.reason == "party_total"
-    assert excluded.entities == {PROVIDER: (_OFFICIAL, _PRIVATE_TOTAL)}
+    assert result.group_summaries[0].value == pytest.approx(value)
+    assert [record.entities for record in result.exclusions.records] == (
+        [{PROVIDER: left_out}] if left_out else []
+    )
+
+
+def _recipient_frame(recipients: dict[str, tuple[tuple[str, str, str], float]]) -> Frame:
+    """France's 2022 ODA to `recipients`, each a `(cells, value)` pair of kind, class and
+    whole cells."""
+    enrichment = [_KINDS, f"{_RECIPIENT}_party_class", f"{_RECIPIENT}_party_whole"]
+    return Frame.build(
+        role_keys=["financingProvider", _RECIPIENT, *enrichment],
+        rows=[
+            {
+                "stat_var": _ODA,
+                "financingProvider": "country/FRA",
+                _RECIPIENT: recipient,
+                **dict(zip(enrichment, cells, strict=True)),
+                "time_period": "2022",
+                "value": value,
+                "unit": "USD",
+            }
+            for recipient, (cells, value) in recipients.items()
+        ],
+    )
+
+
+# DAC2A's All Recipients total holds the official recipients and the residuals, so it has no
+# one class.
+_ALL_RECIPIENTS = {
+    "DACAllRecipients": (("total", "untyped", "true"), 12000.0),
+    "country/MAR": (("party", "official", "false"), 600.0),
+}
+
+
+@pytest.mark.parametrize(
+    ("frame", "column", "whole_total", "members"),
+    [
+        (
+            lambda: provider_frame({_OFFICIAL: (OFFICIAL_WHOLE, 4267.6), **_MEMBERS}),
+            PROVIDER_KINDS,
+            _OFFICIAL,
+            ("country/DEU", "country/FRA"),
+        ),
+        (lambda: _recipient_frame(_ALL_RECIPIENTS), _KINDS, "DACAllRecipients", ("country/MAR",)),
+    ],
+    ids=["official-whole-official-party", "no-class-whole-total"],
+)
+def test_a_whole_total_that_may_hold_a_member_beside_it_is_refused(
+    frame, column: str, whole_total: str, members: tuple[str, ...]
+) -> None:
+    with pytest.raises(PlaceLevelsMixedError) as raised:
+        run_aggregate(frame(), group_by=("time_period",), aggregation="sum")
+
+    assert (raised.value.column, raised.value.whole_total, raised.value.members) == (
+        column,
+        whole_total,
+        members,
+    )
 
 
 def test_a_private_donor_is_summed_and_counted_with_its_value() -> None:
-    result = run_aggregate(provider_frame(_DONORS), group_by=("time_period",), aggregation="sum")
+    result = run_aggregate(provider_frame(_MEMBERS), group_by=("time_period",), aggregation="sum")
 
     (pooled,) = result.pooled_parties
-    assert (pooled.role, pooled.count, pooled.whole_totals) == (PROVIDER, 3, False)
+    assert (pooled.role, pooled.count, pooled.total_count) == (PROVIDER, 3, 0)
     assert (pooled.private_count, pooled.private_value) == (1, 30.0)
     assert result.group_summaries[0].value == pytest.approx(350.0)
 
 
 def test_a_mean_reports_no_pooled_parties() -> None:
-    result = run_aggregate(provider_frame(_DONORS), group_by=("time_period",), aggregation="mean")
+    result = run_aggregate(provider_frame(_MEMBERS), group_by=("time_period",), aggregation="mean")
 
     assert result.pooled_parties == ()
 
@@ -562,17 +670,17 @@ def test_a_pool_of_whole_totals_alone_is_summed_with_the_private_total_counted()
     assert result.group_summaries[0].value == pytest.approx(4578.4)
     assert result.exclusions.records == ()
     (pooled,) = result.pooled_parties
-    assert (pooled.count, pooled.whole_totals) == (2, True)
+    assert (pooled.count, pooled.total_count) == (2, 2)
     assert (pooled.private_count, pooled.private_value) == (1, 310.8)
 
 
-@pytest.mark.parametrize("donors", [_DONORS, _WHOLE_TOTALS], ids=["members", "whole-totals"])
-def test_a_frame_with_no_sector_column_reports_nothing_about_private_parties(
+@pytest.mark.parametrize("donors", [_MEMBERS, _WHOLE_TOTALS], ids=["members", "whole-totals"])
+def test_a_frame_with_no_class_column_reports_nothing_about_private_parties(
     donors: dict[str, tuple[tuple[str, str, str], float]],
 ) -> None:
-    # A frame minted before the sector column cannot tell a private party apart, so it
+    # A frame minted before the class column cannot tell a private party apart, so it
     # reports no private count at all rather than a count of zero.
-    frame = provider_frame(donors, sectors=False)
+    frame = provider_frame(donors, classes=False)
 
     summed = run_aggregate(frame, group_by=("time_period",), aggregation="sum")
     ranked = _rank(frame, rank_by=(PROVIDER,))
@@ -624,15 +732,15 @@ def test_a_sum_of_totals_not_all_whole_is_refused(frame) -> None:
 def test_a_total_whole_in_some_years_reads_not_whole_after_a_verb_keyed_by_it(
     frame_by_year: dict[str, Frame],
 ) -> None:
-    # Summed per donor first, each donor keeps one sector and whole cell. A total whole in
+    # Summed per donor first, each donor keeps one class and whole cell. A total whole in
     # some years only takes `false`, so the later sum across donors stays refused.
     by_donor = run_aggregate(_years(frame_by_year), group_by=(PROVIDER,), aggregation="sum").frame
     cells = {
-        donor: (sector, whole)
-        for donor, sector, whole in zip(
+        donor: (party_class, whole)
+        for donor, party_class, whole in zip(
             *(
                 by_donor.table.column(column).to_pylist()
-                for column in (PROVIDER, PROVIDER_SECTORS, PROVIDER_WHOLE)
+                for column in (PROVIDER, PROVIDER_CLASSES, PROVIDER_WHOLE)
             ),
             strict=True,
         )

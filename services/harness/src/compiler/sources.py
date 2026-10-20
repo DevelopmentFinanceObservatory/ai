@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS, MemberClass
+from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
     AmbiguousSourceReading,
     Period,
@@ -638,7 +638,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     union of such totals, absent for any other set. `side_classes` is the
     classes of party, totals aside, the dataset publishes on such a set's side,
     absent for any other set and from a Search that predates it. A class outside
-    `common.place_type.MemberClass` fails the block.
+    `common.place_type.PartyClass` fails the block.
     """
     found = []
     for role, raw in groups.items():
@@ -650,8 +650,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     label=label,
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
-                    whole_of=_member_classes(group.get("whole_of")),
-                    side_classes=_member_classes(group.get("side_classes")),
+                    whole_of=_party_classes(group.get("whole_of")),
+                    side_classes=_party_classes(group.get("side_classes")),
                 )
             )
     return tuple(found)
@@ -759,7 +759,7 @@ def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, 
 
 
 # What a whole-population total holds, by flow side and class of party.
-_WHOLE_OF_HOLDS: dict[tuple[str, MemberClass], str] = {
+_WHOLE_OF_HOLDS: dict[tuple[str, PartyClass], str] = {
     ("origin", "official"): "all official donors",
     ("origin", "private"): "private donors",
     ("destination", "official"): "every recipient country",
@@ -940,16 +940,16 @@ def _strings(value: object) -> list[str]:
     return [item for item in _sequence_of_any(value) if isinstance(item, str)]
 
 
-_MEMBER_CLASSES: TypeAdapter[tuple[MemberClass, ...]] = TypeAdapter(tuple[MemberClass, ...])
+_PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
 
 
-def _member_classes(value: object) -> tuple[MemberClass, ...]:
+def _party_classes(value: object) -> tuple[PartyClass, ...]:
     """The classes of party `value` lists, none when it lists none.
 
     Raises:
-        pydantic.ValidationError: When it lists a class outside `MemberClass`.
+        pydantic.ValidationError: When it lists a class outside `PartyClass`.
     """
-    return _MEMBER_CLASSES.validate_python(_strings(value))
+    return _PARTY_CLASSES.validate_python(_strings(value))
 
 
 def _text(value: object) -> str | None:

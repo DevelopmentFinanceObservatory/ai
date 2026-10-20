@@ -36,7 +36,15 @@ from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_o
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
-from party_frames import OFFICIAL, OFFICIAL_WHOLE, PRIVATE, PRIVATE_WHOLE, PROVIDER, provider_frame
+from party_frames import (
+    GROUP_TOTAL,
+    OFFICIAL,
+    OFFICIAL_WHOLE,
+    PRIVATE,
+    PRIVATE_WHOLE,
+    PROVIDER,
+    provider_frame,
+)
 
 
 def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
@@ -1259,12 +1267,12 @@ def test_control_characters_are_escaped_through_group_key_unit_warning_and_exclu
 
 
 # Ethiopia's 2021 ODA from donors, in USD millions: two countries, one private foundation and
-# the official total DAC2A publishes beside them.
+# a group total holding the two countries, which a sum leaves out.
 _DONORS = {
     "country/FRA": (OFFICIAL, 120.0),
     "country/DEU": (OFFICIAL, 200.0),
     "GatesFoundation": (PRIVATE, 30.0),
-    "DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6),
+    "DACEUInstitutionsAndMembers": (GROUP_TOTAL, 320.0),
 }
 _NO_PRIVATE = {name: row for name, row in _DONORS.items() if row[0] != PRIVATE}
 # The two whole totals DAC2A publishes for Ethiopia in 2021, which a sum across donors adds.
@@ -1292,36 +1300,56 @@ def test_a_sum_over_donors_states_how_many_private_donors_it_holds_and_their_val
     assert "This sum of 3 providers includes 1 private donor (30)." in digest
 
 
-def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_one() -> None:
-    result = run_aggregate(
-        provider_frame(_WHOLE_TOTALS), group_by=("time_period",), aggregation="sum"
-    )
+@pytest.mark.parametrize(
+    ("donors", "line"),
+    [
+        (
+            _WHOLE_TOTALS,
+            "This sum of 2 whole totals of providers includes 1 total of private donors (310.8).",
+        ),
+        # A whole total of a class no member has is summed beside the members.
+        (
+            {"DACPrivateDonors": (PRIVATE_WHOLE, 310.8), "country/FRA": (OFFICIAL, 120.0)},
+            "This sum of 1 whole total and 1 provider includes 1 total of private donors (310.8).",
+        ),
+        (
+            {"DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6), "GatesFoundation": (PRIVATE, 30.0)},
+            "This sum of 1 whole total and 1 provider includes 1 private donor (30).",
+        ),
+    ],
+    ids=[
+        "whole-totals",
+        "private-whole-total-beside-a-member",
+        "whole-total-beside-a-private-member",
+    ],
+)
+def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_ones(
+    donors: dict[str, tuple[tuple[str, str, str], float]], line: str
+) -> None:
+    result = run_aggregate(provider_frame(donors), group_by=("time_period",), aggregation="sum")
 
     digest = render_aggregate_digest(
         group_by=("time_period",), aggregation="sum", result=result, **_identity()
     )
 
-    assert (
-        "This sum of 2 whole totals of providers includes 1 total of private donors (310.8)."
-        in digest.splitlines()
-    )
+    assert line in digest.splitlines()
 
 
 @pytest.mark.parametrize(
-    ("donors", "aggregation", "sectors"),
+    ("donors", "aggregation", "classes"),
     [
         (_NO_PRIVATE, "sum", True),
         (_DONORS, "mean", True),
         (_DONORS, "sum", False),
         (_WHOLE_TOTALS, "sum", False),
     ],
-    ids=["no-private-donor", "not-a-sum", "no-sector-column", "whole-totals-no-sector-column"],
+    ids=["no-private-donor", "not-a-sum", "no-class-column", "whole-totals-no-class-column"],
 )
 def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tell(
-    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, sectors: bool
+    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, classes: bool
 ) -> None:
     result = run_aggregate(
-        provider_frame(donors, sectors=sectors), group_by=("time_period",), aggregation=aggregation
+        provider_frame(donors, classes=classes), group_by=("time_period",), aggregation=aggregation
     )
 
     digest = render_aggregate_digest(

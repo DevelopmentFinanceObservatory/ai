@@ -167,13 +167,13 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
 
 # The `options.columns` of a flow table's mint. apis expands each bare token to a
 # `{column}_{token}` column for every entity column the table has, the sides its identity
-# leaves unnamed among them: the party's kind, sector and whole-population mark
+# leaves unnamed among them: the party's kind, class and whole-population mark
 # (`common.place_type`).
-KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_sector", "party_whole")
+KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_class", "party_whole")
 
 # The columns a recorded selection may hold that `replayed_mint_options` replaces with
 # `KIND_COLUMNS`: a flow party's type column, `kind`, the earlier token for the party kind,
-# and `party_kind`, which recorded selections from before the sector and whole tokens hold
+# and `party_kind`, which recorded selections from before the class and whole tokens hold
 # alone.
 _REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind", "party_kind"))
 
@@ -824,7 +824,7 @@ def _read_outcome(
 
 
 def requests_kinds(columns: Iterable[str]) -> bool:
-    """Whether `columns` asks apis for any of a flow party's kind, sector or whole cells."""
+    """Whether `columns` asks apis for any of a flow party's kind, class or whole cells."""
     return not set(KIND_COLUMNS).isdisjoint(columns)
 
 
@@ -1288,7 +1288,7 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`).
 
-    A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_sector` or
+    A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or
     `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
     `get_data(place_types=True)` asks for, is a role key too, with each empty cell
     written `UNTYPED` (`_with_untyped_places`).
@@ -1314,8 +1314,8 @@ def _with_untyped_places(table: pa.Table) -> pa.Table:
     carries (`common.place_type.enrichment_role`) written as `common.place_type.UNTYPED`.
 
     apis leaves the cell empty for a place its graph holds no type for, for a party it
-    declares no kind for, and in the sector column of a residual or of a total holding
-    parties of both sectors, and `build_frame_from_arrow` refuses an empty role cell. A column typed null holds no value at all. A column of another type is left
+    declares no kind for, and in the class column of a total holding parties of more than
+    one class, and `build_frame_from_arrow` refuses an empty role cell. A column typed null holds no value at all. A column of another type is left
     unchanged, for `build_frame_from_arrow` to refuse.
     """
     roles = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]

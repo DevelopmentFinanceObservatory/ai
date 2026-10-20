@@ -461,7 +461,7 @@ def _covering_selects(
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Each `dimension` member's kind or type cell among `rows`, the kind where
-    both are held; empty when the rows carry neither column. A party's sector
+    both are held; empty when the rows carry neither column. A party's class
     and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
@@ -1339,7 +1339,7 @@ def build_orchestrator_tools(
         no private donors, and otherwise refuses `entity_role_not_admitted`:
         open the donor side and keep the parties whose
         `financingProvider_party_kind` is `party` and
-        `financingProvider_party_sector` is `official`. Keep `open_roles` when the
+        `financingProvider_party_class` is `official`. Keep `open_roles` when the
         user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",

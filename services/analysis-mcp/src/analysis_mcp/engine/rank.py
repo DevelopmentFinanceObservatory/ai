@@ -177,7 +177,7 @@ class RankResult:
     `window_period_count` is how many periods the window holds before
     unit-less rows are left out, the periods each entity's coverage is
     measured against. `private_parties` are the `(role, party)` pairs of the
-    ranked roles whose party is in the private sector, which the digest tags.
+    ranked roles whose party is of the private class, which the digest tags.
     """
 
     frame: Frame

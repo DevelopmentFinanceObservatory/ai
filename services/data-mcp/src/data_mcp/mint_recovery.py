@@ -139,7 +139,7 @@ class DatasetVersions(Protocol):
 
 
 # The `options.columns` of a flow table's mint before `KIND_COLUMNS`: the token `kind`, and
-# `party_kind` before the sector and whole tokens joined it. A root minted with either stays
+# `party_kind` before the class and whole tokens joined it. A root minted with either stays
 # in the frame store with no age rule, and `replayed_mint_options` upgrades the recovered
 # selection on replay.
 _EARLIER_KIND_COLUMNS: tuple[tuple[str, ...], ...] = (("kind",), ("party_kind",))

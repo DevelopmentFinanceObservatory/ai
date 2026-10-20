@@ -1631,10 +1631,11 @@ async def get_data(
                 "with none. On a flow frame it adds three cells for each party side instead, "
                 "named for the side (financingProvider_party_kind, financingRecipient_party_kind "
                 "and so on): party_kind is party, residual, or total for a group total such as "
-                '"Africa, Total", which sums and ranks leave out; party_sector is official or '
-                'private; party_whole is "true" on the published total of a whole population '
+                '"Africa, Total", which sums and ranks leave out; party_class is official, '
+                'private or residual; party_whole is "true" on the published total of a whole population '
                 'such as "Official Donors, Total", which adds up with the other whole totals '
-                'when they are the only rows, and "false" elsewhere. A cell reads "untyped" '
+                "when they are the only rows, or beside members of a class it does not hold, "
+                'and "false" elsewhere. A cell reads "untyped" '
                 "where the party has no value. Set it for a spec that "
                 "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
@@ -1718,9 +1719,9 @@ async def get_data(
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds the `observationAbout_type` column,
     so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's kind, sector
+    beside the places inside it. On a flow frame it adds each party's kind, class
     and whole-population mark (`financingProvider_party_kind`,
-    `financingProvider_party_sector`, `financingProvider_party_whole` and the
+    `financingProvider_party_class`, `financingProvider_party_whole` and the
     recipient's three) instead.
 
     `breakdown` sums the family within each code of one hierarchical code
@@ -1738,7 +1739,7 @@ async def get_data(
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
         place_types: Whether to add the places' types (`observationAbout_type`), or
-            each party's kind, sector and whole cells on a flow frame, for a spec that
+            each party's kind, class and whole cells on a flow frame, for a spec that
             names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
             the spec leaves open, to compare or rank its members, and adds the party cells as

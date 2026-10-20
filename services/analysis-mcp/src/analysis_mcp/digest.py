@@ -136,33 +136,61 @@ def _key_text(key: Sequence[tuple[str, str]]) -> str:
     return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
 
 
-# How a flow party role's pooled rows are named in a sum's private-party line: all of them,
-# one private one, and several. Parties first, then whole totals, which a sum across a role of
-# whole totals alone pools.
-_PARTY_NOUNS: dict[str, tuple[str, str, str]] = {
-    "financingProvider": ("providers", "private donor", "private donors")
+# How a flow party role's pooled parties are named in a sum's private-party line, one and
+# several: its members, its private members, its whole totals and its private whole totals.
+# A pool of members beside whole totals names the totals `whole total` on every role.
+_MEMBER_NOUNS: dict[str, tuple[str, str]] = {"financingProvider": ("provider", "providers")}
+_OTHER_MEMBER_NOUNS = ("party", "parties")
+_PRIVATE_MEMBER_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("private donor", "private donors")
 }
-_OTHER_PARTY_NOUNS = ("parties", "private party", "private parties")
-_TOTAL_NOUNS: dict[str, tuple[str, str, str]] = {
-    "financingProvider": (
-        "whole totals of providers",
-        "total of private donors",
-        "totals of private donors",
-    )
+_OTHER_PRIVATE_MEMBER_NOUNS = ("private party", "private parties")
+_WHOLE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("whole total of providers", "whole totals of providers")
 }
-_OTHER_TOTAL_NOUNS = ("whole totals", "private total", "private totals")
+_WHOLE_TOTALS = ("whole total", "whole totals")
+_PRIVATE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("total of private donors", "totals of private donors")
+}
+_OTHER_PRIVATE_TOTAL_NOUNS = ("private total", "private totals")
 
 
-def _party_nouns(pooled: PooledParties) -> tuple[str, str, str]:
-    if pooled.whole_totals:
-        return _TOTAL_NOUNS.get(pooled.role, _OTHER_TOTAL_NOUNS)
-    return _PARTY_NOUNS.get(pooled.role, _OTHER_PARTY_NOUNS)
+def _counted(count: int, nouns: tuple[str, str], *, qualifier: str = "") -> str:
+    """`3 providers`, or `3 listed providers` with `qualifier` `listed `."""
+    return f"{count} {qualifier}{nouns[count != 1]}"
+
+
+def _pool_text(pooled: PooledParties, *, qualifier: str = "") -> str:
+    """`3 providers`, `2 whole totals of providers`, or `1 whole total and 1 provider`: the
+    parties a sum pooled, members and whole totals counted apart."""
+    members = pooled.count - pooled.total_count
+    member_nouns = _MEMBER_NOUNS.get(pooled.role, _OTHER_MEMBER_NOUNS)
+    if not pooled.total_count:
+        return _counted(members, member_nouns, qualifier=qualifier)
+    if not members:
+        nouns = _WHOLE_TOTAL_NOUNS.get(pooled.role, _WHOLE_TOTALS)
+        return _counted(pooled.count, nouns, qualifier=qualifier)
+    totals = _counted(pooled.total_count, _WHOLE_TOTALS, qualifier=qualifier)
+    return f"{totals} and {_counted(members, member_nouns)}"
 
 
 def _private_count_text(pooled: PooledParties, count: int) -> str:
-    """`24 private donors`."""
-    _, one, many = _party_nouns(pooled)
-    return f"{count} {one if count == 1 else many}"
+    """`24 private donors`, `1 total of private donors`, or both joined: the `count` private
+    parties a sum pooled, whole totals first."""
+    totals = pooled.private_total_count or 0
+    parts = []
+    if totals:
+        parts.append(
+            _counted(totals, _PRIVATE_TOTAL_NOUNS.get(pooled.role, _OTHER_PRIVATE_TOTAL_NOUNS))
+        )
+    if count - totals:
+        parts.append(
+            _counted(
+                count - totals,
+                _PRIVATE_MEMBER_NOUNS.get(pooled.role, _OTHER_PRIVATE_MEMBER_NOUNS),
+            )
+        )
+    return " and ".join(parts)
 
 
 def _private_clause(pooled: PooledParties, count: int) -> str:
@@ -179,10 +207,9 @@ def _private_clause(pooled: PooledParties, count: int) -> str:
 def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str]:
     """One line per pooled role that held private parties: `subject` is the sum the line
     describes, and the private parties are in it because they sum like any other. A role whose
-    frame carries no sector column gets no line."""
+    frame carries no class column gets no line."""
     return [
-        f"{subject} of {entry.count} {_party_nouns(entry)[0]} includes "
-        f"{_private_clause(entry, entry.private_count)}."
+        f"{subject} of {_pool_text(entry)} includes {_private_clause(entry, entry.private_count)}."
         for entry in pooled
         if entry.private_count
     ]
@@ -197,7 +224,7 @@ def _two_sided_pooled_lines(
     lines = _private_lines(result.numerator_pooled, subject="The numerator sum")
     listed = [entry for entry in result.denominator_pooled if entry.role in keyed_roles]
     for entry in listed:
-        text = f"Shares of the sum of the {entry.count} listed {_party_nouns(entry)[0]}"
+        text = f"Shares of the sum of the {_pool_text(entry, qualifier='listed ')}"
         if entry.private_count:
             text += f", which includes {_private_count_text(entry, entry.private_count)}"
         lines.append(f"{text}.")
