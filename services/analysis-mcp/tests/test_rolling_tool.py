@@ -763,6 +763,106 @@ async def test_a_strict_recipient_country_population_uses_the_countrys_latest_ye
     ]
 
 
+async def test_a_binding_excludes_untyped_recipients_before_a_strict_level_check(store) -> None:
+    frame = Frame.build(
+        role_keys=["financingRecipient", "financingRecipient_type"],
+        rows=[
+            {
+                "stat_var": _STAT_VAR,
+                "financingRecipient": recipient,
+                "financingRecipient_type": kind,
+                "time_period": str(year),
+                "value": 1.0,
+                "unit": "dcid:USD",
+            }
+            for recipient, kind, latest in (
+                ("country/KEN", "Country", 2023),
+                ("country/GHA", "untyped", 2024),
+            )
+            for year in range(2022, latest + 1)
+        ],
+    )
+    root = await _register(store, _ref("1"), frame)
+    population = {
+        "spec_id": _AID,
+        "bindings": {"financingRecipient": ["country/KEN"]},
+        "levels": {"financingRecipient_type": "Country"},
+        "strict_levels": ["financingRecipient_type"],
+    }
+
+    bound = _pair(
+        await filter_verb(
+            frame_ref=root,
+            predicates=(
+                {
+                    "kind": "category_match",
+                    "column": "financingRecipient",
+                    "values": ["country/KEN"],
+                },
+            ),
+        )
+    )
+    countries = _pair(
+        await filter_verb(
+            frame_ref=bound,
+            predicates=(
+                {
+                    "kind": "place_level",
+                    "column": "financingRecipient_type",
+                    "level": "Country",
+                    "strict": True,
+                },
+            ),
+        )
+    )
+    sequential_frame, _trace = await store.get(FrameRef(**countries))
+    sequential_spec_id = "spec_" + "b" * 32
+    sequential_root = await _register(store, _ref("2", sequential_spec_id), sequential_frame)
+
+    resolved = await resolve_anchor(populations=[population], roots=[root])
+    sequential = await resolve_anchor(
+        populations=[{"spec_id": sequential_spec_id}], roots=[sequential_root]
+    )
+
+    assert resolved.is_error is False, resolved.content
+    assert sequential.is_error is False, sequential.content
+    assert resolved.structured_content["period"] == sequential.structured_content["period"]
+    assert resolved.structured_content["left_out"] == sequential.structured_content["left_out"]
+
+
+async def test_a_binding_that_keeps_an_untyped_recipient_refuses_a_strict_level_check(
+    store,
+) -> None:
+    frame = Frame.build(
+        role_keys=["financingRecipient", "financingRecipient_type"],
+        rows=[
+            {
+                "stat_var": _STAT_VAR,
+                "financingRecipient": "country/GHA",
+                "financingRecipient_type": "untyped",
+                "time_period": "2024",
+                "value": 1.0,
+                "unit": "dcid:USD",
+            }
+        ],
+    )
+    root = await _register(store, _ref("1"), frame)
+
+    result = await resolve_anchor(
+        populations=[
+            {
+                "spec_id": _AID,
+                "bindings": {"financingRecipient": ["country/GHA"]},
+                "levels": {"financingRecipient_type": "Country"},
+                "strict_levels": ["financingRecipient_type"],
+            }
+        ],
+        roots=[root],
+    )
+
+    assert _refused(result) == ("rolling_anchor_unresolved", "binding_unusable")
+
+
 async def test_a_level_on_a_root_without_the_type_column_refuses(store) -> None:
     root = await _register(store, _ref("1"), _frame({"dcid:AUS": [2022]}))
 

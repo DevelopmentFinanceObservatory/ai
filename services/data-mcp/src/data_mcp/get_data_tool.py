@@ -112,6 +112,7 @@ from data_mcp.tool_errors import (
     ToolRefusal,
     facet_issues_from,
     from_upstream_error,
+    refusal_code,
     to_tool_result,
 )
 from data_mcp.version_description import fetch_version_description
@@ -842,6 +843,7 @@ async def _mint_payload_or_refusal(
     settings: Settings,
     deadline: CallDeadline,
     on_poll: OnPoll | None = None,
+    raise_upstream_error: bool = False,
 ) -> tuple[dict[str, Any], OperationPollNote | None] | ToolResult:
     """The mint route's manifest payload, resolving a 202 operation to completion first.
 
@@ -878,6 +880,7 @@ async def _mint_payload_or_refusal(
         deadline=deadline,
         poll_interval_s=settings.operation_poll_interval_s,
         on_poll=on_poll,
+        raise_upstream_error=raise_upstream_error,
     )
     if isinstance(resolved, ToolResult):
         return resolved
@@ -1283,55 +1286,65 @@ async def _attempt_mint(
             )
         )
 
-    try:
-        posted = await _post_mint_with_column_negotiation(
-            client,
-            request_body,
+    removable = set(place_type_columns_for(identity)) if place_types else set()
+    for attempt in range(2):
+        try:
+            posted = await _post_mint(
+                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+            )
+            if isinstance(posted, ToolRefusal):
+                return to_tool_result(posted)
+            resolved = await _mint_payload_or_refusal(
+                posted,
+                client=client,
+                settings=settings,
+                deadline=deadline,
+                on_poll=on_poll,
+                raise_upstream_error=True,
+            )
+        except UpstreamError as exc:
+            if attempt == 0 and _negotiate_unserved_columns(
+                options=options, refused=exc, removable=removable, spec_id=spec_id
+            ):
+                request_body["options"] = options
+                continue
+            if not sends_definition and exc.code == "spec_not_found":
+                # The sidecar-free registry-fallback request above just missed
+                # apis' own registry too: `mint_spec_id` raises exactly this
+                # code in that case, and the platform contract's
+                # `definition_not_held` -- "held by neither store nor registry"
+                # -- is what this completes.
+                return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+            return minted(to_tool_result(_rebase_entities_role_pointer(from_upstream_error(exc))))
+        if isinstance(resolved, ToolResult):
+            return minted(resolved)
+        payload, operation_poll = resolved
+        return await _finish_mint_response(
+            payload,
+            requested_spec_id=spec_id,
             options=options,
-            removable=set(FLOW_ENRICHMENT_COLUMNS) if place_types else set(),
-            spec_id=spec_id,
+            scope=wire_scope,
+            entity_labels=entity_labels,
+            dropped_roles=dropped_roles,
             settings=settings,
             deadline=deadline,
+            asked_for_kinds=place_types or without_party_totals,
+            operation_poll=operation_poll,
+            breakdown=(
+                None
+                if breakdown is None
+                else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
+            ),
         )
-    except UpstreamError as exc:
-        if not sends_definition and exc.code == "spec_not_found":
-            # The sidecar-free registry-fallback request above just missed
-            # apis' own registry too: `mint_spec_id` raises exactly this
-            # code in that case, and the platform contract's
-            # `definition_not_held` -- "held by neither store nor registry"
-            # -- is what this completes.
-            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return minted(to_tool_result(_rebase_entities_role_pointer(from_upstream_error(exc))))
-    if isinstance(posted, ToolRefusal):
-        return to_tool_result(posted)
-
-    resolved = await _mint_payload_or_refusal(
-        posted, client=client, settings=settings, deadline=deadline, on_poll=on_poll
-    )
-    if isinstance(resolved, ToolResult):
-        return minted(resolved)
-    payload, operation_poll = resolved
-    return await _finish_mint_response(
-        payload,
-        requested_spec_id=spec_id,
-        options=options,
-        scope=wire_scope,
-        entity_labels=entity_labels,
-        dropped_roles=dropped_roles,
-        settings=settings,
-        deadline=deadline,
-        asked_for_kinds=place_types or without_party_totals,
-        operation_poll=operation_poll,
-        breakdown=(
-            None
-            if breakdown is None
-            else BreakdownLevel(code_system=breakdown.code_system, level=breakdown.level)
-        ),
-    )
+    raise AssertionError("two mint attempts must return or raise")
 
 
 def _without_unserved_place_type(
-    options: dict[str, Any], refused: UpstreamError, *, spec_id: str
+    options: dict[str, Any],
+    refused: UpstreamError,
+    *,
+    removable: set[str],
+    spec_id: str,
 ) -> bool:
     """Drop `options.columns` when it asks for the place type column alone and a
     `column_unknown` refusal lists that column as unserved, and say whether it did. A
@@ -1340,17 +1353,18 @@ def _without_unserved_place_type(
     """
     alternatives = refused.extensions.get("alternatives")
     if (
-        refused.code != "column_unknown"
+        refusal_code(refused) != "column_unknown"
+        or refused.extensions.get("pointer") != "/options/columns"
         or options.get("columns") != [_PLACE_TYPE_COLUMN]
+        or _PLACE_TYPE_COLUMN not in removable
         or refused.extensions.get("truncated")
         or not isinstance(alternatives, list)
+        or not all(
+            isinstance(item, dict) and isinstance(item.get("ref"), str) for item in alternatives
+        )
     ):
         return False
-    served = {
-        alternative["ref"]
-        for alternative in alternatives
-        if isinstance(alternative, dict) and isinstance(alternative.get("ref"), str)
-    }
+    served = {alternative["ref"] for alternative in alternatives}
     if _PLACE_TYPE_COLUMN in served:
         return False
     logger.info(
@@ -1368,7 +1382,7 @@ def _without_unserved_flow_types(
     """Remove policy-added types for absent flow roles after a complete column listing."""
     alternatives = refused.extensions.get("alternatives")
     if (
-        refused.code != "column_unknown"
+        refusal_code(refused) != "column_unknown"
         or refused.extensions.get("pointer") != "/options/columns"
         or refused.extensions.get("truncated")
         or not isinstance(alternatives, list)
@@ -1406,31 +1420,17 @@ def _without_unserved_flow_types(
     return True
 
 
-async def _post_mint_with_column_negotiation(
-    client: UpstreamClient,
-    request_body: dict[str, Any],
+def _negotiate_unserved_columns(
     *,
     options: dict[str, Any],
     removable: set[str],
     spec_id: str,
-    settings: Settings,
-    deadline: CallDeadline,
-) -> httpx2.Response | ToolRefusal:
-    """Post once, then retry once only when a complete column listing narrows policy metadata."""
-    try:
-        return await _post_mint(
-            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
-        )
-    except UpstreamError as exc:
-        changed = _without_unserved_place_type(
-            options, exc, spec_id=spec_id
-        ) or _without_unserved_flow_types(options, exc, removable=removable)
-        if not changed:
-            raise
-        request_body["options"] = options
-        return await _post_mint(
-            client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
-        )
+    refused: UpstreamError,
+) -> bool:
+    """Narrow policy-added metadata after one complete column refusal."""
+    return _without_unserved_place_type(
+        options, refused, removable=removable, spec_id=spec_id
+    ) or _without_unserved_flow_types(options, refused, removable=removable)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1489,13 +1489,12 @@ async def mint_recorded_root(
     """
     settings = settings or Settings()
     client = get_client()
-    posted = await _post_recorded_mint(client, record, settings=settings, deadline=deadline)
-    if isinstance(posted, ToolResult):
-        return posted
-    response, options = posted
-    payload = await _manifest_payload_without_waiting(
-        response, client=client, settings=settings, deadline=deadline
+    minted_response = await _mint_recorded_response(
+        client, record, settings=settings, deadline=deadline
     )
+    if isinstance(minted_response, ToolResult):
+        return minted_response
+    payload, options = minted_response
     if isinstance(payload, QueuedOperation | ToolResult):
         return payload
     try:
@@ -1540,18 +1539,22 @@ async def mint_recorded_root(
     )
 
 
-async def _post_recorded_mint(
+async def _mint_recorded_response(
     client: UpstreamClient,
     record: MintRecord,
     *,
     settings: Settings,
     deadline: CallDeadline,
-) -> tuple[httpx2.Response, Mapping[str, Any]] | ToolResult:
-    """POST the mint `record` names, as `_attempt_mint` posts `get_data`'s, with the
-    stored definition beside the `spec_id` when the definition store holds one, and
-    return the response with the options it sent: the recorded ones mapped for that
-    definition's identity (`replayed_mint_options`). A recorded
-    `options.without_party_totals` is sent as recorded."""
+) -> tuple[dict[str, Any] | QueuedOperation, Mapping[str, Any]] | ToolResult:
+    """Mint `record` and resolve one already-terminal queued response without waiting.
+
+    As `_attempt_mint` does, a single column correction can span the POST and an
+    immediately terminal operation poll.
+
+    The mint carries the stored definition beside the `spec_id` when the definition
+    store holds one. Its options are the recorded ones mapped for that definition's
+    identity (`replayed_mint_options`). A recorded `options.without_party_totals` is
+    sent as recorded."""
     spec_id = record.dataset.spec_id
     identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
     if isinstance(identity, ToolResult):
@@ -1576,21 +1579,33 @@ async def _post_recorded_mint(
         "input": mint_input,
         "options": options,
     }
-    try:
-        posted = await _post_mint_with_column_negotiation(
-            client,
-            request_body,
-            options=options,
-            removable=removable,
-            spec_id=spec_id,
-            settings=settings,
-            deadline=deadline,
-        )
-    except UpstreamError as exc:
-        if identity is None and exc.code == "spec_not_found":
-            return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
-        return to_tool_result(from_upstream_error(exc))
-    return to_tool_result(posted) if isinstance(posted, ToolRefusal) else (posted, options)
+    for attempt in range(2):
+        try:
+            posted = await _post_mint(
+                client, request_body, spec_id=spec_id, settings=settings, deadline=deadline
+            )
+            if isinstance(posted, ToolRefusal):
+                return to_tool_result(posted)
+            payload = await _manifest_payload_without_waiting(
+                posted,
+                client=client,
+                settings=settings,
+                deadline=deadline,
+                raise_upstream_error=True,
+            )
+        except UpstreamError as exc:
+            if attempt == 0 and _negotiate_unserved_columns(
+                options=options, refused=exc, removable=removable, spec_id=spec_id
+            ):
+                request_body["options"] = options
+                continue
+            if identity is None and exc.code == "spec_not_found":
+                return to_tool_result(ToolRefusal.definition_not_held(definition_id=spec_id))
+            return to_tool_result(from_upstream_error(exc))
+        if isinstance(payload, ToolResult):
+            return payload
+        return payload, options
+    raise AssertionError("two recorded mint attempts must return or raise")
 
 
 async def _manifest_payload_without_waiting(
@@ -1599,6 +1614,7 @@ async def _manifest_payload_without_waiting(
     client: UpstreamClient,
     settings: Settings,
     deadline: CallDeadline,
+    raise_upstream_error: bool = False,
 ) -> dict[str, Any] | QueuedOperation | ToolResult:
     """The mint route's manifest payload, or the operation a 202 queued and has not
     finished. `_mint_payload_or_refusal` for a caller that does not wait."""
@@ -1610,6 +1626,7 @@ async def _manifest_payload_without_waiting(
         submit_payload=payload,
         deadline=deadline,
         poll_interval_s=settings.operation_poll_interval_s,
+        raise_upstream_error=raise_upstream_error,
     )
     return resolved.manifest_payload if isinstance(resolved, ResolvedOperation) else resolved
 
