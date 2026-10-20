@@ -385,7 +385,7 @@ def test_leading_line_is_the_mixed_opener_token(
     sentence_plan: list[dict[str, Any]] | None,
     leading_line: str | None,
 ) -> None:
-    """A mixed envelope with a definite part leads with Search's opener; with no opener,
+    """A mixed envelope with a definite part leads with Search's opener. With no opener,
     or with no definite part, the digest opens with the first part's block."""
     envelope = _envelope(
         status,

@@ -129,8 +129,8 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
 
 def _mixed_opener(envelope: Mapping[str, Any]) -> str | None:
     """The unowned heading token the Search API opens a mixed resolution with. Search
-    opens one only when a part is definite; without one, the first unowned heading token
-    is some other sentence's (a refusal frame two parts share)."""
+    opens one only when a part is definite. Without a definite part, the first unowned
+    heading token belongs to some other sentence (a refusal frame two parts share)."""
     if envelope.get("status") != "mixed" or not any(
         part.get("status") == "definite" for part in envelope.get("parts") or []
     ):
