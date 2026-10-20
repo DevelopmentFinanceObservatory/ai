@@ -326,10 +326,7 @@ class AskedOutput(BaseModel):
         description=(
             "each party the output totals across into one figure: "
             '["donor"] for "total aid from all donors". Such a party stays out of open_roles, '
-            "and the search call names the population as an entity: search binds the source's "
-            "published total, or, where the source publishes none, departs "
-            "whole_total_unpublished and returns the members, whose sum is the total, or, "
-            "where the source holds no series of that total, finds no data"
+            "and the search call names the population as an entity"
         ),
     )
 
@@ -1331,13 +1328,13 @@ def build_orchestrator_tools(
         names the population the user asked for: "aid to Ethiopia from all
         donors" names "all donors" as a `from` entity, which covers official
         and private donors, and a donor side left unnamed on DAC2a covers
-        official donors only. For a named population search binds the
-        source's published total, or, where the source publishes none, returns
-        the members with a `whole_total_unpublished` departure, and their sum
-        is the total, or, where the source holds no series of that total
-        ("official donors" on the CRS), finds no data. A published total stands in only where no operation runs
-        over its side: any operation over `origin` or `destination`,
-        `aggregate` included, opens that side and keeps its members. Search
+        official donors only. For a named population, search binds the
+        source's published total. Where the source publishes none, search
+        departs `whole_total_unpublished` and returns the members, whose sum
+        is the total. Where the source holds no series of that total, such as
+        "official donors" on the CRS, search finds no data. A published total
+        stands in only where no operation runs over its side: any operation
+        over `origin` or `destination`, `aggregate` included, opens that side and keeps its members. Search
         lists "official donors" member by member only where the dataset holds
         no private donors, and otherwise refuses `entity_role_not_admitted`:
         open the donor side and keep the parties whose

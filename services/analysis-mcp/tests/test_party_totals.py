@@ -416,7 +416,11 @@ async def test_the_aggregate_tool_reports_the_totals_it_left_out(store) -> None:
 _MEMBER_KINDS = {"member_kinds": ["party"]}
 
 
-_RECIPIENT_PHRASES = ("category_match on 'financingRecipient'", '("all recipients")')
+_RECIPIENT_PHRASES = (
+    "category_match on 'financingRecipient'",
+    '("all recipients")',
+    "to sum the members, keep party and residual",
+)
 
 
 @pytest.mark.parametrize(
@@ -444,7 +448,11 @@ _RECIPIENT_PHRASES = ("category_match on 'financingRecipient'", '("all recipient
             ),
             PROVIDER_KINDS,
             {"types": ["party", "untyped"], **_MEMBER_KINDS},
-            ("category_match on 'financingProvider'", '("all donors")'),
+            (
+                "category_match on 'financingProvider'",
+                '("all donors")',
+                "to sum the members, keep party and residual",
+            ),
         ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
         (lambda: _frame(kinds=False), _KINDS, {"types": []}, ("place_types=true",)),

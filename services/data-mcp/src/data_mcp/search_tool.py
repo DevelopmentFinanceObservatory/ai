@@ -219,10 +219,11 @@ class SearchPart(BaseModel):
                 "side of a flow, never a side one of the entities names. A total across a side "
                 "sends none, runs no operation over it, and names the population the user asked "
                 "for as an entity: 'all donors' covers official and private donors, and a donor "
-                "side left unnamed on DAC2a covers official donors only. For a named population "
-                "search binds the source's published total, or, where the source publishes "
-                "none, returns the members and departs whole_total_unpublished, so their sum is "
-                "the total, or, where the source holds no series of that total, finds no data"
+                "side left unnamed on DAC2a covers official donors only. For a named population, "
+                "search binds the source's published total. Where the source publishes none, "
+                "search departs `whole_total_unpublished` and returns the members, whose sum is "
+                "the total. Where the source holds no series of that total, such as 'official "
+                "donors' on the CRS, search finds no data"
             ),
         )
     )
@@ -526,13 +527,13 @@ async def search(
     "recipient"}, {"text": "all donors", "role": "donor"}]}`, which covers
     official and private donors. A donor side left unnamed on DAC2a covers
     official donors only, and "official donors" stays official. For a named
-    population search binds the source's published total, or, where the
-    source publishes none, returns the members and departs
-    `whole_total_unpublished`, naming what their sum covers, and that sum is
-    the total, or, where the source holds no series of that total ("official
-    donors" on the CRS), finds no data. A published total stands in only where no operation runs over
-    its side: any operation whose `over` is `origin` or `destination`,
-    `aggregate` included, opens that flow side and keeps its members, so a
+    population, search binds the source's published total. Where the source
+    publishes none, search departs `whole_total_unpublished` and returns the
+    members, whose sum is the total. Where the source holds no series of that
+    total, such as "official donors" on the CRS, search finds no data. A
+    published total stands in only where no operation runs over its side:
+    any operation whose `over` is `origin` or `destination`, `aggregate`
+    included, opens that flow side and keeps its members, so a
     total leaves `over` off that side. Keep `open_roles` when the user
     explicitly asks to break down that side. Search lists "official donors"
     member by member only where the dataset holds no private donors, and

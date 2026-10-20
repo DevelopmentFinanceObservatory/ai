@@ -376,10 +376,7 @@ async def share_of(
                 "totals, residuals included. A filter to member_kinds is for comparing or "
                 "ranking members; before a sum it leaves out the residuals. For a total "
                 'across a whole side, search naming the population ("all donors") with no '
-                "operation over that side: search binds the source's published total, or, "
-                "where the source publishes none, departs whole_total_unpublished and returns "
-                "the members, whose sum is the total, or, where the source holds no series of "
-                "that total, finds no data. Role columns only -- stat_var and "
+                "operation over that side. Role columns only -- stat_var and "
                 "time_period are not accepted selectors."
             ),
         ),

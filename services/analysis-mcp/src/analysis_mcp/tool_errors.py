@@ -198,6 +198,7 @@ from typing import Any, Literal, Self
 from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
+    WHOLE_SIDE_POPULATIONS,
     PartyKind,
     enrichment_role,
     sector_column,
@@ -342,9 +343,6 @@ _KEY_SAMPLE_IN_MESSAGE = 5
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
 # are of kind `party` too, told apart by their sector.
 _MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
-
-# The population a search names for the total across each flow party role's whole side.
-_WHOLE_SIDE = {"financingProvider": "all donors", "financingRecipient": "all recipients"}
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1301,10 +1299,11 @@ class ToolRefusal:
         the engine that found them, and empty when the frame carries no such
         column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
         message naming the role and the group-total exclusion, since a
-        `place_level` filter is not what its refusal asks for. It names two
-        repairs: a search naming the population for a total across the whole
-        side, and for a comparison of members a filter keeping the kinds a
-        kind column's `fix.member_kinds` lists."""
+        `place_level` filter is not what its refusal asks for. It names a
+        search naming the population for a total across the whole side, a
+        filter keeping party and residual for a sum of members, and for a
+        comparison of members a filter keeping the kinds a kind column's
+        `fix.member_kinds` lists."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and not types:
             return cls(
@@ -1327,16 +1326,13 @@ class ToolRefusal:
                     "are left out of sums and ranks beside their members, and totals alone are "
                     f"summed when {whole_column(role)!r} is true on every row. So a party here has "
                     "no declared kind, or every party is a total and not all are whole. For a "
-                    f'total across the whole side, search naming the population ("{_WHOLE_SIDE[role]}") '
-                    "with no operation over that side: search binds the source's published "
-                    "total, or, where the source publishes none, departs whole_total_unpublished "
-                    "and returns the members, or, where the source holds no series of that "
-                    "total, finds no data. A sum of members adds every "
-                    "row except totals, residuals included. To compare or rank members, filter "
-                    f"the frame with a category_match on {role!r} naming the parties to keep, or "
-                    f"a category_match on {column!r} keeping {', '.join(_MEMBER_KINDS)}, then "
-                    f"retry with that result's frame_ref; {sector_column(role)!r} tells private "
-                    "parties from official ones."
+                    "total across the whole side, search naming the population "
+                    f'("{WHOLE_SIDE_POPULATIONS[role]}") with no operation over that side. '
+                    f"Otherwise filter the frame with a category_match on {role!r} naming the "
+                    f"parties to keep, or a category_match on {column!r}: to sum the members, "
+                    f"keep party and residual; to compare or rank them, keep "
+                    f"{', '.join(_MEMBER_KINDS)} alone. Then retry with that result's frame_ref; "
+                    f"{sector_column(role)!r} tells private parties from official ones."
                 ),
                 fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )

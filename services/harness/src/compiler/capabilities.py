@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="e08f1562f80f6c81a93ae1961825555485839dee975571bdfb36d72e423615be",
+        input_schema_hash="600b9684dbf35e24868084ff8dfa77c3b0fbfc4726df57d9ca573a594ec1fa7d",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.
@@ -182,7 +182,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
         # `scope.entities` taking a dcid only behind the `dcid:` marker.
-        input_schema_hash="7e326e1885680ab0d0ee0e23c8bb154eb4ece96446f4c63b011765af2d5d8129",
+        input_schema_hash="f41295e614da8bebda129204c56210ae80f8d8a850aeb8a69c9b9dca895c3c80",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -242,7 +242,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
-        input_schema_hash="dc6679bbefda7db202c360eec59c396dfdfbee2ed85d7aac8debd53a249ff369",
+        input_schema_hash="8d22de7fcab0c3c9aba0d4e42e66693d01820081583cab5e4026e809d653502c",
         output_schema_hash="e60ea45f31ec8203f49f2af3cde2844277baac2480b2064bb444abdb296c2792",
     ),
     ToolCapability(
