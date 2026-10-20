@@ -2611,7 +2611,7 @@ BOTH_TOTALS_IDENTITY: dict[str, Any] = {
 }
 OFFICIAL_ONLY_SPEC = spec_id_for(canonicalize(OFFICIAL_ONLY_IDENTITY))
 BOTH_TOTALS_SPEC = spec_id_for(canonicalize(BOTH_TOTALS_IDENTITY))
-_WHOLE_TOTAL_SECTORS = {"DACOfficialDonors": "official", "DACPrivateDonors": "private"}
+_WHOLE_TOTAL_CLASSES = {"DACOfficialDonors": "official", "DACPrivateDonors": "private"}
 _WHOLE_TOTAL_IDENTITIES = {
     OFFICIAL_ONLY_SPEC: (OFFICIAL_ONLY_IDENTITY, ["DACOfficialDonors"]),
     BOTH_TOTALS_SPEC: (BOTH_TOTALS_IDENTITY, ["DACOfficialDonors", "DACPrivateDonors"]),
@@ -2620,7 +2620,7 @@ _WHOLE_TOTAL_IDENTITIES = {
 
 def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
     """Each of `donors`' 2021 aid to Ethiopia as apis renders it, with the party kind,
-    sector and whole cells when `kinds`: each donor a total marked whole, of its own sector."""
+    class and whole cells when `kinds`: each donor a total marked whole, of its own class."""
     count = len(donors)
     columns: dict[str, Any] = {
         "stat_var": pa.array(["dcid:Oda"] * count, type=pa.string()),
@@ -2632,12 +2632,12 @@ def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
     }
     if kinds:
         columns["financingProvider_party_kind"] = pa.array(["total"] * count)
-        columns["financingProvider_party_sector"] = pa.array(
-            [_WHOLE_TOTAL_SECTORS[donor] for donor in donors]
+        columns["financingProvider_party_class"] = pa.array(
+            [_WHOLE_TOTAL_CLASSES[donor] for donor in donors]
         )
         columns["financingProvider_party_whole"] = pa.array(["true"] * count)
         columns["financingRecipient_party_kind"] = pa.array(["party"] * count)
-        columns["financingRecipient_party_sector"] = pa.array(["official"] * count)
+        columns["financingRecipient_party_class"] = pa.array(["official"] * count)
         columns["financingRecipient_party_whole"] = pa.array(["false"] * count)
     buf = io.BytesIO()
     pq.write_table(pa.table(columns), buf)

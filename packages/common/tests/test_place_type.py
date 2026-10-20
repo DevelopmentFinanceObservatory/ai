@@ -96,7 +96,7 @@ def test_places_of_a_type_whose_places_nest_do_not_sit_at_one_level() -> None:
     [
         ("observationAbout_type", "observationAbout"),
         ("financingRecipient_party_kind", "financingRecipient"),
-        ("financingProvider_party_sector", "financingProvider"),
+        ("financingProvider_party_class", "financingProvider"),
         ("financingProvider_party_whole", "financingProvider"),
         ("financingProvider_type", "financingProvider"),
         ("financingRecipient", None),

@@ -247,11 +247,11 @@ class AggregateResult:
     pool: the distinct value combinations, across all groups, of the entity
     roles outside `group_by`, or of the grouped ones when every one is
     grouped, since each total then pools only its own entity. A place's
-    type or a party's kind, sector or whole cell describes an entity and
+    type or a party's kind, class or whole cell describes an entity and
     counts as none.
 
     `pooled_parties` holds, under `sum`, for each flow party role the call pooled,
-    how many parties it summed and how many of them are in the private sector,
+    how many parties it summed and how many of them are of the private class,
     with their value. It is empty under any other aggregation.
     """
 

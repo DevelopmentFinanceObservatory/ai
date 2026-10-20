@@ -921,10 +921,10 @@ async def test_a_door_refusal_of_the_steps_fails_the_publish(
     [
         ("observationAbout", "observationAbout_type", ("Continent",)),
         ("financingRecipient", "financingRecipient_party_kind", ("total",)),
-        ("financingProvider", "financingProvider_party_sector", ("official", "private")),
+        ("financingProvider", "financingProvider_party_class", ("official", "private")),
         ("financingProvider", "financingProvider_party_whole", ("true", "false")),
     ],
-    ids=["place-type", "party-kind", "party-sector", "party-whole"],
+    ids=["place-type", "party-kind", "party-class", "party-whole"],
 )
 async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_published_frame(
     materialisation_store: InMemoryMaterialisationStore,
@@ -934,7 +934,7 @@ async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_publi
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
     sum keyed by a flow party carries `financingRecipient_party_kind` and the
-    party's sector and whole columns. apis joins every role's value into a
+    party's class and whole columns. apis joins every role's value into a
     series label, so the published frame holds the place column alone, and the
     door's own `Frame.build` accepts it with every row kept.
     """

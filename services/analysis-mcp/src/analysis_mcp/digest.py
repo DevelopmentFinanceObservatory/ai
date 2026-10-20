@@ -179,7 +179,7 @@ def _private_clause(pooled: PooledParties, count: int) -> str:
 def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str]:
     """One line per pooled role that held private parties: `subject` is the sum the line
     describes, and the private parties are in it because they sum like any other. A role whose
-    frame carries no sector column gets no line."""
+    frame carries no class column gets no line."""
     return [
         f"{subject} of {entry.count} {_party_nouns(entry)[0]} includes "
         f"{_private_clause(entry, entry.private_count)}."

@@ -1308,20 +1308,20 @@ def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_one() -> No
 
 
 @pytest.mark.parametrize(
-    ("donors", "aggregation", "sectors"),
+    ("donors", "aggregation", "classes"),
     [
         (_NO_PRIVATE, "sum", True),
         (_DONORS, "mean", True),
         (_DONORS, "sum", False),
         (_WHOLE_TOTALS, "sum", False),
     ],
-    ids=["no-private-donor", "not-a-sum", "no-sector-column", "whole-totals-no-sector-column"],
+    ids=["no-private-donor", "not-a-sum", "no-class-column", "whole-totals-no-class-column"],
 )
 def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tell(
-    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, sectors: bool
+    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, classes: bool
 ) -> None:
     result = run_aggregate(
-        provider_frame(donors, sectors=sectors), group_by=("time_period",), aggregation=aggregation
+        provider_frame(donors, classes=classes), group_by=("time_period",), aggregation=aggregation
     )
 
     digest = render_aggregate_digest(

@@ -209,7 +209,7 @@ class ArtifactEntry(BaseModel):
     an already-stripped document that predates the field.
 
     `enrichment_stamp` is the digest of the code-index facts behind the file's
-    `{role}_party_kind`, `{role}_party_sector` and `{role}_party_whole` cells (apis'
+    `{role}_party_kind`, `{role}_party_class` and `{role}_party_whole` cells (apis'
     `CodeIndex.enrichment_digest`). apis sends
     it exactly when the file holds party-kind cells read under the code index serving
     the call. A file with no party-kind cell carries none, and so does a listed file

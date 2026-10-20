@@ -65,17 +65,17 @@ import pyarrow as pa
 from common.place_type import (
     PARTY_KINDS,
     PARTY_ROLES,
-    PRIVATE_SECTOR,
+    PRIVATE_CLASS,
     TOTAL_KIND,
     TYPED_ROLES,
     UNTYPED,
     WHOLE_CELL,
     PartyKind,
     at_one_level,
+    class_column,
     enrichment_columns,
     enrichment_role,
     kind_column,
-    sector_column,
     type_column,
     whole_column,
 )
@@ -287,15 +287,15 @@ def _all_whole(table: pa.Table, role: str) -> bool:
 @dataclass(frozen=True, kw_only=True)
 class PooledParties:
     """The parties of one flow role a sum pooled: `count` distinct parties over
-    `periods` periods, of which `private_count` are in the `private` sector
-    (`common.place_type.PRIVATE_SECTOR`), holding `private_value` of the summed
+    `periods` periods, of which `private_count` are of the `private` class
+    (`common.place_type.PRIVATE_CLASS`), holding `private_value` of the summed
     rows' value. A private party sums like any other, so a total over the role
     includes this value and the digest says so.
 
     `whole_totals` is whether the pooled parties are whole totals, such as
     "Official Donors, Total" beside "Private Donors, Total", and none of them a
     member. `private_count` is None when the frame carries no
-    `{role}_party_sector` column, so nothing is known about private parties, and
+    `{role}_party_class` column, so nothing is known about private parties, and
     `private_value` is None then too, or when the value sums past the finite
     double range."""
 
@@ -308,17 +308,17 @@ class PooledParties:
 
 
 def _private_rows(table: pa.Table, role: str) -> pa.Table | None:
-    """The rows of `table` whose `role` party is in the `private` sector, or None
-    when `table` carries no sector column for `role`. A total takes the sector of
+    """The rows of `table` whose `role` party is of the `private` class, or None
+    when `table` carries no class column for `role`. A total takes the class of
     the parties it holds, so a private whole total's rows are among them."""
-    sectors = sector_column(role)
-    if sectors not in table.column_names:
+    classes = class_column(role)
+    if classes not in table.column_names:
         return None
     return table.filter(
         array_kernel(
             "equal",
-            table.column(sectors).combine_chunks(),
-            pa.scalar(PRIVATE_SECTOR, pa.string()),
+            table.column(classes).combine_chunks(),
+            pa.scalar(PRIVATE_CLASS, pa.string()),
         )
     )
 
@@ -363,9 +363,9 @@ def pooled_parties(table: pa.Table, roles: Iterable[str]) -> tuple[PooledParties
 
 
 def private_parties(table: pa.Table, roles: Iterable[str]) -> tuple[tuple[str, str], ...]:
-    """The `(role, party)` pairs of `table` whose party is in the `private` sector
+    """The `(role, party)` pairs of `table` whose party is of the `private` class
     in a role among `roles`, sorted, for a ranking to tag. None are tagged where
-    the frame carries no sector column."""
+    the frame carries no class column."""
     held: set[tuple[str, str]] = set()
     for role in dict.fromkeys(roles):
         if role not in PARTY_ROLES:
@@ -387,7 +387,7 @@ def role_columns(frame: Frame) -> tuple[str, ...]:
 def entity_roles(frame: Frame) -> tuple[str, ...]:
     """The role columns of `frame` that identify an entity: every role
     column less the `{role}_type` column and the `{role}_party_kind`,
-    `{role}_party_sector` and `{role}_party_whole` columns
+    `{role}_party_class` and `{role}_party_whole` columns
     (`common.place_type.enrichment_role`), which describe a place or party
     another column names. A verb counts entities over these alone."""
     return tuple(
@@ -405,7 +405,7 @@ def frame_keeping_role_types(
 ) -> Frame:
     """An output frame of `columns` declaring `role_keys`, plus the
     enrichment columns (`common.place_type.enrichment_columns`: a place's type,
-    a party's kind, sector and whole cell) of every role in `role_keys` that
+    a party's kind, class and whole cell) of every role in `role_keys` that
     `source`, the verb's `frame_ref` input, carries and `role_keys` leaves out.
 
     A place's type and a party's attributes belong to it, so a verb that keeps

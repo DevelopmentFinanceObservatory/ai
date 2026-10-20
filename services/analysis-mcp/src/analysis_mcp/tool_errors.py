@@ -199,8 +199,8 @@ from common.place_type import (
     PARTY_ROLES,
     PLACE_LEVELS,
     PartyKind,
+    class_column,
     enrichment_role,
-    sector_column,
     whole_column,
 )
 from common.refusal import internal_error_message, refusal_meta, refusal_text
@@ -340,7 +340,7 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 _KEY_SAMPLE_IN_MESSAGE = 5
 
 # The party kinds a filter keeps to compare or rank a flow side's members: private parties
-# are of kind `party` too, told apart by their sector.
+# are of kind `party` too, told apart by their class.
 _MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
 
 
@@ -1329,7 +1329,7 @@ class ToolRefusal:
                     f"parties to keep, or a category_match on {column!r} keeping party and "
                     "residual, then retry with that result's frame_ref. To compare or rank "
                     f"members, keep {', '.join(_MEMBER_KINDS)} alone; private parties are of "
-                    f"kind party, and {sector_column(role)!r} tells them apart."
+                    f"kind party, and {class_column(role)!r} tells them apart."
                 ),
                 fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )

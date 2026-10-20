@@ -197,7 +197,7 @@ def publish_body(
     (see `_wire_row_slices` for the row mappings). Rows are encoded one
     slice at a time, so the whole row list never exists as Python objects.
 
-    A place-type, party-kind, party-sector or party-whole column
+    A place-type, party-kind, party-class or party-whole column
     (`common.place_type.enrichment_role`) beside its place column is left out. apis labels each series and table
     row by joining every role's value, so the column would label a continent
     "Africa / Continent". It is a function of its place column, so the

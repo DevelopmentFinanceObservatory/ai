@@ -4,8 +4,8 @@ that total other parties, and record them as `party_total` exclusions.
 The frames carry `financingRecipient_party_kind` as `get_data(place_types=true)` registers it for a
 flow table: the kind apis serves for each party, `party`, `residual` or `total`, and `untyped`
 where it serves none. A donor-side frame (`party_frames.provider_frame`) carries
-`financingProvider_party_kind` likewise, beside the sector (`official` or `private`) and whole
-(`true` or `false`) cells, and the tests that sum whole totals or count private donors read it.
+`financingProvider_party_kind` likewise, beside the class (`official`, `private` or `residual`) and
+whole (`true` or `false`) cells, and the tests that sum whole totals or count private donors read it.
 """
 
 from __future__ import annotations
@@ -35,8 +35,8 @@ from party_frames import (
     PRIVATE,
     PRIVATE_WHOLE,
     PROVIDER,
+    PROVIDER_CLASSES,
     PROVIDER_KINDS,
-    PROVIDER_SECTORS,
     PROVIDER_WHOLE,
     RESIDUAL,
     provider_frame,
@@ -540,12 +540,12 @@ def test_a_pool_of_whole_totals_alone_is_summed_with_the_private_total_counted()
 
 
 @pytest.mark.parametrize("donors", [_DONORS, _WHOLE_TOTALS], ids=["members", "whole-totals"])
-def test_a_frame_with_no_sector_column_reports_nothing_about_private_parties(
+def test_a_frame_with_no_class_column_reports_nothing_about_private_parties(
     donors: dict[str, tuple[tuple[str, str, str], float]],
 ) -> None:
-    # A frame minted before the sector column cannot tell a private party apart, so it
+    # A frame minted before the class column cannot tell a private party apart, so it
     # reports no private count at all rather than a count of zero.
-    frame = provider_frame(donors, sectors=False)
+    frame = provider_frame(donors, classes=False)
 
     summed = run_aggregate(frame, group_by=("time_period",), aggregation="sum")
     ranked = _rank(frame, rank_by=(PROVIDER,))
@@ -597,15 +597,15 @@ def test_a_sum_of_totals_not_all_whole_is_refused(frame) -> None:
 def test_a_total_whole_in_some_years_reads_not_whole_after_a_verb_keyed_by_it(
     frame_by_year: dict[str, Frame],
 ) -> None:
-    # Summed per donor first, each donor keeps one sector and whole cell. A total whole in
+    # Summed per donor first, each donor keeps one class and whole cell. A total whole in
     # some years only takes `false`, so the later sum across donors stays refused.
     by_donor = run_aggregate(_years(frame_by_year), group_by=(PROVIDER,), aggregation="sum").frame
     cells = {
-        donor: (sector, whole)
-        for donor, sector, whole in zip(
+        donor: (party_class, whole)
+        for donor, party_class, whole in zip(
             *(
                 by_donor.table.column(column).to_pylist()
-                for column in (PROVIDER, PROVIDER_SECTORS, PROVIDER_WHOLE)
+                for column in (PROVIDER, PROVIDER_CLASSES, PROVIDER_WHOLE)
             ),
             strict=True,
         )

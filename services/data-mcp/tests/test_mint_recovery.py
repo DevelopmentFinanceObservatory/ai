@@ -194,7 +194,7 @@ async def _holding(
         "both-flow-party-types",
         "the-one-flow-party-type-a-table-serves",
         "flow-party-kinds",
-        "flow-party-kind-without-sector-and-whole",
+        "flow-party-kind-without-class-and-whole",
         "flow-party-kinds-under-the-earlier-token",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",

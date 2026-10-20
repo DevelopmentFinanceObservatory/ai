@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from common.hashed_fields import HASHED_WHEN_SET
-from common.place_type import MemberClass
+from common.place_type import PartyClass
 from pydantic import Field, JsonValue, model_validator
 
 from planner.records import (
@@ -78,7 +78,7 @@ class ResolvedGroup(StrictModel):
     "G7"). `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. `whole_of` names
-    the classes of party (`common.place_type.MemberClass`) the bound total holds
+    the classes of party (`common.place_type.PartyClass`) the bound total holds
     in full, or all the totals of a union read as one population ("all donors
     including private"), whose `total` is `None`; empty for any other set.
     `side_classes` names the classes of party, totals aside, the source publishes
@@ -98,10 +98,10 @@ class ResolvedGroup(StrictModel):
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
-    whole_of: Annotated[tuple[MemberClass, ...], HASHED_WHEN_SET] = Field(
+    whole_of: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda classes: not classes
     )
-    side_classes: Annotated[tuple[MemberClass, ...], HASHED_WHEN_SET] = Field(
+    side_classes: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
         default=(), exclude_if=lambda classes: not classes
     )
 

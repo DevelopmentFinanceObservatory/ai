@@ -4259,7 +4259,7 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
     ids=[
         "flow-party-types",
         "flow-retired-kind",
-        "flow-kind-without-sector-and-whole",
+        "flow-kind-without-class-and-whole",
         "flow-no-columns",
         "place-no-columns",
     ],

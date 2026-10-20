@@ -37,7 +37,7 @@ import json
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast, get_args
 
-from common.place_type import MemberClass
+from common.place_type import PartyClass
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -626,8 +626,8 @@ MAX_SEED_GROUP_LABEL_CHARS = 120
 
 
 # The most classes a whole total's `whole_of` or its side's `side_classes` names: every
-# `common.place_type.MemberClass`.
-MAX_SEED_MEMBER_CLASSES = len(get_args(MemberClass))
+# `common.place_type.PartyClass`.
+MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 
 
 class SeedEntityGroup(BaseModel):
@@ -657,11 +657,11 @@ class SeedEntityGroup(BaseModel):
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
     )
-    whole_of: tuple[MemberClass, ...] = Field(
-        default=(), max_length=MAX_SEED_MEMBER_CLASSES, exclude_if=lambda classes: not classes
+    whole_of: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    side_classes: tuple[MemberClass, ...] = Field(
-        default=(), max_length=MAX_SEED_MEMBER_CLASSES, exclude_if=lambda classes: not classes
+    side_classes: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
 
 

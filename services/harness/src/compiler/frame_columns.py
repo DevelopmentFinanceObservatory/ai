@@ -338,7 +338,7 @@ def bound_role_keys(
     which the compiler predicted as `expected` in its own spelling; each is
     spelled the way `frame` spells it. A verb keeps each of those roles'
     enrichment columns (`common.place_type.enrichment_columns`: its type, and a
-    party's kind, sector and whole columns) that its input carries
+    party's kind, class and whole columns) that its input carries
     (`analysis_mcp.engine.common.frame_keeping_role_types`), so the keys
     take them too when `input_role_keys` holds them. With neither known,
     `expected` stands as compiled.

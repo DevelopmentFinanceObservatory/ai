@@ -2323,22 +2323,32 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     assert set(frame.table.column("financingProvider_party_kind").to_pylist()) == {"untyped"}
 
 
-def test_a_partys_sector_and_whole_cells_pass_through_and_an_empty_sector_reads_untyped() -> None:
-    """apis leaves the sector cell empty for a residual and for a total holding both
-    sectors. The decoder writes that cell as `untyped` and every served cell reaches
-    the frame as it was served."""
+def test_a_partys_class_and_whole_cells_pass_through_and_an_empty_class_reads_untyped() -> None:
+    """apis leaves the class cell empty for a total holding more than one class. The
+    decoder writes that cell as `untyped` and every served cell reaches the frame as it
+    was served."""
     table = pa.table(
         {
-            "stat_var": pa.array(["dcid:Oda"] * 4),
+            "stat_var": pa.array(["dcid:Oda"] * 5),
             "financingProvider": pa.array(
-                ["country/FRA", "GatesFoundation", "DACOfficialDonors", "DACUnspecified"]
+                [
+                    "country/FRA",
+                    "GatesFoundation",
+                    "DACOfficialDonors",
+                    "DACUnspecified",
+                    "DACAllDonors",
+                ]
             ),
-            "financingRecipient": pa.array(["country/ETH"] * 4),
-            "time_period": pa.array(["2021"] * 4),
-            "value": pa.array([1.0] * 4),
-            "financingProvider_party_kind": pa.array(["party", "party", "total", "residual"]),
-            "financingProvider_party_sector": pa.array(["official", "private", "official", ""]),
-            "financingProvider_party_whole": pa.array(["false", "false", "true", "false"]),
+            "financingRecipient": pa.array(["country/ETH"] * 5),
+            "time_period": pa.array(["2021"] * 5),
+            "value": pa.array([1.0] * 5),
+            "financingProvider_party_kind": pa.array(
+                ["party", "party", "total", "residual", "total"]
+            ),
+            "financingProvider_party_class": pa.array(
+                ["official", "private", "official", "residual", ""]
+            ),
+            "financingProvider_party_whole": pa.array(["false", "false", "true", "false", "false"]),
         }
     )
     buf = io.BytesIO()
@@ -2347,13 +2357,14 @@ def test_a_partys_sector_and_whole_cells_pass_through_and_an_empty_sector_reads_
     frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
 
     rows = frame.table.select(
-        ["financingProvider", "financingProvider_party_sector", "financingProvider_party_whole"]
+        ["financingProvider", "financingProvider_party_class", "financingProvider_party_whole"]
     ).to_pylist()
     assert {row["financingProvider"]: tuple(row.values())[1:] for row in rows} == {
         "country/FRA": ("official", "false"),
         "GatesFoundation": ("private", "false"),
         "DACOfficialDonors": ("official", "true"),
-        "DACUnspecified": ("untyped", "false"),
+        "DACUnspecified": ("residual", "false"),
+        "DACAllDonors": ("untyped", "false"),
     }
 
 
@@ -2450,7 +2461,7 @@ def test_extra_columns_name_a_frame_of_their_own() -> None:
             "cv_3b6c33d24aa1d42e0de5d54574aa1ca5",
         ),
         (("party_kind",), "cv_aa6883b65fa153b6b5fd56e03a5dca14"),
-        (KIND_COLUMNS, "cv_8709a6cc44ecef86361ea58f408d749e"),
+        (KIND_COLUMNS, "cv_f91d484f1789bbcde7595066c052e2fe"),
     ],
 )
 def test_a_columns_only_pair_keeps_the_recorded_derivation(
@@ -2495,12 +2506,12 @@ _KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
     [
         (("party_kind",), True),
         (KIND_COLUMNS, True),
-        (("party_sector",), True),
+        (("party_class",), True),
         (("party_whole",), True),
         (("observationAbout_type",), False),
         ((), False),
     ],
-    ids=["kind", "kind-sector-whole", "sector", "whole", "types", "default"],
+    ids=["kind", "kind-class-whole", "class", "whole", "types", "default"],
 )
 def test_the_enrichment_stamp_names_only_a_frame_that_asks_for_kinds(
     columns: tuple[str, ...], keyed_by_stamp: bool

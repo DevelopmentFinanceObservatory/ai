@@ -24,8 +24,8 @@ import pytest
 from common.materialisation import FrameTooLarge
 from common.place_type import (
     PARTY_ROLES,
+    class_column,
     kind_column,
-    sector_column,
     type_column,
     whole_column,
 )
@@ -1874,10 +1874,10 @@ class HeldFrames:
             rows = [{**row, column: self.cell(row[self.role])} for row in rows]
             roles.append(column)
             if self.role in PARTY_ROLES:
-                # apis serves a party's sector and whole cells beside its kind.
-                sector, whole = sector_column(self.role), whole_column(self.role)
-                rows = [{**row, sector: "official", whole: "false"} for row in rows]
-                roles += [sector, whole]
+                # apis serves a party's class and whole cells beside its kind.
+                classes, whole = class_column(self.role), whole_column(self.role)
+                rows = [{**row, classes: "official", whole: "false"} for row in rows]
+                roles += [classes, whole]
         frame = Frame.build(role_keys=roles, rows=rows)
 
         async def read(*, max_rows: int) -> tuple[Frame, Any]:

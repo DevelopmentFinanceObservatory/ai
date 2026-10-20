@@ -460,7 +460,7 @@ def _covering_selects(
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     """Each `dimension` member's kind or type cell among `rows`, the kind where
-    both are held; empty when the rows carry neither column. A party's sector
+    both are held; empty when the rows carry neither column. A party's class
     and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
