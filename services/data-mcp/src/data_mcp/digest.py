@@ -94,9 +94,9 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     block bare; an envelope of two or more parts labels each block by its
     `variable_text`. A definite block also names the measure Search elected
     and each sibling measure's own spec_id (`_measure_choice_line`).
-    A mixed envelope with a definite part leads with the text of the first
-    `sentence_plan` token when it is an unowned `heading` token
-    (`_mixed_opener`); any other envelope has no leading line. A part whose ask named
+    A mixed envelope leads with Search's "Answered 2 of 3 parts.", the text of
+    its `sentence_plan` tokens of segment `coverage` (`_answered_line`); an
+    envelope with none has no leading line. A part whose ask named
     sources ends its block with one line saying which it asked for and
     which it excluded (`_sources_line`). Each
     part's own warnings render inside its block, though a refused part
@@ -118,8 +118,8 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     multi = len(parts) > 1
     blocks = [_render_part(index, part, multi=multi) for index, part in enumerate(parts)]
     sections = list(blocks)
-    if opener := _mixed_opener(envelope):
-        sections.insert(0, opener)
+    if answered := _answered_line(envelope):
+        sections.insert(0, answered)
     skills = _skills_section(envelope)
     if skills is not None:
         sections.append(skills)
@@ -127,21 +127,12 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     return "\n\n".join([*sections, *trailer]) if trailer else "\n\n".join(sections)
 
 
-def _mixed_opener(envelope: Mapping[str, Any]) -> str | None:
-    """The unowned heading token the Search API opens a mixed resolution with. Search
-    opens one only when a part is definite. Without a definite part, the first unowned
-    heading token belongs to some other sentence (a refusal frame two parts share)."""
-    if envelope.get("status") != "mixed" or not any(
-        part.get("status") == "definite" for part in envelope.get("parts") or []
-    ):
-        return None
+def _answered_line(envelope: Mapping[str, Any]) -> str | None:
+    """The text of the envelope sentence's `coverage` tokens, the "Answered N of M parts."
+    the Search API opens a mixed resolution with, or None when it sends none."""
     plan = envelope.get("sentence_plan") or []
-    if not plan:
-        return None
-    first = plan[0]
-    if first.get("segment") != "heading" or first.get("part_index") is not None:
-        return None
-    return first.get("text") or None
+    text = "".join(token.get("text", "") for token in plan if token.get("segment") == "coverage")
+    return text.strip() or None
 
 
 def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:

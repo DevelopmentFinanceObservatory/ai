@@ -357,41 +357,34 @@ def test_single_part_envelope_renders_with_no_part_label() -> None:
     assert "Part 1" not in digest
 
 
-_OPENER = [
-    {"kind": "text", "segment": "heading", "text": "Answered 1 of 2 parts."},
-    {"kind": "text", "text": " "},
+_COVERAGE = [
+    {"kind": "text", "segment": "coverage", "text": "Answered 1 of 2 parts."},
+    {"kind": "text", "segment": "coverage", "text": " "},
+    {"kind": "text", "segment": "heading", "text": "Health spending", "part_index": 0},
 ]
 
-
-_SHARED_REFUSAL = [
+# An unowned heading token first, as a refusal frame two parts share puts it.
+_SHARED_HEADING = [
     {"kind": "text", "segment": "heading", "text": "No match for "},
     {"kind": "text", "segment": "heading", "text": "health spending", "part_index": 0},
 ]
 
 
 @pytest.mark.parametrize(
-    ("status", "first_status", "sentence_plan", "leading_line"),
-    [
-        ("mixed", "definite", _OPENER, "Answered 1 of 2 parts."),
-        ("mixed", "definite", None, None),
-        ("definite", "definite", _OPENER, None),
-        ("mixed", "candidates", _SHARED_REFUSAL, None),
-    ],
-    ids=["mixed_with_opener", "mixed_without_opener", "definite", "mixed_none_definite"],
+    ("sentence_plan", "leading_line"),
+    [(_COVERAGE, "Answered 1 of 2 parts."), (None, None), (_SHARED_HEADING, None)],
+    ids=["coverage", "no_plan", "unowned_heading"],
 )
-def test_leading_line_is_the_mixed_opener_token(
-    status: str,
-    first_status: str,
-    sentence_plan: list[dict[str, Any]] | None,
-    leading_line: str | None,
+def test_leading_line_is_the_answered_line(
+    sentence_plan: list[dict[str, Any]] | None, leading_line: str | None
 ) -> None:
-    """A mixed envelope with a definite part leads with Search's opener. With no opener,
-    or with no definite part, the digest opens with the first part's block."""
+    """A mixed envelope leads with Search's coverage tokens. Without them, whatever its
+    plan opens with, the digest opens with the first part's block."""
     envelope = _envelope(
-        status,
+        "mixed",
         sentence_plan=sentence_plan,
         parts=[
-            _part(first_status, variable_text="health spending", spec=_spec(spec_id="spec_1")),
+            _part("definite", variable_text="health spending", spec=_spec(spec_id="spec_1")),
             _part(
                 "no_data",
                 variable_text="malaria grants",
@@ -406,15 +399,6 @@ def test_leading_line_is_the_mixed_opener_token(
         assert first_block.startswith('Part 1: "health spending"')
     else:
         assert first_block == leading_line
-
-
-def test_mixed_opener_token_owned_by_a_part_is_not_a_leading_line() -> None:
-    envelope = _envelope(
-        "mixed",
-        sentence_plan=[{"kind": "text", "segment": "heading", "text": "Owned.", "part_index": 0}],
-    )
-
-    assert "Owned." not in render_digest(envelope)
 
 
 def test_part_own_warning_renders_inside_its_block() -> None:
