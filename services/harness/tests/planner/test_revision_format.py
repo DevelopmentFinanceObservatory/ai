@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from planner.plan import DatasetRequirement, Plan, RankRequirement, plan_revision
+from planner.records import PlaceLevel, PlaceType
 from pydantic import BaseModel
 from translator.discovery import requirement_revision
 
@@ -127,6 +128,9 @@ def test_the_recorded_plans_hold_every_field_added_since_the_base_format() -> No
         ],
     }
     walk(Plan.model_validate(with_election))
+    # PlaceLevel pre-dates the base format but no recorded plan happens to
+    # use one. Exercise its newly added defaults explicitly.
+    walk(PlaceLevel(level=PlaceType.COUNTRY))
     added = {
         (key, name)
         for key, model in _hashed_models().items()
@@ -152,6 +156,19 @@ def test_a_field_added_since_the_base_format_enters_the_revision_once_set() -> N
     (requirement,) = (r for r in limited.evidence_requirements if isinstance(r, RankRequirement))
     assert revision_content(requirement)["limit"] == 3
     assert "limit" not in revision_content(requirement.model_copy(update={"limit": None}))
+
+
+def test_a_qualified_strict_place_level_enters_a_plan_revision_only_when_stated() -> None:
+    legacy = PlaceLevel(level=PlaceType.COUNTRY)
+    qualified = PlaceLevel(level=PlaceType.COUNTRY, role="recipient", strict=True)
+
+    assert revision_content(legacy) == {"kind": "place_level", "level": "Country"}
+    assert revision_content(qualified) == {
+        "kind": "place_level",
+        "level": "Country",
+        "role": "recipient",
+        "strict": True,
+    }
 
 
 def test_a_rolling_period_enters_the_revision_once_stated() -> None:

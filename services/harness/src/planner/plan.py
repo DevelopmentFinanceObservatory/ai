@@ -2010,7 +2010,11 @@ def _dataset_shape(requirement: DatasetRequirement) -> FrameShape:
         *roles,
         *(
             RoleDimension(
-                role=word, requirement_id=requirement.id, open=True, place=place_role(word)
+                role=word,
+                requirement_id=requirement.id,
+                open=True,
+                place=place_role(word),
+                level_filterable=True,
             )
             for word in requirement.across
         ),
@@ -2157,12 +2161,48 @@ def _rank_reduction_reason(
     return None
 
 
-def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> FrameShape:
+def _place_level_roles(
+    predicate: PlaceLevel, roles: Sequence[RoleDimension]
+) -> tuple[RoleDimension, ...]:
+    """The one role a level predicate targets, including an unambiguous open flow side."""
+    if predicate.role is not None:
+        return roles_named(roles, predicate.role)
+    places = tuple(role for role in roles if role.place)
+    if places:
+        return places
+    open_roles = tuple(role for role in roles if role.open)
+    return open_roles if len(open_roles) == 1 else ()
+
+
+def _filter_shape(
+    requirement: FilterRequirement,
+    input_shape: FrameShape,
+) -> FrameShape:
     place_level = keeps_one_level(requirement.predicates)
+    levelled_role_keys: set[tuple[Identifier, str | None]] = set()
+    if place_level:
+        for predicate in requirement.predicates:
+            if not isinstance(predicate, PlaceLevel):
+                continue
+            candidates = _place_level_roles(predicate, input_shape.roles)
+            if len(candidates) > 1:
+                named = predicate.role or "an omitted role"
+                raise ValueError(
+                    f"{requirement.id!r}: a place_level filter names {named!r}, which resolves "
+                    f"to {len(candidates)} roles; state one role"
+                )
+            if len(candidates) == 1:
+                levelled_role_keys.add((candidates[0].requirement_id, candidates[0].role))
+    level_available = bool(levelled_role_keys) and all(
+        role.level_filterable
+        for role in input_shape.roles
+        if (role.requirement_id, role.role) in levelled_role_keys
+    )
     reason = shape_rejects(
         ShapeVerb.FILTER,
         input_shape,
         place_level=place_level,
+        place_level_available=level_available,
         period_threshold=states_period_threshold(requirement.predicates),
     )
     if reason is not None:
@@ -2177,6 +2217,7 @@ def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> Fr
         period=years.period,
         pins_one_year=years.leaves_one_year,
         keeps_one_level=place_level,
+        levelled_role_keys=tuple(levelled_role_keys),
     )
 
 
@@ -3238,7 +3279,10 @@ def _operand_roles(
                 elif len(roles) == 1:
                     selected.extend(roles)
             elif isinstance(predicate, PlaceLevel):
-                selected.extend(role for role in roles if role.place)
+                if predicate.role is not None:
+                    selected.extend(roles_named(roles, predicate.role))
+                else:
+                    selected.extend(role for role in roles if role.place)
     return {(role.role, role.requirement_id) for role in selected}
 
 

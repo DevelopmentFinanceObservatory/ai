@@ -4554,10 +4554,15 @@ def _rank_over(
 
 
 def _countries_of(
-    input_id: str, *, reads: str = "fetch", filter_id: str = "countries"
+    input_id: str,
+    *,
+    reads: str = "fetch",
+    filter_id: str = "countries",
+    role: str | None = None,
+    strict: bool = False,
 ) -> tuple[FilterRequirement, FilterOperation]:
     """A filter keeping the countries of `input_id`, a requirement that names no place."""
-    predicates = (PlaceLevel(level=PlaceType.COUNTRY),)
+    predicates = (PlaceLevel(level=PlaceType.COUNTRY, role=role, strict=strict),)
     return (
         FilterRequirement(
             id=filter_id, decision_ids=["measure"], input_id=input_id, predicates=predicates
@@ -4643,7 +4648,7 @@ def _ids_debt_total(
 ) -> CompileResult:
     """A total over every IDS debtor, `across=('country',)`, with or without a level filter."""
     ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
-    countries_req, countries = _countries_of("health")
+    countries_req, countries = _countries_of("health", role="country", strict=True)
     reads = "countries" if level_filter else "fetch"
     total_req = AggregateRequirement(
         id="totals",
@@ -4687,16 +4692,48 @@ def test_a_total_over_ids_debtors_by_country_needs_no_level_filter(
     assert total.args["group_by"] == ["time_period"]
 
 
-def test_a_level_filter_over_ids_debtors_is_refused_with_its_own_code(
+def test_a_level_filter_over_ids_debtors_reads_the_debtors_type_column(
     build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
 ) -> None:
     result = _ids_debt_total(build, decision, source, level_filter=True)
 
-    assert _codes(result) == [Code.LEVEL_FILTER_ON_FLOW_AXIS]
-    assert (result.issues[0].operation_id, result.issues[0].requirement_id) == (
-        "countries",
-        "health",
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    retrieve, countries, _ = result.workflow.steps
+    assert retrieve.args["place_types"] is True
+    assert retrieve.args["without_party_totals"] is True
+    assert countries.args == {
+        "predicates": [
+            {
+                "kind": "place_level",
+                "column": "destination_type",
+                "level": "Country",
+                "strict": True,
+            }
+        ]
+    }
+
+
+def test_a_rank_requirement_for_country_filtered_debtors_refuses_a_raw_input(
+    build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
+) -> None:
+    ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
+    countries_req, countries = _countries_of("health", role="country", strict=True)
+    rank_req, raw_rank = _rank_over("countries", axis="country", reads="fetch")
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [_every_country(), countries_req, rank_req],
     )
+    fetch = RetrieveOperation(id="fetch", requirement_id="health", spec_id=ids.spec_id)
+
+    result = build(
+        plan,
+        _translation(fetch, countries, raw_rank, terminal=["ranked"]),
+        discovered={"health": ids},
+    )
+
+    assert Code.OPERATION_MISMATCH in _codes(result)
+    assert result.workflow is None
 
 
 def test_a_series_of_every_place_asks_for_no_place_types_and_no_party_totals(
@@ -4932,6 +4969,10 @@ def test_top_donor_countries_are_refused_over_the_open_origin_axis(
     assert f"{party!r} narrows a party to its countries" in issue.reason
     assert f"holds every {word}, agencies included" in issue.reason
     assert f"state `across` as '{word}s'" in issue.reason
+    assert (
+        "direct `{kind:place_level, role:<party>, level:Country, strict:true}` filter bound to "
+        "that role and redirect the calculation through that filter" in issue.reason
+    )
     assert result.workflow is None
 
 

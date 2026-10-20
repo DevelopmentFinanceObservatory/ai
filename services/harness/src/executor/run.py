@@ -1859,7 +1859,19 @@ class _Run:
                 self.columns.get(binding.from_step) if binding is not None else None
             )
             return
-        compiled = {*step.expected_role_keys, *(entity.role for entity in source.entities)}
+        base_columns = {
+            *step.expected_role_keys,
+            *(entity.role for entity in source.entities),
+            *(axis.column for axis in source.open_entity_axes or ()),
+        }
+        compiled = {
+            *base_columns,
+            *(
+                f"{column}{suffix}"
+                for column in base_columns
+                for suffix in ("_type", "_party_kind")
+            ),
+        }
         try:
             self.columns[step.id] = retrieved_frame_columns(
                 result.structured_content or {}, compiled=compiled

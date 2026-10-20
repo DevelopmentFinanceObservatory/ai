@@ -365,7 +365,8 @@ def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
-        return f"the place is a {level_noun(predicate.level)}"
+        subject = predicate.role or "place"
+        return f"the {subject} is a {level_noun(predicate.level)}"
     raise AssertionError(f"unhandled predicate kind: {predicate!r}")
 
 
