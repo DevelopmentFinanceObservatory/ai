@@ -177,7 +177,7 @@ class RankResult:
     `window_period_count` is how many periods the window holds before
     unit-less rows are left out, the periods each entity's coverage is
     measured against. `private_parties` are the `(role, party)` pairs of the
-    ranked roles whose party is `private`, which the digest tags.
+    ranked roles whose party is in the private sector, which the digest tags.
     """
 
     frame: Frame
@@ -478,7 +478,8 @@ def run_rank(
     require_one_place_level(frame, rank_by)
     # A total of other parties is neither ranked beside them nor summed into
     # an entity's value, whether its role is ranked or pooled. A ranked role
-    # holding only totals ("which regions receive the most?") ranks them.
+    # holding only totals ("which regions receive the most?") ranks them, and
+    # a ranked role holding parties leaves out its unallocated residuals.
     frame, party_exclusions = without_party_totals(frame, role_columns(frame), ranked=rank_by)
     # `exclude_unitless=True`: `resolved.unit` labels every ranked entity's
     # output row alike. An entity whose rows leave `unit` unbound is excluded;

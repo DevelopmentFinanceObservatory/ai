@@ -39,7 +39,7 @@ from compiler.surface import (
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, frame_ref_for
+from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
@@ -2560,7 +2560,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
     assert answer.store == frame_ref_for(
-        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=("party_kind",)
+        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=KIND_COLUMNS
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]
@@ -2581,7 +2581,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     # data-mcp asked apis for the cut, with the kinds.
     (options,) = minted
     assert options["without_party_totals"] is True
-    assert options["columns"] == ["party_kind"]
+    assert options["columns"] == list(KIND_COLUMNS)
 
 
 # --- an outside client's path to the OECD's all-donors figures ---
@@ -2611,6 +2611,7 @@ BOTH_TOTALS_IDENTITY: dict[str, Any] = {
 }
 OFFICIAL_ONLY_SPEC = spec_id_for(canonicalize(OFFICIAL_ONLY_IDENTITY))
 BOTH_TOTALS_SPEC = spec_id_for(canonicalize(BOTH_TOTALS_IDENTITY))
+_WHOLE_TOTAL_SECTORS = {"DACOfficialDonors": "official", "DACPrivateDonors": "private"}
 _WHOLE_TOTAL_IDENTITIES = {
     OFFICIAL_ONLY_SPEC: (OFFICIAL_ONLY_IDENTITY, ["DACOfficialDonors"]),
     BOTH_TOTALS_SPEC: (BOTH_TOTALS_IDENTITY, ["DACOfficialDonors", "DACPrivateDonors"]),
@@ -2618,8 +2619,8 @@ _WHOLE_TOTAL_IDENTITIES = {
 
 
 def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
-    """Each of `donors`' 2021 aid to Ethiopia as apis renders it, with the party kinds
-    (`whole_total` for both) when `kinds`."""
+    """Each of `donors`' 2021 aid to Ethiopia as apis renders it, with the party kind,
+    sector and whole cells when `kinds`: each donor a total marked whole, of its own sector."""
     count = len(donors)
     columns: dict[str, Any] = {
         "stat_var": pa.array(["dcid:Oda"] * count, type=pa.string()),
@@ -2630,8 +2631,14 @@ def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
         "unit": pa.array(["USD"] * count, type=pa.string()),
     }
     if kinds:
-        columns["financingProvider_party_kind"] = pa.array(["whole_total"] * count)
+        columns["financingProvider_party_kind"] = pa.array(["total"] * count)
+        columns["financingProvider_party_sector"] = pa.array(
+            [_WHOLE_TOTAL_SECTORS[donor] for donor in donors]
+        )
+        columns["financingProvider_party_whole"] = pa.array(["true"] * count)
         columns["financingRecipient_party_kind"] = pa.array(["party"] * count)
+        columns["financingRecipient_party_sector"] = pa.array(["official"] * count)
+        columns["financingRecipient_party_whole"] = pa.array(["false"] * count)
     buf = io.BytesIO()
     pq.write_table(pa.table(columns), buf)
     return buf.getvalue()
@@ -2648,7 +2655,7 @@ def _whole_totals_mint_response(spec_id: str, *, kinds: bool) -> dict[str, Any]:
     parquet = _whole_totals_parquet_bytes(donors, kinds=kinds)
     rendering: dict[str, Any] = {"bundle": False, "format": "parquet", "layout": "frame"}
     if kinds:
-        rendering["columns"] = ["party_kind"]
+        rendering["columns"] = list(KIND_COLUMNS)
     return {
         "schema_version": 1,
         "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
@@ -2773,7 +2780,8 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     """`search` for "all donors including private" returns one spec binding both totals.
     `get_data` with default flags gives two rows, and no kind column says they are
     whole totals, so `aggregate` refuses `place_levels_mixed`. After a retry with
-    `place_types`, both cells are `whole_total` and the sum is both populations."""
+    `place_types`, both are totals whose whole cells are `true`, and the sum is both
+    populations."""
     minted = _serve_whole_totals(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
 
@@ -2813,13 +2821,13 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     assert sum(plain_held[0].table.column("value").to_pylist()) == pytest.approx(4_578_400_000.0)
     assert refused.is_error
     assert (refused.structured_content or {})["code"] == "place_levels_mixed"
-    assert [options.get("columns") for options in minted] == [None, ["party_kind"]]
+    assert [options.get("columns") for options in minted] == [None, list(KIND_COLUMNS)]
     # The frame holding the kinds is named apart from the plain one, under its file's stamp.
     assert typed_content["frame_ref"] != plain_content["frame_ref"]
     assert typed_content["frame_ref"] == frame_ref_for(
         spec_id=BOTH_TOTALS_SPEC,
         content_version=typed_content["content_version"],
-        columns=("party_kind",),
+        columns=KIND_COLUMNS,
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
     ).model_dump(mode="json")
     assert summed_held is not None

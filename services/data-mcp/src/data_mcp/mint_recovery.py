@@ -138,17 +138,18 @@ class DatasetVersions(Protocol):
     def __call__(self, *, spec_id: str) -> Awaitable[Sequence[DatasetVersion]]: ...
 
 
-# The `options.columns` of a flow table's mint before the token was renamed to
-# `KIND_COLUMNS`. A root minted with it stays in the frame store with no age rule, and
-# `replayed_mint_options` upgrades the recovered selection on replay.
-_EARLIER_KIND_COLUMNS: tuple[str, ...] = ("kind",)
+# The `options.columns` of a flow table's mint before `KIND_COLUMNS`: the token `kind`, and
+# `party_kind` before the sector and whole tokens joined it. A root minted with either stays
+# in the frame store with no age rule, and `replayed_mint_options` upgrades the recovered
+# selection on replay.
+_EARLIER_KIND_COLUMNS: tuple[tuple[str, ...], ...] = (("kind",), ("party_kind",))
 
 # Every `options.columns` a recorded mint may hold: none, some of the type columns, or a
-# flow table's kinds under either token.
+# flow table's kinds under any of its tokens.
 RECOVERABLE_COLUMNS: tuple[tuple[str, ...], ...] = (
     *TYPE_COLUMN_SELECTIONS,
     KIND_COLUMNS,
-    _EARLIER_KIND_COLUMNS,
+    *_EARLIER_KIND_COLUMNS,
 )
 
 

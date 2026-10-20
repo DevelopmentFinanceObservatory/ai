@@ -74,17 +74,8 @@ def test_top_members_ranks_at_the_period_half_the_members_hold() -> None:
                 **dict.fromkeys(("T1", "T2", "T3", "T4", "T5", "T6"), "total"),
             },
         ),
-        (
-            {},
-            {
-                **dict.fromkeys("BCD", "party"),
-                "A": "private",
-                **dict.fromkeys(("T1", "T2", "T3"), "total"),
-                **dict.fromkeys(("T4", "T5", "T6"), "whole_total"),
-            },
-        ),
     ],
-    ids=["outside_the_select", "group_totals", "private_donor_and_whole_totals"],
+    ids=["outside_the_select", "group_totals"],
 )
 def test_top_members_anchors_on_the_compared_members_alone(
     select: dict[str, Any], cells: dict[str, str] | None
@@ -201,17 +192,17 @@ def test_top_members_ranks_nothing_across_unlike_values(other: dict[str, Any]) -
 
 
 def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
-    """A group total such as the G7, a whole-population total, a residual and a
-    party with no kind are left out of a ranking of donors. A private donor
-    ranks beside the others."""
+    """A group total such as the G7, a residual and a party with no kind are
+    left out of a ranking of donors. A private donor, of kind `party` with
+    its sector in a column of its own, ranks beside the others."""
     cells = {
-        "DACOfficialDonors": "whole_total",
+        "DACOfficialDonors": "total",
         "GroupOfSeven": "total",
         "AfricaRegional": "residual",
         "Unknown": "untyped",
         "Germany": "party",
         "Japan": "party",
-        "GatesFoundation": "private",
+        "GatesFoundation": "party",
     }
 
     assert comparable_members(cells, dimension="financingProvider") == {

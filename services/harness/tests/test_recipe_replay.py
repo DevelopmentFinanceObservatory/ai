@@ -34,7 +34,7 @@ from common.materialisation import (
 from common.recipe import build_recipe, replay_key
 from common.row_budget import RowBudget
 from data_mcp.deadline import CallDeadline
-from data_mcp.frame_materialisation import frame_ref_for, replayed_mint_options
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for, replayed_mint_options
 from data_mcp.get_data_tool import RootMint
 from data_mcp.mint_recovery import recover_mint_record
 from data_mcp.operations import QueuedOperation
@@ -388,9 +388,10 @@ async def test_a_replay_on_moved_data_publishes_the_new_frame_under_the_same_nor
     [
         OPTIONS | {"columns": ["financingProvider_type", "financingRecipient_type"]},
         OPTIONS | {"columns": ["kind"]},
+        OPTIONS | {"columns": ["party_kind"]},
         OPTIONS,
     ],
-    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns"],
+    ids=["flow-party-types", "flow-retired-kind", "flow-kind-alone", "flow-no-columns"],
 )
 async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
     scene: Scene, recorded: dict[str, Any]
@@ -402,7 +403,7 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
 
     assert isinstance(replayed, Replayed), replayed
     (minted,) = scene.dataset.minted
-    assert minted.options == OPTIONS | {"columns": ["party_kind"]}
+    assert minted.options == OPTIONS | {"columns": list(KIND_COLUMNS)}
     current = FrameRef(spec_id=SPEC, content_version=SECOND)
     held = await scene.store.get_mint_record(current)
     assert held is not None

@@ -16,7 +16,7 @@ from common.materialisation import (
     MintRecord,
     MintRecordUnrecoverableError,
 )
-from data_mcp.frame_materialisation import frame_ref_for
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.mint_recovery import recover_mint_record
 from dfo_frame_grammar import Frame
 
@@ -152,6 +152,11 @@ async def _holding(
             _DEFAULT_OPTIONS | {"columns": ["financingProvider_type"]},
         ),
         (
+            _typed(_OLDER, KIND_COLUMNS),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": list(KIND_COLUMNS)},
+        ),
+        (
             _typed(_OLDER, ("party_kind",)),
             _OLDER,
             _DEFAULT_OPTIONS | {"columns": ["party_kind"]},
@@ -189,6 +194,7 @@ async def _holding(
         "both-flow-party-types",
         "the-one-flow-party-type-a-table-serves",
         "flow-party-kinds",
+        "flow-party-kind-without-sector-and-whole",
         "flow-party-kinds-under-the-earlier-token",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",

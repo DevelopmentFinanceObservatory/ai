@@ -497,24 +497,29 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
     ("marked", "hashed"),
     [
         (
-            {"whole_of": ["party"]},
-            {"role": "observationAbout", "label": "Africa", "ref": "africa", "whole_of": ["party"]},
-        ),
-        (
-            {"whole_of": ["party"], "side_kinds": ["party", "residual"]},
+            {"whole_of": ["official"]},
             {
                 "role": "observationAbout",
                 "label": "Africa",
                 "ref": "africa",
-                "whole_of": ["party"],
-                "side_kinds": ["party", "residual"],
+                "whole_of": ["official"],
+            },
+        ),
+        (
+            {"whole_of": ["official"], "side_classes": ["official", "residual"]},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "whole_of": ["official"],
+                "side_classes": ["official", "residual"],
             },
         ),
         ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
     ],
-    ids=["with-the-marker", "with-the-sides-kinds", "without-the-field"],
+    ids=["with-the-marker", "with-the-sides-classes", "without-the-field"],
 )
-async def test_a_seed_resolves_its_set_with_the_kinds_its_whole_total_holds(
+async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
     monkeypatch: pytest.MonkeyPatch, marked: dict[str, list[str]], hashed: dict[str, Any]
 ) -> None:
     # A seed without the field resolves to the group it always did, so a plan hash over

@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS
+from common.place_type import FLOW_ROLE_COLUMNS, MemberClass
 from planner.records import (
     AmbiguousSourceReading,
     Period,
@@ -42,7 +42,7 @@ from planner.workflow import (
     ResolvedGroup,
     SelectedSource,
 )
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -634,10 +634,11 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     A group stating no name names nothing a requirement can ask for, so it is
     left out rather than failing the block. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
-    `whole_of` is the kinds of party a whole-population total holds, or a
-    union of such totals, absent for any other set. `side_kinds` is the kinds
-    of party, totals aside, the dataset publishes on such a set's side, absent
-    for any other set and from a Search that predates it.
+    `whole_of` is the classes of party a whole-population total holds, or a
+    union of such totals, absent for any other set. `side_classes` is the
+    classes of party, totals aside, the dataset publishes on such a set's side,
+    absent for any other set and from a Search that predates it. A class outside
+    `common.place_type.MemberClass` fails the block.
     """
     found = []
     for role, raw in groups.items():
@@ -649,8 +650,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     label=label,
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
-                    whole_of=tuple(_strings(group.get("whole_of"))),
-                    side_kinds=tuple(_strings(group.get("side_kinds"))),
+                    whole_of=_member_classes(group.get("whole_of")),
+                    side_classes=_member_classes(group.get("side_classes")),
                 )
             )
     return tuple(found)
@@ -757,21 +758,26 @@ def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, 
     return definitions
 
 
-# What a whole-population total holds, by flow side and kind of party.
-_WHOLE_OF_HOLDS: dict[tuple[str, str], str] = {
-    ("origin", "party"): "all official donors",
+# What a whole-population total holds, by flow side and class of party.
+_WHOLE_OF_HOLDS: dict[tuple[str, MemberClass], str] = {
+    ("origin", "official"): "all official donors",
     ("origin", "private"): "private donors",
-    ("destination", "party"): "every recipient country",
+    ("destination", "official"): "every recipient country",
     ("destination", "residual"): "aid the source allocates to no single country",
 }
 
 
 def _whole_scope(group: ResolvedGroup) -> str:
     """What `group`'s whole-population total holds, and on the donor side the private
-    donors it leaves out when the source publishes some there (`side_kinds`). A group
-    without `side_kinds` says nothing it leaves out, since nothing says what the side holds."""
-    held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, kind), kind) for kind in group.whole_of)
-    if group.role == "origin" and "private" in group.side_kinds and "private" not in group.whole_of:
+    donors it leaves out when the source publishes some there (`side_classes`). A group
+    without `side_classes` says nothing it leaves out, since nothing says what the side
+    holds."""
+    held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, cls), cls) for cls in group.whole_of)
+    if (
+        group.role == "origin"
+        and "private" in group.side_classes
+        and "private" not in group.whole_of
+    ):
         return f"{held} (private donors are outside it)"
     return held
 
@@ -932,6 +938,18 @@ def _sequence_of_any(value: object) -> list[object]:
 
 def _strings(value: object) -> list[str]:
     return [item for item in _sequence_of_any(value) if isinstance(item, str)]
+
+
+_MEMBER_CLASSES: TypeAdapter[tuple[MemberClass, ...]] = TypeAdapter(tuple[MemberClass, ...])
+
+
+def _member_classes(value: object) -> tuple[MemberClass, ...]:
+    """The classes of party `value` lists, none when it lists none.
+
+    Raises:
+        pydantic.ValidationError: When it lists a class outside `MemberClass`.
+    """
+    return _MEMBER_CLASSES.validate_python(_strings(value))
 
 
 def _text(value: object) -> str | None:

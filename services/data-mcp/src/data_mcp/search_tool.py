@@ -538,7 +538,8 @@ async def search(
     member by member only where the dataset holds no private donors, and
     otherwise refuses `entity_role_not_admitted`: open the donor side, read it
     with get_data and `place_types` set, and keep the rows whose
-    `financingProvider_party_kind` is `party`.
+    `financingProvider_party_kind` is `party` and
+    `financingProvider_party_sector` is `official`.
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
     "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
     ["creditor"], "operations": [{"verb": "rank",

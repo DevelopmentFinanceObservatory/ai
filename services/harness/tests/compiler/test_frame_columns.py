@@ -223,7 +223,7 @@ def test_any_other_verb_must_declare_its_predicted_roles_as_the_frame_spells_the
     ) == ("financingProvider", "financingRecipient")
 
 
-@pytest.mark.parametrize("suffix", ["_type", "_party_kind"])
+@pytest.mark.parametrize("suffix", ["_type", "_party_kind", "_party_sector", "_party_whole"])
 def test_a_verb_keeping_a_role_declares_the_roles_enrichment_column_its_input_carries(
     suffix: str,
 ) -> None:

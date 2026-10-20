@@ -917,25 +917,27 @@ async def test_a_door_refusal_of_the_steps_fails_the_publish(
 
 
 @pytest.mark.parametrize(
-    ("role", "cells"),
+    ("role", "described", "cells"),
     [
-        ("observationAbout", ("Continent",)),
-        ("financingRecipient", ("total",)),
-        ("financingProvider", ("party", "private", "whole_total")),
+        ("observationAbout", "observationAbout_type", ("Continent",)),
+        ("financingRecipient", "financingRecipient_party_kind", ("total",)),
+        ("financingProvider", "financingProvider_party_sector", ("official", "private")),
+        ("financingProvider", "financingProvider_party_whole", ("true", "false")),
     ],
-    ids=["place-type", "total-kind", "private-and-whole-total-kinds"],
+    ids=["place-type", "party-kind", "party-sector", "party-whole"],
 )
 async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_published_frame(
-    materialisation_store: InMemoryMaterialisationStore, role: str, cells: tuple[str, ...]
+    materialisation_store: InMemoryMaterialisationStore,
+    role: str,
+    described: str,
+    cells: tuple[str, ...],
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
-    sum keyed by a flow party carries `financingRecipient_party_kind`. apis joins
-    every role's value into a series label, so the published frame holds the
-    place column alone, and the door's own `Frame.build` accepts it with every
-    row kept. The kind cells apis writes for a private provider and a
-    whole-population total are left out with the rest.
+    sum keyed by a flow party carries `financingRecipient_party_kind` and the
+    party's sector and whole columns. apis joins every role's value into a
+    series label, so the published frame holds the place column alone, and the
+    door's own `Frame.build` accepts it with every row kept.
     """
-    described = f"{role}_type" if role == "observationAbout" else f"{role}_party_kind"
     rows = [
         {
             "stat_var": "dcid:LifeExpectancy_Person",

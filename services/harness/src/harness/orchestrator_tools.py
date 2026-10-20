@@ -58,8 +58,9 @@ from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
     TYPED_ROLES,
-    enrichment_columns,
     enrichment_role,
+    kind_column,
+    type_column,
 )
 from common.row_budget import row_budget
 from compiler.sources import (
@@ -462,12 +463,13 @@ def _covering_selects(
 
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Each `dimension` member's kind or type cell among `rows`; empty when
-    the rows carry neither of its enrichment columns."""
+    """Each `dimension` member's kind or type cell among `rows`, the kind where
+    both are held; empty when the rows carry neither column. A party's sector
+    and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
         for row in rows
-        for column in enrichment_columns(dimension)
+        for column in (type_column(dimension), kind_column(dimension))
         if row.get(column) is not None and row.get(dimension) is not None
     }
 
@@ -1339,7 +1341,8 @@ def build_orchestrator_tools(
         lists "official donors" member by member only where the dataset holds
         no private donors, and otherwise refuses `entity_role_not_admitted`:
         open the donor side and keep the parties whose
-        `financingProvider_party_kind` is `party`. Keep `open_roles` when the
+        `financingProvider_party_kind` is `party` and
+        `financingProvider_party_sector` is `official`. Keep `open_roles` when the
         user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",

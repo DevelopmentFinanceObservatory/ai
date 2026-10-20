@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import random
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -35,7 +36,7 @@ from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_o
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
-from party_frames import PROVIDER, provider_frame
+from party_frames import OFFICIAL, OFFICIAL_WHOLE, PRIVATE, PRIVATE_WHOLE, PROVIDER, provider_frame
 
 
 def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
@@ -1260,15 +1261,20 @@ def test_control_characters_are_escaped_through_group_key_unit_warning_and_exclu
 # Ethiopia's 2021 ODA from donors, in USD millions: two countries, one private foundation and
 # the official total DAC2A publishes beside them.
 _DONORS = {
-    "country/FRA": ("party", 120.0),
-    "country/DEU": ("party", 200.0),
-    "GatesFoundation": ("private", 30.0),
-    "DACOfficialDonors": ("whole_total", 4267.6),
+    "country/FRA": (OFFICIAL, 120.0),
+    "country/DEU": (OFFICIAL, 200.0),
+    "GatesFoundation": (PRIVATE, 30.0),
+    "DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6),
 }
-_NO_PRIVATE = {name: row for name, row in _DONORS.items() if row[0] != "private"}
+_NO_PRIVATE = {name: row for name, row in _DONORS.items() if row[0] != PRIVATE}
+# The two whole totals DAC2A publishes for Ethiopia in 2021, which a sum across donors adds.
+_WHOLE_TOTALS = {
+    "DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6),
+    "DACPrivateDonors": (PRIVATE_WHOLE, 310.8),
+}
 
 
-def _identity() -> dict[str, object]:
+def _identity() -> dict[str, Any]:
     return {
         "op_spec_hash": "ops_" + "a" * 32,
         "content_version": "ocv_" + "b" * 32,
@@ -1286,19 +1292,36 @@ def test_a_sum_over_donors_states_how_many_private_donors_it_holds_and_their_val
     assert "This sum of 3 providers includes 1 private donor (30)." in digest
 
 
+def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_one() -> None:
+    result = run_aggregate(
+        provider_frame(_WHOLE_TOTALS), group_by=("time_period",), aggregation="sum"
+    )
+
+    digest = render_aggregate_digest(
+        group_by=("time_period",), aggregation="sum", result=result, **_identity()
+    )
+
+    assert (
+        "This sum of 2 whole totals of providers includes 1 total of private donors (310.8)."
+        in digest.splitlines()
+    )
+
+
 @pytest.mark.parametrize(
-    ("donors", "aggregation", "years"),
+    ("donors", "aggregation", "sectors"),
     [
-        (_NO_PRIVATE, "sum", ("2021",)),
-        (_DONORS, "mean", ("2021",)),
+        (_NO_PRIVATE, "sum", True),
+        (_DONORS, "mean", True),
+        (_DONORS, "sum", False),
+        (_WHOLE_TOTALS, "sum", False),
     ],
-    ids=["no-private-donor", "not-a-sum"],
+    ids=["no-private-donor", "not-a-sum", "no-sector-column", "whole-totals-no-sector-column"],
 )
-def test_a_digest_names_no_private_donors_where_the_sum_holds_none(
-    donors: dict[str, tuple[str, float]], aggregation: str, years: tuple[str, ...]
+def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tell(
+    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, sectors: bool
 ) -> None:
     result = run_aggregate(
-        provider_frame(donors, years=years), group_by=("time_period",), aggregation=aggregation
+        provider_frame(donors, sectors=sectors), group_by=("time_period",), aggregation=aggregation
     )
 
     digest = render_aggregate_digest(
@@ -1314,7 +1337,7 @@ def test_a_digest_names_no_private_donors_where_the_sum_holds_none(
         (_DONORS, (), "This sum of 3 providers includes 1 private donor (60 over 2 periods)."),
         # Each year's sum is finite, and the private donor's value across both years is not.
         (
-            {"country/FRA": ("party", 1.0), "GatesFoundation": ("private", 1e308)},
+            {"country/FRA": (OFFICIAL, 1.0), "GatesFoundation": (PRIVATE, 1e308)},
             ("time_period",),
             "This sum of 2 providers includes 1 private donor.",
         ),
@@ -1322,7 +1345,7 @@ def test_a_digest_names_no_private_donors_where_the_sum_holds_none(
     ids=["finite", "overflowing"],
 )
 def test_a_sum_over_several_years_states_the_private_value_over_them(
-    donors: dict[str, tuple[str, float]], group_by: tuple[str, ...], line: str
+    donors: dict[str, tuple[tuple[str, str, str], float]], group_by: tuple[str, ...], line: str
 ) -> None:
     result = run_aggregate(
         provider_frame(donors, years=("2020", "2021")), group_by=group_by, aggregation="sum"
@@ -1351,7 +1374,9 @@ def test_a_rank_of_donors_tags_each_private_donor() -> None:
     assert [line.split(":")[0] for line in tagged] == [f"  #3 {PROVIDER}=GatesFoundation (private)"]
 
 
-def _keyed_share_digest(donors: dict[str, tuple[str, float]]) -> tuple[str, list[float]]:
+def _keyed_share_digest(
+    donors: dict[str, tuple[tuple[str, str, str], float]],
+) -> tuple[str, list[float]]:
     result = run_share_of(
         provider_frame(donors),
         provider_frame(donors),
@@ -1375,7 +1400,7 @@ def _keyed_share_digest(donors: dict[str, tuple[str, float]]) -> tuple[str, list
     ids=["with-private", "no-private"],
 )
 def test_each_donors_share_divides_by_the_listed_sum_and_says_so(
-    donors: dict[str, tuple[str, float]], wording: str
+    donors: dict[str, tuple[tuple[str, str, str], float]], wording: str
 ) -> None:
     digest, percents = _keyed_share_digest(donors)
 

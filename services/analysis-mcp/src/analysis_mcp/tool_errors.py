@@ -155,13 +155,13 @@ that type are refused, and one place alone passes whatever its type. It is
 retryable over a `filter` result that keeps one level (`place_level` on the
 type column). On a flow party role (`financingProvider`,
 `financingRecipient`) the verbs leave out the parties whose
-`{role}_party_kind` cell is `total` or `whole_total` and record them as
-`party_total` exclusions; the refusal fires there only when several parties
-include one with no kind or a cell no kind names, are all totals on a role
-the verb pools (a role holding `whole_total` parties alone is summed), or sit
-in a frame that carries no kind column for their role. `rank` ranks a role
-holding only totals, and leaves the residuals of a ranked role holding parties
-out as `party_residual` exclusions.
+`{role}_party_kind` cell is `total` and record them as `party_total`
+exclusions; the refusal fires there only when several parties include one
+with no kind or a cell no kind names, are all totals on a role the verb pools
+(a role of totals alone, each `true` in `{role}_party_whole` on every row, is
+summed), or sit in a frame that carries no kind column for their role. `rank`
+ranks a role holding only totals, and leaves the residuals of a ranked role
+holding parties out as `party_residual` exclusions.
 
 `service_unavailable` fires when the process's frame row budget
 (`common.row_budget`) has no room for a verb's input rows
@@ -196,11 +196,12 @@ from enum import StrEnum
 from typing import Any, Literal, Self
 
 from common.place_type import (
-    MEMBER_KINDS,
     PARTY_ROLES,
     PLACE_LEVELS,
-    WHOLE_TOTAL_KIND,
+    PartyKind,
     enrichment_role,
+    sector_column,
+    whole_column,
 )
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
@@ -338,8 +339,9 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
 
-# The party kinds a filter keeps to compare or rank a flow side's members, in sorted order.
-_MEMBER_KINDS = tuple(sorted(MEMBER_KINDS))
+# The party kinds a filter keeps to compare or rank a flow side's members: private parties
+# are of kind `party` too, told apart by their sector.
+_MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
 
 # The population a search names for the total across each flow party role's whole side.
 _WHOLE_SIDE = {"financingProvider": "all donors", "financingRecipient": "all recipients"}
@@ -1300,10 +1302,9 @@ class ToolRefusal:
         column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
         message naming the role and the group-total exclusion, since a
         `place_level` filter is not what its refusal asks for. It names two
-        repairs: the source's published total for a total across the whole
-        side, or the member sum where search reports none published, and for
-        a comparison of members a filter keeping `MEMBER_KINDS`, which a kind
-        column's `fix.member_kinds` lists."""
+        repairs: a search naming the population for a total across the whole
+        side, and for a comparison of members a filter keeping the kinds a
+        kind column's `fix.member_kinds` lists."""
         role = enrichment_role(column, roles=PARTY_ROLES)
         if role is not None and not types:
             return cls(
@@ -1318,28 +1319,24 @@ class ToolRefusal:
                 fix={"column": column, "types": []},
             )
         if role is not None:
-            whole_total = (
-                "this frame's whole_total rows are the source's published totals, and the "
-                "side's total is their sum"
-                if WHOLE_TOTAL_KIND in types
-                else f'search naming the population ("{_WHOLE_SIDE[role]}") with no operation over '
-                "that side: search binds the source's published total, or, where the source "
-                "publishes none, departs whole_total_unpublished and returns the members, or, "
-                "where the source holds no series of that total, finds no data"
-            )
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
                 message=(
                     f"The {role} parties in this frame cannot be pooled: {column!r} holds "
-                    f"{', '.join(types)}. Parties of kind total or whole_total, such as a DAC "
-                    "regional total or Official Donors, Total, are left out of sums and ranks "
-                    "beside their members automatically, so this refusal means a party has no "
-                    "kind this server declares, or that every party is a group total. For a "
-                    f"total across the whole side, {whole_total}. A sum of members adds every "
-                    "row except group totals, residuals included. To compare or rank members, "
-                    f"filter the frame with a category_match on {role!r} naming "
-                    f"the parties to keep, or a category_match on {column!r} keeping "
-                    f"{', '.join(_MEMBER_KINDS)}, then retry with that result's frame_ref."
+                    f"{', '.join(types)}. Parties of kind total, such as a DAC regional total, "
+                    "are left out of sums and ranks beside their members, and totals alone are "
+                    f"summed when {whole_column(role)!r} is true on every row. So a party here has "
+                    "no declared kind, or every party is a total and not all are whole. For a "
+                    f'total across the whole side, search naming the population ("{_WHOLE_SIDE[role]}") '
+                    "with no operation over that side: search binds the source's published "
+                    "total, or, where the source publishes none, departs whole_total_unpublished "
+                    "and returns the members, or, where the source holds no series of that "
+                    "total, finds no data. A sum of members adds every "
+                    "row except totals, residuals included. To compare or rank members, filter "
+                    f"the frame with a category_match on {role!r} naming the parties to keep, or "
+                    f"a category_match on {column!r} keeping {', '.join(_MEMBER_KINDS)}, then "
+                    f"retry with that result's frame_ref; {sector_column(role)!r} tells private "
+                    "parties from official ones."
                 ),
                 fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )

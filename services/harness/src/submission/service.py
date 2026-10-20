@@ -40,7 +40,6 @@ from typing import Annotated, Any, NamedTuple, Protocol
 from compiler.evidence import open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
-    block_groups,
     measure_named_by_query,
     open_entity_axes_of,
     source_from_spec_block,
@@ -2016,24 +2015,23 @@ def identity_on_record(
     `period_end_open` it is otherwise the one the block the planner was
     shown carries (`planner.plan.shown_identity`): the translator can find
     a closed requirement's pin by searching its stated years, and no search
-    finds a definition with no end year.
+    finds a definition with no end year. A shown block that is not readable
+    as a source (`source_from_spec_block`) puts none on record.
     """
     recorded: RecordedDefinition | None = recorded_identity(pin)
     if recorded is None and definition_lookup is not None:
         recorded = definition_lookup(pin)
-    if recorded is None and end_open and pin in shown:
-        identity = shown_identity(pin, shown[pin])
-        block = shown[pin].spec_block(pin)
-        recorded = (
-            _ShownDefinition(
-                identity,
-                block_groups(block) if block is not None else (),
-                source_from_spec_block(block).resolved_sources if block is not None else (),
-            )
-            if identity is not None
-            else None
-        )
-    return recorded
+    if recorded is not None or not end_open or pin not in shown:
+        return recorded
+    identity = shown_identity(pin, shown[pin])
+    block = shown[pin].spec_block(pin)
+    if identity is None or block is None:
+        return None
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return None
+    return _ShownDefinition(identity, source.groups, source.resolved_sources)
 
 
 def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:

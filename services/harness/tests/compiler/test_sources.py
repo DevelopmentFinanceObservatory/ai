@@ -643,7 +643,7 @@ _WHOLE_TOTAL = {
         "label": "all donors",
         "entity_type": None,
         "total": "DACOfficialDonors",
-        "whole_of": ["party"],
+        "whole_of": ["official"],
     }
 }
 _WHOLE_SET = {
@@ -652,40 +652,51 @@ _WHOLE_SET = {
         "label": "all donors including private",
         "entity_type": None,
         "total": None,
-        "whole_of": ["party", "private"],
+        "whole_of": ["official", "private"],
     }
 }
 
 
-def test_a_group_carries_the_kinds_its_whole_total_holds() -> None:
-    sided = {"origin": _WHOLE_TOTAL["origin"] | {"side_kinds": ["party", "private"]}}
+def test_a_group_carries_the_classes_its_whole_total_holds() -> None:
+    sided = {"origin": _WHOLE_TOTAL["origin"] | {"side_classes": ["official", "private"]}}
     single = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=sided))
     union = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET))
     members = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
 
-    assert [(g.total, g.whole_of, g.side_kinds) for g in single.groups] == [
-        ("DACOfficialDonors", ("party",), ("party", "private"))
+    assert [(g.total, g.whole_of, g.side_classes) for g in single.groups] == [
+        ("DACOfficialDonors", ("official",), ("official", "private"))
     ]
-    assert [(g.total, g.whole_of, g.side_kinds) for g in union.groups] == [
-        (None, ("party", "private"), ())
+    assert [(g.total, g.whole_of, g.side_classes) for g in union.groups] == [
+        (None, ("official", "private"), ())
     ]
-    assert [(g.whole_of, g.side_kinds) for g in members.groups] == [((), ()), ((), ())]
+    assert [(g.whole_of, g.side_classes) for g in members.groups] == [((), ()), ((), ())]
+
+
+def test_a_group_naming_a_party_kind_as_its_class_fails_the_block() -> None:
+    """`party` is a frame kind and no class of party, so a block from a Search
+    that wrote kinds into `whole_of` fails rather than being read as some class."""
+    kinds = {"origin": _WHOLE_TOTAL["origin"] | {"whole_of": ["party"]}}
+
+    with pytest.raises(ValueError):
+        source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=kinds))
 
 
 @pytest.mark.parametrize(
-    ("side_kinds", "outside"),
+    ("side_classes", "outside"),
     [
-        (["party", "private", "residual"], " (private donors are outside it)"),
-        (["party", "residual"], ""),
+        (["official", "private", "residual"], " (private donors are outside it)"),
+        (["official", "residual"], ""),
         (None, ""),
     ],
     ids=["dac2a-publishes-private-donors", "dac2b-publishes-none", "search-without-the-field"],
 )
 def test_a_whole_total_is_read_with_the_population_it_holds(
-    side_kinds: list[str] | None, outside: str
+    side_classes: list[str] | None, outside: str
 ) -> None:
     labels = {entity["ref"]: entity["label"] for entity in _WHOLE_ENTITIES}
-    total = _WHOLE_TOTAL["origin"] | ({} if side_kinds is None else {"side_kinds": side_kinds})
+    total = _WHOLE_TOTAL["origin"] | (
+        {} if side_classes is None else {"side_classes": side_classes}
+    )
     (single,) = source_from_spec_block(
         _spec(entities=_WHOLE_ENTITIES, entity_groups={"origin": total})
     ).groups

@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 from common.place_type import (
     PARTY_KINDS,
-    TOTAL_KINDS,
     UNTYPED,
     at_one_level,
     enrichment_columns,
@@ -97,6 +96,8 @@ def test_places_of_a_type_whose_places_nest_do_not_sit_at_one_level() -> None:
     [
         ("observationAbout_type", "observationAbout"),
         ("financingRecipient_party_kind", "financingRecipient"),
+        ("financingProvider_party_sector", "financingProvider"),
+        ("financingProvider_party_whole", "financingProvider"),
         ("financingProvider_type", "financingProvider"),
         ("financingRecipient", None),
         ("flow_kind", None),
@@ -111,19 +112,15 @@ def test_an_enrichment_column_names_the_role_it_describes(column: str, role: str
 
 
 @pytest.mark.parametrize(
-    ("cell", "accepted", "holds_others"),
+    ("cell", "accepted"),
     [
-        ("party", True, False),
-        ("private", True, False),
-        ("residual", True, False),
-        ("total", True, True),
-        ("whole_total", True, True),
-        (UNTYPED, False, False),
-        ("philanthropy", False, False),
+        ("party", True),
+        ("residual", True),
+        ("total", True),
+        ("private", False),
+        ("whole_total", False),
+        (UNTYPED, False),
     ],
 )
-def test_a_party_kind_cell_is_accepted_and_a_total_holds_other_parties(
-    cell: str, accepted: bool, holds_others: bool
-) -> None:
+def test_a_party_kind_cell_names_one_of_three_kinds(cell: str, accepted: bool) -> None:
     assert (cell in PARTY_KINDS) is accepted
-    assert (cell in TOTAL_KINDS) is holds_others
