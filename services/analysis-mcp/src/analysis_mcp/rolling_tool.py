@@ -25,7 +25,7 @@ on a column the frame lacks, or a binding on a column that is no part of a
 series, refuses.
 Periods other than calendar years refuse (`rolling_grain_unsupported`).
 
-The series are those `dfo-apis`' assembler groups a frame's rows into
+The series are those `apis`' assembler groups a frame's rows into
 (`assembler.resolve._group_by_coordinate` over `frame_view.dimension_columns`),
 with the same three columns left out. The assembler counts a period for a
 series only on a row whose `status` is null. Every frame this service reads
@@ -88,6 +88,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from analysis_mcp.engine.columnar import group_rows
 from analysis_mcp.engine.common import Units
 from analysis_mcp.engine.filter import (
+    FilterPlaceLevelUnknownError,
     FilterPredicateTypeMismatchError,
     FilterPredicateValueTypeMismatchError,
     FilterUnitConversionUnsupportedError,
@@ -206,20 +207,26 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
             spec_id=population.spec_id,
             columns=off_series,
         )
-    predicates: list[CategoryMatchPredicate | PlaceLevelPredicate] = [
+    binding_predicates = [
         CategoryMatchPredicate(column=column, values=values)
         for column, values in population.bindings.items()
     ]
-    predicates += [
-        PlaceLevelPredicate(column=column, level=level)
+    level_predicates = [
+        PlaceLevelPredicate(column=column, level=level, strict=column in population.strict_levels)
         for column, level in population.levels.items()
     ]
     try:
-        return run_filter(frame, predicates=predicates, span=admitted.span).frame.table
+        narrowed = frame
+        if binding_predicates:
+            narrowed = run_filter(narrowed, predicates=binding_predicates, span=admitted.span).frame
+        if level_predicates:
+            narrowed = run_filter(narrowed, predicates=level_predicates, span=admitted.span).frame
+        return narrowed.table
     except (
         FilterUnknownColumnError,
         FilterPredicateTypeMismatchError,
         FilterPredicateValueTypeMismatchError,
+        FilterPlaceLevelUnknownError,
         FilterUnitConversionUnsupportedError,
     ) as exc:
         return _unresolved(
@@ -232,7 +239,7 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
 
 
 def coordinate_text(cell: str | UnitCell | None) -> str | None:
-    """One cell of a series' coordinates as text, in the form `dfo-apis`' assembler
+    """One cell of a series' coordinates as text, in the form `apis`' assembler
     groups it under: a converted unit as `currency/prices[/base_year]`, a composed
     unit as the RFC 8785 text of its JSON object, and any other cell as itself."""
     if isinstance(cell, UnitRequest):

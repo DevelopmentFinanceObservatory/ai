@@ -19,10 +19,10 @@ from dfo_frame_grammar.rolling import latest_anchor
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import RetryMode
 
-# dfo-apis's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
+# The apis service's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
 # whose selection's estimated series count (`_series_estimate`) exceeds this.
 MAX_SERIES_PER_COMPONENT = 24
-# The most rows dfo-apis's assembler draws in one table (`MAX_TABLE_ROWS` in
+# The most rows the apis service's assembler draws in one table (`MAX_TABLE_ROWS` in
 # dfo-data-tools' `assembler/limits.py`): series times periods.
 MAX_TABLE_ROWS = 2_000
 # The catalogue grammar's `maxItems` on a `line_chart` select's one array
@@ -31,7 +31,7 @@ MAX_TABLE_ROWS = 2_000
 LINE_CHART_MAX_VALUES = 8
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
-# dfo-apis's `facet_dimension_names` (dfo-data-tools' `assembler/frame_view.py`):
+# The apis service's `facet_dimension_names` (dfo-data-tools' `assembler/frame_view.py`):
 # the facet columns a select may leave unbound. The platform refuses one only
 # when it splits a series, and its estimate counts an unbound facet as 1.
 _FACET_DIMENSIONS = frozenset({UNIT_COLUMN, *FACET_IDENTITY_COLUMNS})
@@ -76,7 +76,7 @@ def select_binding_ok(
     than one dimension; a `line_chart` array longer than
     `LINE_CHART_MAX_VALUES`; and for every other type, a select whose
     `_series_estimate` exceeds `MAX_SERIES_PER_COMPONENT` (24), the cap
-    dfo-apis's assembler enforces although the catalogue grammar's
+    the apis service's assembler enforces although the catalogue grammar's
     `maxItems` allows an array of 30. `table` may array more than one
     dimension; the catalogue grammar restricts the single-array-dimension
     rule to `line_chart` and `bar_chart`. A non-mapping `select`
@@ -322,7 +322,7 @@ def top_members(
     member's kind or type cell, only the ones one ranking compares
     (`comparable_members`). A member outside them does not move the period.
     Only a member holding a value at the period is ranked. Cells are compared
-    as dfo-apis spells them in a view and a select (`coordinate_text`).
+    as apis spells them in a view and a select (`coordinate_text`).
 
     Returns:
         None when there is nothing to rank honestly: no matching rows, rows
@@ -464,7 +464,7 @@ def _declared_dimensions(view: dict[str, Any]) -> dict[str, int]:
 
 
 def _series_estimate(*, select: dict[str, Any], declared: dict[str, int]) -> int:
-    """dfo-apis's own upper bound on the series `select` resolves to
+    """The apis service's own upper bound on the series `select` resolves to
     (`_check_series_estimate` in dfo-data-tools' `assembler/resolve.py`):
     the product, over every declared dimension, of the bound array's
     length, 1 for a single bound value or an unbound facet column, and

@@ -353,13 +353,13 @@ async def test_the_constant_price_referral_is_reachable() -> None:
 
     assert proposed["outcome"] == "invalid_input", proposed
     issue_codes = {issue["code"] for issue in proposed["detail"]["issues"]}
-    assert "requirement_unmeetable" in issue_codes or "source_unusable" in issue_codes
+    assert "source_unusable" in issue_codes
     action = proposed["action"]
     assert action["call"] == "return_to_planner"
 
     referred = core.return_to_planner(
         kind=ReferralKind(action["arguments"]["kind"]),
-        reason="no operation restates a series in another year's prices",
+        reason="the source states no price basis, so it cannot meet a constant-price ask",
         requirement_id=action["arguments"].get("requirement_id"),
         tool_context=context,
     )

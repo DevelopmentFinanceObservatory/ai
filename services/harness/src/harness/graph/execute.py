@@ -401,7 +401,7 @@ def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any
 
     A tool's `fix` can carry its own `remedy`: one sentence written for the
     end user (`data_mcp.tool_errors`: an `over_ceiling` on
-    `member_cardinality`, and a mint dfo-apis refuses `member_not_resolvable`),
+    `member_cardinality`, and a mint apis refuses `member_not_resolvable`),
     not the code/detail prose the rest of `fix` holds for a retrying caller.
     `plan_done` hands it to the orchestrator under `failed_step`.
     """

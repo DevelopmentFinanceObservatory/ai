@@ -124,10 +124,19 @@ def frame_columns(
     """
     keys = normalize_role_keys(role_keys)
     by_axis = columns_on_axes(axis_by_column, keys)
-    return FrameColumns(
-        role_keys=keys,
-        columns={name: name if name in keys else by_axis.get(name) for name in compiled},
-    )
+
+    def bound(name: str) -> str | None:
+        if name in keys:
+            return name
+        for suffix in ("_type", "_party_kind"):
+            if name.endswith(suffix):
+                role = name.removesuffix(suffix)
+                role_column = by_axis.get(role, role)
+                candidate = f"{role_column}{suffix}" if role_column is not None else None
+                return candidate if candidate in keys else None
+        return by_axis.get(name)
+
+    return FrameColumns(role_keys=keys, columns={name: bound(name) for name in compiled})
 
 
 def columns_on_axes(
@@ -319,6 +328,9 @@ def bound_populations(
                     "stand for two roles"
                 )
             entry[member] = respelled
+        strict_levels = population.get("strict_levels")
+        if isinstance(strict_levels, list):
+            entry["strict_levels"] = [_spelling(name, sides=sides) for name in strict_levels]
         bound.append(entry)
     return list(canonical_populations(bound))
 
@@ -390,7 +402,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # `analysis_mcp.engine` computes it:
 #
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
-#   dfo-apis collapses every member into one series under the family's own
+#   apis collapses every member into one series under the family's own
 #   ref; otherwise the frame holds what the definition binds, unbounded here.
 # - `growth` and `rank` refuse an input holding several StatVars
 #   (`require_single_stat_var`) and stamp the one they read on every row.

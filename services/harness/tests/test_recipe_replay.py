@@ -3,7 +3,7 @@
 The verbs are analysis-mcp's own functions behind a double that counts each call,
 so the frames, traces and pairs are the ones a deployment stores. The mint is
 `Dataset`, which registers a dataset's current frame as data-mcp's mint does.
-dfo-apis is `FakeApis` behind `httpx2.MockTransport`, and the publisher is
+apis is `FakeApis` behind `httpx2.MockTransport`, and the publisher is
 presentation-mcp's `PlatformAssembler.publish_frame` over it. The mounted
 services and data-mcp's real mint are in `test_recipe_replay_integration.py`.
 """
@@ -192,7 +192,7 @@ def _ref(result: ToolResult) -> FrameRef:
 
 
 class Scene:
-    """One dataset, the tools, dfo-apis, and a recipe published from the first version."""
+    """One dataset, the tools, apis, and a recipe published from the first version."""
 
     def __init__(self, store: InMemoryMaterialisationStore) -> None:
         self.store = store
@@ -310,7 +310,7 @@ class Scene:
             )
 
     def growth_of(self, frame: FrameRef) -> dict[str, float]:
-        """Each reporter's value in the rows dfo-apis holds for `frame`."""
+        """Each reporter's value in the rows apis holds for `frame`."""
         return {row["reporter"]: row["value"] for row in self.apis.frames[pair(frame)]}
 
 
@@ -392,7 +392,9 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
 
     assert isinstance(replayed, Replayed), replayed
     (minted,) = scene.dataset.minted
-    assert minted.options == OPTIONS | {"columns": ["party_kind"]}
+    assert minted.options == OPTIONS | {
+        "columns": ["financingProvider_type", "financingRecipient_type", "party_kind"]
+    }
     current = FrameRef(spec_id=SPEC, content_version=SECOND)
     held = await scene.store.get_mint_record(current)
     assert held is not None
@@ -419,7 +421,7 @@ async def test_a_flow_root_minted_with_kinds_keeps_the_stored_normal_form(
 async def test_a_root_minted_without_party_totals_is_minted_with_the_option_again(
     scene: Scene, recorded: dict[str, Any]
 ) -> None:
-    """The option is dfo-apis', sent as recorded and stated again in the replayed recipe,
+    """The option is apis', sent as recorded and stated again in the replayed recipe,
     whose normal form stays."""
     original, recipe = await scene.fixed(recorded)
     scene.dataset.move(SECOND_VALUES)

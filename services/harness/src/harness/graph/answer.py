@@ -205,7 +205,7 @@ def answer_frames(outcome: RunOutcome, *, published: bool = True) -> dict[str, A
 
     Each frame comes with both its pairs (`AnswerFrame`): a final retrieval
     minted with extra columns is described and drawn by its manifest's own
-    pair, which dfo-apis serves, while the store holds it under its
+    pair, which apis serves, while the store holds it under its
     `frame_ref`, the pair the steps reading it were bound to."""
     records = {record.step_id: record for record in presentable_steps(outcome, published=published)}
     answers = outcome.results if isinstance(outcome, Accepted) else outcome.answers
@@ -399,7 +399,7 @@ def _stat_var_totals(
     both sides of a `compare` get their sentence. A retrieval is summed when
     its recorded `get_data` result (`_RecordingSurface.retrieval_manifest`,
     looked up via `getattr` like `link_evidence`) names the StatVars
-    dfo-apis added into the family total
+    apis added into the family total
     (`summed_stat_var_count`). The sentence names the family, states that
     count and who set the reading (`_reading_set_by`), and says when the
     figures add up, or are computed from, recipients the question did not
@@ -753,7 +753,7 @@ def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> 
 
 
 def _family_name(manifest: Mapping[str, Any], source: SelectedSource | None) -> str:
-    """The name narration gives a summed family: the name dfo-apis gave the
+    """The name narration gives a summed family: the name apis gave the
     family (`summed_stat_var_label`), else the name of its source."""
     label = manifest.get("summed_stat_var_label")
     if isinstance(label, str) and label:
@@ -831,7 +831,7 @@ def _total_sentence(
 ) -> str:
     """The sentence stated for one summed family.
 
-    `count` is the StatVars dfo-apis summed, named indicators as the card's
+    `count` is the StatVars apis summed, named indicators as the card's
     attribution names them. It describes the family, so it stays true of
     figures a later filter or verb drew from the sum. `across_recipients`
     is how the answer combines recipients the question did not name

@@ -146,7 +146,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         input_schema_hash="39de2f6a92402cf75bd547315a8d502240e233159b47bece6e2d16bb05aada4c",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
-        # dfo-apis's 45 s search deadline, so a slow search returns dfo-apis's own
+        # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.
         call_timeout_s=60.0,
     ),
@@ -167,7 +167,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         input_schema_hash="9d1e4169bddb8a136e8a978928a6eafc79ff19809d0383d05c1d1ecc120647c9",
         # Above data-mcp's resubmit budget
         # (`data_mcp.resolve_definition_tool.RESUBMIT_CALL_BUDGET_S`, 100 s), itself
-        # above dfo-apis's 90 s deadline for a resubmit whose member walk reads a
+        # above the apis service's 90 s deadline for a resubmit whose member walk reads a
         # family's whole subject set.
         call_timeout_s=110.0,
     ),
@@ -182,7 +182,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_types`, `without_party_totals` and `breakdown` parameters, and
         # `scope.entities` taking a dcid only behind the `dcid:` marker.
-        input_schema_hash="e7609438beb3ceaed7072c71ef7d69488b6dc45635a820814a9c74740fa0f8f6",
+        input_schema_hash="dc4b98b8b3d9e1fdfdd8bc74becd6d7b39f295bcdaf0c38280fc1d791f2c8363",
         # A mint is not safely retryable (`data_mcp.get_data_tool._post_mint`).
         # The call timeout sits above data-mcp's `Settings.get_data_deadline_s`,
         # so get_data returns a result or a typed refusal before it fires.
@@ -207,7 +207,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `change`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="7be1cf6034ecf528d931b4f568700bebb821c69ead44cfaaad8e0e1a1715d1dd",
+        input_schema_hash="666941b52133c221c2eb2cf0b8efcf03120d6d9ae8a336e235a4fa5c9da15d80",
         output_schema_hash="4ea943f4115b61f65a88ba242b83d571e1101c3820b2a37d6a893a048f556684",
     ),
     ToolCapability(
@@ -228,7 +228,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
-        input_schema_hash="f66afdbb23f66fe5e5c225d99b87f4fc8fab0f0b7aa24c3bcc767392f929d591",
+        input_schema_hash="f899ba9c1c3515a8b84911bb1271db33af2ee5536886eb9a40a36d0677d0c635",
         output_schema_hash="4ea943f4115b61f65a88ba242b83d571e1101c3820b2a37d6a893a048f556684",
     ),
     ToolCapability(
@@ -277,7 +277,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `place_level` predicate, the 21-character period operand, a
         # threshold's `rolling`, and the `rolling` and `anchor_key` parameters.
-        input_schema_hash="b647cd47142035a50d5e42427a27354779a2546769ccbc474b90b398832b6ffc",
+        input_schema_hash="1d94a1ec12d1d8305e524fd44e5e1b4f3a6123cf0123d356629089819033cf1b",
         output_schema_hash="4ea943f4115b61f65a88ba242b83d571e1101c3820b2a37d6a893a048f556684",
         empty_is_an_answer=True,
     ),
@@ -298,7 +298,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         tool=_analysis("resolve_anchor"),
         phase=Phase.WORKFLOW,
         implementation_version="1",
-        input_schema_hash="afb07a93ca6902725c8887a86be11f1ad27a74ee4434d74b3676ffd9f325fcf2",
+        input_schema_hash="ba86ada5d7c9dccbc684dafb2f23a8274fadd245e7b8bb3e3fb626e3966a3cd4",
         output_schema_hash="8869a613e4373434d7b1024eede77d1dc6dc57968b2a71690e618ca59794358c",
     ),
 )

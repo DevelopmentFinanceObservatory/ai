@@ -1,4 +1,4 @@
-"""Builders for `POST /api/graph/resolve` results, in the shape dfo-apis' `src/graph_api/README.md`
+"""Builders for `POST /api/graph/resolve` results, in the shape apis' `src/graph_api/README.md`
 documents: every result carries every field, `null` where its status does not use it, and a
 group or region resolved with `expand: ["members"]` carries its members inline."""
 

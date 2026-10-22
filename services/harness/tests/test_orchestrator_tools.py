@@ -240,6 +240,14 @@ def test_no_tool_declaration_names_the_implementation_behind_it():
     assert not named
 
 
+def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
+    declarations = _declarations()
+
+    assert "`other_prices`, each with its spec_id and label" in declarations["search"]
+    ask_user = declarations["ask_user"]
+    assert "An option for a count or prices that a search result names" in ask_user
+
+
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
     """A select is written in the dimension names its own frame's view lists,
     so the examples key on more than one name."""
@@ -1777,7 +1785,7 @@ WIDE_VIEW: dict[str, Any] = {
 }
 
 
-# The pair dfo-apis serves the retrieval under, whatever its rendering.
+# The pair apis serves the retrieval under, whatever its rendering.
 WIDE_REF = {"spec_id": SPEC_AID, "content_version": "cv_" + "c" * 32}
 SUMMED = {"by": ["time_period"], "op": "sum"}
 # The pair the store holds the summed retrieval under, as data-mcp names a
@@ -1990,7 +1998,7 @@ TEN_PROVIDERS: dict[str, dict[str, float]] = {
 
 
 class BarPlatform(WideFrameExecutor):
-    """Draws a bar chart of `values` as dfo-apis binds one. Each selected
+    """Draws a bar chart of `values` as apis binds one. Each selected
     provider's points inside the intent's window, at the latest period every
     one of them holds, written into the catalogue's `bar_chart` payload, whose
     input frame is the one the intent names."""
@@ -2108,7 +2116,7 @@ async def test_make_charts_pins_a_cut_bar_chart_to_the_period_it_ranked_at(
 async def test_a_cut_bar_chart_draws_every_bar_at_the_period_in_its_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A and B share 2024 as well, the period dfo-apis draws two bars at when
+    """A and B share 2024 as well, the period apis draws two bars at when
     no window names another. The payload holds their 2023 values."""
     executor = await _draw_ten(monkeypatch)
 
@@ -2290,7 +2298,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     monkeypatch: pytest.MonkeyPatch, role: str, carried: bool
 ) -> None:
     """Group totals (the largest values here) are left out of the top N, and
-    out of its count, by the kind dfo-apis serves for the same retrieval; the
+    out of its count, by the kind apis serves for the same retrieval; the
     chart is drawn on the frame the model chose. A frame whose rows carry the
     kind or type column is ranked from those rows, with no second retrieval.
     That means parties among totals, or countries typed `Country` and
@@ -2449,7 +2457,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 async def test_make_charts_keeps_the_listed_order_unless_asked_to_rank(
     monkeypatch: pytest.MonkeyPatch, chart: dict[str, Any]
 ) -> None:
-    """dfo-apis orders a bar chart's bars itself, so `order_by_value` leaves
+    """apis orders a bar chart's bars itself, so `order_by_value` leaves
     its select as listed."""
     listed = ["donor/00", "donor/03", "donor/01"]
     select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
@@ -2563,7 +2571,7 @@ SIX_RECIPIENTS = [f"country/R{number}" for number in range(6)]
 
 
 class SixSeriesExecutor(FakeExecutor):
-    """Describes a frame of six series, one for each recipient, as dfo-apis
+    """Describes a frame of six series, one for each recipient, as apis
     lists a dimension, its values with the empty cells dropped. Five series
     are the United States' and the sixth, a total, has no provider."""
 
@@ -2817,14 +2825,16 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     tools, ctx = _tools()
     _, later = _tools()
 
-    options = [{"label": "Republic of the Congo"}, {"label": "DR Congo"}]
+    questions = [
+        {
+            "question": "Which Congo?",
+            "options": [{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+        }
+    ]
 
-    assert _stated(tools["ask_user"]("Which Congo?", [], ctx)) == (
-        "tool_arguments_invalid",
-        "correct_and_retry",
-    )
+    assert "refusal" in tools["ask_user"]([], ctx)
     assert not ctx.actions.skip_summarization
-    asked = tools["ask_user"]("Which Congo?", options, ctx)
+    asked = tools["ask_user"](questions, ctx)
     later.state.update(ctx.state)
     second = tools["plan"]("Congo's GDP", ["Congo's GDP"], later)
 
@@ -2832,13 +2842,16 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     assert ctx.actions.skip_summarization is True
     assert HANDED_OFF not in second
     assert not later.actions.skip_summarization
-    assert pending_action(ctx.state) == PendingAsk(question="Which Congo?", options=options)
+    assert pending_action(ctx.state) == PendingAsk(questions=questions)
     assert "already waiting on ask" in second["error"]
     assert _stated(second) == ("hand_off_pending", "do_not_retry")
 
 
-async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
-    # Search's answer to "Bilateral plus imputed multilateral aid from France to Kenya".
+@pytest.mark.parametrize("constant", [False, True], ids=["counts", "counts_and_prices"])
+async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constant: bool):
+    # Search's answer to "Bilateral plus imputed multilateral aid from France to
+    # Kenya", and the same answer offering the gross count in constant prices
+    # as dfo-apis lists it: axis "unit", labelled by its prices.
     envelope = json.loads(
         (
             Path(__file__).parents[2]
@@ -2848,6 +2861,10 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
             / "resolve_aid_france_kenya.json"
         ).read_text()
     )
+    if constant:
+        envelope["parts"][0]["spec"]["resolved"]["alternative_measures"].append(
+            {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}}
+        )
     tools, ctx = _tools(resolver=_resolver(resolver_digest(envelope)))
 
     found = await tools["search"]("aid from France to Kenya", ctx, [{"variable": "aid"}])
@@ -2857,52 +2874,129 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
     assert part["alternatives"] == [
         {"spec_id": "spec_c67524ce5da3bfd4d94994a76c560b28", "label": "net disbursements"}
     ]
+    assert part.get("other_prices") == (
+        [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
+    )
 
 
 SPEC_NET = "spec_" + "c" * 32
+SPEC_CONSTANT = "spec_" + "e" * 32
 # `FAMILY_BLOCK` counted as gross disbursements, offering net disbursements
-# under its own spec_id, as search's `resolved.alternative_measures` states it.
+# and constant prices, each under its own spec_id, as search's
+# `resolved.alternative_measures` states them.
 COUNTED_BLOCK = {
     **FAMILY_BLOCK,
     "resolved": {
         **FAMILY_BLOCK["resolved"],
         "measure_label": "gross disbursements",
         "alternative_measures": [
-            {"label": "net disbursements", "axis": "what", "definition": {"spec_id": SPEC_NET}}
+            {"label": "net disbursements", "axis": "what", "definition": {"spec_id": SPEC_NET}},
+            {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}},
         ],
     },
 }
 
 
+def _count_question(net: str) -> dict[str, Any]:
+    """`ask_user`'s question on how to count the aid: gross under `SPEC_AID`, net under `net`."""
+    return {
+        "question": "How should aid be counted?",
+        "options": [
+            {"label": "gross disbursements", "spec_id": SPEC_AID},
+            {"label": "net disbursements", "spec_id": net},
+        ],
+    }
+
+
+_PRICES_QUESTION = {
+    "question": "In which prices?",
+    "options": [{"label": "Current US dollars"}, {"label": "Constant 2023 US dollars"}],
+}
+
+
 @pytest.mark.parametrize(
-    ("net", "refused"),
+    ("questions", "refused"),
     [
-        (SPEC_NET, None),
-        ("spec_" + "d" * 32, "which no search result named this turn"),
-        (SPEC_AID, "is on more than one option"),
+        ([_count_question(SPEC_NET), _PRICES_QUESTION], None),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "Current US dollars"},
+                        {"label": "constant prices", "spec_id": SPEC_CONSTANT},
+                    ],
+                },
+            ],
+            None,
+        ),
+        ([_count_question("spec_" + "d" * 32)], "which no search result named this turn"),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "current prices", "spec_id": SPEC_AID},
+                        {"label": "constant prices", "spec_id": SPEC_CONSTANT},
+                    ],
+                },
+            ],
+            f"{SPEC_AID} is on more than one option",
+        ),
+        ([_count_question(SPEC_AID)], "is on more than one option"),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "Which count first?",
+                    "options": [{"label": "net disbursements", "spec_id": SPEC_NET}],
+                },
+            ],
+            f"{SPEC_NET} is on more than one option",
+        ),
+        ([], "it asks 0 questions, and ask_user takes 1 to 3"),
+        ([_PRICES_QUESTION] * 4, "it asks 4 questions, and ask_user takes 1 to 3"),
+        (
+            [_count_question(SPEC_NET), {"question": "In which prices?", "options": []}],
+            "question 'In which prices?' offers no option",
+        ),
     ],
-    ids=["offered", "unnamed", "repeated"],
+    ids=[
+        "offered",
+        "prices_offered",
+        "unnamed",
+        "elected_on_both_first_options",
+        "repeated",
+        "repeated_across_questions",
+        "no_question",
+        "four_questions",
+        "no_option",
+    ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(
-    net: str, refused: str | None
+    questions: list[dict[str, Any]], refused: str | None
 ):
     part = {"variable": "aid", "status": "definite", "spec_id": SPEC_AID}
     tools, ctx = _tools(resolver=_resolver(_digest({**part, "spec_block": COUNTED_BLOCK})))
     await tools["search"]("aid to Kenya", ctx, [{"variable": "aid"}])
-    options = [
-        {"label": "gross disbursements", "spec_id": SPEC_AID},
-        {"label": "net disbursements", "spec_id": net},
-    ]
 
-    asked = tools["ask_user"]("How should aid be counted?", options, ctx)
+    asked = tools["ask_user"](questions, ctx)
 
     if refused is None:
         assert asked[HANDED_OFF] == "ask"
-        assert pending_action(ctx.state).options[1].spec_id == SPEC_NET
+        pending = pending_action(ctx.state)
+        assert [question.question for question in pending.questions] == [
+            "How should aid be counted?",
+            "In which prices?",
+        ]
+        assert pending.questions[0].options[1].spec_id == SPEC_NET
     else:
         assert refused in asked["refusal"]
         assert asked["code"] == ToolErrorCode.REQUEST_INVALID.value
         assert ctx.state.get(ORCHESTRATOR_PENDING_KEY) is None
+        assert ctx.state.get(ORCHESTRATOR_CALLS_KEY, {}).get("ask_user") is None
 
 
 # Search's answer to "Bilateral plus imputed multilateral aid from France to
@@ -2942,12 +3036,71 @@ def _net_family_envelope() -> dict[str, Any]:
     }
 
 
-async def _searched_france_kenya(definition_surface) -> tuple[dict[str, Any], Any, FakeExecutor]:
-    """The tools after one search for aid from France to Kenya, with the
-    conversation's identities on record as `harness.studio` keeps them."""
+# The net count in constant prices, which the constant-prices sibling of the
+# elected gross count offers as its other count.
+FRANCE_KENYA_NET_CONSTANT = "spec_" + "d" * 32
+
+
+def _prices_offered() -> dict[str, Any]:
+    """Search's answer for aid from France to Kenya with its one sibling, under
+    `FRANCE_KENYA_NET`'s spec_id, offered as the gross count in constant
+    prices (axis `unit`)."""
+    envelope = copy.deepcopy(FRANCE_KENYA)
+    (sibling,) = envelope["parts"][0]["spec"]["resolved"]["alternative_measures"]
+    sibling.update(axis="unit", label="constant prices")
+    return envelope
+
+
+def _constant_prices_envelope() -> dict[str, Any]:
+    """Search's answer for the constant-prices sibling's definition: the gross
+    count search elected, offering current prices back and the net count in
+    constant prices."""
+    envelope = _net_family_envelope()
+    resolved = envelope["parts"][0]["spec"]["resolved"]
+    (current,) = resolved["alternative_measures"]
+    net = copy.deepcopy(current)
+    net["definition"]["spec_id"] = FRANCE_KENYA_NET_CONSTANT
+    resolved["alternative_measures"] = [
+        {**net, "label": "net disbursements"},
+        {**current, "axis": "unit", "label": "current prices"},
+    ]
+    resolved["measure_label"] = "gross disbursements"
+    return envelope
+
+
+# How search offers `FRANCE_KENYA_NET` beside the gross count it elected: the
+# search answer, the sibling's own definition, and the lines the offering
+# reading and the sibling's reading render, with `{gross}` and `{net}` for
+# the two spec_ids.
+_SIBLINGS = {
+    "another-count": (
+        FRANCE_KENYA,
+        _net_family_envelope,
+        (
+            "   counted as gross disbursements; other counts: net disbursements [{net}]",
+            "   counted as net disbursements, another count of {gross}",
+        ),
+    ),
+    "other-prices": (
+        _prices_offered(),
+        _constant_prices_envelope,
+        (
+            "   counted as gross disbursements; other prices: constant prices [{net}]",
+            "   counted as gross disbursements in constant prices, other prices of {gross}",
+        ),
+    ),
+}
+
+
+async def _searched_france_kenya(
+    definition_surface, envelope: dict[str, Any] = FRANCE_KENYA
+) -> tuple[dict[str, Any], Any, FakeExecutor]:
+    """The tools after one search for aid from France to Kenya answered by
+    `envelope`, with the conversation's identities on record as
+    `harness.studio` keeps them."""
     executor = FakeExecutor()
     tools = build_orchestrator_tools(
-        resolver=_resolver(resolver_digest(FRANCE_KENYA)),
+        resolver=_resolver(resolver_digest(envelope)),
         executor=executor,
         definition_surface=definition_surface,
     )
@@ -2960,11 +3113,13 @@ async def _searched_france_kenya(definition_surface) -> tuple[dict[str, Any], An
     return by_name, ctx, executor
 
 
-async def test_a_fetch_of_another_count_reads_its_own_block_and_gains_a_reading():
-    surface = FakeSurface(
-        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
-    )
-    tools, ctx, executor = await _searched_france_kenya(surface)
+@pytest.mark.parametrize("offered", _SIBLINGS)
+async def test_a_fetch_of_a_sibling_reads_its_own_block_and_gains_a_reading(offered: str):
+    """A fetched sibling gains a reading stating the count it reads, linked
+    to the reading that offered it, which a later turn renders."""
+    searched, definition, lines = _SIBLINGS[offered]
+    surface = FakeSurface(ToolCallResult(is_error=False, **search_result_parts(definition())))
+    tools, ctx, executor = await _searched_france_kenya(surface, searched)
 
     found = await tools["fetch"](FRANCE_KENYA_NET, ctx)
 
@@ -2983,18 +3138,51 @@ async def test_a_fetch_of_another_count_reads_its_own_block_and_gains_a_reading(
     )
     assert chosen.fetch is not None and chosen.fetch.summary == "64 observations"
     assert elected.fetch is None
-    assert (elected.other_count_of, chosen.other_count_of) == (None, elected.spec_id)
+    assert (elected.sibling_of, chosen.sibling_of and chosen.sibling_of.spec_id) == (
+        None,
+        elected.spec_id,
+    )
+    rendered = render_readings([elected, chosen], budget=10_000).text.splitlines()
+    for line in lines:
+        assert line.format(gross=elected.spec_id, net=FRANCE_KENYA_NET) in rendered
 
 
+@pytest.mark.parametrize(
+    ("offered", "count_of", "options", "chosen", "rationale"),
+    [
+        (
+            "another-count",
+            True,
+            ("gross disbursements", "net disbursements"),
+            "net disbursements",
+            "Chosen in place of gross disbursements, the measure search elected.",
+        ),
+        (
+            "other-prices",
+            False,
+            ("gross disbursements", "net disbursements"),
+            "gross disbursements",
+            "Search elected gross disbursements for this source.",
+        ),
+    ],
+)
 @pytest.mark.parametrize("gross_first", [True, False], ids=["gross-first", "net-first"])
-async def test_a_fetched_other_count_states_the_measure_search_elected(gross_first: bool):
+async def test_a_fetched_sibling_states_the_measure_search_elected(
+    gross_first: bool,
+    offered: str,
+    count_of: bool,
+    options: tuple[str, ...],
+    chosen: str,
+    rationale: str,
+):
     """The net count's own block names net as its measure and offers gross
     back; a plan pinning net after a fetch of it still says search elected
-    gross, whichever source the planner is shown first."""
-    surface = FakeSurface(
-        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
-    )
-    tools, ctx, _ = await _searched_france_kenya(surface)
+    gross, whichever source the planner is shown first. The gross count in
+    constant prices settles as its own source: its block elects the gross
+    count search elected, and offers the net count in constant prices."""
+    searched, definition, _ = _SIBLINGS[offered]
+    surface = FakeSurface(ToolCallResult(is_error=False, **search_result_parts(definition())))
+    tools, ctx, _ = await _searched_france_kenya(surface, searched)
     await tools["fetch"](FRANCE_KENYA_NET, ctx)
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     shown = [gross, FRANCE_KENYA_NET] if gross_first else [FRANCE_KENYA_NET, gross]
@@ -3011,11 +3199,12 @@ async def test_a_fetched_other_count_states_the_measure_search_elected(gross_fir
         "counted_as", FRANCE_KENYA_NET, choice, user=None
     )
 
-    assert pins[FRANCE_KENYA_NET].other_count_of == gross
+    assert pins[FRANCE_KENYA_NET].settled
+    assert pins[FRANCE_KENYA_NET].other_count_of == (gross if count_of else None)
     assert (decision.options, decision.chosen, decision.rationale) == (
-        ("gross disbursements", "net disbursements"),
-        "net disbursements",
-        "Chosen in place of gross disbursements, the measure search elected.",
+        options,
+        chosen,
+        rationale,
     )
 
 
@@ -3407,7 +3596,7 @@ _COUNTS = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
     ("counts_result", "counts"),
     [
         (ToolCallResult(is_error=False, text=_COUNTS), _COUNTS),
-        # dfo-apis answers 503 while no search catalogue is published.
+        # apis answers 503 while no search catalogue is published.
         (
             ToolCallResult(is_error=True, structured_content={"code": "service_unavailable"}),
             COUNTS_UNAVAILABLE,
@@ -3605,7 +3794,7 @@ async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation
 
 
 class EmptyExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real zero-row mint (Kenya health spending,
+    """get_data's outcome for apis' real zero-row mint (Kenya health spending,
     1960-1970, on dev 2026-10-07): 200, `coverage.rows` 0 and an `empty_result` warning."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
@@ -3669,7 +3858,7 @@ async def test_fetch_of_empty_data_through_an_equivalent_spec_records_it_under_i
 
 
 class FacetRefusingExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real refusal of a Euro unit on Kenya and Ghana
+    """get_data's outcome for apis' real refusal of a Euro unit on Kenya and Ghana
     health spending (dev, 2026-10-07)."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):

@@ -2,7 +2,7 @@
 
 `spec_id = "spec_" + sha256(canonical_bytes).hexdigest()[:32]`, where
 `canonical_bytes` is `rfc8785.dumps(identity)` -- RFC 8785 (JSON
-Canonicalization Scheme) applied to the identity document dfo-apis serialises
+Canonicalization Scheme) applied to the identity document apis serialises
 under `Spec.definition.identity`. This module owns no knowledge of that
 document's shape beyond treating it as an opaque JSON-compatible mapping:
 `dfo-spec-kit` mints and verifies spec_ids the same way internally, but is

@@ -68,7 +68,7 @@ MAX_ENTITIES = 50
 Year = Annotated[int, Field(ge=1900, le=2100)]
 
 # How many places a rank keeps, as a rank requirement and its operation state
-# it. A component draws at most 24 series (dfo-apis's `MAX_SERIES_PER_COMPONENT`),
+# it. A component draws at most 24 series (the apis service's `MAX_SERIES_PER_COMPONENT`),
 # while the narration reads a longer ranking, and a question past 100 places asks
 # for a listing rather than a ranking.
 MAX_RANK_LIMIT = 100
@@ -250,7 +250,7 @@ class Breakdown(StrictModel):
 class StatVarReading(TitlelessEnum):
     """How a retrieval reads a source that binds a family of StatVars.
 
-    `sum` reads the family as one series, its members summed by dfo-apis at
+    `sum` reads the family as one series, its members summed by apis at
     retrieval. `separate` keeps one series per member StatVar.
     """
 
@@ -532,7 +532,7 @@ class PlaceType(TitlelessEnum):
 
 
 class PlaceLevel(TaggedModel):
-    """Keep rows whose place is at `level`, for a requirement that names no place."""
+    """Keep rows whose role's entities are at `level`."""
 
     kind: Literal["place_level"] = Field(
         default="place_level", description="Tags this predicate as a level of place."
@@ -548,6 +548,22 @@ class PlaceLevel(TaggedModel):
             "no level. A place is at a level when this type is one of its types, except that "
             "a place carrying a Eurostat NUTS type is not a country."
         )
+    )
+    role: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "The role whose entities' types this keeps. Omit only when the input has one "
+            "resolvable entity role; old place filters omit it."
+        ),
+    )
+    strict: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        description=(
+            "Refuse if any entity on this role has unknown typing. New country-population "
+            "filters set this true; omitted legacy filters retain their exclude-unknown policy."
+        ),
     )
 
 

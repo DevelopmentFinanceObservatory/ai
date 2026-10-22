@@ -20,7 +20,7 @@ object.
 
 `asyncio.to_thread` crosses the synchronous `google-cloud-storage` client
 into this async protocol, matching the discipline in
-`dfo-apis/src/artifact_store/inventory.py`. Retention is the bucket's own
+`apis/src/artifact_store/inventory.py`. Retention is the bucket's own
 lifecycle rule alone: no sweep and no read-side window filter live here.
 """
 

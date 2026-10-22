@@ -6,7 +6,7 @@ propagate. Twenty codes span four retry modes (`RetryMode`), most with a
 typed factory whose `fix` payload is the machine-readable detail a calling
 model needs to correct and retry, wait, refresh, or give up.
 
-`from_upstream_error` routes a dfo-apis call failure onto this grammar.
+`from_upstream_error` routes an apis service call failure onto this grammar.
 `entity_not_found`, `entity_ambiguous`, `definition_not_held`, and
 `node_not_held` come from resolver/lookup code instead, which already has
 the query/role/candidates/definition_id/dcids in hand. `definition_not_held`
@@ -22,7 +22,7 @@ this code has no
 is never reached through `from_upstream_error` either: its one source is
 `data_mcp.operations.resolve_operation_response`, when the call deadline ends its
 wait on a 202 operation without a manifest. `service_unavailable` has five
-sources: `from_upstream_error` (dfo-apis' own `service_unavailable` code, or a
+sources: `from_upstream_error` (apis' own `service_unavailable` code, or a
 transport error), `mint_unanswered` (a mint POST that got no response), an
 unreachable definition store (`search` and `get_data`), `get_data`'s refusals
 for work the call deadline left no time for, or for a mint the mint ledger
@@ -125,8 +125,8 @@ ENTITY_CANDIDATE_CAP = 5
 ENTITY_DCID_MARKER = "dcid:"
 
 # The ceilings `over_ceiling`'s `fix.ceiling_kind` can name, each by the unit
-# its `count` and `cap` measure. `_UPSTREAM_CEILING_KINDS` maps dfo-apis' own
-# kinds onto these. `candidate_window` is dfo-apis' member walk stopping at its
+# its `count` and `cap` measure. `_UPSTREAM_CEILING_KINDS` maps apis' own
+# kinds onto these. `candidate_window` is apis' member walk stopping at its
 # candidate page before it could prove the family complete;
 # `member_cardinality` is a family counted and found over the member cap.
 CeilingKind = Literal["bytes", "candidate_window", "member_cardinality", "requests", "rows"]
@@ -161,7 +161,7 @@ class EntityCandidate:
 
 @dataclass(frozen=True, kw_only=True)
 class FacetAlternative:
-    """One `ref`/`label` pair dfo-apis offers in place of a rejected facet."""
+    """One `ref`/`label` pair apis offers in place of a rejected facet."""
 
     ref: str
     label: str
@@ -171,7 +171,7 @@ class FacetAlternative:
 class FacetIssue:
     """One axis's worth of a `facet_not_available` refusal.
 
-    Mirrors dfo-apis' `ProblemIssue` (`src/dfo_platform/problem.py`):
+    Mirrors apis' `ProblemIssue` (`src/dfo_platform/problem.py`):
     `mint.py`'s `classify_mint_exception` aggregates every failing axis into
     a single `issues` list before raising, so a refusal can name more than
     one axis at once.
@@ -180,7 +180,7 @@ class FacetIssue:
     axis: str | None
     alternatives: list[FacetAlternative]
     truncated: bool
-    # The issue's own cause, when dfo-apis sends one.
+    # The issue's own cause, when apis sends one.
     code: str | None = None
     detail: str | None = None
 
@@ -212,7 +212,7 @@ class ToolRefusal:
             # field a model actually acts on.
             return RetryMode.DO_NOT_RETRY
         if self.code is ToolErrorCode.DEFAULT_FACET_UNDEFINED:
-            # dfo-apis' `retryable` says whether the same request might succeed
+            # apis' `retryable` says whether the same request might succeed
             # (`dfo_platform/problem.py`). When it can't, a changed request can
             # only when an issue lists values to change to.
             if self.fix.get("retryable"):
@@ -269,7 +269,7 @@ class ToolRefusal:
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # Relays dfo-apis' `detail`, `issues[]` (each with its own code and
+        # Relays apis' `detail`, `issues[]` (each with its own code and
         # detail) and `retryable` in `fix`. The message names what was asked
         # for; `get_data` adds the spec_id and the places it was minting, which
         # the operation-poll path does not have.
@@ -392,7 +392,7 @@ class ToolRefusal:
     def upstream_version_changed(
         cls, *, capability_version: str | None, trace_id: str | None = None
     ) -> Self:
-        # dfo-apis raises it when a source's revision, or a rate table's
+        # apis raises it when a source's revision, or a rate table's
         # provenance, moved during materialisation and its own retry did not
         # converge (`materialise/revision.py`, `materialise/rate_tables.py`).
         # This is the synchronous mint's refusal; a queued operation that fails
@@ -768,17 +768,17 @@ class ToolRefusal:
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
-        # dfo-apis refuses a `get_data(stat_vars="sum")` mint with this code when the
+        # apis refuses a `get_data(stat_vars="sum")` mint with this code when the
         # family's StatVars cannot be added into one total: two members are distinct
         # measures with the same codes (gross and net), a member has no decoded code, or
         # the rows span several sources (`datasets_api/groupby.py`). The 422 names the
         # axis in `issues[].axis` and the precondition in `detail` prose. A summed mint
-        # that ran as an operation reports both when dfo-apis stored its refusal, and
+        # that ran as an operation reports both when apis stored its refusal, and
         # otherwise only the code (`cause.code`), so both can be empty. The same
         # request refuses the same way every time. `detail` stays in `fix` for
         # diagnosis. `remedy` is written for the end user, like
         # `over_ceiling`'s: it offers a breakdown by each axis other than `stat_var`
-        # the sum failed on, and dfo-apis names `provenance` when the rows span
+        # the sum failed on, and apis names `provenance` when the rows span
         # several sources. The message's last sentence is for a caller that sets
         # `stat_vars` itself.
         axis_list = list(axes)
@@ -816,13 +816,13 @@ class ToolRefusal:
     ) -> Self:
         # Raised by `data_mcp.operations.resolve_operation_response` once a mint's own
         # 202 operation has not produced a manifest within its share of the call
-        # deadline (`CallBudget.post_mint_reserve_s` is kept back). dfo-apis'
+        # deadline (`CallBudget.post_mint_reserve_s` is kept back). apis'
         # `datasets_api.operation_store.compute_operation_id` hashes
         # `{request_identity, coverage_stamp, rendering}`, so a repeat `get_data` call
         # for this spec_id and scope rejoins the same operation while the dataset's
         # coverage is unchanged, and starts a fresh one once newer coverage lands.
         # Either way the fix is to wait and repeat the call, never to pick a different
-        # spec_id or narrow the request. `last_status` is the last status dfo-apis
+        # spec_id or narrow the request. `last_status` is the last status apis
         # reported, and `last_poll_error` names the last failure when every poll since
         # then failed. A `done`/`failed` operation never runs again, so for those the
         # message states the status and says only that its result was not fetched.
@@ -881,15 +881,15 @@ class ToolRefusal:
     ) -> Self:
         # Raised by `get_data._post_mint` on any `UpstreamTransportError` from the mint
         # POST: a timeout, whether its own `CallBudget.mint_timeout_s` cap or the call
-        # deadline ended it, or a connection failure. A mint within dfo-apis' sync budget
+        # deadline ended it, or a connection failure. A mint within apis' sync budget
         # runs inline and keeps running after its client leaves, with no operation
         # record; only a mint over that budget becomes an operation a repeat submit
         # rejoins (`datasets_api.operations.submit.submit_over_budget`). A repeat call is
         # therefore safe but may run the request again, and a connection failure started
         # nothing. `waits_out_sync_mint` is `CallBudget.waits_out_sync_mint`: when the
-        # call's mint cap is shorter than dfo-apis' own synchronous mint timeout, the mint
+        # call's mint cap is shorter than apis' own synchronous mint timeout, the mint
         # ledger holds the mint until that timeout and `retry_after_s` is the time left.
-        # dfo-apis' mint route materialises a repeat from the start, so a slow inline
+        # apis' mint route materialises a repeat from the start, so a slow inline
         # mint runs out of time on every repeat, and the message names a narrower scope
         # as the way through.
         prefix = f"The mint for {spec_id!r} got no answer after {elapsed_s:.0f}s. "
@@ -930,7 +930,7 @@ class ToolRefusal:
         capability_version: str | None = None,
     ) -> Self:
         # Raised by `MintLedger.admit` for a mint whose request matches one it holds: a
-        # repeat call would start the same work in dfo-apis a second time.
+        # repeat call would start the same work in apis a second time.
         return cls(
             code=ToolErrorCode.SERVICE_UNAVAILABLE,
             message=(
@@ -1236,7 +1236,7 @@ def _facet_alternatives_from_raw(raw: object) -> list[FacetAlternative]:
 def _objects(value: object) -> list[Mapping[str, Any]]:
     """The entries of `value` that are objects, when `value` is a list.
 
-    dfo-apis sends `issues[]` and `alternatives[]` as lists of objects.
+    apis sends `issues[]` and `alternatives[]` as lists of objects.
     Anything else is skipped, so a malformed entry costs the refusal that one
     entry's fields and the refusal itself still reaches the caller.
     """
@@ -1340,7 +1340,7 @@ def _rollup_not_summable_refusal(exc: UpstreamError) -> ToolRefusal:
     )
 
 
-# Every `ceiling_kind` dfo-apis' Datasets surface raises, mapped to the kind
+# Every `ceiling_kind` apis' Datasets surface raises, mapped to the kind
 # this module names it by. The `sync_` and `operation_` kinds are the admission
 # ceilings of a preview (`refuse_preview_over_budget`) and of an operation
 # (`refuse_async_over_ceiling`), counted in the same units as the inline ones.
@@ -1360,7 +1360,7 @@ def _ceiling_kind_from_extensions(extensions: Mapping[str, Any]) -> CeilingKind 
     """The kind the wire's `ceiling_kind` names, or `None` when it names none
     `_UPSTREAM_CEILING_KINDS` maps.
 
-    dfo-apis publishes `ceiling_kind` as a top-level RFC 9457 problem-document
+    apis publishes `ceiling_kind` as a top-level RFC 9457 problem-document
     member, which `_to_upstream_error` files into `UpstreamError.extensions`
     with every other member it doesn't name explicitly. A failed operation
     carries it when the worker stored the refusal. An absent or unmapped kind
@@ -1376,7 +1376,7 @@ def _int_member(extensions: Mapping[str, Any], key: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-# How every spec_id starts (dfo-apis `SpecIdInput.spec_id`). A `member_not_resolvable`
+# How every spec_id starts (apis `SpecIdInput.spec_id`). A `member_not_resolvable`
 # issue names the spec_id as its `member` when the identity as a whole did not resolve.
 _SPEC_ID_PREFIX = "spec_"
 
@@ -1417,7 +1417,7 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
 def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusal | None:
     """Dispatch the upstream-exact codes to their typed factories.
 
-    `code` is the refusal's own code (`_refusal_code`). Several upstream codes
+    `code` is the refusal's own code (`refusal_code`). Several upstream codes
     can share one entry here — `_UPSTREAM_CODE_MAP` is what narrows many wire
     codes onto few `ToolErrorCode`s, this table only needs one factory per
     `ToolErrorCode`. Returns `None` for `upstream_error` and anything
@@ -1469,7 +1469,7 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
         ToolErrorCode.SERVICE_UNAVAILABLE: lambda: ToolRefusal.service_unavailable(
             # Every raise site for this code emits the same generic body
             # (store, registry, graph/LLM infra, and door backpressure
-            # alike), so "a dfo-apis dependency" is what's actually
+            # alike), so "an apis service dependency" is what's actually
             # knowable. Most raise sites do name what's backed up in
             # `detail` (e.g. mint.py, register.py); only the search
             # engine's infra-failure path (app.py) carries none.
@@ -1506,7 +1506,7 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
 
 
 # The poll route's code for an operation that ran and did not complete
-# (dfo-apis' `OperationFailed`). Its body names the refusal that failed the
+# (apis' `OperationFailed`). Its body names the refusal that failed the
 # operation as `cause: {code}`. When the worker stored that refusal, the body
 # also carries its detail, pointer, issues and ceiling fields; otherwise its
 # detail is the poll route's own sentence and it carries none of them.
@@ -1532,7 +1532,7 @@ def _over_ceiling_kind(code: str | None, exc: UpstreamError) -> CeilingKind | No
     return _ceiling_kind_from_extensions(exc.extensions)
 
 
-def _refusal_code(exc: UpstreamError) -> str | None:
+def refusal_code(exc: UpstreamError) -> str | None:
     """The code of the refusal `exc` reports, which picks its `ToolRefusal`.
 
     A failed operation names the refusal that failed it in `cause.code`, the
@@ -1549,9 +1549,9 @@ def _refusal_code(exc: UpstreamError) -> str | None:
 
 
 def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
-    """Translate a dfo-apis call failure into the tool-facing refusal grammar.
+    """Translate an apis service call failure into the tool-facing refusal grammar.
 
-    The refusal's own code (`_refusal_code`) picks the refusal: the problem's
+    The refusal's own code (`refusal_code`) picks the refusal: the problem's
     `code`, or for a failed operation (`operation_failed`) the code of the
     refusal that failed it. A mapped code reaches its typed factory either
     way, so a deferred mint that `rollup_not_summable` failed refuses with the
@@ -1580,7 +1580,7 @@ def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
             capability_version=exc.capability_version,
         )
 
-    code = _refusal_code(exc)
+    code = refusal_code(exc)
     retried_in_place = (
         exc.code == _OPERATION_FAILED_CODE and code in _FAILED_OPERATION_CAUSES_RETRIED_IN_PLACE
     )
@@ -1594,8 +1594,8 @@ def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
     # of `exc.retryable`, since the static per-code table can't vary by
     # instance. The mapped codes avoid this gap because their `retryable`
     # value is a fixed upstream constant per code, verified against real
-    # dfo-apis raise sites. A failed operation records `retryable: false` for
-    # a refusal whose own flag is false (dfo-apis `operations/worker.py`), so
+    # apis raise sites. A failed operation records `retryable: false` for
+    # a refusal whose own flag is false (apis `operations/worker.py`), so
     # a mapped cause keeps it too.
     retry_after_s = _derive_retry_after_s(exc) if exc.retryable or retried_in_place else None
     return ToolRefusal.upstream_error(

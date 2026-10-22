@@ -158,11 +158,15 @@ AMENDMENT_ENTRY_STATE_KEY = "planner:amendment_entry"
 
 # The session-state slot holding the `UnsupportedOperation` of every decline
 # earned in the planner's current entry that the recorded plan may make but
-# need not: a translation that refers a requirement back as unmeetable
-# (`translator.tool._earned_decline`) earns one. It holds for the rest of the
+# need not: a first-draft entry or a translation that refers a requirement
+# back as unmeetable (`translator.tool._earned_decline`) earns one. It holds for the rest of the
 # entry, whatever later plans change, and no plan owes it. Cleared and kept
 # with `UNSUPPORTED_STATE_KEY`.
 OPTIONAL_DECLINES_STATE_KEY = "planner:optional_declines"
+
+# Optional declines that may end the entry when every ask is declined and
+# no evidence requirements remain, including first-draft asks no kind states.
+TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
@@ -909,7 +913,7 @@ def names_no_place(requirement: DatasetRequirement) -> bool:
     """Whether `requirement` names no place: its `across` states the place party.
 
     Its retrieval holds every place with data at every level, or the
-    countries where dfo-apis cannot list them all, so a rank, a total or a
+    countries where apis cannot list them all, so a rank, a total or a
     share over it needs a `PlaceLevel` filter first (`planner.shapes`).
     """
     return any(across_party(word) == "place" for word in requirement.across)
@@ -2332,7 +2336,11 @@ def _dataset_shape(
         *roles,
         *(
             RoleDimension(
-                role=word, requirement_id=requirement.id, open=True, place=place_role(word)
+                role=word,
+                requirement_id=requirement.id,
+                open=True,
+                place=place_role(word),
+                level_filterable=True,
             )
             for word in requirement.across
         ),
@@ -2509,15 +2517,51 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     )
 
 
-def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> FrameShape:
+def _place_level_roles(
+    predicate: PlaceLevel, roles: Sequence[RoleDimension]
+) -> tuple[RoleDimension, ...]:
+    """The one role a level predicate targets, including an unambiguous open flow side."""
+    if predicate.role is not None:
+        return roles_named(roles, predicate.role)
+    places = tuple(role for role in roles if role.place)
+    if places:
+        return places
+    open_roles = tuple(role for role in roles if role.open)
+    return open_roles if len(open_roles) == 1 else ()
+
+
+def _filter_shape(
+    requirement: FilterRequirement,
+    input_shape: FrameShape,
+) -> FrameShape:
     place_level = keeps_one_level(requirement.predicates)
     years = year_filter(input_shape.period, requirement.predicates, drift=input_shape.drift)
     if isinstance(years, str):
         raise ValueError(f"{requirement.id!r}: {years}")
+    levelled_role_keys: set[tuple[Identifier, str | None]] = set()
+    if place_level:
+        for predicate in requirement.predicates:
+            if not isinstance(predicate, PlaceLevel):
+                continue
+            candidates = _place_level_roles(predicate, input_shape.roles)
+            if len(candidates) > 1:
+                named = predicate.role or "an omitted role"
+                raise ValueError(
+                    f"{requirement.id!r}: a place_level filter names {named!r}, which resolves "
+                    f"to {len(candidates)} roles; state one role"
+                )
+            if len(candidates) == 1:
+                levelled_role_keys.add((candidates[0].requirement_id, candidates[0].role))
+    level_available = bool(levelled_role_keys) and all(
+        role.level_filterable
+        for role in input_shape.roles
+        if (role.requirement_id, role.role) in levelled_role_keys
+    )
     reason = shape_rejects(
         ShapeVerb.FILTER,
         input_shape,
         place_level=place_level,
+        place_level_available=level_available,
         period_threshold=states_period_threshold(requirement.predicates),
         years=years,
     )
@@ -2525,7 +2569,11 @@ def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> Fr
         raise ValueError(f"{requirement.id!r}: {reason}")
     narrowed_roles = tuple(p.role for p in requirement.predicates if isinstance(p, EntityIn))
     return filtered(
-        input_shape, narrowed_roles=narrowed_roles, years=years, keeps_one_level=place_level
+        input_shape,
+        narrowed_roles=narrowed_roles,
+        years=years,
+        keeps_one_level=place_level,
+        levelled_role_keys=tuple(levelled_role_keys),
     )
 
 
@@ -4088,7 +4136,10 @@ def _operand_roles(
                 elif len(roles) == 1:
                     selected.extend(roles)
             elif isinstance(predicate, PlaceLevel):
-                selected.extend(role for role in roles if role.place)
+                if predicate.role is not None:
+                    selected.extend(roles_named(roles, predicate.role))
+                else:
+                    selected.extend(role for role in roles if role.place)
     return {(role.role, role.requirement_id) for role in selected}
 
 
@@ -4179,7 +4230,7 @@ class SessionState(Protocol):
 def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
     """`period` as an identity's `requested_window`.
 
-    With `end_open` the range states `start_year` alone, the form dfo-apis
+    With `end_open` the range states `start_year` alone, the form apis
     ends at the current year at every mint
     (`datasets_api.adapter.window_to_identity` writes no `end_year` key
     either), so the definition reaches years published after the plan.
@@ -4435,7 +4486,9 @@ class PinSource(StrictModel):
     is the spec_id of the source that offered this one as another way of
     counting its flow, when only a `fetch` of it settled it
     (`harness.turn_records.SearchReading.other_count_of`): its block then
-    names its own measure, which search did not elect. `asked_roles` are the
+    names its own measure, which search did not elect. A source offered as
+    the same count in other prices has none: its block elects the count
+    search elected for the source that offered it. `asked_roles` are the
     flow parties the search part that settled on it asked for, each a
     `planner.parties.PARTY_ROLES` word, empty when it named none.
     """
@@ -4556,13 +4609,27 @@ def load_optional_declines(state: SessionState) -> frozenset[UnsupportedOperatio
     )
 
 
-def record_optional_decline(state: SessionState, operation: UnsupportedOperation) -> None:
-    """Add `operation` to the declines the planner's current entry earned without requiring."""
+def load_terminal_declines(state: SessionState) -> frozenset[UnsupportedOperation]:
+    """Return the optional declines that may close this planner entry on their own."""
+    return frozenset(
+        UnsupportedOperation(code) for code in state.get(TERMINAL_DECLINES_STATE_KEY) or ()
+    )
+
+
+def record_optional_decline(
+    state: SessionState, operation: UnsupportedOperation, *, terminal: bool = False
+) -> None:
+    """Permit `operation` optionally, and with `terminal` allow it to close the entry alone."""
     recorded = load_optional_declines(state) | {operation}
     state[OPTIONAL_DECLINES_STATE_KEY] = sorted(code.value for code in recorded)
+    if terminal:
+        state[TERMINAL_DECLINES_STATE_KEY] = sorted(
+            code.value for code in load_terminal_declines(state) | {operation}
+        )
 
 
 def clear_unsupported(state: SessionState) -> None:
     """Forget the `unsupported` answers and optional declines, as a new planner entry starts."""
     state[UNSUPPORTED_STATE_KEY] = []
     state[OPTIONAL_DECLINES_STATE_KEY] = []
+    state[TERMINAL_DECLINES_STATE_KEY] = []

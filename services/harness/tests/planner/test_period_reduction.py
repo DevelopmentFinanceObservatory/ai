@@ -465,7 +465,14 @@ def test_a_search_that_named_the_years_admits_no_figure_over_them(
     identity = {"stat_var": "NetODA", "requested_window": window}
     spec_id = spec_id_for(canonicalize(identity))
     pins = _reading_pin_sources(
-        [{"status": "definite", "spec_id": spec_id, "requested_window_kind": "range"}],
+        [
+            {
+                "text": "net ODA",
+                "status": "definite",
+                "spec_id": spec_id,
+                "requested_window_kind": "range",
+            }
+        ],
         [spec_id],
         blocks={spec_id: {"spec_id": spec_id, "definition": {"identity": identity}}},
         earlier=(),

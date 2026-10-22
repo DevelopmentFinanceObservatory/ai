@@ -76,9 +76,9 @@ class Settings(BaseServiceSettings):
     to two per instance. A rollout can leave an old revision still draining
     SSE streams running alongside the new one, so up to four instances hold
     connections at once, and four times two stays within the ten
-    connections dfo-infra's platform Postgres instance reserves for it.
+    connections the infra repository's platform Postgres instance reserves for it.
     `session_store_connect_timeout_s` bounds one connector dial attempt,
-    matching dfo-apis' `DATASET_STORE_CONNECT_TIMEOUT` default. Every one of
+    matching apis' `DATASET_STORE_CONNECT_TIMEOUT` default. Every one of
     these five `session_store_*` fields, and `database_url` itself,
     collapses a blank value to unset, like `studio_api_token` below.
 
@@ -125,11 +125,11 @@ class Settings(BaseServiceSettings):
     A holder of `MCP_API_TOKEN` can name any caller, so a bucket per caller
     would let one client pass the limit by changing a header. Every caller
     therefore shares, and can exhaust, one limit. A tool call over it refuses `rate_limited`. `search` spends a Gemini
-    call in dfo-apis on every request, which is what the bucket protects. The
-    dfo-apis mint slots outside `get_data` calls can hold are capped in
+    call in apis on every request, which is what the bucket protects. The
+    apis mint slots outside `get_data` calls can hold are capped in
     data-mcp, per instance, by `EXTERNAL_MINT_CONCURRENCY`
     (`data_mcp.settings.Settings.external_mint_concurrency`), which counts a
-    mint until dfo-apis has stopped running it. None of these limits applies
+    mint until apis has stopped running it. None of these limits applies
     to the per-server mounts.
 
     `combined_mcp_max_in_flight` caps the tool calls and resource reads the
@@ -144,7 +144,7 @@ class Settings(BaseServiceSettings):
 
     `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) is the bearer
     `POST /api/studio/refresh` takes (`harness.live_refresh`), and the principal
-    this service presents to dfo-apis' frame refresh and render routes. Unset or
+    this service presents to apis' frame refresh and render routes. Unset or
     blank, the route refuses every caller. It must differ from
     `studio_api_token`: the studio routes refuse it, so one value for both would
     close them.
@@ -232,7 +232,7 @@ class Settings(BaseServiceSettings):
     # engine (see the class docstring for the budget these defaults sum to).
     session_store_pool_size: int = 2
     session_store_max_overflow: int = 0
-    # Bounds one Cloud SQL Connector dial attempt, matching dfo-apis'
+    # Bounds one Cloud SQL Connector dial attempt, matching apis'
     # DATASET_STORE_CONNECT_TIMEOUT default.
     session_store_connect_timeout_s: float = 30.0
     mcp_call_timeout_s: float = 60.0

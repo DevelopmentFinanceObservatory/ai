@@ -143,8 +143,8 @@ TRANSIENT_CODES = frozenset(
     {
         "upstream_error",
         # data-mcp also answers this for a `get_data` mint POST that got no response
-        # (`ToolRefusal.mint_unanswered`): dfo-apis may still be running it, and a
-        # repeat call either rejoins the operation dfo-apis recorded for it or runs
+        # (`ToolRefusal.mint_unanswered`): apis may still be running it, and a
+        # repeat call either rejoins the operation apis recorded for it or runs
         # the request again. data-mcp, analysis-mcp and presentation-mcp answer it
         # when the process's frame row budget (`common.row_budget`) has no room for
         # a call's rows, which the same call finds once other calls release theirs.
@@ -187,7 +187,7 @@ STOP_CODES = frozenset(
         "capability_unavailable",
         "entity_not_found",
         "node_not_held",
-        # dfo-apis cannot sum the family a `get_data` asked to sum (a gross/net
+        # apis cannot sum the family a `get_data` asked to sum (a gross/net
         # pair, a code it cannot decode, sources that disagree). `do_not_retry`
         # on the wire; reading the family separately is a different plan.
         "rollup_not_summable",

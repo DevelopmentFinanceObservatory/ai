@@ -659,7 +659,13 @@ def test_a_constant_price_requirement_is_met_by_the_same_base_year(
 ) -> None:
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
-    assert _basis_codes(constant, source(unit_label="constant 2015 US dollars")) == []
+    assert (
+        _basis_codes(
+            constant,
+            source(unit_ref="ConstantUSD_2015", unit_label="constant 2015 US dollars"),
+        )
+        == []
+    )
 
 
 def test_a_constant_price_requirement_fails_on_another_base_year(
@@ -675,13 +681,15 @@ def test_a_constant_price_requirement_fails_on_another_base_year(
     assert (issue.found, issue.required) == (2010, 2015)
 
 
-def test_a_constant_price_requirement_is_unverified_without_a_base_year(
+def test_a_constant_price_requirement_is_refused_without_a_base_year(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
+    # An answer over a source of unknown base year would claim a year it
+    # does not have.
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
     assert _basis_codes(constant, source(unit_label="real US dollars")) == [
-        ("unit_price_basis_unverified", "warning")
+        ("unit_price_basis_unverified", "error")
     ]
 
 
@@ -1102,11 +1110,79 @@ def test_a_retrieval_matching_the_approved_source_meets_the_requirement(
 
     assert errors(issues) == []
     # The unit names its currency but no price basis, which the surface does
-    # not carry yet (dfo-ai#193), so the basis rides along as a note.
+    # not carry yet, so the basis rides along as a note.
     assert [issue.code for issue in issues] == [
         EvidenceIssueCode.UNIT_MATCHES,
         EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
     ]
+
+
+@pytest.mark.parametrize(
+    ("unit_ref", "unit_label", "request_unit", "refused_by"),
+    [
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant 2024 prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            "ConstantUSD_2024",
+            "Constant 2024 US dollars",
+            None,
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            "CurrencyUSD",
+            "US Dollar",
+            {"currency": "USD", "prices": "constant", "base_year": 2024},
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+    ],
+)
+def test_discovery_and_the_manifest_read_a_price_basis_alike(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    unit_ref: str,
+    unit_label: str,
+    request_unit: dict[str, object] | None,
+    refused_by: EvidenceIssueCode | None,
+) -> None:
+    # A retrieved series states its unit as dfo-apis writes it, a request
+    # object or a ref with no label, so a plan accepted at approval is
+    # accepted once retrieved, and one refused at run time never compiles.
+    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2024))
+    identity: dict[str, Any] = {"stat_var": "DebtServicePaid"}
+    if request_unit is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": request_unit}}
+    discovered = source(unit_ref=unit_ref, unit_label=unit_label, identity=identity)
+    retrieved = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", facet={"unit": request_unit or unit_ref})
+        ),
+    )
+
+    def refusals(evidence: RetrievalEvidence) -> list[EvidenceIssueCode]:
+        return [
+            issue.code
+            for issue in errors(check_evidence(constant, evidence))
+            if issue.code.value.startswith("unit")
+        ]
+
+    at_approval = refusals(evidence_from_source(discovered))
+    assert at_approval == refusals(retrieved)
+    assert at_approval == ([refused_by] if refused_by is not None else [])
 
 
 def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(
@@ -1410,7 +1486,7 @@ _BASIS_UNSTATED = ("unit_price_basis_unverified", "warning")
 @pytest.mark.parametrize(
     ("unit", "expected"),
     [
-        # Data Commons unit dcids, as dfo-apis serves the CRS and ONE facets.
+        # Data Commons unit dcids, as apis serves the CRS and ONE facets.
         ("CurrencyUSD", [_MATCHES, _BASIS_UNSTATED]),
         ("dcid:USDollar", [_MATCHES, _BASIS_UNSTATED]),
         ("CurrencyEUR", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
@@ -1558,8 +1634,10 @@ def test_a_place_noun_beside_a_party_word_answers_no_axis_and_names_the_whole_pa
     for axes in ((DONORS,), (RECIPIENTS,), (COUNTRIES,), (), (RECIPIENTS, DONORS)):
         assert open_axes_for((across,), axes) == (
             f"{across!r} narrows a party to its countries, and a source's open axis holds every "
-            f"{party_word}, agencies included; state `across` as {stated_as!r} to cover them "
-            "all, or name the countries in `entities`"
+            f"{party_word}, agencies included; state `across` as {stated_as!r} to open that "
+            "whole side, then add a direct `{kind:place_level, role:<party>, level:Country, "
+            "strict:true}` filter bound to that role and redirect the calculation through that "
+            "filter, or name the countries in `entities`"
         )
 
 
@@ -1867,7 +1945,7 @@ def test_a_place_axis_holding_one_place_needs_no_across(
     )
 
 
-# dfo-apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
+# apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
 # `search` places on a flow axis, and the axis it places it on.
 _SEARCH_ROLE_TEXT_TO_AXIS = {
     "from": "origin",
@@ -2023,7 +2101,7 @@ def _donor_stats(*entities: dict[str, str]) -> pa.Table:
     return _series_stats(_stat("DebtServicePaid", entities=list(entities)))
 
 
-# dfo-apis's mint for education aid to Kenya from every donor: the manifest as
+# The apis service's mint for education aid to Kenya from every donor: the manifest as
 # served and the first rows of its series statistics. The series name each
 # entity's role by declared property (`financingProvider`), where Search names
 # the open donor side `origin`, and the manifest's coverage dimensions state
@@ -2053,7 +2131,7 @@ def _kenya_from(*donors: str) -> pa.Table:
 
 def _recorded_donor_retrieval(*, axes: bool = True) -> RetrievalEvidence:
     """The recorded mint read as evidence; `axes=False` drops each dimension's `axis`,
-    as a dfo-apis that predates the field serves it."""
+    as an apis service that predates the field serves it."""
     manifest = dict(_RECORDED_DONOR_MINT["manifest"])
     if not axes:
         coverage = manifest["coverage"]
@@ -2242,7 +2320,7 @@ def _kenya_from_every_donor(requirement: RequirementFactory) -> DatasetRequireme
 def test_a_summed_retrieval_keeping_its_donors_covers_the_population(
     requirement: RequirementFactory,
 ) -> None:
-    # dfo-apis sums the family and keeps every entity role column, so the
+    # apis sums the family and keeps every entity role column, so the
     # summed frame carries one series per donor under `financingProvider`.
     approved, manifest = _summed_donor_family()
     donors = ("country/FRA", "country/DEU", "country/USA", "country/JPN")
@@ -2723,7 +2801,7 @@ def test_a_retrieval_meets_a_named_set_when_it_holds_a_member_the_approved_sourc
 
 
 # A set Search bound as the one party its dataset publishes as the set's total
-# (dfo-apis `entity_groups[role].total`): the G7 as donor, a resolver group with
+# (apis `entity_groups[role].total`): the G7 as donor, a resolver group with
 # no graph node, and Africa as recipient.
 _TOTAL_GROUPS = (
     ResolvedGroup(role="origin", label="G7", total="GroupOfSeven"),

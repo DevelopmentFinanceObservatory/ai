@@ -20,10 +20,11 @@ GCP_PROJECT := "dev-fin-observatory"
 # Host port for the harness dev server. Also written into .env by `just env`.
 PORT := "8080"
 
-# The platform presentation-mcp talks to. `.env` carries no value and the
-# service default is localhost:8083, where nothing listens, so every search
-# fails silently without this.
-DFO_APIS_URL := "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app"
+# The dfo-apis local runs call. `just apis-proxy` serves the dev deployment on
+# this port, authenticated as your gcloud account, since Cloud Run IAM guards
+# it. A dfo-apis checkout's `just dev` serves a local one on the same port.
+APIS_PORT    := "8083"
+DFO_APIS_URL := "http://localhost:" + APIS_PORT
 
 # The deployed dev harness `ask-dev` targets, so asking it needs no --url
 # typed by hand. Pinned as a literal rather than resolved with `gcloud run
@@ -239,16 +240,24 @@ dev: _check-env
     echo "  analysis-mcp     → http://localhost:{{PORT}}/mcp/analysis/mcp"
     echo "  presentation-mcp → http://localhost:{{PORT}}/mcp/presentation/mcp"
     echo "    (presentation-mcp fetches its release once at startup and mounts no tools"
-    echo "     unless a dfo-apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
+    echo "     unless an apis instance with DFO_PRESENTATION_SURFACE=1 answers)"
     PORT={{PORT}} PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         PRESENTATION_RELEASE_REQUIRED=false uv run --env-file {{ENV_FILE}} harness-server
 
+# Leave running in its own terminal while local runs call dfo-apis. Needs
+# roles/run.invoker on dfo-dev-apis for your gcloud account.
+# Serve the dev dfo-apis on localhost:8083, authenticated as you
+apis-proxy:
+    gcloud run services proxy dfo-dev-apis --region northamerica-northeast1 \
+        --project {{GCP_PROJECT}} --port {{APIS_PORT}}
+
 # Serve the studio surface against the real model and the real platform.
-# Needs GOOGLE_API_KEY in {{ENV_FILE}}. Costs model spend on every turn.
+# Needs GOOGLE_API_KEY in {{ENV_FILE}} and dfo-apis at DFO_APIS_URL (`just
+# apis-proxy`). Costs model spend on every turn.
 # A plan whose steps include an analysis verb runs and narrates its answer,
 # then cannot render a card: the platform refuses a frame_ref an analysis verb
 # minted. The turn still reaches `done` with the figures in prose.
-studio-live: _check-env
+studio-live: _check-env _check-apis
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -z "$(grep -s '^GOOGLE_API_KEY=' {{ENV_FILE}} | cut -d= -f2-)" ]; then
@@ -375,10 +384,11 @@ eval-planner-entry arm *args: _check-env
 eval-planner-entry-validate *args:
     uv run --package harness python evals/planner_entry/validate.py "$@"
 
-# Needs the dfo-apis at DFO_APIS_URL.
+# Needs apis at DFO_APIS_URL (`just apis-proxy`).
 # Record search and skill answers for planner-entry tasks lacking a current recording
-eval-planner-entry-record *args: _check-env
-    uv run --env-file {{ENV_FILE}} --package harness python evals/planner_entry/record.py "$@"
+eval-planner-entry-record *args: _check-env _check-apis
+    DFO_APIS_URL={{DFO_APIS_URL}} uv run --env-file {{ENV_FILE}} --package harness \
+        python evals/planner_entry/record.py "$@"
 
 # Needs the LANGFUSE_* keys in .env; see evals/planner_entry/README.md.
 # Push a planner-entry run directory's records to Langfuse
@@ -471,8 +481,9 @@ bench-frames *args:
 graph-models:
     GRAPH_WIRE_UPDATE=1 uv run pytest services/data-mcp/tests/test_graph_wire.py -q
 
-# Refresh the Graph API schema and capabilities snapshots from a deployed dfo-apis (then `just graph-models`)
-graph-schema url=DFO_APIS_URL:
+# Reads DFO_APIS_URL (`just apis-proxy`) unless given a url.
+# Refresh the Graph API schema and capabilities snapshots from apis (then `just graph-models`)
+graph-schema url=DFO_APIS_URL: (_check-apis url)
     curl -fsS "{{url}}/api/graph/schema" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_schema.json
     curl -fsS "{{url}}/api/graph/capabilities" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))' > services/data-mcp/tests/fixtures/graph_api_capabilities.json
 
@@ -583,6 +594,14 @@ _check-env:
     if [ ! -f "{{ENV_FILE}}" ]; then
         echo "Error: {{ENV_FILE}} not found."
         echo "Run 'just setup' or 'just env' first."
+        exit 1
+    fi
+
+_check-apis url=DFO_APIS_URL:
+    #!/usr/bin/env bash
+    if ! curl -s -o /dev/null --max-time 5 "{{url}}"; then
+        echo "Error: nothing answers at {{url}}." >&2
+        echo "Run 'just apis-proxy' in another terminal, or start dfo-apis locally on that port." >&2
         exit 1
     fi
 

@@ -11,7 +11,8 @@ A record holds what was resolved from beside the result:
 
 - `populations`: the populations the period was taken over, in the spelling
   `common.rolling.canonical_populations` gives them. A population's `levels` is
-  written only when it holds a column to a level.
+  written only when it holds a column to a level; `strict_levels` records the
+  held columns that must classify every entity.
 - `roots`: the `{spec_id, content_version}` pair of each root frame read, sorted.
 - `rule`: the name of the rule that chose the period.
 - `period`: the latest period.
@@ -65,12 +66,15 @@ class AnchorPopulation(BaseModel):
     spec_id: str
     bindings: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     levels: dict[str, str] = Field(default_factory=dict)
+    strict_levels: tuple[str, ...] = ()
 
     @model_serializer(mode="wrap")
     def _without_unset_levels(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         dumped = handler(self)
         if not dumped["levels"]:
             del dumped["levels"]
+        if not dumped["strict_levels"]:
+            del dumped["strict_levels"]
         return dumped
 
 

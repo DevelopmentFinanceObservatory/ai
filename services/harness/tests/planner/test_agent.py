@@ -318,26 +318,59 @@ def _ask_answered_events(
     return [_ask_event([], call_id=call_id), _ask_response(call_id, {"result": result})]
 
 
-def _clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
+def _clarify_ask_event(*questions: list[dict[str, str]]) -> Event:
     """A real ADK event for the graph's own `clarify` interrupt
     (`harness.graph.state.CLARIFY_INTERRUPT`), built through ADK's own
     `create_request_input_event`: this is the shape `_offered_candidates`'s
     `payload` branch reads, distinct from `ask_user`'s flat
     `args["candidates"]` -- `RequestInput.model_dump` nests the caller's own
-    `payload` (where `clarify` puts `candidates`) under `args["payload"]`.
-    Every clarify round shares the fixed interrupt id `"clarify"`
-    (`CLARIFY_INTERRUPT`), which is easy to confuse with `_ask_event`'s
-    per-call id.
+    `payload` under `args["payload"]`. Each argument is one question's
+    candidates, under the ids `q1`, `q2`, ... by position
+    (`harness.graph.state.ask_questions`). Every clarify round shares the
+    fixed interrupt id `"clarify"` (`CLARIFY_INTERRUPT`), which is easy to
+    confuse with `_ask_event`'s per-call id.
     """
+    return create_request_input_event(
+        RequestInput(
+            interrupt_id="clarify",
+            payload={
+                "questions": [
+                    {"id": f"q{number}", "question": f"Question {number}", "candidates": candidates}
+                    for number, candidates in enumerate(questions, start=1)
+                ]
+            },
+        )
+    )
+
+
+def _legacy_clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
+    """The `clarify` interrupt of a single question, with one flat list at
+    `payload["candidates"]`."""
     return create_request_input_event(
         RequestInput(interrupt_id="clarify", payload={"candidates": candidates})
     )
 
 
-def _clarify_answer_event(spec_id: str) -> Event:
+def _option(spec_id: str) -> dict[str, str]:
+    """One question's answer: the candidate `spec_id` picked."""
+    return {"kind": "option", "spec_id": spec_id}
+
+
+_SKIPPED = {"kind": "skipped"}
+
+
+def _clarify_answer_event(*answers: dict[str, str]) -> Event:
     """A real ADK event answering `_clarify_ask_event`, the shape
-    `harness.studio`'s `/interrupt` route actually sends for a clarify pick
-    (`create_request_input_response(CLARIFY_INTERRUPT, {"result": {"spec_id": ...}})`)."""
+    `harness.studio`'s `/interrupt` route actually sends: one answer per question,
+    by position under `q1`, `q2`, ...
+    (`create_request_input_response(CLARIFY_INTERRUPT, {"result": {"answers": ...}})`)."""
+    result = {"answers": {f"q{number}": answer for number, answer in enumerate(answers, start=1)}}
+    part = create_request_input_response("clarify", {"result": result})
+    return Event(content=types.Content(role="user", parts=[part]))
+
+
+def _legacy_clarify_answer_event(spec_id: str) -> Event:
+    """The answer body of a single-question pause: `{"spec_id": ...}`."""
     part = create_request_input_response("clarify", {"result": {"spec_id": spec_id}})
     return Event(content=types.Content(role="user", parts=[part]))
 
@@ -3925,7 +3958,39 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
                 {"spec_id": offered[1], "label": "Net disbursements"},
             ]
         ),
-        _clarify_answer_event(picked),
+        _clarify_answer_event(_option(picked)),
+    ]
+
+
+def _count_and_prices_events(count: dict[str, str], prices: dict[str, str]) -> list[Any]:
+    """One `ask_user` call with two questions, how to count the aid and in which
+    prices, and the answers `count` and `prices` to them. The prices options carry
+    no spec_id, so their ids are the positional `o1` and `o2`."""
+    return [
+        _clarify_ask_event(
+            [
+                {"spec_id": _GROSS, "label": "Gross disbursements"},
+                {"spec_id": _NET, "label": "Net disbursements"},
+            ],
+            [
+                {"spec_id": "o1", "label": "Current prices"},
+                {"spec_id": "o2", "label": "Constant prices"},
+            ],
+        ),
+        _clarify_answer_event(count, prices),
+    ]
+
+
+def _legacy_measure_ask_events(picked: str) -> list[Any]:
+    """The ask of `_measure_ask_events` in the single-question pause shape."""
+    return [
+        _legacy_clarify_ask_event(
+            [
+                {"spec_id": _GROSS, "label": "Gross disbursements"},
+                {"spec_id": _NET, "label": "Net disbursements"},
+            ]
+        ),
+        _legacy_clarify_answer_event(picked),
     ]
 
 
@@ -3943,6 +4008,30 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
             "net disbursements",
             ResolvedBy.PLANNER_DEFAULT,
         ),
+        (
+            _GROSS,
+            _count_and_prices_events(_option(_GROSS), _SKIPPED),
+            "gross disbursements",
+            ResolvedBy.USER,
+        ),
+        (
+            _GROSS,
+            _count_and_prices_events(_SKIPPED, _option("o1")),
+            "gross disbursements",
+            ResolvedBy.PLANNER_DEFAULT,
+        ),
+        (
+            _GROSS,
+            _count_and_prices_events(_SKIPPED, _option(_GROSS)),
+            "gross disbursements",
+            ResolvedBy.PLANNER_DEFAULT,
+        ),
+        (
+            _GROSS,
+            _legacy_measure_ask_events(_GROSS),
+            "gross disbursements",
+            ResolvedBy.USER,
+        ),
     ],
     ids=[
         "elected",
@@ -3951,6 +4040,10 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
         "sibling",
         "sibling-asked",
         "same-label-other-ask",
+        "two-questions-count-answered",
+        "two-questions-count-skipped",
+        "two-questions-id-from-other-question",
+        "legacy-single-candidate-pick",
     ],
 )
 def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
@@ -5186,7 +5279,7 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
-        _clarify_answer_event(SPEC),
+        _clarify_answer_event(_option(SPEC)),
     ]
     dataset, derived = requirements
     elected = decision(
@@ -5222,7 +5315,7 @@ def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> N
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
-        _clarify_answer_event(SPEC),
+        _clarify_answer_event(_option(SPEC)),
         _clarify_ask_event([{"spec_id": other_spec, "label": "c"}]),
     ]
     tool_context = _FakeToolContext()
@@ -7888,12 +7981,14 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     readings = [
         {
+            "text": "aid to Ghana",
             "status": "definite",
             "spec_id": SPEC_GHANA_AID,
             "provenance_ref": CRS,
             "provenance_account": PROVIDER_ACCOUNT,
         },
         {
+            "text": "debt of Ghana",
             "status": "definite",
             "spec_id": SPEC_GHANA_DEBT,
             "provenance_ref": DAC2A,

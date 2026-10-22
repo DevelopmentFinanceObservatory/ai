@@ -1,6 +1,6 @@
 """The `skill://` resources: every skill file, in the layout FastMCP's skill provider uses.
 
-`SkillsProvider` serves three URI shapes, read from dfo-apis' Skills API
+`SkillsProvider` serves three URI shapes, read from apis' Skills API
 through `data_mcp.skills_client`:
 
 - `skill://{id}/SKILL.md`: `SKILL.md` verbatim, with the front matter's
@@ -60,7 +60,7 @@ def refusal_prose(refused: SkillReadRefused, *, skill_id: str, path: str | None 
     """What a failed read of `skill_id` (and `path`) tells a resource or extension caller.
 
     An unmounted Skills API and an index still building get fixed prose. A
-    `service_unavailable` with no Skills API code behind it means dfo-apis is
+    `service_unavailable` with no Skills API code behind it means apis is
     unreachable, and the refusal's own message says so. Every other refusal
     keeps its own message.
     """

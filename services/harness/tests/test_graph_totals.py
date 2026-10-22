@@ -7,7 +7,7 @@ answer frame carries, and `_dropped_key_sentences` the one for each step
 under an answer frame that left keys out.
 
 The plans are compiled by `compile_plan` against the real tool schemas, over
-the spec blocks recorded from dev dfo-apis in
+the spec blocks recorded from dev apis in
 `tests/fixtures/family_spec_blocks.json` where a test quotes a user question.
 Each `get_data` result declares the role keys and coverage dimensions the
 live frame declares: a CRS frame keys on `financingProvider` (origin axis) and

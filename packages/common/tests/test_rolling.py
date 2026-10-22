@@ -220,6 +220,17 @@ def test_a_population_with_no_level_is_spelled_and_keyed_as_before_levels() -> N
     assert canonical_populations([plain, levelled, plain]) == [levelled, plain]
 
 
+def test_a_strict_level_is_canonical_and_changes_the_population_key() -> None:
+    plain = {"spec_id": _AID, "bindings": {}, "levels": {"observationAbout_type": "Country"}}
+    strict = {**plain, "strict_levels": ["observationAbout_type"]}
+    root = {"spec_id": _AID, "content_version": "cv_" + "1" * 32}
+
+    assert canonical_populations([strict]) == [strict]
+    assert anchor_key(populations=[plain], roots=[root], rule="half1") != anchor_key(
+        populations=[strict], roots=[root], rule="half1"
+    )
+
+
 def test_a_level_filter_over_a_root_without_the_type_column_raises() -> None:
     tree = _node("filter", {"predicates": [_level("Country")]}, frame_ref={"root": 0})
 

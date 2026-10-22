@@ -85,6 +85,7 @@ from harness.studio import (
 from harness.studio_state import (
     ConversationState,
     StudioStore,
+    _deserialize_pending,
     _PendingInterrupt,
     land_component,
 )
@@ -368,13 +369,24 @@ def _charts_the_plan() -> tuple[types.Part, ...]:
 
 def _ask(*options: str) -> tuple[types.Part, ...]:
     """A turn that asks the user which reading they meant."""
+    return _ask_questions(("Which reading?", options or ("A", "B")))
+
+
+def _ask_questions(*questions: tuple[str, tuple[str, ...]]) -> tuple[types.Part, ...]:
+    """A turn that asks the user each question, offering its options."""
     return (
         call(
             "ask_user",
-            question="Which reading?",
-            options=[{"label": option} for option in options or ("A", "B")],
+            questions=[
+                {"question": question, "options": [{"label": option} for option in options]}
+                for question, options in questions
+            ],
         ),
     )
+
+
+def _pick(option_id: str) -> dict[str, Any]:
+    return {"kind": "option", "option_id": option_id}
 
 
 def _search(turns: int = 1) -> CannedSearch:
@@ -476,7 +488,13 @@ def _turn_body(message: str = "kenya oda 2023") -> dict[str, Any]:
     return turn_body(message)
 
 
-def _interrupt_body(interrupt_id: str, decision: str, payload: Any = None) -> dict[str, Any]:
+def _interrupt_body(
+    interrupt_id: str,
+    decision: str,
+    payload: Any = None,
+    *,
+    answers: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "kind": "interrupt.response",
         "schema_version": 1,
@@ -486,6 +504,8 @@ def _interrupt_body(interrupt_id: str, decision: str, payload: Any = None) -> di
     }
     if payload is not None:
         body["payload"] = payload
+    if answers is not None:
+        body["answers"] = answers
     return body
 
 
@@ -1400,7 +1420,7 @@ async def test_a_stream_fatal_error_closes_the_activity_lines_left_running_first
 
 async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running() -> None:
     """A takeover ends the stream mid-step, same as a Stop: the step's line
-    would otherwise stay pending forever in Studio, since dfo-website
+    would otherwise stay pending forever in Studio, since website
     matches a later frame to an already-open line by `step_id` and patches
     it in place -- nothing ever resends this step's frame on THIS stream.
     The stream closes the line as failed before the stream-fatal
@@ -1987,18 +2007,100 @@ async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
 
         assert _events(first)[-1] == "elicitation.request"
         elicitation = _frame(first, "elicitation.request")
-        assert elicitation["input"] == "single_select"
-        assert [option["label"] for option in elicitation["options"]] == ["reading A", "reading B"]
+        (question,) = elicitation["questions"]
+        assert question["input"] == "single_select"
+        assert [option["label"] for option in question["options"]] == ["reading A", "reading B"]
 
         second = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(elicitation["interrupt_id"], "answer", elicitation["options"][1]["id"]),
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": _pick(question["options"][1]["id"])},
+            ),
         )
 
     assert _events(second)[-1] == "done"
     assert _frame(second, "message.complete")["text"] == "You meant reading B."
     assert "The user chose: reading B" in request_text(_model(app).requests[-1])
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "ambiguous q\n(then: reading B)"
+
+
+async def test_several_questions_resume_with_every_answer_in_one_reply() -> None:
+    """Two questions share one pause. Each may be left to the agent, the pause
+    as a whole may not be dismissed, and one reply answers both. The turn's
+    record keeps each answer under its question, in words."""
+    app = _app(
+        *_ask_questions(
+            ("How should the aid be counted?", ("Net", "Gross")),
+            ("Which prices?", ("Constant", "Current")),
+        ),
+        _text("Gross it is."),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        assert elicitation.get("skippable", False) is False
+        assert [
+            (q["id"], q["question"], q["skippable"], [o["label"] for o in q["options"]])
+            for q in elicitation["questions"]
+        ] == [
+            ("q1", "How should the aid be counted?", True, ["Net", "Gross"]),
+            ("q2", "Which prices?", True, ["Constant", "Current"]),
+        ]
+        gross = elicitation["questions"][0]["options"][1]["id"]
+
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": _pick(gross), "q2": {"kind": "skipped"}},
+            ),
+        )
+
+    assert _events(second)[-1] == "done"
+    asked = request_text(_model(app).requests[-1])
+    assert "1. How should the aid be counted? The user chose: Gross" in asked
+    assert "2. Which prices? The user left this to you. Go on with Constant." in asked
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "ambiguous q\n(then: How should the aid be counted? Gross)"
+
+
+async def test_the_turn_record_keeps_a_picked_count_under_its_spec_id() -> None:
+    """A pick whose option carries a spec_id is recorded as `label (spec_id)`,
+    so a later turn can tell which series the user settled."""
+    app = _app(
+        search_call("kenya oda 2023", "aid to Kenya"),
+        call(
+            "ask_user",
+            questions=[
+                {
+                    "question": "How should the aid be counted?",
+                    "options": [{"label": "Net", "spec_id": SPEC_A}, {"label": "Gross"}],
+                }
+            ],
+        ),
+        _text("Net it is."),
+        resolver=_search(),
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        assert question["options"][0]["id"] == SPEC_A
+
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(elicitation["interrupt_id"], "answer", answers={"q1": _pick(SPEC_A)}),
+        )
+
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == f"ambiguous q\n(then: Net ({SPEC_A}))"
 
 
 async def test_stop_during_a_pause_invalidates_the_ask_it_left_behind() -> None:
@@ -2026,7 +2128,9 @@ async def test_stop_during_a_pause_invalidates_the_ask_it_left_behind() -> None:
         replay = await client.post(
             "/api/studio/interrupt",
             json=_interrupt_body(
-                elicitation["interrupt_id"], "answer", elicitation["options"][1]["id"]
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": _pick(elicitation["questions"][0]["options"][1]["id"])},
             ),
             headers=AUTH,
         )
@@ -2430,6 +2534,67 @@ async def test_a_different_answer_after_a_crashed_resume_expires_is_refused(
     assert reloaded is not None
     assert plan["interrupt_id"] in reloaded.pending
     assert reloaded.pending[plan["interrupt_id"]].answer == {"decision": "approve", "payload": None}
+
+
+@pytest.mark.parametrize(
+    ("retried", "status"),
+    [pytest.param(0, 200, id="same-answers"), pytest.param(1, 409, id="other-answers")],
+)
+async def test_a_retried_resume_of_an_ask_must_carry_the_answers_that_resumed_it(
+    tmp_path: Path, retried: int, status: int
+) -> None:
+    """A's resume of an answered ask dies on its search, its segment lease
+    left behind. Once the lease expires, B's retry resumes only with the
+    answers A resumed with; other answers to the same question are refused
+    for good."""
+    clock = [1_000.0]
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    resolver = _HangingResolver()
+    app_a = _app(
+        *_ask("reading A", "reading B"),
+        *_card(),
+        resolver=resolver,
+        session_service=session_service,
+        store=store_a,
+    )
+
+    async with _client(app_a) as client_a:
+        first = await _stream(client_a, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        option_ids = [option["id"] for option in elicitation["questions"][0]["options"]]
+        resume = asyncio.ensure_future(
+            _stream(
+                client_a,
+                "/api/studio/interrupt",
+                _interrupt_body(
+                    elicitation["interrupt_id"], "answer", answers={"q1": _pick(option_ids[0])}
+                ),
+            )
+        )
+        await asyncio.wait_for(resolver.entered.wait(), timeout=5)
+        app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+        cancel = await client_a.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        assert cancel.status_code == 204
+        await asyncio.wait_for(resume, timeout=5)
+
+    app_b = _app(_text("Reading A."), session_service=session_service, store=store_b)
+    async with _client(app_b) as client_b:
+        clock[0] += studio_state_module.SEGMENT_TTL_S + 1  # A's segment has expired
+        retry = await client_b.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(
+                elicitation["interrupt_id"], "answer", answers={"q1": _pick(option_ids[retried])}
+            ),
+            headers=AUTH,
+        )
+
+    assert retry.status_code == status
 
 
 async def test_two_concurrent_first_answers_to_one_interrupt_give_one_stream_and_one_409(
@@ -3318,7 +3483,7 @@ async def test_an_edit_patch_on_a_card_holding_no_write_token_recreates_it_in_it
     manifest = _frame(frames, "done")["composition"]
     assert [b["component_id"] for b in manifest["blocks"]] == ["cmp_01test0002"]
     # A create: the stored intent with the patch merged in at the top
-    # level, as dfo-apis `merge_intent` merges a revise, so `select` is
+    # level, as apis `merge_intent` merges a revise, so `select` is
     # replaced whole, and no component_id or token.
     assert executor.calls[-1] == {
         "tool": "write_component",
@@ -3848,7 +4013,7 @@ async def test_a_skipped_ask_resumes_and_hands_the_skip_back() -> None:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
         assert elicitation["skippable"] is True
-        assert elicitation["allow_free_text"] is True
+        assert elicitation["questions"][0]["allow_free_text"] is True
 
         second = await _stream(
             client,
@@ -3869,13 +4034,111 @@ async def test_a_free_text_answer_resumes_in_the_users_own_words() -> None:
         second = await _stream(
             client,
             "/api/studio/interrupt",
-            _interrupt_body(elicitation["interrupt_id"], "answer", "the OECD reading please"),
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": {"kind": "text", "text": "the OECD reading please"}},
+            ),
         )
 
     assert _events(second)[-1] == "done"
     assert "The user answered in their own words: the OECD reading please" in request_text(
         _model(app).requests[-1]
     )
+
+
+async def test_a_pause_opened_before_questions_takes_its_answer_as_a_payload() -> None:
+    """An elicitation stored with flat `option_ids` reads back as one question,
+    and `/interrupt` takes its answer as a single `payload`, a pick of an
+    offered id."""
+    app = _app(*_ask("reading A", "reading B"), _text("You meant reading B."))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        option_id = elicitation["questions"][0]["options"][1]["id"]
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        stored = conversation.pending[elicitation["interrupt_id"]]
+        conversation.pending = _deserialize_pending(
+            {
+                elicitation["interrupt_id"]: {
+                    "adk_id": stored.adk_id,
+                    "kind": "elicitation",
+                    "option_ids": [
+                        option["id"] for option in elicitation["questions"][0]["options"]
+                    ],
+                }
+            }
+        )
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(elicitation["interrupt_id"], "answer", option_id),
+        )
+
+    assert _events(second)[-1] == "done"
+    assert "The user chose: reading B" in request_text(_model(app).requests[-1])
+
+
+# Each answer `/interrupt` refuses to an elicitation of two questions, both
+# skippable on their own, offering options "A"/"B" and "C"/"D".
+_REFUSED_ANSWERS: dict[str, tuple[dict[str, Any], str]] = {
+    "missing-question": ({"answers": {"q1": {"kind": "skipped"}}}, "missing ['q2']"),
+    "extra-question": (
+        {
+            "answers": {
+                "q1": {"kind": "skipped"},
+                "q2": {"kind": "skipped"},
+                "q3": {"kind": "skipped"},
+            }
+        },
+        "extra ['q3']",
+    ),
+    "unknown-option": (
+        {"answers": {"q1": _pick("o9"), "q2": {"kind": "skipped"}}},
+        "option 'o9' is not offered by question 'q1'",
+    ),
+    "payload-instead-of-answers": ({"payload": "o1"}, "carries answers, not a payload"),
+    "no-answers": ({}, "requires answers"),
+    "skip-of-the-whole-pause": ({"decision": "skip"}, "cannot be skipped as a whole"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSED_ANSWERS))
+async def test_an_answer_that_does_not_fit_the_questions_is_refused(case: str) -> None:
+    change, detail = _REFUSED_ANSWERS[case]
+    app = _app(*_ask_questions(("Count?", ("A", "B")), ("Prices?", ("C", "D"))))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        body = {**_interrupt_body(elicitation["interrupt_id"], "answer"), **change}
+        response = await client.post("/api/studio/interrupt", json=body, headers=AUTH)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "binding_invalid"
+    assert detail in response.json()["detail"]
+    assert (
+        elicitation["interrupt_id"]
+        in app.state.studio.store.current(PRINCIPAL, CONVERSATION).pending
+    )
+
+
+async def test_a_question_that_is_the_only_one_cannot_be_skipped_alone() -> None:
+    """A lone question is dismissed with the whole pause, so its own
+    `skipped` answer is refused."""
+    async with _client(_app(*_ask())) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        response = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(
+                elicitation["interrupt_id"], "answer", answers={"q1": {"kind": "skipped"}}
+            ),
+            headers=AUTH,
+        )
+    assert response.status_code == 422
+    assert "question 'q1' cannot be skipped" in response.json()["detail"]
 
 
 # --- auto_add and the add / set_card_meta ops (deltas 11, 13) --------------------
@@ -4038,7 +4301,7 @@ async def test_a_crashing_edit_model_becomes_a_stream_fatal_error_frame() -> Non
     assert "done" not in _events(frames)
 
 
-async def test_answer_without_a_payload_is_refused() -> None:
+async def test_answer_without_answers_is_refused() -> None:
     async with _client(_app(*_ask())) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
         elicitation = _frame(first, "elicitation.request")
@@ -4048,7 +4311,7 @@ async def test_answer_without_a_payload_is_refused() -> None:
             headers=AUTH,
         )
         assert response.status_code == 422
-        assert "requires a text payload" in response.json()["detail"]
+        assert "requires answers" in response.json()["detail"]
         # the interrupt is still pending after the refusal; skipping works
         second = await _stream(
             client,
@@ -4069,6 +4332,21 @@ async def test_approve_with_a_payload_is_refused() -> None:
         )
     assert response.status_code == 422
     assert "does not take a payload" in response.json()["detail"]
+
+
+async def test_answers_to_a_plan_are_refused() -> None:
+    async with _client(_app(*_plan())) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        response = await client.post(
+            "/api/studio/interrupt",
+            json=_interrupt_body(
+                plan["interrupt_id"], "approve", answers={"q1": {"kind": "skipped"}}
+            ),
+            headers=AUTH,
+        )
+    assert response.status_code == 422
+    assert "a plan interrupt takes no answers" in response.json()["detail"]
 
 
 async def test_adding_an_already_composed_component_mints_no_revision() -> None:
