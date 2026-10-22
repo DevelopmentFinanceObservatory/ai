@@ -98,6 +98,7 @@ from planner.records import (
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
+    Predicate,
     RankAmong,
     RankDirection,
     Reduction,
@@ -1496,19 +1497,38 @@ _DECADE = Period(start=2015, end=2024)
 
 
 @pytest.mark.parametrize(
-    ("reduction", "right_is_peak", "right_period", "refused"),
+    ("reduction", "right_is_peak", "right_period", "refused", "open_to"),
     [
-        pytest.param(Reduction.MAX, False, _DECADE, None, id="max-vs-series"),
-        pytest.param(Reduction.MIN, False, _DECADE, None, id="min-vs-series"),
+        pytest.param(Reduction.MAX, False, _DECADE, None, (), id="max-vs-series"),
+        pytest.param(
+            Reduction.MAX,
+            False,
+            _DECADE,
+            "newer data moves the last year",
+            ("debt",),
+            id="max-open-to-the-data-vs-a-fixed-series",
+        ),
+        pytest.param(
+            Reduction.MAX,
+            False,
+            _DECADE,
+            "newer data moves the last year",
+            ("debt", "population"),
+            id="max-vs-a-series-open-to-other-data",
+        ),
+        pytest.param(Reduction.MIN, False, _DECADE, None, (), id="min-vs-series"),
         pytest.param(
             Reduction.MAX,
             False,
             Period(start=2015, end=2019),
             "no year to match",
+            (),
             id="max-vs-a-series-missing-picked-years",
         ),
-        pytest.param(Reduction.SUM, False, _DECADE, "carry single years", id="sum-labels-the-span"),
-        pytest.param(Reduction.MAX, True, _DECADE, "both sides hold", id="max-vs-max"),
+        pytest.param(
+            Reduction.SUM, False, _DECADE, "carry single years", (), id="sum-labels-the-span"
+        ),
+        pytest.param(Reduction.MAX, True, _DECADE, "both sides hold", (), id="max-vs-max"),
     ],
 )
 def test_a_comparison_reads_an_extreme_by_entity_as_single_years(
@@ -1519,15 +1539,22 @@ def test_a_comparison_reads_an_extreme_by_entity_as_single_years(
     right_is_peak: bool,
     right_period: Period,
     refused: str | None,
+    open_to: tuple[str, ...],
 ) -> None:
     # analysis-mcp labels a max or min row with the year its value came from,
     # so the peak over 2018-2022 compares against another source's years,
-    # which have to hold every year a peak may fall in; a sum is labelled
-    # 2018/2022, which matches no single year, and two peaks meet only where
-    # both fell in the same year.
-    dataset = requirement(period=Period(start=2018, end=2022))
+    # which have to hold every year a peak may fall in, today and once newer
+    # data adds years to either. A sum is labelled 2018/2022, which matches
+    # no single year, and two peaks meet only where both fell in the same
+    # year.
+    dataset = requirement(period=Period(start=2018, end=2022), period_end_open="debt" in open_to)
     peak = derived_requirement(reduction=reduction, group_by=(GroupBy.ENTITY,))
-    population = requirement(id="population", measure="population", period=right_period)
+    population = requirement(
+        id="population",
+        measure="population",
+        period=right_period,
+        period_end_open="population" in open_to,
+    )
     requirements: list[EvidenceRequirement] = [dataset, peak, population]
     right_id = population.id
     if right_is_peak:
@@ -1566,19 +1593,135 @@ def _after_peak(kind: str) -> EvidenceRequirement:
         return _rank("peak", id="reader")
     if kind == "aggregate-by-period":
         return AggregateRequirement(**common, reduction=Reduction.SUM, group_by=(GroupBy.PERIOD,))
-    return FilterRequirement(**common, predicates=(PeriodThreshold(op="gte", year=2020),))
+    return FilterRequirement(**common, predicates=(_PEAK_YEAR_FILTERS[kind],))
+
+
+def _years_back(op: str, offset: int) -> PeriodThreshold:
+    """A year threshold `offset` years back from 2022, the newest year, as it follows the newest data."""
+    return PeriodThreshold(op=op, year=2022 + offset, rolling=RelativePeriod(offset=offset))
+
+
+# Filters over the peak: a fixed first year, a fixed last year, and each of
+# them following the newest data, a first year one year later than the
+# peak's own first year as it follows the newest data, and one on an entity
+# alone.
+_PEAK_YEAR_FILTERS = {
+    "year-filter": PeriodThreshold(op="gte", year=2020),
+    "earlier-year-filter": PeriodThreshold(op="gte", year=2017),
+    "upper-year-filter": PeriodThreshold(op="lte", year=2021),
+    "rolling-upper-year-filter": _years_back("lte", 0),
+    "rolling-year-filter": _years_back("gte", -2),
+    "two-years-back-filter": _years_back("lte", -2),
+    "six-years-back-filter": _years_back("gte", -6),
+    "five-years-back-filter": _years_back("gte", -5),
+    "after-ten-years-back-filter": _years_back("gt", -10),
+    "ten-years-back-filter": _years_back("gte", -10),
+    "entity-filter": EntityIn(names=("France",)),
+}
+# Filters in front of the peak: a first year six years back behind a fixed
+# 2018, a first year ten years back, and a last year before the newest.
+_PEAK_INPUT_FILTERS = {
+    "trailing-start": (_years_back("gte", -6), PeriodThreshold(op="gte", year=2018)),
+    "ten-years-back": (_years_back("gte", -10),),
+    "before-the-newest": (_years_back("lt", 0),),
+}
+
+
+_FIRST_PASSED = "can move past the first year the filter keeps"
+_LAST_PASSED = "can move past the last year the filter keeps"
 
 
 @pytest.mark.parametrize(
-    ("kind", "refused"),
+    ("kind", "open_", "before", "refused"),
     [
-        pytest.param("growth", "growth reads each entity's series", id="growth-after-max"),
-        pytest.param("per-period-rank", "rank counts every year", id="per-period-rank-after-max"),
-        pytest.param("collapsing-rank", "rank counts every year", id="collapsing-rank-after-max"),
         pytest.param(
-            "aggregate-by-period", "aggregate by period", id="aggregate-by-period-after-max"
+            "growth", False, None, "growth reads each entity's series", id="growth-after-max"
         ),
-        pytest.param("year-filter", None, id="year-filter-after-max"),
+        pytest.param(
+            "per-period-rank", False, None, "rank counts every year", id="per-period-rank-after-max"
+        ),
+        pytest.param(
+            "collapsing-rank", False, None, "rank counts every year", id="collapsing-rank-after-max"
+        ),
+        pytest.param(
+            "aggregate-by-period",
+            False,
+            None,
+            "aggregate by period",
+            id="aggregate-by-period-after-max",
+        ),
+        pytest.param("year-filter", False, None, None, id="year-filter-after-max"),
+        pytest.param("upper-year-filter", False, None, None, id="upper-year-filter-after-max"),
+        pytest.param("year-filter", True, None, None, id="year-filter-after-max-of-open-years"),
+        pytest.param(
+            "upper-year-filter",
+            True,
+            None,
+            _LAST_PASSED,
+            id="upper-year-filter-after-max-of-open-years",
+        ),
+        pytest.param(
+            "rolling-upper-year-filter",
+            True,
+            None,
+            _LAST_PASSED,
+            id="rolling-upper-year-filter-after-max-of-open-years",
+        ),
+        pytest.param(
+            "rolling-year-filter",
+            True,
+            None,
+            _FIRST_PASSED,
+            id="rolling-year-filter-after-max-of-open-years",
+        ),
+        pytest.param(
+            "entity-filter", True, "trailing-start", None, id="entity-filter-after-a-trailing-start"
+        ),
+        pytest.param(
+            "year-filter", True, "trailing-start", None, id="year-filter-after-a-trailing-start"
+        ),
+        pytest.param(
+            "earlier-year-filter",
+            True,
+            "trailing-start",
+            None,
+            id="earlier-year-filter-after-a-trailing-start",
+        ),
+        pytest.param(
+            "six-years-back-filter",
+            True,
+            "trailing-start",
+            None,
+            id="the-trailing-years-back-after-a-trailing-start",
+        ),
+        pytest.param(
+            "five-years-back-filter",
+            True,
+            "trailing-start",
+            _FIRST_PASSED,
+            id="fewer-years-back-after-a-trailing-start",
+        ),
+        pytest.param(
+            "ten-years-back-filter",
+            True,
+            "ten-years-back",
+            None,
+            id="the-same-years-back-after-a-following-start",
+        ),
+        pytest.param(
+            "after-ten-years-back-filter",
+            True,
+            "ten-years-back",
+            _FIRST_PASSED,
+            id="a-later-year-back-after-a-following-start",
+        ),
+        pytest.param(
+            "two-years-back-filter",
+            True,
+            "before-the-newest",
+            _LAST_PASSED,
+            id="an-earlier-last-year-after-one-before-the-newest",
+        ),
     ],
 )
 def test_a_reader_of_an_extreme_by_entity_follows_its_picked_years(
@@ -1586,15 +1729,37 @@ def test_a_reader_of_an_extreme_by_entity_follows_its_picked_years(
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     kind: str,
+    open_: bool,
+    before: str | None,
     refused: str | None,
 ) -> None:
     # analysis-mcp holds a max by entity as one row per entity, at the year
     # its peak fell in: no series to grow, no year whose entities a per-year
     # reader could set side by side, and one year of each entity's window for
-    # a rank's coverage to count.
-    dataset = requirement(period=Period(start=2018, end=2022))
-    peak = derived_requirement(id="peak", reduction=Reduction.MAX, group_by=(GroupBy.ENTITY,))
-    requirements = [dataset, peak, _after_peak(kind)]
+    # a rank's coverage to count. A year filter keeps the entities whose peak
+    # falls in its years, which over years open to the data a later peak can
+    # leave: past a last year, or behind a first year that follows the newest
+    # further ahead than the peak's own. A peak's year moves only later, so a
+    # fixed first year, or one following the newest no further ahead than
+    # the peak's own first year, keeps every entity it keeps today.
+    dataset = requirement(period=Period(start=2018, end=2022), period_end_open=open_)
+    requirements: list[EvidenceRequirement] = [dataset]
+    if before is not None:
+        requirements.append(
+            FilterRequirement(
+                id="before",
+                decision_ids=["measure"],
+                input_id=dataset.id,
+                predicates=_PEAK_INPUT_FILTERS[before],
+            )
+        )
+    peak = derived_requirement(
+        id="peak",
+        input_id=requirements[-1].id,
+        reduction=Reduction.MAX,
+        group_by=(GroupBy.ENTITY,),
+    )
+    requirements += [peak, _after_peak(kind)]
 
     if refused is not None:
         with pytest.raises(ValidationError, match=refused):
@@ -1657,20 +1822,40 @@ def test_a_rank_window_cutting_a_growths_span_is_refused(
         _plan(_population_decision(decision), evidence_requirements=[dataset, growth, cut])
 
 
+@pytest.mark.parametrize(
+    ("predicates", "window"),
+    [
+        pytest.param((PeriodThreshold(op="eq", year=2020),), {}, id="an-eq"),
+        # The window's first year is one the filter removed, so it ranks 2023.
+        pytest.param(
+            (PeriodThreshold(op="ne", year=2022),),
+            {"window_start": 2022, "window_end": 2023},
+            id="a-window-starting-on-a-removed-year",
+        ),
+        pytest.param(
+            (PeriodThreshold(op="ne", year=2022), PeriodThreshold(op="ne", year=2024)),
+            {"window_start": 2022, "window_end": 2024},
+            id="a-window-ending-on-removed-years",
+        ),
+    ],
+)
 def test_a_rank_over_a_filter_pinning_one_year_needs_no_reduction(
-    decision: DecisionFactory, requirement: RequirementFactory
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    predicates: tuple[PeriodThreshold, ...],
+    window: dict[str, int],
 ) -> None:
     dataset = requirement()
     one_year = FilterRequirement(
         id="in_2020",
         decision_ids=("measure",),
         input_id=dataset.id,
-        predicates=(PeriodThreshold(op="eq", year=2020),),
+        predicates=predicates,
     )
 
     plan = _plan(
         _population_decision(decision),
-        evidence_requirements=[dataset, one_year, _rank(one_year.id)],
+        evidence_requirements=[dataset, one_year, _rank(one_year.id, **window)],
     )
 
     assert plan.requirement("ranked").input_id == one_year.id
@@ -1885,6 +2070,55 @@ def test_a_filter_keeps_one_level() -> None:
                 PlaceLevel(level=PlaceType.CONTINENT),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("predicates", "admitted"),
+    [
+        pytest.param(
+            (PeriodThreshold(op="gte", year=2024), PeriodThreshold(op="gte", year=2024)),
+            False,
+            id="a-year-threshold-twice",
+        ),
+        pytest.param(
+            (ValueThreshold(op="gt", value=1.5), ValueThreshold(op="gt", value=1.5)),
+            False,
+            id="a-value-threshold-twice",
+        ),
+        pytest.param(
+            (EntityIn(names=("France", "Kenya")), EntityIn(names=("Kenya", "France"))),
+            False,
+            id="one-entity-list-twice-in-another-order",
+        ),
+        pytest.param(
+            (
+                PeriodThreshold(op="gte", year=2024, rolling=RelativePeriod(offset=0)),
+                PeriodThreshold(op="gte", year=2024, rolling=RelativePeriod(offset=0)),
+            ),
+            False,
+            id="a-rolling-year-threshold-twice",
+        ),
+        pytest.param(
+            (
+                PeriodThreshold(op="gte", year=2024),
+                PeriodThreshold(op="gte", year=2024, rolling=RelativePeriod(offset=0)),
+            ),
+            True,
+            id="a-fixed-and-a-rolling-threshold-on-one-year",
+        ),
+    ],
+)
+def test_a_filter_states_each_predicate_once(
+    predicates: tuple[Predicate, ...], admitted: bool
+) -> None:
+    """analysis-mcp's filter op spec refuses a predicate stated twice, by its
+    canonical form. A rolling threshold carries its reference there, so it
+    differs from a fixed one on the same year."""
+    if admitted:
+        _countries("gdp", predicates=predicates)
+        return
+    with pytest.raises(ValidationError, match="every predicate must be unique"):
+        _countries("gdp", predicates=predicates)
 
 
 def test_a_series_of_every_place_needs_no_level(
@@ -2275,6 +2509,7 @@ def _patch_of(requirements: list[EvidenceRequirement]) -> None:
             "removed_evidence_requirements": [],
             "declined": [],
             "answered": [],
+            "across_years": [],
         }
     )
 
@@ -2871,7 +3106,7 @@ def test_a_per_axis_share_of_over_a_limited_denominator_fails_naming_the_order_t
 ) -> None:
     # One year leaves the limited rank uncut, but every debtor outside the
     # top five in the numerator has no denominator group, so `run_share_of`
-    # refuses the call at the first one.
+    # leaves each of them out.
     total = requirement(period=Period(start=2022, end=2022))
     bilateral = requirement(
         id="bilateral", measure="bilateral debt service paid", period=Period(start=2022, end=2022)
@@ -3254,7 +3489,7 @@ def test_a_year_filter_excluding_the_one_year_an_earlier_filter_kept_fails_namin
     "predicates",
     [
         (PeriodThreshold(op="eq", year=2018),),
-        (PeriodThreshold(op="eq", year=2018), PeriodThreshold(op="eq", year=2018)),
+        (PeriodThreshold(op="eq", year=2018), PeriodThreshold(op="gte", year=2018)),
         (PeriodThreshold(op="eq", year=2018), PeriodThreshold(op="gt", year=2017)),
         (PeriodThreshold(op="eq", year=2018), PeriodThreshold(op="ne", year=2019)),
     ],
@@ -4657,17 +4892,6 @@ def test_a_rolling_window_names_at_least_one_bound() -> None:
         RollingWindow()
 
 
-def test_a_growth_whose_offsets_span_other_years_than_its_window_is_refused() -> None:
-    assert _rolling_growth("d").window_start == 2019
-
-    with pytest.raises(ValidationError) as refused:
-        _rolling_growth("d", window_start=2020)
-
-    error = _rolling_error(refused.value)
-    assert error.issue is RollingIssue.YEARS_DISAGREE
-    assert error.requirement_ids == ("growth",)
-
-
 def test_a_window_rolling_at_one_end_keeps_any_fixed_year_at_the_other() -> None:
     since = RollingWindow(window_end=RelativePeriod(offset=0))
 
@@ -4690,33 +4914,610 @@ def _windowed_rank(**overrides: Any) -> RankRequirement:
     return RankRequirement(**(fields | overrides))
 
 
-@pytest.mark.parametrize(
-    "window", [{"window_start": None, "window_end": None}, {"window_start": 2021}]
-)
-def test_a_rank_rolling_disagreeing_with_its_window_is_refused(window: dict[str, Any]) -> None:
+def test_a_rank_rolling_a_window_it_does_not_state_is_refused() -> None:
     assert _windowed_rank().rolling == _LAST_FIVE
 
     with pytest.raises(ValidationError) as refused:
-        _windowed_rank(**window)
+        _windowed_rank(window_start=None, window_end=None)
 
     assert _rolling_error(refused.value).issue is RollingIssue.YEARS_DISAGREE
 
 
-def test_rolling_thresholds_of_one_filter_stand_for_one_newest_year() -> None:
-    since = PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5))
-    until = PeriodThreshold(op="lte", year=2024, rolling=RelativePeriod(offset=0))
-    assert FilterRequirement(id="recent", input_id="d", predicates=(since, until))
+_DATASET = "annual_debt_service"
+_OFFSET = {offset: RelativePeriod(offset=offset) for offset in (0, -1, -5)}
 
-    with pytest.raises(ValidationError) as refused:
-        FilterRequirement(
-            id="recent",
-            input_id="d",
-            predicates=(since, until.model_copy(update={"year": 2023})),
-        )
 
-    error = _rolling_error(refused.value)
+def _years(step_id: str, input_id: str, *thresholds: PeriodThreshold) -> FilterRequirement:
+    return FilterRequirement(
+        id=step_id, decision_ids=["measure"], input_id=input_id, predicates=thresholds
+    )
+
+
+def _gte(year: int, offset: int | None = None) -> PeriodThreshold:
+    return PeriodThreshold(op="gte", year=year, rolling=None if offset is None else _OFFSET[offset])
+
+
+def _lte(year: int, offset: int | None = None) -> PeriodThreshold:
+    return PeriodThreshold(op="lte", year=year, rolling=None if offset is None else _OFFSET[offset])
+
+
+def _eq(year: int, offset: int | None = None) -> PeriodThreshold:
+    return PeriodThreshold(op="eq", year=year, rolling=None if offset is None else _OFFSET[offset])
+
+
+# 2015-2024 retrieved with no end year, read as it is or below a fixed last year.
+_CAP = _years("cap", _DATASET, _lte(2024))
+_ROLLING_START = RollingWindow(window_start=_OFFSET[0])
+_ON_THE_NEWEST = RollingWindow(window_start=_OFFSET[0], window_end=_OFFSET[0])
+
+
+@pytest.mark.parametrize(
+    ("steps", "refused"),
+    [
+        pytest.param(
+            [
+                _windowed_rank(
+                    decision_ids=["measure"],
+                    input_id=_DATASET,
+                    window_start=2024,
+                    rolling=_ROLLING_START,
+                )
+            ],
+            "ranked",
+            id="a-window-of-one-year-whose-start-alone-follows",
+        ),
+        pytest.param(
+            [
+                _windowed_rank(
+                    decision_ids=["measure"],
+                    input_id=_DATASET,
+                    rolling=RollingWindow(window_start=_OFFSET[-5]),
+                )
+            ],
+            "ranked",
+            id="a-window-of-six-years-whose-start-alone-follows",
+        ),
+        pytest.param(
+            [_rolling_growth(_DATASET, rolling=RollingWindow(window_start=_OFFSET[-5]))],
+            "growth",
+            id="a-growth-whose-start-alone-follows",
+        ),
+        pytest.param(
+            [_years("recent", _DATASET, _gte(2019, -5), _lte(2024))],
+            "recent",
+            id="a-filter-from-a-following-year-to-a-fixed-one",
+        ),
+        pytest.param(
+            [_years("recent", _DATASET, _gte(2019, -5), _eq(2022))],
+            "recent",
+            id="a-filter-from-a-following-year-keeping-a-fixed-one",
+        ),
+        pytest.param(
+            [_CAP, _years("recent", "cap", _gte(2019, -5))],
+            "recent",
+            id="a-following-first-year-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [_CAP, _years("recent", "cap", _eq(2024, 0))],
+            "recent",
+            id="the-newest-year-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [_years("cap", _DATASET, _lte(2026)), _years("recent", "cap", _eq(2024, 0))],
+            "recent",
+            id="the-newest-year-over-a-cap-the-data-has-yet-to-reach",
+        ),
+        pytest.param(
+            [
+                _CAP,
+                _windowed_rank(
+                    decision_ids=["measure"],
+                    input_id="cap",
+                    window_start=2024,
+                    rolling=_ON_THE_NEWEST,
+                ),
+            ],
+            "ranked",
+            id="a-window-on-the-newest-year-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [_CAP, _rolling_growth("cap")],
+            "growth",
+            id="a-growth-over-the-last-five-years-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [_CAP, _rolling_growth("cap", rolling=RollingWindow(window_end=_OFFSET[0]))],
+            "growth",
+            id="a-growth-whose-end-alone-follows-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5)),
+                _rolling_growth(
+                    "recent", window_start=2020, rolling=RollingWindow(window_end=_OFFSET[0])
+                ),
+            ],
+            "growth",
+            id="a-growth-from-a-fixed-year-over-a-following-first-year",
+        ),
+        pytest.param(
+            [
+                _years("cap", _DATASET, _gte(2022), _lte(2024)),
+                _years("recent", "cap", _gte(2019, -5)),
+            ],
+            "recent",
+            id="a-following-first-year-behind-a-fixed-one-over-a-fixed-cap",
+        ),
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5)),
+                _CAP,
+                ComparisonRequirement(
+                    id="excess",
+                    decision_ids=["measure"],
+                    minuend=RequirementSide(input_id="recent"),
+                    subtrahend=RequirementSide(input_id="cap"),
+                ),
+            ],
+            "excess",
+            id="a-following-first-year-against-a-fixed-cap-on-the-other-side",
+        ),
+    ],
+)
+def test_a_first_year_following_the_newest_data_below_a_fixed_last_year_is_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    refused: str,
+) -> None:
+    """Each new year moves the first year while the last stays fixed, so the
+    years shrink until none is left, whichever step states either bound."""
+    population = decision(fixes=DecisionFixes(among=RankAmong.POPULATION))
+
+    with pytest.raises(ValidationError) as raised:
+        _plan(population, evidence_requirements=[requirement(period_end_open=True), *steps])
+
+    error = _rolling_error(raised.value)
+    assert error.issue is RollingIssue.YEARS_RUN_OUT
+    assert error.requirement_ids == (refused,)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        pytest.param([_years("recent", _DATASET, _gte(2019, -5))], id="a-following-first-year"),
+        pytest.param(
+            [_CAP, _years("recent", "cap", _gte(2019))], id="a-fixed-first-year-over-a-cap"
+        ),
+        pytest.param(
+            [_CAP, _years("recent", "cap", _lte(2023, -1))], id="a-following-last-year-over-a-cap"
+        ),
+        pytest.param(
+            [
+                _windowed_rank(
+                    decision_ids=["measure"],
+                    input_id=_DATASET,
+                    window_start=2024,
+                    rolling=_ON_THE_NEWEST,
+                )
+            ],
+            id="a-window-on-the-newest-year",
+        ),
+        pytest.param([_rolling_growth(_DATASET)], id="a-growth-over-the-last-five-years"),
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5)),
+                _rolling_growth("recent"),
+            ],
+            id="a-growth-over-the-last-five-years-over-a-following-first-year",
+        ),
+    ],
+)
+def test_a_first_year_following_the_newest_data_with_a_last_year_that_follows_is_admitted(
+    decision: DecisionFactory, requirement: RequirementFactory, steps: list[EvidenceRequirement]
+) -> None:
+    population = decision(fixes=DecisionFixes(among=RankAmong.POPULATION))
+
+    assert _plan(population, evidence_requirements=[requirement(period_end_open=True), *steps])
+
+
+_PEAK = AggregateRequirement(
+    id="peak",
+    decision_ids=["measure"],
+    input_id=_DATASET,
+    reduction=Reduction.MAX,
+    group_by=(GroupBy.ENTITY,),
+)
+_SINCE_2015 = _years("since", _DATASET, _gte(2015))
+_WITH_THE_PEAK = SumOfRequirement(
+    id="pair",
+    decision_ids=["measure"],
+    left=RequirementSide(input_id="since"),
+    right=RequirementSide(input_id="peak"),
+)
+
+
+_WITH_THE_RECENT_PEAK = _WITH_THE_PEAK.model_copy(
+    update={"left": RequirementSide(input_id="recent")}
+)
+_FROM_2015 = "bound the max or min's input from 2015 as well"
+_FOLLOWING = (
+    "bound the max or min's input with the same first year as the other side, following "
+    "the newest data as it does"
+)
+
+
+@pytest.mark.parametrize(
+    ("steps", "refused"),
+    [
+        pytest.param(
+            [_years("recent", _DATASET, _gte(2019, -5)), _PEAK, _SINCE_2015, _WITH_THE_PEAK],
+            _FROM_2015,
+            id="a-sibling-following-first-year",
+        ),
+        pytest.param(
+            [_PEAK, _SINCE_2015, _WITH_THE_PEAK, _years("recent", "pair", _gte(2019, -5))],
+            _FROM_2015,
+            id="a-following-first-year-above-the-pair",
+        ),
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5)),
+                _PEAK.model_copy(update={"input_id": "since"}),
+                _SINCE_2015,
+                _WITH_THE_PEAK,
+            ],
+            None,
+            id="a-max-bounded-from-the-series-first-year",
+        ),
+        pytest.param(
+            [_years("recent", _DATASET, _gte(2019, -5)), _PEAK, _WITH_THE_RECENT_PEAK],
+            _FOLLOWING,
+            id="a-series-from-a-following-first-year",
+        ),
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5)),
+                _PEAK.model_copy(update={"input_id": "recent"}),
+                _WITH_THE_RECENT_PEAK,
+            ],
+            None,
+            id="a-max-bounded-from-the-series-following-first-year",
+        ),
+    ],
+)
+def test_a_max_by_entity_read_from_the_first_year_needs_a_series_reaching_back_as_far(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    refused: str | None,
+) -> None:
+    # A following first year anywhere over the dataset retrieves it from its
+    # first year, so a max by entity read straight from it may fall in any
+    # year back to then, before the first year the series starts at. The
+    # refusal advises bounding the max from that first year, following the
+    # newest data where the series' does.
+    population = decision(fixes=DecisionFixes(among=RankAmong.POPULATION))
+    requirements = [requirement(period_end_open=True), *steps]
+
+    if refused is not None:
+        with pytest.raises(ValidationError, match="back to its dataset's first year") as raised:
+            _plan(population, evidence_requirements=requirements)
+        assert refused in str(raised.value)
+    else:
+        assert _plan(population, evidence_requirements=requirements)
+
+
+_SINCE = PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5))
+_UNTIL = PeriodThreshold(op="lte", year=2024, rolling=RelativePeriod(offset=0))
+
+
+@pytest.mark.parametrize(
+    ("steps", "refused"),
+    [
+        pytest.param(
+            [_rolling_growth(_DATASET, window_start=2020)],
+            ("growth",),
+            id="a-growth-whose-offsets-span-other-years",
+        ),
+        pytest.param(
+            [_windowed_rank(decision_ids=["measure"], input_id=_DATASET, window_start=2021)],
+            ("ranked",),
+            id="a-rank-window-whose-offsets-span-other-years",
+        ),
+        pytest.param(
+            [_years("recent", _DATASET, _SINCE, _UNTIL.model_copy(update={"year": 2023}))],
+            ("recent",),
+            id="two-thresholds-of-one-filter",
+        ),
+        pytest.param(
+            [_years("since", _DATASET, _gte(2024, -1)), _years("recent", "since", _lte(2024, 0))],
+            ("since", "recent"),
+            id="a-filter-over-a-filter",
+        ),
+        pytest.param(
+            [
+                _years("since", _DATASET, _gte(2019, -5)),
+                _windowed_rank(
+                    decision_ids=["measure"],
+                    input_id="since",
+                    window_start=2023,
+                    window_end=2023,
+                    rolling=_ON_THE_NEWEST,
+                ),
+            ],
+            ("since", "ranked"),
+            id="a-rank-window-over-a-filter",
+        ),
+        pytest.param(
+            [
+                _years("since", _DATASET, _gte(2019, -5)),
+                _years("until", _DATASET, _lte(2023, 0)),
+                ComparisonRequirement(
+                    id="excess",
+                    decision_ids=["measure"],
+                    minuend=RequirementSide(input_id="since"),
+                    subtrahend=RequirementSide(input_id="until"),
+                ),
+            ],
+            ("since", "until"),
+            id="the-two-sides-of-a-comparison",
+        ),
+    ],
+)
+def test_rolling_years_one_run_reads_from_two_newest_years_are_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    refused: tuple[str, ...],
+) -> None:
+    """The run writes every rolling year a result reads as one newest year
+    moved by its offset, so years stated under two newest years are not the
+    years it reads, in one step or across the steps one result reads."""
+    population = decision(fixes=DecisionFixes(among=RankAmong.POPULATION))
+
+    with pytest.raises(ValidationError) as raised:
+        _plan(population, evidence_requirements=[requirement(period_end_open=True), *steps])
+
+    error = _rolling_error(raised.value)
     assert error.issue is RollingIssue.YEARS_DISAGREE
-    assert error.requirement_ids == ("recent",)
+    assert error.requirement_ids == refused
+
+
+@pytest.mark.parametrize(
+    ("steps", "ends", "refused"),
+    [
+        pytest.param(
+            [_years("recent", _DATASET, _gte(2021, -5))],
+            {_DATASET: 2024},
+            ("recent",),
+            id="a-filter-whose-newest-year-follows-the-data",
+        ),
+        pytest.param(
+            [_years("since", _DATASET, _gte(2020, -5)), _years("recent", "since", _lte(2025, 0))],
+            {_DATASET: 2024},
+            ("since", "recent"),
+            id="a-filter-over-a-filter-agreeing-on-a-later-year",
+        ),
+        pytest.param(
+            [_rolling_growth(_DATASET, window_start=2020, window_end=2025)],
+            {_DATASET: 2024},
+            ("growth",),
+            id="a-growth-whose-newest-year-follows-the-data",
+        ),
+        pytest.param(
+            [
+                _years("since", _DATASET, _gte(2019, -5)),
+                _years("until", "other", _lte(2024, 0)),
+                ComparisonRequirement(
+                    id="excess",
+                    decision_ids=["measure"],
+                    minuend=RequirementSide(input_id="since"),
+                    subtrahend=RequirementSide(input_id="until"),
+                ),
+            ],
+            {_DATASET: 2024, "other": 2023},
+            ("since", "until"),
+            id="one-side-of-a-comparison-ends-before-the-newest-year",
+        ),
+    ],
+)
+def test_rolling_years_whose_newest_year_follows_the_data_are_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    ends: dict[str, int],
+    refused: tuple[str, ...],
+) -> None:
+    """The newest year a group's rolling years state is one every dataset
+    they rest on holds today, so a later one restates the period Search
+    found."""
+    datasets = [
+        requirement(id=dataset_id, period=Period(start=2015, end=end), period_end_open=True)
+        for dataset_id, end in ends.items()
+    ]
+
+    with pytest.raises(ValidationError) as raised:
+        _plan(decision(), evidence_requirements=[*datasets, *steps])
+
+    error = _rolling_error(raised.value)
+    assert error.issue is RollingIssue.YEARS_DISAGREE
+    assert error.requirement_ids == refused
+
+
+def test_rolling_years_no_result_reads_together_may_state_two_newest_years(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """The run resolves a newest year for each group of rolling steps one
+    result reads (`compiler.rolling.anchor_groups`), so two results over one
+    dataset count from newest years of their own."""
+    steps = [_years("since", _DATASET, _gte(2019, -5)), _years("until", _DATASET, _lte(2023, 0))]
+
+    assert _plan(decision(), evidence_requirements=[requirement(period_end_open=True), *steps])
+
+
+def _sum(step_id: str, left: str, right: str) -> SumOfRequirement:
+    return SumOfRequirement(
+        id=step_id,
+        decision_ids=["measure"],
+        left=RequirementSide(input_id=left),
+        right=RequirementSide(input_id=right),
+    )
+
+
+@pytest.mark.parametrize(
+    ("steps", "refused"),
+    [
+        pytest.param(
+            [_years("newest", "other", _eq(2024, 0)), _sum("both", _DATASET, "newest")],
+            "both",
+            id="a-sum-of-an-open-side-and-a-newest-year-of-the-other",
+        ),
+        pytest.param(
+            [
+                _years("newest", "other", _eq(2024, 0)),
+                QuotientRequirement(
+                    id="both",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id=_DATASET),
+                    denominator=RequirementSide(input_id="newest"),
+                ),
+            ],
+            "both",
+            id="a-quotient-of-an-open-side-over-a-newest-year-of-the-other",
+        ),
+        pytest.param(
+            [_years("before", "other", _lte(2023, -1)), _sum("both", _DATASET, "before")],
+            "both",
+            id="a-sum-of-an-open-side-and-years-before-the-newest-of-the-other",
+        ),
+        pytest.param(
+            [_sum("both", _DATASET, "other"), _years("newest", "both", _eq(2024, 0))],
+            None,
+            id="the-newest-year-of-the-sum",
+        ),
+        pytest.param(
+            [
+                _years("since", _DATASET, _gte(2019, -5)),
+                _years("newest", "other", _eq(2024, 0)),
+                _sum("both", "since", "newest"),
+            ],
+            None,
+            id="an-open-side-whose-own-first-year-follows-the-newest",
+        ),
+        pytest.param(
+            [
+                _years("newest_one", _DATASET, _eq(2024, 0)),
+                _years("newest", "other", _eq(2024, 0)),
+                _sum("both", "newest_one", "newest"),
+            ],
+            None,
+            id="a-newest-year-on-each-side",
+        ),
+    ],
+)
+def test_a_two_sided_step_holds_an_open_side_to_a_newest_year_read_over_it(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    refused: str | None,
+) -> None:
+    """The run reads the newest year over the datasets the rolling steps
+    counting from it reach (`compiler.rolling.anchor_groups`). An open side
+    no such step reaches holds its own newest year, which can lag the other
+    side's, so the pair keeps no year once the other side reports one it
+    lacks. A rolling bound reading both sides counts both."""
+    datasets = [
+        requirement(id=dataset_id, period=Period(start=2015, end=2024), period_end_open=True)
+        for dataset_id in (_DATASET, "other")
+    ]
+
+    if refused is None:
+        assert _plan(decision(), evidence_requirements=[*datasets, *steps])
+        return
+    with pytest.raises(ValidationError) as raised:
+        _plan(decision(), evidence_requirements=[*datasets, *steps])
+
+    error = _rolling_error(raised.value)
+    assert error.issue is RollingIssue.SIDE_UNANCHORED
+    assert error.requirement_ids == (refused,)
+
+
+_NOT_2022 = PeriodThreshold(op="ne", year=2022)
+
+
+@pytest.mark.parametrize(
+    ("steps", "refused"),
+    [
+        pytest.param(
+            [
+                _years(
+                    "recent",
+                    _DATASET,
+                    _SINCE,
+                    PeriodThreshold(op="ne", year=2024, rolling=_OFFSET[0]),
+                )
+            ],
+            ("recent",),
+            id="an-ne-that-follows-the-newest-data",
+        ),
+        pytest.param(
+            [_years("recent", _DATASET, _NOT_2022)], ("recent",), id="an-ne-over-an-open-end"
+        ),
+        pytest.param(
+            [_CAP, _years("recent", "cap", _NOT_2022)],
+            ("recent",),
+            id="an-ne-over-a-fixed-cap-of-an-open-end",
+        ),
+        pytest.param(
+            [
+                _years("recent", _DATASET, PeriodThreshold(op="ne", year=2025)),
+                _years("newest", "recent", _eq(2024, 0)),
+            ],
+            ("recent",),
+            id="the-newest-year-over-an-ne-on-a-later-year",
+        ),
+    ],
+)
+def test_an_ne_over_years_newer_data_moves_is_refused(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    refused: tuple[str, ...],
+) -> None:
+    """A year an `ne` removes from years newer data moves can become the
+    newest year, or the one a later bound following the newest data names,
+    which then holds no row, so an `ne` removes a fixed year from fixed years."""
+    with pytest.raises(ValidationError) as raised:
+        _plan(decision(), evidence_requirements=[requirement(period_end_open=True), *steps])
+
+    error = _rolling_error(raised.value)
+    assert error.issue is RollingIssue.EXCLUSION_ROLLS
+    assert error.requirement_ids == refused
+
+
+def test_a_first_year_after_the_newest_year_is_refused() -> None:
+    """`gt` at offset 0 keeps only the years after the newest year at least
+    half the series hold, and none when every series ends on it."""
+    assert PeriodThreshold(op="gt", year=2023, rolling=_OFFSET[-1])
+
+    with pytest.raises(ValidationError):
+        PeriodThreshold(op="gt", year=2024, rolling=_OFFSET[0])
+
+
+def test_an_ne_that_follows_the_newest_data_is_refused_over_fixed_years_too(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """The refusal names the `ne`, before the rule that every rolling year
+    reads a dataset retrieved with `period_end_open` asks for one."""
+    fixed = _years("recent", _DATASET, _NOT_2022)
+    assert _plan(decision(), evidence_requirements=[requirement(), fixed])
+    rolling_ne = _years("recent", _DATASET, PeriodThreshold(op="ne", year=2024, rolling=_OFFSET[0]))
+
+    with pytest.raises(ValidationError) as raised:
+        _plan(decision(), evidence_requirements=[requirement(), rolling_ne])
+
+    assert _rolling_error(raised.value).issue is RollingIssue.EXCLUSION_ROLLS
 
 
 def test_a_rolling_period_over_a_dataset_with_a_fixed_end_is_refused(
@@ -4768,12 +5569,17 @@ def test_a_rolling_threshold_needs_an_open_dataset_too(
                     id="f",
                     input_id="d",
                     predicates=(
-                        PeriodThreshold(op=op, year=2024, rolling=RelativePeriod(offset=0)),
+                        PeriodThreshold(op=op, year=2024, rolling=RelativePeriod(offset=offset)),
                     ),
                 ),
                 from_start,
             )
-            for op, from_start in [("gte", True), ("gt", True), ("eq", True), ("lte", False)]
+            for op, offset, from_start in [
+                ("gte", 0, True),
+                ("gt", -1, True),
+                ("eq", 0, True),
+                ("lte", 0, False),
+            ]
         ),
     ],
 )
@@ -4894,18 +5700,6 @@ def test_an_operation_stating_other_rolling_than_its_requirement_is_a_mismatch()
         id="f", requirement_id="f", input="d", predicates=(PeriodThreshold(op="eq", year=2024),)
     )
     assert mismatches(newest, fixed, {"d": "d"}) == ["predicates"]
-
-
-def test_an_operation_rolling_must_agree_with_its_own_window() -> None:
-    with pytest.raises(ValidationError, match="offsets span 5"):
-        GrowthOperation(
-            id="g",
-            requirement_id="growth",
-            input="d",
-            window_start=2020,
-            window_end=2024,
-            rolling=_LAST_FIVE,
-        )
 
 
 @dataclass(frozen=True)

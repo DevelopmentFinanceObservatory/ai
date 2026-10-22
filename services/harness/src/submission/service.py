@@ -77,6 +77,7 @@ from planner.plan import (
     EvidenceRequirement,
     FixDisagreement,
     FullHistory,
+    OneYearRead,
     PinSource,
     Plan,
     RankRequirement,
@@ -97,6 +98,7 @@ from planner.plan import (
     full_history,
     inputs_of,
     is_search_pin,
+    licences_restated,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -105,12 +107,12 @@ from planner.plan import (
     load_plan_rounds,
     load_unsupported,
     open_window,
+    period_licences_held,
     period_window,
     pin_sources,
+    read_from_first_year,
     recorded_identity,
     roles_not_kept,
-    rolling_readers,
-    rolls_from_its_start,
     search_pin_slot,
     settle_decisions,
     shown_identity,
@@ -198,6 +200,7 @@ class Proposal:
     removed_evidence_requirements: Sequence[Any] = ()
     declined: Sequence[Any] = ()
     answered: Sequence[Any] = ()
+    across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
 
@@ -246,7 +249,12 @@ class Admission:
 
 
 def submit(
-    view: SessionView, proposal: Proposal, *, question_fixed: bool, proposer: Proposer
+    view: SessionView,
+    proposal: Proposal,
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> dict[str, object]:
     """Check `proposal` against `view` and record it, answering as `propose_plan` does.
 
@@ -256,7 +264,13 @@ def submit(
     nothing but an `unsupported` answer. `proposer` is the tool `proposal`
     came through.
     """
-    admitted = admit(view, proposal, question_fixed=question_fixed, proposer=proposer)
+    admitted = admit(
+        view,
+        proposal,
+        question_fixed=question_fixed,
+        reads_user_words=reads_user_words,
+        proposer=proposer,
+    )
     if not isinstance(admitted, Admission):
         return admitted
     view.record_admission(admitted)
@@ -274,13 +288,24 @@ def submit(
 
 
 def admit(
-    view: SessionView, proposal: Proposal, *, question_fixed: bool, proposer: Proposer
+    view: SessionView,
+    proposal: Proposal,
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> Admission | dict[str, object]:
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
-    `question_fixed` is `_resolve_intent`'s. `proposer` is the tool every
-    refusal's `action` names. Writes nothing but an `unsupported` answer
-    (`SessionView.record_unsupported`).
+    `question_fixed` is `_resolve_intent`'s. `reads_user_words` says the
+    planner reads the user's own words in every entry, as the standalone
+    planner and `harness_pair_v1` do; under `harness.planner_seam` it reads
+    them only in an entry the user's amendment opened
+    (`planner.plan.amendment_entry`). Only where it reads them may
+    `proposal.across_years` name a step, and each step it names takes a
+    licence to combine its years (`planner.plan.period_licences_held`).
+    `proposer` is the tool every refusal's `action` names. Writes nothing
+    but an `unsupported` answer (`SessionView.record_unsupported`).
     """
     try:
         # ADK's arg preprocessing silently falls back to raw dicts for the
@@ -297,10 +322,12 @@ def admit(
                 "removed_evidence_requirements": proposal.removed_evidence_requirements,
                 "declined": proposal.declined,
                 "answered": proposal.answered,
+                "across_years": proposal.across_years,
             }
         )
     except ValidationError as exc:
         return _invalid_data(exc, proposer)
+    reads_user_words = reads_user_words or amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
     evidence_requirements = patch.evidence_requirements
@@ -389,7 +416,13 @@ def admit(
     # A pending referral outranks an overridden user decision: answering it
     # may change the patch.
     blocked = (
-        _referral_unanswered(existing, view)
+        _across_years_unread(
+            patch.across_years,
+            requirements=requirements_after,
+            previous=previous,
+            reads_user_words=reads_user_words,
+        )
+        or _referral_unanswered(existing, view)
         or (
             None
             if user_spoke
@@ -442,7 +475,13 @@ def admit(
                 asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
             )
-        stated = plan
+        stated = plan.model_copy(
+            update={
+                "period_licences": period_licences_held(
+                    plan, named=patch.across_years, previous=previous
+                )
+            }
+        )
         plan, copies = _window_pins(
             stated,
             shown=pins,
@@ -461,7 +500,14 @@ def admit(
         if cause is not None:
             view.record_unsupported(cause.operation)
         return _invalid_data(exc, proposer)
-    blocked = _unrecordable(plan, view, stated=stated, previous=previous, proposer=proposer)
+    blocked = _unrecordable(
+        plan,
+        view,
+        stated=stated,
+        previous=previous,
+        reads_user_words=reads_user_words,
+        proposer=proposer,
+    )
     if blocked is not None:
         return blocked
     # The copies this plan pins. A copy that only a replaced plan pinned is
@@ -495,6 +541,7 @@ class _Patch(BaseModel):
     ]
     declined: Annotated[list[Decline], Field(max_length=MAX_DECLINES)]
     answered: Annotated[list[AskAnswer], Field(max_length=MAX_PLAN_ASKS)]
+    across_years: Annotated[list[Identifier], Field(max_length=MAX_PLAN_REQUIREMENTS)]
 
     @model_validator(mode="after")
     def _roles_are_party_words(self) -> _Patch:
@@ -1689,7 +1736,13 @@ def _source_ref_unpicked(
 
 
 def _unrecordable(
-    plan: Plan, view: SessionView, *, stated: Plan, previous: Plan | None, proposer: Proposer
+    plan: Plan,
+    view: SessionView,
+    *,
+    stated: Plan,
+    previous: Plan | None,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
@@ -1707,7 +1760,7 @@ def _unrecordable(
     per member of a party nobody named that no decision states
     (`_result_scope_unstated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
-    against `stated` and `previous`).
+    against `stated`, read with `reads_user_words`).
     """
     if not plan.evidence_requirements:
         return _nothing_to_plan(plan, view) or _invalid_plan(
@@ -1724,7 +1777,7 @@ def _unrecordable(
         or _breakdown_decline_unearned(stated, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
-        or _period_reduction_unstated(stated, view, previous=previous)
+        or _period_reduction_unstated(stated, reads_user_words=reads_user_words)
     )
 
 
@@ -1774,34 +1827,101 @@ def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:
     )
 
 
-def _period_reduction_unstated(
-    plan: Plan, view: SessionView, *, previous: Plan | None
-) -> dict[str, object] | None:
+class OneYear(StrEnum):
+    """The change a `PERIOD_REDUCTION_UNSTATED` refusal offers to have a step read one year.
+
+    Each edits the refused step alone, so no other result's years or inputs
+    move (`planner.plan.one_year_followed`), save those of the refused
+    steps it is offered together with. `WINDOW` sets a rank's own
+    window to the year. `FILTER` has an aggregate read its own input through
+    an `eq` filter on the year. The year is one every series keeps holding
+    as newer data arrives (`planner.plan.YearsHeld.one_year`): the last one
+    the step's input holds, fixed where that year is fixed or a fixed bound
+    stops it, and rolling at the offset newer data moves it by otherwise,
+    or that last year fixed where the rolling one gives a plan
+    `planner.plan._one_year_offered` does not pass. A change is offered
+    only where the plan it gives, alone or with the changes it is offered
+    together with, validates and retrieves every dataset over
+    the window the refused plan does, so it meets no rule the refused plan
+    did not and leaves every other result's years as they were.
+    """
+
+    WINDOW = "window"
+    FILTER = "filter"
+
+
+def _one_year_rolling(offset: int | None, *, rolls: str) -> str:
+    """How a one-year remedy states `rolling` at `offset`, `None` for a fixed year; `rolls` names what rolls."""
+    if offset is None:
+        return "`rolling` unset"
+    year = "the newest year" if offset == 0 else f"the year {-offset} before the newest"
+    return f"{rolls} at offset {offset}, so it keeps {year} as newer data arrives"
+
+
+def _one_year_offer(
+    change: OneYear, read: OneYearRead, together_with: Sequence[str]
+) -> dict[str, object]:
+    """The `one_year` a gap of a `PERIOD_REDUCTION_UNSTATED` refusal offers: `change` on `read`, with the steps it is made together with."""
+    return {
+        "change": change,
+        "year": read.year,
+        "offset": read.offset,
+        "together_with": list(together_with),
+    }
+
+
+def _one_year_together(together_with: Sequence[str]) -> str:
+    """The sentence saying a one-year change is admitted only together with the ones offered to `together_with`, and an empty string when it names none."""
+    if not together_with:
+        return ""
+    steps = " and ".join(repr(step) for step in together_with)
+    return (
+        f" Make this change together with the one-year change offered to {steps}: the plan "
+        "is admitted with all of them, and refused with any one alone."
+    )
+
+
+def _period_reduction_unstated(plan: Plan, *, reads_user_words: bool) -> dict[str, object] | None:
     """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
 
-    The rule is `planner.plan.unstated_period_reductions`, read with whether
-    the planner's entry opened with the user's amendment
-    (`planner.plan.amendment_entry`) and with `previous`, the plan this call
-    amends. For each such step the refusal names the step, the result
-    computed from it and the asks that result answers, and the years
-    reduced, and says those asks do not ask for one figure over them. When
-    another result computed from the step answers an ask across years, the
-    step is asked for, and the refusal points at the unmarked asks. Each is
-    answered by a result of its own that keeps the years or reads one year,
-    or, for a result answering no ask, the result is listed under an ask
-    across years or removed. Otherwise it gives two ways to settle the step,
-    keep the years (`_keep_the_years`) or read one year, and in an amendment
-    entry a third, a decision the user made in their amendment. `detail.gaps` holds
-    one entry per step, in the order the rule finds them.
+    The rule is `planner.plan.unstated_period_reductions`, over the
+    licences `admit` wrote on `plan`. For each such step the refusal names
+    the step, the result computed from it, the asks that result answers and
+    the years reduced, and says those asks do not ask for one figure over
+    them.
+
+    When another result computed from the step answers an ask across years,
+    the step is asked for, and the refusal points at the unmarked asks. Each
+    is answered by a result of its own that keeps the years or reads one
+    year, or, for a result answering no ask, the result is listed under an
+    ask across years or removed.
+
+    Otherwise the refusal gives two ways to settle the step: keep the years
+    (`_keep_the_years`), or read one year, the second only where the step
+    holds a year it can read alone (`planner.plan.YearsHeld.one_year`).
+    Where the planner reads the user's own words (`reads_user_words`), it
+    adds a third, naming the step in `across_years` when those words ask for
+    the figure.
+
+    `detail.gaps` holds one entry per step, in the order the rule finds
+    them. Its `one_year` is the change offered to read one year, with the
+    `OneYear` `change`, the `year`, the `offset` from the anchor it rolls at
+    (`None` for a fixed year), and `together_with`, the other steps whose
+    changes the plan has to make with it (empty where it passes alone).
+    `one_year` is `None` where the step is asked for and keeps its years,
+    and where it holds no year it can read in a plan
+    `planner.plan._one_year_offered` passes, alone or with the others.
     """
-    amended = amendment_entry(view.state)
-    gaps = unstated_period_reductions(plan, amendment_entry=amended, previous=previous)
+    gaps = unstated_period_reductions(plan)
     if not gaps:
         return None
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
+    offered: list[dict[str, object] | None] = []
     for gap in gaps:
         held = gap.held
+        offer: dict[str, object] | None = None
+        read = held.one_year
         years = held.phrase()
         step = repr(gap.step_id)
         output = repr(gap.output_id)
@@ -1831,42 +1951,37 @@ def _period_reduction_unstated(
                 "or remove it."
             )
         elif isinstance(reducing, RankRequirement):
-            fixed = (
-                " with `rolling` unset or naming both at one offset" if held.follows_newest else ""
-            )
-            remedies = (
-                f"To keep the years, set `per_period` to true on {step}. To read one year, set "
-                f"`window_start` and `window_end` on {step} to that year{fixed}."
-            )
-            if amended:
+            remedies = f"To keep the years, set `per_period` to true on {step}."
+            if read is not None:
+                offer = _one_year_offer(OneYear.WINDOW, read, gap.together_with)
                 remedies += (
-                    f" If the user's change to the plan asks for one ranking over {years}, "
-                    f"leave `per_period` false on {step} and cite on it a decision resolved by "
-                    "`user` whose `fixes` names `per_period`."
+                    f" To read one year, set `window_start` and `window_end` on {step} to "
+                    f"{read.year}, with "
+                    f"{_one_year_rolling(read.offset, rolls='`rolling` naming both')}."
+                    f"{_one_year_together(gap.together_with)}"
+                )
+            if reads_user_words:
+                remedies += (
+                    f" If the user's own words ask for one ranking over {years}, leave "
+                    f"`per_period` false on {step} and name {step} in `across_years`."
                 )
         else:
             assert isinstance(reducing, AggregateRequirement)
-            if held.from_first_year:
-                # Another step has the dataset retrieved from its first
-                # year, so a narrower `period` on it bounds nothing.
-                one_year = (
-                    f"have {step} read {held.dataset_id!r} through a `filter` whose "
-                    "`period_threshold` keeps that year alone, with op `eq`"
-                )
-            else:
-                fixed = " with `period_end_open` unset" if held.follows_newest else ""
-                one_year = (
-                    f"narrow the `period` of {gap.dataset_id!r} to that year{fixed} and cite "
-                    f"on {gap.dataset_id!r} a decision whose `fixes` names `period`"
-                )
-            remedies = (
-                f"To keep the years, {_keep_the_years(reducing)}. To read one year, {one_year}."
-            )
-            if amended:
+            remedies = f"To keep the years, {_keep_the_years(reducing)}."
+            if read is not None:
+                offer = _one_year_offer(OneYear.FILTER, read, gap.together_with)
                 remedies += (
-                    f" If the user's change to the plan asks for one figure over {years}, cite "
-                    f"on {step} a decision resolved by `user` whose `fixes` names `group_by`."
+                    f" To read one year, have {step} read its input {reducing.input_id!r} "
+                    f"through a `filter` whose `period_threshold` keeps {read.year} alone, with "
+                    f"op `eq` and {_one_year_rolling(read.offset, rolls='`rolling`')}."
+                    f"{_one_year_together(gap.together_with)}"
                 )
+            if reads_user_words:
+                remedies += (
+                    f" If the user's own words ask for one figure over {years}, name {step} "
+                    "in `across_years`."
+                )
+        offered.append(offer)
         sentences.append(
             f"{step} reduces {years} to one figure, {result} answers {answers}. {unasked}. "
             f"{remedies}"
@@ -1885,11 +2000,41 @@ def _period_reduction_unstated(
                     "from_first_year": gap.held.from_first_year,
                     "follows_newest": gap.held.follows_newest,
                     "until": gap.held.until,
-                    "dataset_requirement_id": gap.dataset_id,
+                    "dataset_requirement_id": gap.held.dataset_id,
+                    "one_year": one_year,
                 }
-                for gap in gaps
+                for gap, one_year in zip(gaps, offered, strict=True)
             ]
         },
+    )
+
+
+def _across_years_unread(
+    across_years: Sequence[str],
+    *,
+    requirements: Sequence[EvidenceRequirement],
+    previous: Plan | None,
+    reads_user_words: bool,
+) -> dict[str, object] | None:
+    """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
+
+    There the orchestrator holds them, and its (across years) mark on an ask
+    is the only statement that the user asked for one figure over the years.
+    A step whose licence `previous` holds as `requirements` state it is a
+    restatement, which grants nothing (`planner.plan.licences_restated`).
+    """
+    if reads_user_words:
+        return None
+    restated = licences_restated(across_years, requirements=requirements, previous=previous)
+    unread = [name for name in across_years if name not in restated]
+    if not unread:
+        return None
+    return _invalid_plan(
+        "`across_years` names the steps whose years the user's own words ask to combine, "
+        "and in this entry you read the orchestrator's brief, not the user's words. Take "
+        f"{', '.join(map(repr, unread))} out of `across_years`. A step the plan already "
+        "licenses keeps its licence without being named, and any other figure or ranking "
+        "over several years answers only an ask the brief marks (across years)."
     )
 
 
@@ -2100,7 +2245,7 @@ def _open_window(
             `None`). `RollingIssue.FRAME_TOO_LARGE` when the history is past
             the ceiling.
     """
-    if not _rolls_from_its_start(plan, requirement):
+    if not _read_from_first_year(plan, requirement):
         return period_window(requirement.period, end_open=True)
     pin = requirement.source_spec_id or ""
     history = _first_year_on_record(pin, shown=shown, read=read)
@@ -2210,14 +2355,6 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     return reads
 
 
-def _rolls_from_its_start(plan: Plan, requirement: DatasetRequirement) -> bool:
-    """Whether a period over `requirement` follows the newest data from its start (`planner.plan.rolls_from_its_start`)."""
-    requirements = {item.id: item for item in plan.evidence_requirements}
-    return any(
-        rolls_from_its_start(reader) for reader in rolling_readers(requirements, requirement.id)
-    )
-
-
 def _needs_a_pin(plan: Plan, requirement: DatasetRequirement) -> bool:
     """Whether `requirement`, stating `period_end_open` with no identity on record, cannot be retrieved open.
 
@@ -2228,7 +2365,14 @@ def _needs_a_pin(plan: Plan, requirement: DatasetRequirement) -> bool:
     dataset on record has. A pin with nothing on record is confirmed by a
     search over the stated years, which finds a fixed end.
     """
-    return requirement.source_spec_id is not None or _rolls_from_its_start(plan, requirement)
+    return requirement.source_spec_id is not None or _read_from_first_year(plan, requirement)
+
+
+def _read_from_first_year(plan: Plan, requirement: DatasetRequirement) -> bool:
+    """Whether `requirement`, stating `period_end_open`, is retrieved from its dataset's first year (`planner.plan.read_from_first_year`)."""
+    return read_from_first_year(
+        {item.id: item for item in plan.evidence_requirements}, requirement.id
+    )
 
 
 def _window_pins(

@@ -110,7 +110,7 @@ class Run:
     task: str
     refusal_task: bool
     # Whether the accepted plan does with its years what the task's `period_reduction`
-    # says; false when no plan was read for it.
+    # says; false when no plan was accepted or its plan fails to validate.
     years_expected: bool
     stop: str
     first_ok: bool
@@ -134,10 +134,14 @@ class Run:
     # Whether `propose_plan` refused any of them with `PERIOD_REFUSAL`.
     period_refused: bool
     # What the accepted plan does with its years; `None` when no plan was accepted or
-    # the record's plan could not be read.
+    # the record's plan fails to validate.
     period_reduction: PeriodReduction | None
     # Whether the task marks an ask `across_years`.
     asks_across_years: bool
+
+    @property
+    def accepted(self) -> bool:
+        return self.stop == "accepted"
 
     @property
     def years_read(self) -> bool:
@@ -187,7 +191,7 @@ def reduce_run(record: Mapping[str, Any], task: Task) -> Run:
     datasets = [] if task.unit_asked else _first_datasets(record)
     calls = record["calls"]
     finished = [call for call in calls if call["prompt_tokens"] is not None]
-    reduction = record_period_reduction(record)
+    reduction = record_period_reduction(record, task)
     return Run(
         arm=record["arm"],
         task=record["task"],
@@ -368,13 +372,14 @@ def rule_tasks(runs: Iterable[Run]) -> set[str]:
 def years_numbers(runs: Sequence[Run], touched: Collection[str]) -> dict[str, Any]:
     """What an arm's plans did with their years. `touched` are the tasks the period rule
     touched in any arm (`rule_tasks`), so every arm's rounds are over the same tasks."""
-    read = [r for r in runs if r.years_read]
-    unmarked = [r for r in read if not r.asks_across_years]
+    taken = [r for r in runs if r.accepted]
+    unmarked = [r for r in taken if r.years_read and not r.asks_across_years]
     on_touched = [r for r in runs if r.task in touched]
-    accepted = [r for r in on_touched if r.stop == "accepted"]
+    accepted = [r for r in on_touched if r.accepted]
     return {
-        "years_read": len(read),
-        "years_expected": sum(r.years_expected for r in read),
+        "years_accepted": len(taken),
+        "years_expected": sum(r.years_expected for r in taken),
+        "years_unloaded": sum(not r.years_read for r in taken),
         "unmarked_accepted": len(unmarked),
         "unmarked_reducing": sum(r.period_reduction is not PeriodReduction.NONE for r in unmarked),
         "period_first_refusals": sum(r.first_code == PERIOD_REFUSAL for r in runs),
@@ -389,6 +394,7 @@ def years_table(numbers: Mapping[str, Mapping[str, Any]]) -> str:
     header = [
         "Arm",
         "Years as the task expects",
+        "Accepted plans that no longer load",
         "No ask across years: accepted plans holding a period reduction",
         f"First proposals refused `{PERIOD_REFUSAL}`",
         "Rounds to acceptance where the rule applied",
@@ -404,7 +410,8 @@ def years_table(numbers: Mapping[str, Mapping[str, Any]]) -> str:
         rows.append(
             [
                 arm,
-                _share(n["years_expected"], n["years_read"]),
+                _share(n["years_expected"], n["years_accepted"]),
+                _share(n["years_unloaded"], n["years_accepted"]),
                 _share(n["unmarked_reducing"], n["unmarked_accepted"]),
                 _share(n["period_first_refusals"], n["runs"]),
                 rounds,
@@ -542,8 +549,8 @@ def _closures_text(*numbers: Mapping[str, Any]) -> str:
 
 
 def task_table(by_arm: Mapping[str, Sequence[Run]], tasks: Sequence[Task]) -> str:
-    """Per task: first proposals accepted and kind passes, over its repetitions, and the
-    accepted plans that do with their years what the task expects, over those read."""
+    """Per task: first proposals accepted and kind passes, over its repetitions, and of
+    its accepted plans, those that do with their years what the task expects."""
     arms = list(by_arm)
     header = ["Task", "Kind", *(f"{arm}: first ok, kind pass, years" for arm in arms)]
     rows = []
@@ -556,11 +563,11 @@ def task_table(by_arm: Mapping[str, Sequence[Run]], tasks: Sequence[Task]) -> st
             elif task.first_proposal_refusal:
                 cells.append(f"ending {sum(r.expected_ending for r in runs)}/{len(runs)}")
             else:
-                read = [r for r in runs if r.years_read]
+                taken = [r for r in runs if r.accepted]
                 cells.append(
                     f"{sum(r.first_ok for r in runs)}/{len(runs)}, "
                     f"{sum(r.kind_pass for r in runs)}/{len(runs)}, "
-                    + (f"{sum(r.years_expected for r in read)}/{len(read)}" if read else "-")
+                    + (f"{sum(r.years_expected for r in taken)}/{len(taken)}" if taken else "-")
                 )
         if any(cell != "-" for cell in cells):
             rows.append([task.id, task.kind, *cells])
@@ -762,8 +769,10 @@ def build_report(
     sections += [
         "## Years",
         "What accepted plans do with the years of their data. A plan does as its task expects "
-        "when its period reduction is the task's `period_reduction`. The second column is over "
-        "the accepted plans of tasks that mark no ask `across_years`; `propose_plan` refuses a "
+        "when its period reduction is the task's `period_reduction`, read with the asks the task "
+        "marks `across_years`; a stored plan that no longer loads counts as a miss, and the "
+        "second column counts them. The third column is over the accepted plans read of tasks "
+        "that mark no ask `across_years`; `propose_plan` refuses a "
         "period reduction there, so only a run of a revision without the rule counts any. The "
         "rule applied to a task when, in any arm, it refused a proposal or accepted a period "
         "reduction for asks marked across years; rounds are `propose_plan` calls up to the "

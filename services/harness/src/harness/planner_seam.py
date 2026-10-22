@@ -427,6 +427,12 @@ class PlannerSeam:
             # `QUESTION_FIXED` instead, handled below the same way
             # `BUDGET_EXHAUSTED` is.
             question_fixed=True,
+            # The orchestrator reads the user's words and marks its asks
+            # (across years). The planner reads them only in an entry the
+            # user's amendment opens, which `save_amendment_entry` records
+            # below, and only there may `propose_plan`'s `across_years`
+            # name a step.
+            reads_user_words=False,
             prefix_cache=prefix_cache,
             translate=translate,
         )
@@ -509,9 +515,9 @@ class PlannerSeam:
             # `MAX_PLAN_ROUNDS` bounds would run unbounded for the rest of it.
             save_plan_rounds(cast(SessionState, ctx.session.state), 0)
             # Whether the user's own words open this entry, which
-            # `propose_plan` reads to honour a decision they make in them
-            # (`planner.plan.unstated_period_reductions`). `_message` renders
-            # the amendment on the same test.
+            # `propose_plan` reads to accept the steps its `across_years`
+            # names (`submission.service.admit`). `_message` renders the
+            # amendment on the same test.
             save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):

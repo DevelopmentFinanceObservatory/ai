@@ -179,7 +179,7 @@ _REGENERATE = "just context-baseline"
 # behaviour a sentence at a time.
 PLANNER_SYSTEM_INSTRUCTION_CEILING = 18_460
 
-# Every planner tool declaration together: 37,595 (`propose_plan` 33,542 and
+# Every planner tool declaration together measures 37,595 (`propose_plan` 33,542 and
 # 4,053 across the smaller ones). The margin is 2.7%.
 PLANNER_DECLARATIONS_TOTAL_CEILING = 38_610
 

@@ -924,9 +924,14 @@ def _validated_arguments(
 
 
 def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
-    """The refusal of a `plan` call whose `asks` break the planner's limits
-    (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None."""
+    """The refusal of a `plan` call whose `asks` list none or break the
+    planner's limits (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None.
+
+    A plan held to no asks has no ask to license combining a step's years
+    (`planner.plan.Plan.period_licences`), so a brief lists at least one."""
     problems = []
+    if not asks:
+        problems.append("asks lists no outputs: list each output the user asked for")
     if len(asks) > MAX_PLAN_ASKS:
         problems.append(
             f"asks lists {len(asks)} outputs, more than {MAX_PLAN_ASKS}: merge outputs the "
@@ -948,7 +953,7 @@ def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
     return {
         "refusal": f"plan recorded nothing: {'; '.join(problems)}.",
         "code": ToolErrorCode.REQUEST_INVALID.value,
-        "legal": {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]},
+        "legal": {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]},
     }
 
 
@@ -1876,7 +1881,7 @@ def build_orchestrator_tools(
         the year you chose if you chose one. The years a source holds are
         not the question's period. `asks` lists each output the user asked
         for, one per entry, in the user's terms: a number, a ranking, a
-        chart, a comparison; at most six, each one short line. One figure
+        chart, a comparison; at least one and at most six, each one short line. One figure
         the user asked for across several years is an ask of its own that
         sets `across_years`: "the total between 2010 and the latest" is one
         cumulative number beside the yearly figures. A view added to help

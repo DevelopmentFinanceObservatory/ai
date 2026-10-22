@@ -188,6 +188,11 @@
     "left_id",
     "right_id"
   ],
+  "planner.plan.PeriodLicence": [
+    "step_id",
+    "step_kind",
+    "reduction"
+  ],
   "planner.plan.Plan": [
     "question",
     "answer_mode",

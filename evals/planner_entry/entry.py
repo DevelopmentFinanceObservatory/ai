@@ -183,9 +183,19 @@ class Task(_Strict):
     alternative_payloads: list[Alternative] = []
 
     @property
+    def across_years_numbers(self) -> tuple[int, ...]:
+        """The numbers of the asks marked `across_years`, as `Plan.asks_across_years`
+        holds them."""
+        return tuple(
+            number
+            for number, ask in enumerate(self.asks)
+            if isinstance(ask, AskedOutput) and ask.across_years
+        )
+
+    @property
     def asks_across_years(self) -> bool:
         """Whether any ask is marked `across_years`."""
-        return any(isinstance(ask, AskedOutput) and ask.across_years for ask in self.asks)
+        return bool(self.across_years_numbers)
 
     def selects_kinds(self, kinds: Collection[str]) -> bool:
         """Whether a plan using `kinds` selects this task's kinds: every `required_kinds`
@@ -681,8 +691,8 @@ async def run_entry(
 def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
     """A digest of what a run of `task` shows the planner: the question, the searches,
     the brief and asks, and the recorded search envelopes and tool answers. Runs pair
-    only where their digests agree. An ask not marked `across_years` digests as it
-    did before asks carried the mark, so a baseline stored then still pairs on it."""
+    only where their digests agree. An ask not marked `across_years` digests without
+    that field, so a baseline stored before asks carried the mark still pairs on it."""
     asks = [
         ask
         if isinstance(ask, str)
@@ -810,17 +820,17 @@ def period_reductions(plan: Plan) -> list[dict[str, Any]]:
     and whether `propose_plan` refuses it.
 
     Both readings are `planner.plan.unstated_period_reductions`, the rule `propose_plan`
-    enforces at a first entry: once on the plan with no ask marked across years, which
-    reports every reduction, and once on the plan as it stands, which reports those it
-    refuses.
+    enforces at a first entry: once on the plan with no ask marked across years and no
+    licence, which reports every reduction, and once on the plan as it stands, which
+    reports those it refuses.
     """
     refused = {gap.step_id for gap in unstated_period_reductions(plan)}
-    unmarked = plan.model_copy(update={"asks_across_years": ()})
+    unmarked = plan.model_copy(update={"asks_across_years": (), "period_licences": ()})
     return [
         {
             "step": gap.step_id,
-            "start": gap.years.start,
-            "end": gap.years.end,
+            "start": gap.held.years.start,
+            "end": gap.held.years.end,
             "refused": gap.step_id in refused,
         }
         for gap in unstated_period_reductions(unmarked)
@@ -835,20 +845,25 @@ def plan_period_reduction(reductions: Sequence[Mapping[str, Any]]) -> PeriodRedu
     return PeriodReduction.ACROSS_YEARS if reductions else PeriodReduction.NONE
 
 
-def record_period_reduction(record: Mapping[str, Any]) -> PeriodReduction | None:
-    """What the accepted plan of `record` does with its years, or `None` when it
-    accepted none.
+def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodReduction | None:
+    """What the accepted plan of `record`, a run of `task`, does with its years, or
+    `None` when it accepted none or its plan fails to validate.
 
-    A record written before records kept `period_reduction` is read from the plan it
-    holds, which carries no ask marked across years, so a reduction in it reads as
-    unstated. A stored plan that `Plan` refuses to validate is not read.
+    A record without `period_reduction` holds a plan with no ask
+    marked across years, since the revision that wrote it had no mark. Its plan is read with the
+    asks `task` marks, the marks the orchestrator hands a run of the current revision,
+    so a baseline stored from that revision is scored on the same asks as the arm.
+    A stored plan that `Plan` refuses to validate is not read; `summarise` counts it
+    as an accepted plan that misses its task's years.
     """
     if (kept := record.get("period_reduction")) is not None:
         return PeriodReduction(kept)
     if record.get("plan") is None:
         return None
     try:
-        plan = Plan.model_validate(record["plan"])
+        plan = Plan.model_validate(
+            {**record["plan"], "asks_across_years": task.across_years_numbers}
+        )
     except ValidationError:
         return None
     return plan_period_reduction(period_reductions(plan))

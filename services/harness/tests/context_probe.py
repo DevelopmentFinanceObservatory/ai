@@ -459,10 +459,12 @@ def field_limits_record() -> dict[str, Any]:
     )
     names = tuple(entity.name for entity in entities)
     measure = ASTRAL_CHAR * MAX_MEASURE_CHARS
-    # Each entity_in lists every name, rotated so no two predicates are equal.
-    # `entity_in` is the largest of the three predicate kinds.
+    # Each entity_in lists every name under a role of its own, so no two
+    # predicates are equal (`FilterRequirement` refuses a repeat whatever the
+    # order of its names). `entity_in` is the largest of the three kinds.
     predicates = tuple(
-        EntityIn(names=names[shift:] + names[:shift], role=role) for shift in range(MAX_PREDICATES)
+        EntityIn(names=names, role=padded(f"{index}", MAX_ENTITY_ROLE_CHARS, ASTRAL_CHAR))
+        for index in range(MAX_PREDICATES)
     )
     fixes = DecisionFixes(
         entities=entities,

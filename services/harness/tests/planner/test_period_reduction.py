@@ -5,9 +5,11 @@ source, which for a question naming no years is every year the source holds.
 `propose_plan` refuses an `aggregate` without `period` in its `group_by`, or a
 `rank` with a `reduction`, over such years with `period_reduction_unstated`
 (`planner.plan.unstated_period_reductions`) unless every answering result
-computed from the step answers asks across years, and only those. In an entry
-the user's amendment opened, a decision of theirs cited on the step admits it
-too.
+computed from the step answers asks across years, and only those, or the step
+holds a licence. Where the planner reads the user's own words, in an entry
+the user's amendment opened or in the standalone planner, a step it names in
+`across_years` takes one, and keeps it while the step keeps its kind and
+states no other reduction (`planner.plan.period_licences_held`).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from planner.plan import (
     AnswerMode,
     AskAnswer,
     Breakdown,
+    ComparisonRequirement,
     DatasetRequirement,
     Decision,
     DecisionFixes,
@@ -37,7 +40,9 @@ from planner.plan import (
     EvidenceRequirement,
     FilterRequirement,
     GrowthRequirement,
+    OneYearRead,
     Period,
+    PeriodLicence,
     PinSource,
     Plan,
     QuotientRequirement,
@@ -49,7 +54,11 @@ from planner.plan import (
     Unit,
     current_recorded_identity,
     load_plan,
+    one_year_followed,
+    period_licences_held,
+    plan_revision,
     save_pin_sources,
+    save_plan,
     unstated_period_reductions,
 )
 from planner.records import (
@@ -64,8 +73,11 @@ from planner.records import (
     Reduction,
     RelativePeriod,
     RollingWindow,
+    ValueThreshold,
 )
+from planner.shapes import VALUE_KEPT_SPAN_PAIRS
 from planner.tool_results import Outcome, ProblemCode
+from submission.service import OneYear
 
 from ..decision_drafts import drafts
 
@@ -197,22 +209,32 @@ def _propose(
     decisions: list[Decision],
     *,
     answered: Sequence[AskAnswer] | None = None,
+    across_years: Sequence[str] = (),
+    removed_decisions: Sequence[str] = (),
+    reads_user_words: bool = False,
+    restart: bool = False,
 ) -> dict[str, Any]:
     """Propose `requirements`, the last of which answers ask 0 unless `answered` says otherwise.
 
-    A plan on record in `ctx` is the one the call amends.
+    A plan on record in `ctx` is the one the call amends, unless `restart`
+    begins a plan of its own. The planner is the seam's, which reads the
+    user's words only in an amendment entry, unless `reads_user_words` makes
+    it the standalone planner's.
     """
-    tools = {tool.name: tool for tool in build_planner_tools()}
+    tools = {tool.name: tool for tool in build_planner_tools(reads_user_words=reads_user_words)}
     recorded = load_plan(ctx.state)
     return tools["propose_plan"].func(
         question=ASK,
         answer_mode=AnswerMode.COMPUTED,
         decisions=drafts(decisions),
         evidence_requirements=requirements,
+        removed_decisions=list(removed_decisions),
         answered=(
             [AskAnswer(ask=0, outputs=(requirements[-1].id,))] if answered is None else answered
         ),
-        amends_version=recorded.version if recorded is not None else None,
+        across_years=list(across_years),
+        amends_version=recorded.version if recorded is not None and not restart else None,
+        starts_new_plan=restart,
         tool_context=ctx,
     )
 
@@ -233,9 +255,18 @@ def _gap(
 
 
 def _refused(result: dict[str, Any], *gaps: dict[str, Any]) -> None:
+    """Assert `result` refuses with `gaps`, read apart from the change each offers.
+
+    The change, `one_year`, is what the remedy tests check, by following it
+    (`test_the_one_year_each_refusal_offers_is_admitted`).
+    """
     assert result["outcome"] == Outcome.INVALID_INPUT.value, result
     assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
-    assert result["detail"] == {"gaps": list(gaps)}
+    found = [
+        {key: value for key, value in gap.items() if key != "one_year"}
+        for gap in result["detail"]["gaps"]
+    ]
+    assert found == list(gaps)
 
 
 _STEPS = {
@@ -447,7 +478,7 @@ def test_a_search_that_named_the_years_admits_no_figure_over_them(
 
 
 def _yearly(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
-    """Record in `ctx` the plan a user is shown before they amend it: the step keeping its years."""
+    """Record in `ctx` the plan a user is shown before amending it, its step keeping its years."""
     kept = (
         _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD))
         if step == "aggregate"
@@ -455,6 +486,10 @@ def _yearly(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
     )
     first = _propose(ctx, [_aid(), kept], [decision(), POPULATION][: 1 + (step == "rank")])
     assert first["outcome"] == Outcome.OK.value, first
+
+
+def _licence(step: str, reduction: Reduction = Reduction.SUM) -> PeriodLicence:
+    return PeriodLicence(step_id="result", step_kind=step, reduction=reduction)
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))
@@ -466,45 +501,74 @@ def _yearly(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
         pytest.param(None, id="session-seeded-with-the-plan"),
     ],
 )
-def test_the_users_decision_admits_the_reduction_in_the_entry_their_amendment_opened(
+def test_a_step_named_across_years_is_licensed_where_the_planner_reads_the_users_words(
     decision: Callable[..., Decision], step: str, amendment: bool | None
 ) -> None:
     """The user amends a per-year plan at its card, asking for one figure. No
-    ask changes, so the decision they made licenses it, in that entry only."""
-    build, _, stated, cites = _STEPS[step]
+    ask changes, so the planner names the step, in that entry only."""
+    build, _, _, _ = _STEPS[step]
     ctx = _context(amendment=amendment)
     _yearly(ctx, decision, step)
 
-    result = _propose(ctx, [build(**cites)], [stated])
+    result = _propose(ctx, [build()], [], across_years=["result"])
 
     if amendment:
         assert result["outcome"] == Outcome.OK.value, result
         recorded = load_plan(ctx.state)
         assert recorded is not None and recorded.version == 2
+        assert recorded.period_licences == (_licence(step),)
         return
-    _refused(result, _gap(years=EVERY_YEAR))
-    assert "resolved by `user`" not in result["message"]
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "(across years)" in result["message"]
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.version == 1
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))
-def test_an_amendment_entrys_refusal_offers_the_users_decision(
-    decision: Callable[..., Decision], step: str
+@pytest.mark.parametrize(
+    ("amendment", "offered"),
+    [pytest.param(True, True, id="amendment-entry"), pytest.param(False, False, id="another")],
+)
+def test_a_refusal_offers_naming_the_step_only_where_the_planner_reads_the_users_words(
+    decision: Callable[..., Decision], step: str, amendment: bool, offered: bool
 ) -> None:
     build, _, _, _ = _STEPS[step]
-    ctx = _context(amendment=True)
+    ctx = _context(amendment=amendment)
     _yearly(ctx, decision, step)
 
     result = _propose(ctx, [build()], [])
 
     _refused(result, _gap(years=EVERY_YEAR))
-    assert "resolved by `user`" in result["message"]
+    assert ("name 'result' in `across_years`" in result["message"]) is offered
+
+
+def test_the_remedy_an_amendment_entrys_refusal_offers_is_admitted(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user chose one total for 2024, then asks for it over every year. The
+    step cites their decision, so re-citing it changes nothing. The refusal
+    offers naming the step, which is admitted, so the planner does not loop on
+    the same refusal."""
+    ctx = _context(amendment=False)
+    step = _total(decision_ids=("one_total",))
+    first = _propose(ctx, [_aid(period=ONE_YEAR_ONLY), step], [decision(), USER_TOTAL])
+    assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[AMENDMENT_ENTRY_STATE_KEY] = True
+
+    refused = _propose(ctx, [_aid()], [], answered=())
+    admitted = _propose(ctx, [_aid()], [], answered=(), across_years=["result"])
+
+    _refused(refused, _gap(years=EVERY_YEAR))
+    assert "name 'result' in `across_years`" in refused["message"]
+    assert "resolved by `user`" not in refused["message"]
+    assert admitted["outcome"] == Outcome.OK.value, admitted
 
 
 def _amended(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
     """Record in `ctx` the plan the user's amendment made of `_yearly`, then leave that entry."""
-    build, _, stated, cites = _STEPS[step]
+    build, _, _, _ = _STEPS[step]
     _yearly(ctx, decision, step)
-    amended = _propose(ctx, [build(**cites)], [stated])
+    amended = _propose(ctx, [build()], [], across_years=["result"])
     assert amended["outcome"] == Outcome.OK.value, amended
     ctx.state[AMENDMENT_ENTRY_STATE_KEY] = False
 
@@ -517,61 +581,344 @@ def _amended(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
         pytest.param(Period(start=2000, end=2024), id="over-fewer-years"),
     ],
 )
+@pytest.mark.parametrize(
+    "named",
+    [pytest.param([], id="unnamed"), pytest.param(["result"], id="named-again")],
+)
 def test_a_later_entry_keeps_the_users_reduction_whatever_its_years(
-    decision: Callable[..., Decision], step: str, period: Period
+    decision: Callable[..., Decision], step: str, period: Period, named: list[str]
 ) -> None:
     """A replan after a failed run may narrow the years. The total the user
-    asked for at the card stays theirs."""
-    build, _, stated, cites = _STEPS[step]
+    asked for at the card stays theirs, and a replan naming it again restates
+    the licence it holds."""
+    build, _, _, _ = _STEPS[step]
     ctx = _context(amendment=True)
     _amended(ctx, decision, step)
 
-    result = _propose(ctx, [_aid(period=period), build(**cites)], [stated])
+    result = _propose(ctx, [_aid(period=period), build()], [], across_years=named)
 
     assert result["outcome"] == Outcome.OK.value, result
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.period_licences == (_licence(step),)
+
+
+_INTERVENING: dict[str, Callable[[], list[EvidenceRequirement]]] = {
+    "aggregate-over-one-year": lambda: [_aid(period=ONE_YEAR_ONLY), _total()],
+    "rank-over-one-year": lambda: [_aid(period=ONE_YEAR_ONLY), _ranked()],
+    "rank-over-one-year-with-no-reduction": lambda: [
+        _every_donor().model_copy(update={"period": ONE_YEAR_ONLY}),
+        _ranked(reduction=None),
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "intervening",
+    [pytest.param(name, id=name) for name in _INTERVENING],
+)
+def test_an_intervening_version_keeping_its_years_keeps_the_licence_through_storage(
+    decision: Callable[..., Decision], intervening: str
+) -> None:
+    """A step licensed over every year, kept to one year in a replan, then
+    restored in another keeps its licence. It holds its kind and states no
+    other reduction, and each plan is stored and loaded between the entries.
+    The restoring replan reads the brief, so only the licence admits it."""
+    step = intervening.split("-", 1)[0]
+    build, _, _, _ = _STEPS[step]
+    ctx = _context(amendment=True)
+    _amended(ctx, decision, step)
+
+    def stored(ctx: Any) -> Any:
+        recorded = load_plan(ctx.state)
+        assert recorded is not None
+        state = {**ctx.state}
+        save_plan(state, recorded)
+        return SimpleNamespace(state=state, actions=EventActions(), session=ctx.session)
+
+    ctx = stored(ctx)
+    narrowed = _propose(ctx, _INTERVENING[intervening](), [])
+    ctx = stored(ctx)
+    narrowed_plan = load_plan(ctx.state)
+    restored = _propose(ctx, [_aid(), build()], [])
+
+    assert narrowed["outcome"] == Outcome.OK.value, narrowed
+    assert narrowed_plan is not None and narrowed_plan.period_licences == (_licence(step),)
+    assert restored["outcome"] == Outcome.OK.value, restored
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.version == 4
+    assert recorded.period_licences == (_licence(step),)
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))
 def test_a_later_entry_keeps_no_licence_for_another_reduction(
     decision: Callable[..., Decision], step: str
 ) -> None:
-    """A user who asked for one total did not ask for a maximum."""
-    build, _, stated, cites = _STEPS[step]
+    """A user who asked for one total did not ask for a maximum, and a replan
+    reading the brief cannot name the maximum."""
+    build, _, _, _ = _STEPS[step]
     ctx = _context(amendment=True)
     _amended(ctx, decision, step)
 
-    result = _propose(ctx, [_aid(), build(**cites, reduction=Reduction.MAX)], [stated])
+    unnamed = _propose(ctx, [_aid(), build(reduction=Reduction.MAX)], [])
+    named = _propose(ctx, [_aid(), build(reduction=Reduction.MAX)], [], across_years=["result"])
 
-    _refused(result, _gap(years=EVERY_YEAR))
+    _refused(unnamed, _gap(years=EVERY_YEAR))
+    assert named["code"] == ProblemCode.INVALID_PLAN.value, named
+    assert "Take 'result' out of `across_years`" in named["message"]
 
 
-def test_a_user_decision_that_reduced_no_years_licenses_none_later(
+@pytest.mark.parametrize(
+    ("step", "intervening"),
+    [
+        pytest.param(
+            "aggregate", _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD)), id="aggregate-by-period"
+        ),
+        pytest.param("rank", _ranked(per_period=True), id="rank-per-period"),
+        pytest.param(
+            "aggregate",
+            _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD), reduction=Reduction.MEAN),
+            id="aggregate-by-period-with-a-mean",
+        ),
+        pytest.param(
+            "rank", _ranked(per_period=True, reduction=Reduction.MAX), id="rank-per-period-by-max"
+        ),
+        pytest.param(
+            "rank", _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD)), id="a-step-of-another-kind"
+        ),
+    ],
+)
+def test_a_version_stating_another_reduction_or_kind_drops_the_licence(
+    decision: Callable[..., Decision], step: str, intervening: EvidenceRequirement
+) -> None:
+    """The version between keeps its years, so it is admitted, but it states
+    a figure for each year, or another figure, in place of the one the user
+    asked for, and restoring that figure later needs the user's words
+    again."""
+    build, cited, _, _ = _STEPS[step]
+    ctx = _context(amendment=True)
+    _amended(ctx, decision, step)
+
+    between = _propose(ctx, [intervening], [])
+    restored = _propose(ctx, [_aid(), build()], cited)
+
+    assert between["outcome"] == Outcome.OK.value, between
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.period_licences == ()
+    _refused(restored, _gap(years=EVERY_YEAR))
+
+
+def test_a_reduction_corrected_within_the_amendment_entry_is_named_again(
     decision: Callable[..., Decision],
 ) -> None:
-    """The planner writes a `user` decision on a total of one year, which reduces
-    nothing, then widens the year to every year in the next entry."""
-    ctx = _context(amendment=False)
-    step = _total(decision_ids=("one_total",))
-    first = _propose(ctx, [_aid(period=ONE_YEAR_ONLY), step], [decision(), USER_TOTAL])
+    """Round one of the entry records a sum. Round two makes it a mean. The
+    licence goes with the sum, and naming the step again grants the mean."""
+    ctx = _context(amendment=True)
+    _yearly(ctx, decision, "aggregate")
+    summed = _propose(ctx, [_total()], [], across_years=["result"])
+    assert summed["outcome"] == Outcome.OK.value, summed
+
+    unnamed = _propose(ctx, [_total(reduction=Reduction.MEAN)], [])
+    named = _propose(ctx, [_total(reduction=Reduction.MEAN)], [], across_years=["result"])
+
+    _refused(unnamed, _gap(years=EVERY_YEAR))
+    assert named["outcome"] == Outcome.OK.value, named
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    assert recorded.period_licences == (_licence("aggregate", Reduction.MEAN),)
+
+
+def test_a_new_result_named_in_the_amendment_entry_is_licensed_beside_one_already_licensed(
+    decision: Callable[..., Decision],
+) -> None:
+    """Kenya already has one total. "Give Ghana as one total too" states the
+    same decision wording and grouping for Ghana's step, or cites Kenya's."""
+    ghana = _aid().model_copy(
+        update={"id": "ghana_aid", "entities": (Entity(name="Ghana", role="recipient"),)}
+    )
+    kenya_total = _total(id="kenya_total", decision_ids=("one_total",))
+    ghana_answers = [
+        AskAnswer(ask=0, outputs=("kenya_total",)),
+        AskAnswer(ask=1, outputs=("ghana_total",)),
+    ]
+    ctx = _context(amendment=True)
+    first = _propose(
+        ctx,
+        [_aid(), kenya_total],
+        [decision(), USER_TOTAL],
+        answered=[AskAnswer(ask=0, outputs=("kenya_total",))],
+        across_years=["kenya_total"],
+    )
     assert first["outcome"] == Outcome.OK.value, first
+    ctx.state[ASKS_STATE_KEY] = [ASK, OTHER_ASK]
 
-    result = _propose(ctx, [_aid(), step], [USER_TOTAL])
+    own = USER_TOTAL.model_copy(update={"slot": "ghana_one_total"})
+    with_own = _propose(
+        ctx,
+        [ghana, _total(id="ghana_total", input_id="ghana_aid", decision_ids=("ghana_one_total",))],
+        [own],
+        answered=ghana_answers,
+        across_years=["ghana_total"],
+    )
+    recorded = load_plan(ctx.state)
+    citing_kenyas = _propose(
+        ctx,
+        [_total(id="ghana_total", input_id="ghana_aid", decision_ids=("one_total",))],
+        [],
+        removed_decisions=["ghana_one_total"],
+        answered=ghana_answers,
+        across_years=["ghana_total"],
+    )
 
-    _refused(result, _gap(years=EVERY_YEAR))
+    assert with_own["outcome"] == Outcome.OK.value, with_own
+    assert recorded is not None
+    assert [licence.step_id for licence in recorded.period_licences] == [
+        "kenya_total",
+        "ghana_total",
+    ]
+    assert citing_kenyas["outcome"] == Outcome.OK.value, citing_kenyas
 
 
 def test_a_later_entry_keeps_the_users_ranking_over_another_window(
     decision: Callable[..., Decision],
 ) -> None:
-    """The user's decision says the years are ranked together, and the window
-    says which years, so a replan may move the window."""
-    build, _, stated, cites = _STEPS["rank"]
+    """The licence says the years are ranked together, and the window says
+    which years, so a replan may move the window."""
+    build, _, _, _ = _STEPS["rank"]
     ctx = _context(amendment=True)
     _amended(ctx, decision, "rank")
 
-    result = _propose(ctx, [build(**cites, window_start=2000, window_end=2024)], [stated])
+    result = _propose(ctx, [build(window_start=2000, window_end=2024)], [])
 
     assert result["outcome"] == Outcome.OK.value, result
+
+
+_REWORDED = USER_TOTAL.model_copy(
+    update={
+        "options": ["one figure over every year", "a figure per year"],
+        "chosen": "one figure over every year",
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "made",
+    [
+        pytest.param(
+            Decision(
+                slot="by_sector",
+                description="Whether aid is split by sector.",
+                options=["split by sector", "one figure for every sector"],
+                chosen="split by sector",
+                resolved_by=ResolvedBy.USER,
+                rationale="The user asked for aid by sector.",
+                fixes=DecisionFixes(group_by=(GroupBy.ENTITY, GroupBy.BREAKDOWN)),
+            ),
+            id="a-sector-split",
+        ),
+        pytest.param(_REWORDED, id="a-reworded-decision"),
+        pytest.param(USER_TOTAL, id="a-users-decision"),
+    ],
+)
+def test_a_users_decision_in_an_amendment_entry_licenses_no_reduction(
+    decision: Callable[..., Decision], made: Decision
+) -> None:
+    """Which parties stay apart and whether the years stay apart share `group_by`,
+    so a decision fixing it says nothing about the years. Only naming the step
+    in `across_years` does."""
+    by_sector = _aid().model_copy(update={"breakdown": _SECTORS})
+    assert made.fixes is not None and made.fixes.group_by is not None
+    step = _total(decision_ids=(made.slot,), group_by=made.fixes.group_by)
+
+    result = _propose(_context(amendment=True), [by_sector, step], [decision(), made])
+
+    _refused(result, _gap(years=EVERY_YEAR))
+
+
+def test_a_stored_plan_citing_a_users_decision_carries_no_licence(
+    decision: Callable[..., Decision],
+) -> None:
+    """A plan recorded without licences, or by a first draft citing a
+    decision the planner marked as the user's, holds no licence to carry."""
+    ctx = _context(amendment=False)
+    answered = [AskAnswer(ask=0, outputs=("result",))]
+    save_plan(ctx.state, _stated(decision, USER_TOTAL, answered=answered))
+
+    result = _propose(ctx, [_aid(), _total(decision_ids=("one_total",))], [])
+
+    _refused(result, _gap(years=EVERY_YEAR))
+
+
+@pytest.mark.parametrize(
+    ("named", "requirements"),
+    [
+        pytest.param(["absent"], [_aid(), _total()], id="a-step-the-plan-lacks"),
+        pytest.param(
+            ["result"],
+            [_aid(), _total(group_by=(GroupBy.ENTITY, GroupBy.PERIOD))],
+            id="a-step-keeping-the-years",
+        ),
+        pytest.param(["aid"], [_aid(), _total()], id="a-dataset-requirement"),
+    ],
+)
+def test_naming_a_step_that_combines_no_years_is_refused(
+    decision: Callable[..., Decision], named: list[str], requirements: list[EvidenceRequirement]
+) -> None:
+    ctx = _context(amendment=True)
+
+    result = _propose(ctx, requirements, [decision()], across_years=named)
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert repr(named[0]) in result["message"]
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize("step", sorted(_STEPS))
+def test_the_standalone_planner_licenses_a_step_it_names_in_a_plan_with_no_asks(
+    decision: Callable[..., Decision], step: str
+) -> None:
+    """ "Total French aid to Guatemala between 2015 and 2022": the standalone
+    planner reads the question itself and lists no asks."""
+    build, cited, _, _ = _STEPS[step]
+    years = Period(start=2015, end=2022)
+    requirements = [_aid(period=years), build()]
+
+    refused = _propose(
+        _context(asks=()), requirements, [decision(), *cited], answered=(), reads_user_words=True
+    )
+    ctx = _context(asks=())
+    admitted = _propose(
+        ctx,
+        requirements,
+        [decision(), *cited],
+        answered=(),
+        across_years=["result"],
+        reads_user_words=True,
+    )
+
+    _refused(refused, _gap(asks=(), years=years))
+    assert "name 'result' in `across_years`" in refused["message"]
+    assert admitted["outcome"] == Outcome.OK.value, admitted
+    recorded = load_plan(ctx.state)
+    assert recorded is not None and recorded.period_licences == (_licence(step),)
+
+
+def test_a_restart_begins_with_no_licences(decision: Callable[..., Decision]) -> None:
+    ctx = _context(asks=())
+    first = _propose(
+        ctx,
+        [_aid(), _total()],
+        [decision()],
+        answered=(),
+        across_years=["result"],
+        reads_user_words=True,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+
+    result = _propose(
+        ctx, [_aid(), _total()], [decision()], answered=(), reads_user_words=True, restart=True
+    )
+
+    _refused(result, _gap(asks=(), years=EVERY_YEAR))
 
 
 def _stated(decision: Callable[..., Decision], made: Decision, **fields: Any) -> Plan:
@@ -585,18 +932,47 @@ def _stated(decision: Callable[..., Decision], made: Decision, **fields: Any) ->
     )
 
 
-def test_a_later_entry_keeps_no_reduction_the_plan_it_amends_cited_another_decision_for(
+@pytest.mark.parametrize(
+    ("licence", "licensed"),
+    [
+        pytest.param(_licence("aggregate"), True, id="its-own"),
+        pytest.param(_licence("aggregate", Reduction.MEAN), False, id="another-reduction"),
+        pytest.param(_licence("rank"), False, id="another-kind"),
+        pytest.param(
+            PeriodLicence(step_id="other", step_kind="aggregate", reduction=Reduction.SUM),
+            False,
+            id="another-step",
+        ),
+    ],
+)
+def test_a_licence_admits_only_the_step_of_its_id_kind_and_reduction(
+    decision: Callable[..., Decision], licence: PeriodLicence, licensed: bool
+) -> None:
+    answered = [AskAnswer(ask=0, outputs=("result",))]
+    plan = _stated(decision, ONE_TOTAL, answered=answered, period_licences=(licence,))
+
+    gaps = unstated_period_reductions(plan)
+
+    assert [gap.step_id for gap in gaps] == ([] if licensed else ["result"])
+
+
+def test_an_amended_plan_holds_no_licence_until_propose_plan_carries_it(
     decision: Callable[..., Decision],
 ) -> None:
-    """The plan on record cites the planner's own decision for its total. Restating
-    that decision as the user's licenses nothing."""
     answered = [AskAnswer(ask=0, outputs=("result",))]
-    previous = _stated(decision, ONE_TOTAL, answered=answered)
-    plan = _stated(decision, USER_TOTAL, answered=answered)
+    licensed = _stated(
+        decision, ONE_TOTAL, answered=answered, period_licences=(_licence("aggregate"),)
+    )
+    unlicensed = _stated(decision, ONE_TOTAL, answered=answered)
 
-    gaps = unstated_period_reductions(plan, previous=previous)
+    amended = licensed.amend()
 
-    assert [(gap.step_id, gap.asks) for gap in gaps] == [("result", (0,))]
+    assert amended.period_licences == ()
+    assert period_licences_held(amended, named=(), previous=licensed) == (_licence("aggregate"),)
+    assert plan_revision(licensed) != plan_revision(unlicensed)
+    assert plan_revision(unlicensed) == plan_revision(
+        Plan.model_validate(unlicensed.model_dump(exclude={"period_licences"}))
+    )
 
 
 def test_a_reduction_no_answering_result_is_computed_from_is_refused(
@@ -820,8 +1196,8 @@ def test_a_step_reduces_the_years_its_input_holds_per_entity(
     decision: Callable[..., Decision], steps: list[EvidenceRequirement], reducing: list[str]
 ) -> None:
     """The last step reads the one before it. It reduces years only where
-    that input holds a series of them: a step that already collapsed the
-    years, picked one per entity, or was left one year holds none."""
+    that input holds a series of them. A step that collapses the years,
+    picks one per entity, or leaves one year holds none."""
     first = steps[0].model_copy(update={"decision_ids": ("measure", "population", "pooled")})
     plan = Plan(
         question=ASK,
@@ -845,10 +1221,7 @@ def test_a_total_of_two_sources_summed_year_by_year_answers_an_ask_across_years(
     refused = _propose(_context(pins=pins), requirements, decisions)
     admitted = _propose(_context(across_years=[0], pins=pins), requirements, decisions)
 
-    assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
-    assert refused["detail"]["gaps"] == [
-        _gap(years=EVERY_YEAR) | {"dataset_requirement_id": "bilateral"}
-    ]
+    _refused(refused, _gap(years=EVERY_YEAR) | {"dataset_requirement_id": "bilateral"})
     assert admitted["outcome"] == Outcome.OK.value, admitted
 
 
@@ -934,6 +1307,20 @@ def _open(**overrides: Any) -> DatasetRequirement:
             ONE_YEAR_ONLY,
             id="through-a-fixed-first-year",
         ),
+        pytest.param(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                FilterRequirement(
+                    id="kept",
+                    input_id="aid",
+                    predicates=(PeriodThreshold(op="gte", year=2024, rolling=_NEWEST),),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            ONE_YEAR_ONLY,
+            id="through-a-first-year-on-the-anchor",
+        ),
     ],
 )
 @pytest.mark.usefixtures("aid_on_record")
@@ -944,7 +1331,7 @@ def test_one_year_that_newer_data_widens_is_several(
     years: Period,
 ) -> None:
     """Each sums 2024 alone today and 2024 and every later year once newer data exists."""
-    result = _propose(_context(), requirements, [decision(), *decisions])
+    result = _propose(_context(pins=_SHOWN_OPEN), requirements, [decision(), *decisions])
 
     _refused(result, _gap(years=years) | {"follows_newest": True})
     assert "the years from 2024 to the newest" in result["message"]
@@ -1209,8 +1596,8 @@ def test_an_amendment_about_something_else_licenses_no_total_an_older_decision_c
     decision: Callable[..., Decision],
 ) -> None:
     """The user chose one total for 2024, which reduces no years. A later
-    amendment widens the years and restates nothing else: the decision and the
-    aggregate are carried, and the user never asked for 35 years as one figure."""
+    amendment widens the years and restates nothing else. The decision and the
+    aggregate are carried, and the user did not ask for 35 years as one figure."""
     ctx = _context(amendment=False)
     step = _total(decision_ids=("one_total",))
     first = _propose(ctx, [_aid(period=ONE_YEAR_ONLY), step], [decision(), USER_TOTAL])
@@ -1272,7 +1659,8 @@ def test_a_users_choice_of_years_licenses_no_ranking_over_them_together(
     decision: Callable[..., Decision],
 ) -> None:
     """The user's amendment chose 2015 to 2022. Which years a ranking covers
-    and whether it combines them are separate statements."""
+    and whether it combines them are separate statements, and one year would
+    rewrite the years the user chose, so the refusal offers none."""
     years = Decision(
         slot="years",
         description="Which years the ranking covers.",
@@ -1287,6 +1675,7 @@ def test_a_users_choice_of_years_licenses_no_ranking_over_them_together(
     result = _propose(_context(amendment=True), [_aid(), ranked], [decision(), POPULATION, years])
 
     _refused(result, _gap(years=Period(start=2015, end=2022)))
+    assert result["detail"]["gaps"][0]["one_year"] is None
 
 
 @pytest.mark.parametrize(
@@ -1296,7 +1685,7 @@ def test_a_users_choice_of_years_licenses_no_ranking_over_them_together(
 def test_a_sum_with_a_source_of_fixed_years_follows_the_newest_as_far_as_they_reach(
     decision: Callable[..., Decision], last: int, until: int | None
 ) -> None:
-    """One side holds 2024 and follows the newest data; the other states 2020
+    """One side holds 2024 and follows the newest data. The other states 2020
     to `last`. Their sum holds the years both cover, 2024 today."""
     newest = _series("bilateral", period=ONE_YEAR_ONLY).model_copy(update={"period_end_open": True})
     fixed = _series(
@@ -1322,7 +1711,7 @@ def test_a_sum_with_a_source_of_fixed_years_follows_the_newest_as_far_as_they_re
 def test_restating_an_older_decision_under_another_slot_does_not_make_it_the_amendments(
     decision: Callable[..., Decision],
 ) -> None:
-    """The plan on record already made this choice, for a total of one year.
+    """The plan on record made this choice, for a total of one year.
     Citing it again under a new slot in an amendment entry is the same choice."""
     ctx = _context(amendment=False)
     first = _propose(
@@ -1344,7 +1733,7 @@ _FIVE_BACK = RelativePeriod(offset=-5)
 
 @pytest.mark.usefixtures("aid_on_record")
 @pytest.mark.parametrize(
-    ("steps", "decisions"),
+    ("steps", "decisions", "follows_newest", "phrase"),
     [
         pytest.param(
             [
@@ -1356,6 +1745,8 @@ _FIVE_BACK = RelativePeriod(offset=-5)
                 _total(input_id="kept"),
             ],
             [],
+            True,
+            "the years from 2019 to the newest",
             id="a-filter-from-five-years-back",
         ),
         pytest.param(
@@ -1367,40 +1758,40 @@ _FIVE_BACK = RelativePeriod(offset=-5)
                 )
             ],
             [POPULATION],
+            False,
+            "2019-2024",
             id="a-window-rolling-at-both-ends-five-years-apart",
-        ),
-        pytest.param(
-            [
-                _ranked(
-                    window_start=2019,
-                    window_end=2030,
-                    rolling=RollingWindow(window_start=_FIVE_BACK),
-                )
-            ],
-            [POPULATION],
-            id="a-window-rolling-at-its-start-to-a-fixed-year",
         ),
     ],
 )
 def test_a_start_trailing_the_newest_year_reaches_back_before_the_stated_period(
-    decision: Callable[..., Decision], steps: list[EvidenceRequirement], decisions: list[Decision]
+    decision: Callable[..., Decision],
+    steps: list[EvidenceRequirement],
+    decisions: list[Decision],
+    follows_newest: bool,
+    phrase: str,
 ) -> None:
     """The plan states 2024 alone, and a start that follows the newest data has
-    the dataset retrieved from its first year: 2019 to 2024 reach the step."""
+    the dataset retrieved from its first year, so 2019 to 2024 reach the step.
+    The window's end follows the newest year half the series hold, as its
+    start does. The filter sets no end, so it keeps each later year a series
+    reports."""
     ctx = _context(pins=_SHOWN_OPEN)
 
     result = _propose(ctx, [_open(period=ONE_YEAR_ONLY), *steps], [decision(), *decisions])
 
-    _refused(result, _gap(years=Period(start=2019, end=2024)))
-    assert "reduces 2019-2024 to one figure" in result["message"]
+    gap = _gap(years=Period(start=2019, end=2024))
+    _refused(result, gap | {"follows_newest": follows_newest})
+    assert f"reduces {phrase} to one figure" in result["message"]
 
 
 @pytest.mark.usefixtures("aid_on_record")
 def test_a_following_start_behind_a_fixed_one_keeps_no_year_from_becoming_several(
     decision: Callable[..., Decision],
 ) -> None:
-    """From 2024 on, and from five years back of the newest: 2024 alone today,
-    2024 and 2025 next year, since the fixed year is the later start until 2029."""
+    """From 2024 on, and from five years back of the newest, holds 2024 alone
+    today and 2024 and 2025 next year, since the fixed year is the later start
+    until 2029."""
     kept = FilterRequirement(
         id="kept",
         input_id="aid",
@@ -1451,10 +1842,6 @@ def _keeping(*predicates: PeriodThreshold) -> FilterRequirement:
             id="under-lt",
         ),
         pytest.param(
-            [_keeping(PeriodThreshold(op="ne", year=2023)), _total(input_id="kept")],
-            id="under-ne",
-        ),
-        pytest.param(
             [
                 _total(id="all", group_by=(GroupBy.PERIOD,)),
                 _shares("all"),
@@ -1481,21 +1868,41 @@ def test_a_reader_of_a_dataset_another_branch_reads_from_its_first_year_holds_th
 
 
 @pytest.mark.usefixtures("aid_on_record")
-def test_a_one_year_rank_with_no_reduction_whose_end_alone_follows_is_refused(
-    decision: Callable[..., Decision],
+@pytest.mark.parametrize(
+    ("period", "steps"),
+    [
+        pytest.param(
+            ONE_YEAR_ONLY,
+            [
+                _ranked(
+                    axis=None,
+                    reduction=None,
+                    window_start=2024,
+                    window_end=2024,
+                    rolling=RollingWindow(window_end=_NEWEST),
+                )
+            ],
+            id="a-window-whose-end-alone-follows",
+        ),
+        pytest.param(
+            Period(start=2020, end=2024),
+            [
+                _keeping(PeriodThreshold(op="gte", year=2024, rolling=_NEWEST)),
+                _ranked(input_id="kept", axis=None, reduction=None),
+            ],
+            id="a-first-year-on-the-anchor-ahead-of-an-end-open-to-the-data",
+        ),
+    ],
+)
+def test_a_one_year_rank_with_no_reduction_that_newer_data_widens_is_refused(
+    decision: Callable[..., Decision], period: Period, steps: list[EvidenceRequirement]
 ) -> None:
-    """2024 alone today, 2024 and 2025 once 2025 arrives, when no entity has a
-    single value to rank on."""
-    ranked = _ranked(
-        axis=None,
-        reduction=None,
-        window_start=2024,
-        window_end=2024,
-        rolling=RollingWindow(window_end=_NEWEST),
-    )
-    kenya = _open(period=ONE_YEAR_ONLY).model_copy(update={"across": ()})
+    """2024 alone today, 2024 and 2025 once 2025 arrives or a series reports
+    past the year half of them hold, when no entity has a single value to
+    rank on."""
+    kenya = _open(period=period).model_copy(update={"across": ()})
 
-    result = _propose(_context(pins=_SHOWN_OPEN), [kenya, ranked], [decision(), POPULATION])
+    result = _propose(_context(pins=_SHOWN_OPEN), [kenya, *steps], [decision(), POPULATION])
 
     assert result["outcome"] == Outcome.INVALID_INPUT.value, result
     assert result["code"] == ProblemCode.INVALID_PLAN.value, result
@@ -1584,3 +1991,1044 @@ def test_a_rank_with_no_reduction_and_no_window_holds_every_year_a_rolling_branc
 
     assert result["code"] == ProblemCode.INVALID_PLAN.value, result
     assert "every year 'aid' holds" in result["message"]
+
+
+def _kept_from(year: int, input_id: str = "aid") -> FilterRequirement:
+    """The years from `year` on, a fixed first year, to which newer data adds later ones."""
+    return FilterRequirement(
+        id="kept", input_id=input_id, predicates=(PeriodThreshold(op="gte", year=year),)
+    )
+
+
+def _newest_rank(input_id: str) -> RankRequirement:
+    """A ranking of 2024 with no reduction, its window's end alone following the newest data."""
+    return _ranked(
+        input_id=input_id,
+        axis="recipient",
+        reduction=None,
+        window_start=2024,
+        window_end=2024,
+        rolling=RollingWindow(window_end=_NEWEST),
+    )
+
+
+_PER_YEAR = _total(id="all", input_id="kept", group_by=(GroupBy.PERIOD,))
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("steps", "decisions"),
+    [
+        pytest.param([_newest_rank("kept")], [POPULATION], id="a-rank-of-the-filter"),
+        pytest.param(
+            [
+                _PER_YEAR,
+                ShareOfRequirement(
+                    id="shares",
+                    decision_ids=("pooled",),
+                    numerator=_side("kept"),
+                    denominator=_side("all"),
+                    axis="recipient",
+                    denominator_scope=DenominatorScope.POOLED,
+                ),
+                _newest_rank("shares"),
+            ],
+            [POPULATION, POOLED],
+            id="a-rank-of-a-share-of-the-filter",
+        ),
+        pytest.param(
+            [
+                _PER_YEAR,
+                QuotientRequirement(
+                    id="per_total",
+                    numerator=_side("kept"),
+                    denominator=_side("all"),
+                    axis="recipient",
+                ),
+                _newest_rank("per_total"),
+            ],
+            [POPULATION],
+            id="a-rank-of-a-quotient-of-the-filter",
+        ),
+    ],
+)
+def test_a_rank_with_no_reduction_over_a_fixed_first_year_newer_data_widens_is_refused(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement], decisions: list[Decision]
+) -> None:
+    """`year >= 2024` over an open 2024 holds 2024 today and 2024 and 2025 once
+    2025 arrives, when no entity has a single value to rank on."""
+    kenya = _open(period=ONE_YEAR_ONLY).model_copy(update={"across": ()})
+
+    result = _propose(
+        _context(pins=_SHOWN_OPEN), [kenya, _kept_from(2024), *steps], [decision(), *decisions]
+    )
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "with no reduction" in result["message"]
+
+
+def test_a_year_excluded_at_the_start_of_a_closed_period_leaves_one_year_to_total(
+    decision: Callable[..., Decision],
+) -> None:
+    """`year != 2023` over 2023-2024 leaves 2024 alone, so the total reduces no years."""
+    kept = _keeping(PeriodThreshold(op="ne", year=2023))
+
+    result = _propose(
+        _context(),
+        [_aid(period=Period(start=2023, end=2024)), kept, _total(input_id="kept")],
+        [decision()],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_fixed_first_year_over_a_limited_rank_per_year_of_open_data_keeps_its_cut(
+    decision: Callable[..., Decision],
+) -> None:
+    """`year >= 2024` keeps 2024 today and every later year as it arrives, so the
+    total by donor reads the years each donor made the top five in."""
+    top = _ranked(id="top", per_period=True, limit=5)
+    steps = [
+        _two_donors().model_copy(
+            update={
+                "period": Period(start=2020, end=2024),
+                "period_end_open": True,
+                "source_spec_id": _OPEN_SPEC,
+            }
+        ),
+        top,
+        _kept_from(2024, "top"),
+        _total(input_id="kept"),
+    ]
+
+    result = _propose(
+        _context(pins=_SHOWN_OPEN, across_years=(0,)), steps, [decision(), POPULATION]
+    )
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "per-period rank with a limit" in result["message"]
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_rank_with_no_reduction_over_a_max_per_donor_of_the_newest_year_is_admitted(
+    decision: Callable[..., Decision],
+) -> None:
+    """The newest year as it moves stays one year, so each donor's max is one row
+    of it whatever arrives, and the rank needs no reduction."""
+    newest = _keeping(PeriodThreshold(op="eq", year=2024, rolling=_NEWEST))
+    best = _total(id="best", input_id="kept", reduction=Reduction.MAX)
+    ranked = _ranked(input_id="best", axis="recipient", reduction=None)
+
+    result = _propose(
+        _context(pins=_SHOWN_OPEN),
+        [_open(period=ONE_YEAR_ONLY), newest, best, ranked],
+        [decision(), POPULATION],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+
+
+@pytest.mark.usefixtures("aid_on_record")
+def test_a_max_per_donor_of_an_open_year_picks_a_year_per_donor_once_newer_data_arrives(
+    decision: Callable[..., Decision],
+) -> None:
+    """2024 alone today, and each donor's max falls in a year of its own once 2025
+    arrives, which a rank refuses whatever its reduction."""
+    best = _total(id="best", reduction=Reduction.MAX)
+    ranked = _ranked(input_id="best", axis="recipient", reduction=None)
+
+    result = _propose(
+        _context(pins=_SHOWN_OPEN, across_years=(0,)),
+        [_open(period=ONE_YEAR_ONLY), best, ranked],
+        [decision(), POPULATION],
+    )
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "max or min at the year it fell in" in result["message"]
+
+
+def test_a_group_by_naming_a_column_twice_is_refused_as_an_invalid_plan(
+    decision: Callable[..., Decision],
+) -> None:
+    """Grouping by `entity` twice is no grouping the refusal can add `period` to."""
+    repeated = {**_total().model_dump(mode="json"), "group_by": ["entity", "entity"]}
+
+    result = _propose(
+        _context(),
+        [_aid(), repeated],
+        [decision()],
+        answered=[AskAnswer(ask=0, outputs=("result",))],
+    )
+
+    assert result["outcome"] == Outcome.INVALID_INPUT.value, result
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "group_by" in result["message"]
+
+
+def _step_of(requirements: list[EvidenceRequirement], step_id: str) -> tuple[int, Any]:
+    (index,) = [i for i, step in enumerate(requirements) if step.id == step_id]
+    return index, requirements[index]
+
+
+def _follow(requirements: list[EvidenceRequirement], refused: dict[str, Any]) -> None:
+    """Apply to `requirements` the one-year change `refused` offers, as the planner reads it.
+
+    The step, the kind of change, the year and the offset come from the
+    gap's `one_year`, and the edit from the sentence the refusal states it
+    in, written here without `planner.plan.one_year_followed`. That the two
+    agree is what this checks.
+    """
+    (gap,) = refused["detail"]["gaps"]
+    change, step_id = gap["one_year"], gap["requirement_id"]
+    year, offset = change["year"], change["offset"]
+    rolling = None if offset is None else RelativePeriod(offset=offset)
+    index, step = _step_of(requirements, step_id)
+    if OneYear(change["change"]) is OneYear.WINDOW:
+        rolls = "`rolling` unset" if offset is None else f"`rolling` naming both at offset {offset}"
+        assert (
+            f"set `window_start` and `window_end` on {step_id!r} to {year}, with {rolls}"
+            in refused["message"]
+        )
+        window = (
+            None if rolling is None else RollingWindow(window_start=rolling, window_end=rolling)
+        )
+        requirements[index] = step.model_copy(
+            update={"window_start": year, "window_end": year, "rolling": window}
+        )
+        return
+    rolls = "`rolling` unset" if offset is None else f"`rolling` at offset {offset}"
+    assert (
+        f"have {step_id!r} read its input {step.input_id!r} through a `filter` whose "
+        f"`period_threshold` keeps {year} alone, with op `eq` and {rolls}" in refused["message"]
+    )
+    one_year = FilterRequirement(
+        id="one_year",
+        input_id=step.input_id,
+        predicates=(PeriodThreshold(op="eq", year=year, rolling=rolling),),
+    )
+    requirements[index : index + 1] = [one_year, step.model_copy(update={"input_id": "one_year"})]
+
+
+def _france() -> FilterRequirement:
+    return FilterRequirement(
+        id="france", input_id="aid", predicates=(EntityIn(names=("France",), role="donor"),)
+    )
+
+
+# Ask 1 answered by a series of its own, beside the total answering ask 0.
+_BESIDE_A_SERIES = (ASK, OTHER_ASK)
+
+
+def _unpinned_open() -> DatasetRequirement:
+    """Aid to Kenya over 2020-2024 with no end year and no pin, which Search finds from 2020 on."""
+    return _aid(pin=None, period=Period(start=2020, end=2024)).model_copy(
+        update={"period_end_open": True}
+    )
+
+
+def _offered(
+    requirements: list[EvidenceRequirement],
+    decisions: list[Decision],
+    change: OneYear,
+    offset: int | None,
+    *,
+    id: str,
+    sibling: str | None = None,
+    year: int | None = None,
+) -> Any:
+    """A row whose refusal offers `change` at `offset`, `sibling` answering ask 1 beside it.
+
+    `year` is the year offered, `None` for the last year the step holds today.
+    """
+    return pytest.param(requirements, decisions, change, offset, sibling, year, id=id)
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("requirements", "decisions", "change", "offset", "sibling", "year"),
+    [
+        _offered([_aid(), _ranked()], [POPULATION], OneYear.WINDOW, None, id="a-rank"),
+        _offered(
+            [
+                _open(period=ONE_YEAR_ONLY),
+                _ranked(
+                    window_start=2024, window_end=2024, rolling=RollingWindow(window_end=_NEWEST)
+                ),
+            ],
+            [POPULATION],
+            OneYear.WINDOW,
+            None,
+            id="a-rank-whose-window-end-alone-follows",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1))),
+                _ranked(input_id="kept"),
+            ],
+            [POPULATION],
+            OneYear.WINDOW,
+            None,
+            id="a-rank-of-years-up-to-the-one-before-the-newest",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
+                _ranked(input_id="kept"),
+            ],
+            [POPULATION],
+            OneYear.WINDOW,
+            None,
+            id="a-rank-of-years-before-the-newest",
+        ),
+        _offered([_aid(), _total()], [], OneYear.FILTER, None, id="a-total-of-fixed-years"),
+        _offered(
+            [_unpinned_open(), _total()],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-an-open-end-with-no-pin",
+        ),
+        _offered(
+            [_unpinned_open(), _ranked()],
+            [POPULATION],
+            OneYear.WINDOW,
+            None,
+            id="a-rank-of-an-open-end-with-no-pin",
+        ),
+        _offered(
+            [_open(period=ONE_YEAR_ONLY), _total()],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-an-open-end",
+        ),
+        _offered(
+            [_open(period=ONE_YEAR_ONLY), _kept_from(2024), _total(input_id="kept")],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-from-a-fixed-first-year-of-an-open-end",
+        ),
+        _offered(
+            [_open(period=ONE_YEAR_ONLY), _latest_year(), _total()],
+            [POPULATION],
+            OneYear.FILTER,
+            0,
+            id="a-total-beside-a-branch-reading-from-the-first-year",
+        ),
+        _offered(
+            [_open(period=ONE_YEAR_ONLY), _latest_year(), _ranked()],
+            [POPULATION],
+            OneYear.WINDOW,
+            0,
+            id="a-rank-beside-a-branch-reading-from-the-first-year",
+        ),
+        _offered(
+            [_open(period=ONE_YEAR_ONLY), _latest_year(), _france(), _total(input_id="france")],
+            [POPULATION],
+            OneYear.FILTER,
+            0,
+            id="a-total-of-one-donor-read-from-the-first-year",
+        ),
+        _offered(
+            [*_both(), _total(input_id="both")],
+            [POPULATION, POOLED],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-a-sum",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="gte", year=2024, rolling=_NEWEST)),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            0,
+            id="a-total-from-a-first-year-on-the-anchor",
+        ),
+        _offered(
+            [
+                _open(period=ONE_YEAR_ONLY),
+                _keeping(PeriodThreshold(op="gte", year=2019, rolling=_FIVE_BACK)),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            0,
+            id="a-total-from-five-years-back",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(
+                    PeriodThreshold(op="gte", year=2020),
+                    PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-up-to-the-year-before-the-newest",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-the-years-before-the-newest",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="lte", year=2026)),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-an-open-end-a-fixed-last-year-stops",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(
+                    PeriodThreshold(op="lte", year=2026),
+                    PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
+                ),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-up-to-the-year-before-the-newest-a-fixed-last-year-stops",
+        ),
+        _offered(
+            [
+                _open(period=ONE_YEAR_ONLY),
+                _ranked(
+                    id="yearly",
+                    per_period=True,
+                    window_start=2024,
+                    window_end=2024,
+                    rolling=RollingWindow(window_end=_NEWEST),
+                ),
+                _total(),
+            ],
+            [POPULATION],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-an-open-end-beside-a-rolling-branch",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _ranked(
+                    id="yearly",
+                    per_period=True,
+                    window_start=2024,
+                    window_end=2024,
+                    rolling=RollingWindow(window_end=_NEWEST),
+                ),
+                _keeping(PeriodThreshold(op="lte", year=2023)),
+                _total(input_id="kept"),
+            ],
+            [POPULATION],
+            OneYear.FILTER,
+            None,
+            id="a-total-of-fixed-years-beside-a-rank-of-the-newest",
+            sibling="yearly",
+        ),
+        _offered(
+            [_aid(), _YEARLY, _total()],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-beside-a-series-of-the-same-dataset",
+            sibling="yearly",
+        ),
+        _offered(
+            [
+                _aid(),
+                _total(id="yearly", group_by=(GroupBy.PERIOD,)),
+                GrowthRequirement(
+                    id="change",
+                    input_id="yearly",
+                    window_start=2015,
+                    window_end=2024,
+                    change=GrowthChange.ABSOLUTE,
+                ),
+                _total(),
+            ],
+            [],
+            OneYear.FILTER,
+            None,
+            id="a-total-beside-a-growth-of-the-same-dataset",
+            sibling="change",
+        ),
+        _offered(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _keeping(PeriodThreshold(op="gte", year=2021, rolling=RelativePeriod(offset=-2))),
+                _total(input_id="kept"),
+            ],
+            [],
+            OneYear.FILTER,
+            0,
+            id="a-total-of-an-open-end-from-a-year-before-a-newest-year-the-data-passes",
+            year=2023,
+        ),
+    ],
+)
+def test_the_one_year_each_refusal_offers_is_admitted(
+    decision: Callable[..., Decision],
+    requirements: list[EvidenceRequirement],
+    decisions: list[Decision],
+    change: OneYear,
+    offset: int | None,
+    sibling: str | None,
+    year: int | None,
+) -> None:
+    """Each refusal offers a change to the refused step alone, on the last
+    year its input holds. The year rolls at the offset newer data moves it
+    by, under the newest year the step's other rolling years stand for, where
+    the dataset is retrieved from its first year, and is fixed otherwise,
+    since a rolling year would retrieve the dataset's whole history for every
+    step reading it. The plan that follows the change is admitted, and every
+    other step, the dataset's `period` and the inputs between the step and
+    the dataset included, is left as stated."""
+    cited = [decision(), *decisions]
+    asks, answered = (ASK,), None
+    if sibling is not None:
+        asks = _BESIDE_A_SERIES
+        answered = [
+            AskAnswer(ask=0, outputs=(requirements[-1].id,)),
+            AskAnswer(ask=1, outputs=(sibling,)),
+        ]
+    # Both sides of a sum pin one dataset, so adding them needs no pick from the user.
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+
+    refused = _propose(_context(asks=asks, pins=pins), requirements, cited, answered=answered)
+    (gap,) = refused["detail"]["gaps"]
+    advised = list(requirements)
+    _follow(advised, refused)
+    read = OneYearRead(year=gap["one_year"]["year"], offset=gap["one_year"]["offset"])
+    assert advised == one_year_followed(requirements, gap["requirement_id"], read)
+    ctx = _context(asks=asks, pins=pins)
+    admitted = _propose(ctx, advised, cited, answered=answered)
+
+    offered = gap["years"]["end"] if year is None else year
+    assert gap["one_year"] == {
+        "change": change,
+        "year": offered,
+        "offset": offset,
+        "together_with": [],
+    }
+    assert admitted["outcome"] == Outcome.OK.value, admitted
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    refused_step = gap["requirement_id"]
+    # Admission pins each dataset to the source of the window it reads.
+    unpinned = {"source_spec_id"}
+    assert [
+        step.model_dump(exclude=unpinned)
+        for step in stored.evidence_requirements
+        if step.id not in (refused_step, "one_year")
+    ] == [step.model_dump(exclude=unpinned) for step in requirements if step.id != refused_step]
+    _, before = _step_of(requirements, refused_step)
+    if change is OneYear.FILTER:
+        assert stored.requirement("one_year").input_id == before.input_id
+        assert stored.requirement(refused_step).input_id == "one_year"
+    else:
+        assert stored.requirement(refused_step).input_id == before.input_id
+
+
+def _from_newest(id: str, offset: int) -> FilterRequirement:
+    """2020 on over the max per donor of the open 2020-2024, as a first year `offset` before the newest year."""
+    return FilterRequirement(
+        id=id,
+        input_id="all",
+        predicates=(PeriodThreshold(op="gte", year=2020, rolling=RelativePeriod(offset=offset)),),
+    )
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("steps", "answered", "across_years"),
+    [
+        pytest.param(
+            [
+                _keeping(
+                    PeriodThreshold(op="gt", year=2023),
+                    PeriodThreshold(op="gte", year=2021, rolling=RelativePeriod(offset=-2)),
+                ),
+                _total(input_id="kept"),
+            ],
+            None,
+            (),
+            id="a-newest-year-the-total-does-not-hold",
+        ),
+    ],
+)
+def test_a_refusal_offers_no_one_year_where_the_newest_year_is_not_held(
+    decision: Callable[..., Decision],
+    steps: list[EvidenceRequirement],
+    answered: list[AskAnswer] | None,
+    across_years: tuple[str, ...],
+) -> None:
+    """From 2024 on, below a first year two before a newest year of 2023, the
+    newest year is no year the total holds, and a fixed one is passed once
+    the rolling first year moves past it, so the refusal offers only keeping
+    the years. A max per donor that two results each keep from a rolling
+    first year of their own, on newest years of 2024 and 2023, joins both
+    groups once it rolls, so no rolling year agrees with both, and a fixed
+    year is passed by either first year."""
+    asks = (ASK,) if answered is None else _BESIDE_A_SERIES
+    ctx = _context(asks=asks, pins=_SHOWN_OPEN)
+    dataset = _open(period=Period(start=2020, end=2024))
+
+    refused = _propose(
+        ctx,
+        [dataset, *steps],
+        [decision()],
+        answered=answered,
+        across_years=list(across_years),
+        reads_user_words=bool(across_years),
+    )
+
+    assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
+    (gap,) = refused["detail"]["gaps"]
+    assert gap["one_year"] is None
+    assert "To read one year" not in refused["message"]
+
+
+def _open_series(requirement_id: str, *, measure: str = "net ODA") -> DatasetRequirement:
+    """One donor's flow to Kenya over 2020-2024 with no end year."""
+    return _series(requirement_id, measure=measure, period=Period(start=2020, end=2024)).model_copy(
+        update={"source_spec_id": _OPEN_SPEC, "period_end_open": True}
+    )
+
+
+def _totals_paired(
+    verb: type[QuotientRequirement | SumOfRequirement], *, open_: bool, by_value: bool = False
+) -> list:
+    """The total of two series, over 2020-2024 open or fixed, divided or summed, side by side.
+
+    With `by_value` the first total sums only the years a value filter kept.
+    """
+    series = (
+        _open_series
+        if open_
+        else (lambda rid, **kw: _series(rid, period=Period(start=2020, end=2024), **kw))
+    )
+    sides = (_side("bilateral_total"), _side("imputed_total"))
+    pair = (
+        QuotientRequirement(id="pair", numerator=sides[0], denominator=sides[1])
+        if verb is QuotientRequirement
+        else SumOfRequirement(id="pair", decision_ids=("measure",), left=sides[0], right=sides[1])
+    )
+    kept = FilterRequirement(
+        id="kept",
+        decision_ids=("measure",),
+        input_id="bilateral",
+        predicates=(ValueThreshold(op="gt", value=84.357),),
+    )
+    return [
+        series("bilateral"),
+        series("imputed", measure="imputed multilateral aid"),
+        *([kept] if by_value else []),
+        _total(id="bilateral_total", input_id="kept" if by_value else "bilateral"),
+        _total(id="imputed_total", input_id="imputed"),
+        pair,
+    ]
+
+
+def _each_donors_part(
+    verb: type[ShareOfRequirement | QuotientRequirement], *, by_value: bool = False
+) -> list:
+    """Each donor's total over 2020-2024 with no end year, against the total of those totals.
+
+    With `by_value` each donor's total sums only the years a value filter kept.
+    """
+    sides = (_side("per_donor"), _side("overall"))
+    part = (
+        ShareOfRequirement(
+            id="part",
+            decision_ids=("pooled",),
+            numerator=sides[0],
+            denominator=sides[1],
+            axis="donor",
+            denominator_scope=DenominatorScope.POOLED,
+        )
+        if verb is ShareOfRequirement
+        else QuotientRequirement(id="part", numerator=sides[0], denominator=sides[1])
+    )
+    donors = _two_donors().model_copy(
+        update={
+            "source_spec_id": _OPEN_SPEC,
+            "period": Period(start=2020, end=2024),
+            "period_end_open": True,
+        }
+    )
+    kept = FilterRequirement(
+        id="kept",
+        decision_ids=("measure",),
+        input_id="aid",
+        predicates=(ValueThreshold(op="gt", value=84.357),),
+    )
+    return [
+        donors,
+        *([kept] if by_value else []),
+        _total(id="per_donor", input_id="kept" if by_value else "aid"),
+        _total(id="overall", input_id="per_donor", group_by=(GroupBy.PERIOD,)),
+        part,
+    ]
+
+
+def _growth(**overrides: Any) -> GrowthRequirement:
+    fields: dict[str, Any] = {
+        "id": "change",
+        "input_id": "aid",
+        "window_start": 2020,
+        "window_end": 2024,
+        "change": GrowthChange.ABSOLUTE,
+        "rolling": RollingWindow(window_end=_NEWEST),
+    }
+    return GrowthRequirement(**(fields | overrides))
+
+
+_OVER_2020_TO_2024 = {"window_start": 2020, "window_end": 2024}
+_ROLLING_END = {**_OVER_2020_TO_2024, "rolling": RollingWindow(window_end=_NEWEST)}
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("requirements", "decisions", "admitted"),
+    [
+        pytest.param(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _total(id="total"),
+                _ranked(input_id="total", axis="recipient", reduction=None, **_OVER_2020_TO_2024),
+            ],
+            [POPULATION],
+            False,
+            id="a-fixed-window-over-a-total-of-open-years",
+        ),
+        pytest.param(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _growth(),
+                _ranked(input_id="change", **_OVER_2020_TO_2024),
+            ],
+            [POPULATION],
+            False,
+            id="a-fixed-window-over-a-growth-whose-end-rolls",
+        ),
+        pytest.param(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _growth(),
+                _ranked(input_id="change", **_ROLLING_END),
+            ],
+            [POPULATION],
+            True,
+            id="a-rolling-end-over-a-growth-whose-end-rolls",
+        ),
+        pytest.param(
+            [
+                _open(period=Period(start=2020, end=2024)),
+                _ranked(id="per_donor", **_ROLLING_END),
+                _ranked(input_id="per_donor", reduction=None, **_OVER_2020_TO_2024),
+            ],
+            [POPULATION],
+            False,
+            id="a-fixed-window-over-a-rank-whose-end-rolls",
+        ),
+        pytest.param(
+            _totals_paired(QuotientRequirement, open_=True),
+            [POPULATION, POOLED],
+            False,
+            id="a-quotient-of-totals-of-open-years",
+        ),
+        pytest.param(
+            _totals_paired(SumOfRequirement, open_=True),
+            [POPULATION, POOLED],
+            False,
+            id="a-sum-of-totals-of-open-years",
+        ),
+        pytest.param(
+            _totals_paired(QuotientRequirement, open_=False),
+            [POPULATION, POOLED],
+            True,
+            id="a-quotient-of-totals-of-fixed-years",
+        ),
+        pytest.param(
+            _totals_paired(QuotientRequirement, open_=False, by_value=True),
+            [POPULATION, POOLED],
+            False,
+            id="a-quotient-of-a-total-of-the-years-a-value-filter-kept",
+        ),
+        pytest.param(
+            _totals_paired(SumOfRequirement, open_=False, by_value=True),
+            [POPULATION, POOLED],
+            False,
+            id="a-sum-of-a-total-of-the-years-a-value-filter-kept",
+        ),
+        pytest.param(
+            _each_donors_part(ShareOfRequirement),
+            [POOLED],
+            True,
+            id="a-share-of-a-total-of-the-same-open-years",
+        ),
+        pytest.param(
+            _each_donors_part(QuotientRequirement),
+            [],
+            True,
+            id="a-quotient-of-a-total-of-the-same-open-years",
+        ),
+        pytest.param(
+            _each_donors_part(QuotientRequirement, by_value=True),
+            [],
+            True,
+            id="a-quotient-of-a-total-of-the-same-years-a-value-filter-kept",
+        ),
+    ],
+)
+def test_a_span_newer_data_moves_matches_no_fixed_window_or_span_that_stays(
+    decision: Callable[..., Decision],
+    requirements: list[EvidenceRequirement],
+    decisions: list[Decision],
+    admitted: bool,
+) -> None:
+    """analysis-mcp labels a total with every year it summed, a growth with
+    its window and a rank with the years its window kept, and keeps a span
+    row only under a window holding its label, or beside a side of the same
+    label. A total of open years ends at the newest year the data reports,
+    and a rolling window end follows the newest year, so a fixed window or a
+    span over another dataset loses the label once newer data arrives. A
+    window whose end follows the newest year as the span's does keeps it,
+    and so does a total of that total, which keeps its label. A total of
+    the years a value filter kept spans the years only the data leaves,
+    such as 2016-2020 where France's 2015 value falls below the threshold,
+    so it matches no span another step wrote."""
+    # Both sides pin one dataset, so adding them needs no pick from the user.
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    ctx = _context(across_years=[0], pins=pins)
+
+    result = _propose(ctx, requirements, [decision(), *decisions])
+
+    if admitted:
+        assert result["outcome"] == Outcome.OK.value, result
+    else:
+        assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+
+
+def _keeping_from(
+    requirement_id: str, input_id: str, *predicates: PeriodThreshold
+) -> FilterRequirement:
+    return FilterRequirement(
+        id=requirement_id, decision_ids=("measure",), input_id=input_id, predicates=predicates
+    )
+
+
+@pytest.mark.parametrize(
+    "trailing_first", [False, True], ids=["numerator-first", "denominator-first"]
+)
+def test_a_mean_over_a_pair_with_a_trailing_side_reduces_years_in_either_side_order(
+    decision: Callable[..., Decision], trailing_first: bool
+) -> None:
+    """One side holds 2020 to the newest year. The other holds 2024 alone
+    today, from 2024 or from six years back of the newest, whichever is later.
+    Their quotient holds 2024 today, and 2024 and 2025 once 2025 arrives, so
+    a mean of it by entity reduces years, which no ask across years licenses."""
+    newest = RelativePeriod(offset=0)
+    sides = [
+        _open_series("bilateral"),
+        _keeping_from("left", "bilateral", PeriodThreshold(op="lte", year=2024, rolling=newest)),
+        _open_series("imputed", measure="imputed multilateral aid"),
+        _keeping_from(
+            "right",
+            "imputed",
+            PeriodThreshold(op="gte", year=2024),
+            PeriodThreshold(op="gte", year=2018, rolling=RelativePeriod(offset=-6)),
+            PeriodThreshold(op="lte", year=2024, rolling=newest),
+        ),
+    ]
+    order = (_side("right"), _side("left")) if trailing_first else (_side("left"), _side("right"))
+    pair = QuotientRequirement(id="pair", numerator=order[0], denominator=order[1])
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+
+    result = _propose(
+        _context(pins=pins),
+        [*sides, pair, _total(input_id="pair", reduction=Reduction.MEAN)],
+        [decision(), POPULATION, POOLED],
+    )
+
+    assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
+    assert [gap["requirement_id"] for gap in result["detail"]["gaps"]] == ["result"]
+
+
+def _paired(kind: str, first: str, second: str) -> EvidenceRequirement:
+    """`kind`'s requirement pairing `first` with `second`, in that order."""
+    sides = (_side(first), _side(second))
+    if kind == "quotient_of":
+        return QuotientRequirement(id="pair", numerator=sides[0], denominator=sides[1])
+    if kind == "share_of":
+        return ShareOfRequirement(
+            id="pair", decision_ids=("pooled",), numerator=sides[0], denominator=sides[1]
+        )
+    if kind == "compare":
+        return ComparisonRequirement(
+            id="pair", decision_ids=("measure",), minuend=sides[0], subtrahend=sides[1]
+        )
+    return SumOfRequirement(id="pair", decision_ids=("measure",), left=sides[0], right=sides[1])
+
+
+_PAIRING_VERBS = ("quotient_of", "share_of", "compare", "sum_of")
+_SIDE_ORDERS = pytest.mark.parametrize("swap", [False, True], ids=["as-stated", "swapped"])
+
+
+@pytest.mark.parametrize("kind", _PAIRING_VERBS)
+@pytest.mark.parametrize("other", ["imputed_total", "imputed"], ids=["a-total", "a-series"])
+@_SIDE_ORDERS
+def test_a_total_of_the_rows_a_value_filter_kept_pairs_with_no_other_steps_result(
+    decision: Callable[..., Decision], kind: str, other: str, swap: bool
+) -> None:
+    """Over fixed 2020-2024, one total sums only the years a value filter
+    kept, which analysis-mcp labels with the years those rows fall in. No
+    other step's total or yearly series is known to carry that label, and no
+    change to the pair computes the figure it states, so the refusal names
+    none."""
+    sides = ("bilateral_total", other)
+    requirements = [
+        *(
+            r
+            for r in _totals_paired(QuotientRequirement, open_=False, by_value=True)[:-1]
+            if r.id != "imputed_total" or other == "imputed_total"
+        ),
+        _paired(kind, *(sides[::-1] if swap else sides)),
+    ]
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+
+    refused = _propose(
+        _context(across_years=[0], pins=pins), requirements, [decision(), POPULATION, POOLED]
+    )
+
+    assert refused["code"] == ProblemCode.INVALID_PLAN.value, refused
+    assert VALUE_KEPT_SPAN_PAIRS in refused["message"], refused["message"]
+
+
+@pytest.mark.parametrize("counterpart", ["kept", "kept_total"], ids=["a-series", "a-total"])
+@_SIDE_ORDERS
+def test_a_max_by_entity_pairs_with_no_series_a_value_filter_kept(
+    decision: Callable[..., Decision], counterpart: str, swap: bool
+) -> None:
+    """Over fixed 2020-2024, each donor's max sits at the year it fell in, and
+    a value filter can leave that year out of the other side, so the pair is
+    refused in either order. A total of the kept rows is refused the same way,
+    since reading it as a yearly series leaves the kept rows."""
+    sides = ("peak", counterpart)
+    requirements = [
+        _series("bilateral", period=Period(start=2020, end=2024)),
+        _series("imputed", measure="imputed multilateral aid", period=Period(start=2020, end=2024)),
+        _total(id="peak", input_id="bilateral", reduction=Reduction.MAX),
+        FilterRequirement(
+            id="kept",
+            decision_ids=("measure",),
+            input_id="imputed",
+            predicates=(ValueThreshold(op="gt", value=84.357),),
+        ),
+        *([_total(id="kept_total", input_id="kept")] if counterpart == "kept_total" else []),
+        _paired("quotient_of", *(sides[::-1] if swap else sides)),
+    ]
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+
+    refused = _propose(_context(pins=pins), requirements, [decision(), POPULATION, POOLED])
+
+    assert refused["code"] == ProblemCode.INVALID_PLAN.value, refused
+    assert "no plan pairs a max or min with the rows a value filter kept" in refused["message"]
+
+
+def _ranks_compared() -> list:
+    """Each donor ranked by the sum and by the mean of its aid from 2020 to the newest year, one less the other."""
+    return [
+        _open(period=Period(start=2020, end=2024)),
+        _ranked(id="by_sum", **_ROLLING_END),
+        _ranked(id="by_mean", reduction=Reduction.MEAN, **_ROLLING_END),
+        ComparisonRequirement(
+            id="gap",
+            decision_ids=("measure",),
+            minuend=_side("by_sum"),
+            subtrahend=_side("by_mean"),
+        ),
+    ]
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("requirements", "decisions", "offers"),
+    [
+        pytest.param(
+            _totals_paired(QuotientRequirement, open_=False),
+            [POPULATION, POOLED],
+            {"bilateral_total": OneYear.FILTER, "imputed_total": OneYear.FILTER},
+            id="a-quotient-of-totals-of-fixed-years",
+        ),
+        pytest.param(
+            _ranks_compared(),
+            [POPULATION],
+            {"by_sum": OneYear.WINDOW, "by_mean": OneYear.WINDOW},
+            id="a-comparison-of-ranks-of-open-years",
+        ),
+    ],
+)
+def test_the_sides_of_a_pairing_are_offered_one_year_together(
+    decision: Callable[..., Decision],
+    requirements: list[EvidenceRequirement],
+    decisions: list[Decision],
+    offers: dict[str, OneYear],
+) -> None:
+    """Each side of the pairing reduces 2020-2024, and either one read alone
+    in 2024 matches no row of the other's span. Both read in 2024 match, so
+    the refusal offers each its year together with the other. The plan
+    following both is admitted, and one following either alone is not."""
+    pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
+    cited = [decision(), *decisions]
+
+    refused = _propose(_context(pins=pins), requirements, cited)
+
+    assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
+    gaps = refused["detail"]["gaps"]
+    assert {gap["requirement_id"]: gap["one_year"] for gap in gaps} == {
+        step_id: {
+            "change": change,
+            "year": 2024,
+            "offset": None,
+            "together_with": [other for other in offers if other != step_id],
+        }
+        for step_id, change in offers.items()
+    }
+    for step_id in offers:
+        others = " and ".join(repr(other) for other in offers if other != step_id)
+        assert f"together with the one-year change offered to {others}" in refused["message"]
+    reads = {
+        gap["requirement_id"]: OneYearRead(year=gap["one_year"]["year"], offset=None)
+        for gap in gaps
+    }
+    followed = list(requirements)
+    for step_id, read in reads.items():
+        alone = one_year_followed(requirements, step_id, read)
+        assert _propose(_context(pins=pins), alone, cited)["outcome"] != Outcome.OK.value
+        followed = one_year_followed(followed, step_id, read)
+    admitted = _propose(_context(pins=pins), followed, cited)
+    assert admitted["outcome"] == Outcome.OK.value, admitted

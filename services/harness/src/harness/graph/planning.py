@@ -341,13 +341,13 @@ def _answered_at(answer: object) -> datetime | None:
 def plan_start(ctx: Context, node_input: dict[str, Any]) -> dict[str, Any]:
     """Hand the agent's brief to the planner under the orchestrator's own
     key. This call's asks go under `ASKS_STATE_KEY`, the parties they
-    break down by under `ASK_BREAKDOWNS_STATE_KEY`, and the numbers of
-    those across years under `ASKS_ACROSS_YEARS_STATE_KEY`, each cleared
-    when it lists none so no plan is held to an earlier call's asks, and no
-    earlier call's kept asks are listed. The planner's first-draft entry
-    is an empty payload."""
+    break down by under `ASK_BREAKDOWNS_STATE_KEY`, and the numbers of the
+    asks across years under `ASKS_ACROSS_YEARS_STATE_KEY`. The last two are
+    cleared when the call lists none, so no plan is held to an earlier
+    call's, and no earlier call's kept asks are listed. The planner's
+    first-draft entry is an empty payload."""
     ctx.state[ORCHESTRATOR_BRIEF_KEY] = node_input["brief"]
-    ctx.state[ASKS_STATE_KEY] = node_input.get("asks") or None
+    ctx.state[ASKS_STATE_KEY] = node_input["asks"]
     ctx.state[ASK_BREAKDOWNS_STATE_KEY] = node_input.get("ask_breakdowns") or None
     ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = node_input.get("asks_across_years") or None
     ctx.state[ORCHESTRATOR_KEPT_ASKS_KEY] = None

@@ -48,7 +48,6 @@ operation's own ref, since one variable over another is a third.
 
 from __future__ import annotations
 
-import heapq
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -85,15 +84,15 @@ from analysis_mcp.engine.two_sided import (
     SideSums,
     denominator_key_columns,
     divide_cell,
+    key_sample,
     pair_periods,
     record_cells,
+    record_unmatched_keys,
     record_unmatched_periods,
     result_coverage,
+    split_keys,
     sum_side,
 )
-
-# How many keys per side a `QuotientOfNoKeyMatchedError` samples.
-KEY_SAMPLE_CAP = 20
 
 
 class QuotientOfSideUnitUnsupportedError(Exception):
@@ -111,10 +110,11 @@ class QuotientOfSideUnitUnsupportedError(Exception):
 
 class QuotientOfNoKeyMatchedError(Exception):
     """Both sides hold keys and no numerator key has a denominator group
-    under `denominator_by`'s mapping. `numerator_keys`/`denominator_keys` are each side's `KEY_SAMPLE_CAP`
-    smallest keys, each as `(column, value)` pairs under that side's own
-    column names; `numerator_key_count`/`denominator_key_count` are how many
-    keys each side holds.
+    under `denominator_by`'s mapping. `numerator_keys`/`denominator_keys` are
+    each side's sample of keys (`analysis_mcp.engine.two_sided.key_sample`),
+    each as `(column, value)` pairs under that side's own column names;
+    `numerator_key_count`/`denominator_key_count` are how many keys each side
+    holds.
     """
 
     def __init__(
@@ -287,13 +287,6 @@ def _sum_side(
         ) from exc
 
 
-def _key_sample(sums: SideSums, columns: Sequence[str]) -> tuple[KeyPairs, ...]:
-    return tuple(
-        tuple(zip(columns, key, strict=True))
-        for key in heapq.nsmallest(KEY_SAMPLE_CAP, sums.by_key)
-    )
-
-
 def _all_periods(sums: SideSums) -> list[str]:
     """Every period any of `sums`' keys holds, sorted."""
     return sorted({period for by_period in sums.by_key.values() for period in by_period})
@@ -361,17 +354,11 @@ def run_quotient_of(
             denominator_periods=_all_periods(denominator),
         )
 
-    unmatched_keys: list[tuple[str, ...]] = []
-    paired_keys: list[tuple[str, ...]] = []
-    for key in numerator_keys:
-        if pooled or key in denominator.by_key:
-            paired_keys.append(key)
-        else:
-            unmatched_keys.append(key)
+    paired_keys, unmatched_keys = split_keys(numerator_keys, denominator, pooled=pooled)
     if not paired_keys:
         raise QuotientOfNoKeyMatchedError(
-            numerator_keys=_key_sample(numerator, numerator_by),
-            denominator_keys=_key_sample(denominator, denominator_columns),
+            numerator_keys=key_sample(numerator, numerator_by),
+            denominator_keys=key_sample(denominator, denominator_columns),
             numerator_key_count=len(numerator.by_key),
             denominator_key_count=len(denominator.by_key),
         )
@@ -387,7 +374,6 @@ def run_quotient_of(
     period_quotients: list[PeriodQuotient] = []
     kept_cells: list[tuple[tuple[str, ...], str]] = []
     zero_denominator_cells: list[ZeroDenominatorCell] = []
-    keys_without_shared_period: list[tuple[str, ...]] = []
     keys_with_zero_denominator: list[tuple[str, ...]] = []
     # Every denominator (group, period) some numerator key shares that sums
     # to zero. A pooled group serves every key, so each cell counts once.
@@ -397,9 +383,7 @@ def run_quotient_of(
         numerator_by_period = numerator.by_key.get(key, {})
         denominator_by_period = denominator.by_key.get(group, {})
         key_pairs = tuple(zip(numerator_by, key, strict=True))
-        if not shared:
-            keys_without_shared_period.append(key)
-        elif all(denominator_by_period[period] == 0.0 for period in shared):
+        if shared and all(denominator_by_period[period] == 0.0 for period in shared):
             keys_with_zero_denominator.append(key)
         for period in shared:
             numerator_value = numerator_by_period[period]
@@ -445,13 +429,8 @@ def run_quotient_of(
     )
 
     exclusions = combine_exclusions(numerator.exclusions, denominator.exclusions)
-    exclusions = record_cells(
-        exclusions,
-        reason="unmatched_key",
-        side="numerator",
-        sums=numerator,
-        columns=numerator_by,
-        cells=((key, period) for key in unmatched_keys for period in numerator.by_key[key]),
+    exclusions = record_unmatched_keys(
+        exclusions, numerator=numerator, numerator_by=numerator_by, keys=unmatched_keys
     )
     exclusions = record_unmatched_periods(
         exclusions,
@@ -525,9 +504,7 @@ def run_quotient_of(
         denominator_coverage_fraction=pairing.denominator_coverage_fraction,
         period_quotients=tuple(period_quotients),
         unmatched_keys=tuple(tuple(zip(numerator_by, key, strict=True)) for key in unmatched_keys),
-        keys_without_shared_period=tuple(
-            tuple(zip(numerator_by, key, strict=True)) for key in keys_without_shared_period
-        ),
+        keys_without_shared_period=pairing.keys_without_shared_period,
         keys_with_zero_denominator=tuple(
             tuple(zip(numerator_by, key, strict=True)) for key in keys_with_zero_denominator
         ),

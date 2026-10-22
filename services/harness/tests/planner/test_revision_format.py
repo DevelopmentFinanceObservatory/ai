@@ -158,19 +158,20 @@ def test_a_rolling_period_enters_the_revision_once_stated() -> None:
     plan = Plan.model_validate(_RECORDED["growth"]["plan"])
     content = plan.model_dump(mode="json")
     latest = {"anchor": "latest", "offset": 0}
+    nine_back = {"anchor": "latest", "offset": -9}
     content["evidence_requirements"][0]["period_end_open"] = True
     for section in (content["evidence_requirements"], content["translation"]["operations"]):
         recent, growth = section[1], section[2]
-        recent["predicates"][0]["rolling"] = {"anchor": "latest", "offset": -9}
-        growth["rolling"] = {"window_end": latest}
+        recent["predicates"][0]["rolling"] = nine_back
+        growth["rolling"] = {"window_start": nine_back, "window_end": latest}
 
     rolling = Plan.model_validate(content)
 
     assert plan_revision(rolling) != plan_revision(plan)
     dataset, recent, growth = (revision_content(r) for r in rolling.evidence_requirements)
     assert dataset["period_end_open"] is True
-    assert recent["predicates"][0]["rolling"] == {"anchor": "latest", "offset": -9}
-    assert growth["rolling"] == {"window_start": None, "window_end": latest}
+    assert recent["predicates"][0]["rolling"] == nine_back
+    assert growth["rolling"] == {"window_start": nine_back, "window_end": latest}
     for requirement in plan.evidence_requirements:
         unset = json.dumps(revision_content(requirement))
         assert "rolling" not in unset

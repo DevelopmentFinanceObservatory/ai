@@ -2785,7 +2785,12 @@ def test_comparing_requirements_whose_periods_share_no_year_is_reported(
         minuend=RequirementSide(input_id="old_gdp"),
         subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
-    plan = _draft([decision()], [requirement(), old, comparison])
+    # The plan refuses sides that share no year (`planner.shapes.rejects`), so
+    # the disjoint period is set unchecked, as on a plan the compiler is handed.
+    overlapping = old.model_copy(update={"period": Period(start=1990, end=2015)})
+    plan = _draft([decision()], [requirement(), overlapping, comparison]).model_copy(
+        update={"evidence_requirements": (requirement(), old, comparison)}
+    )
     gap = CompareOperation(
         id="gap", requirement_id="gap", left=Side(input="debt"), right=Side(input="gdp")
     )
@@ -2800,7 +2805,7 @@ def test_comparing_requirements_whose_periods_share_no_year_is_reported(
         },
     )
 
-    assert _codes(result) == [Code.PERIODS_DISJOINT]
+    assert _codes(result) == [Code.INPUT_SHAPE_UNSUPPORTED, Code.PERIODS_DISJOINT]
 
 
 @pytest.mark.parametrize(
@@ -4007,6 +4012,33 @@ def test_arguments_the_compiler_wrote_are_still_checked_against_the_live_schema(
 
     assert _codes(result) == [Code.BAD_ARGS]
     assert "'group_by' was unexpected" in result.issues[0].reason
+
+
+def test_a_filter_writing_one_predicate_twice_is_refused_as_analysis_mcp_refuses_it(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # France named under its role and under none are two predicates to the
+    # plan, and one `category_match` once resolved, which analysis-mcp's
+    # filter refuses as a predicate stated twice (`op_spec_invalid`).
+    predicates = (EntityIn(names=("France",), role="creditor"), EntityIn(names=("France",)))
+    filter_req = FilterRequirement(
+        id="france", decision_ids=["measure"], input_id="annual_debt_service", predicates=predicates
+    )
+    plan = _draft([decision()], [_two_role_requirement(), filter_req])
+    filter_op = FilterOperation(
+        id="france", requirement_id="france", input="debt", predicates=predicates
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), filter_op, terminal=["france"]),
+        discovered={"annual_debt_service": _two_role_creditor_source(source)},
+    )
+
+    assert _codes(result) == [Code.BAD_ARGS]
+    assert result.issues[0].operation_id == "france"
 
 
 def test_capability_unpinned_when_a_live_schema_declares_an_output_schema(

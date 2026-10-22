@@ -42,9 +42,10 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import itertools
 import json
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
@@ -85,6 +86,7 @@ from planner.records import (
     RankDirection,
     RankLimit,
     Reduction,
+    RelativePeriod,
     ResolvedSourceMention,
     RollingIssue,
     RollingPlanError,
@@ -99,14 +101,19 @@ from planner.records import (
     warn_left_out,
 )
 from planner.shapes import (
+    EndDrift,
     FrameShape,
+    PeriodDrift,
     RoleDimension,
     ShapeVerb,
     TimeLabel,
     aggregated,
+    anchor_misses,
+    anchor_year_stays,
     compared,
     filtered,
     grown,
+    growth_endpoint_leaves,
     joined,
     place_role,
     quotiented,
@@ -116,8 +123,9 @@ from planner.shapes import (
     roles_named,
     shared,
     summed_sides,
-    windowed_years,
+    windowed,
     year_filter,
+    years_run_out,
 )
 from planner.shapes import rejects as shape_rejects
 from planner.workflow import ResolvedGroup, Workflow
@@ -192,8 +200,9 @@ FULL_HISTORIES_STATE_KEY = "planner:full_histories"
 # The session-state slot holding the outputs the user asked for, as a JSON
 # list of strings numbered by position, at most `MAX_PLAN_ASKS` of at most
 # `MAX_ASK_CHARS` characters each (`load_asks`). The orchestrator's
-# `plan_start` node writes it beside the brief on every plan call, and clears
-# it when the call lists none. `harness.planner_seam` lists the asks in the
+# `plan_start` node writes it beside the brief on every plan call, and the
+# `plan` tool refuses a call that lists none
+# (`harness.orchestrator_tools._asks_refusal`). `harness.planner_seam` lists the asks in the
 # planner's first message, and `planner.agent.propose_plan` copies them onto
 # every plan it records, so `Plan` refuses one that does not account for each
 # exactly once. Unset, a plan carries no asks and no ask is accounted for.
@@ -959,6 +968,13 @@ class AggregateRequirement(TaggedModel):
         ),
     )
 
+    @field_validator("group_by")
+    @classmethod
+    def _each_column_once(cls, group_by: tuple[GroupBy, ...]) -> tuple[GroupBy, ...]:
+        """Reject a column named twice, which groups by nothing more than naming it once."""
+        _reject_repeats(group_by, what="`group_by` column")
+        return group_by
+
 
 _ROLLING_WINDOW_DESCRIPTION = (
     "Set when the window follows the newest data: which ends are relative and how far back "
@@ -1367,27 +1383,25 @@ class FilterRequirement(TaggedModel):
         return self
 
     @model_validator(mode="after")
-    def _rolling_thresholds_share_a_newest_year(self) -> FilterRequirement:
-        """Reject rolling thresholds whose years stand for different newest years.
+    def _states_each_predicate_once(self) -> FilterRequirement:
+        """Reject a predicate stated twice, which analysis-mcp's filter op spec refuses.
 
-        Raises:
-            RollingPlanError: `RollingIssue.YEARS_DISAGREE`, naming this filter.
+        analysis-mcp compares predicates by their canonical form
+        (`analysis_mcp.identity._sorted_unique_predicates`), which sorts an
+        entity list, and two predicates equal here compile to one form
+        (`compiler.compile._filter_arguments`). So do two whose names
+        resolve to one entity, which only the sources show, and the
+        compiler refuses those (`compiler.arguments.op_spec_errors`).
         """
-        implied = sorted(
-            {
-                predicate.rolling.latest_implied_by(predicate.year)
-                for predicate in self.predicates
-                if isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
-            }
-        )
-        if len(implied) > 1:
-            raise RollingPlanError(
-                RollingIssue.YEARS_DISAGREE,
-                f"{self.id!r}: its rolling thresholds stand for different newest years "
-                f"({implied!r}); state the years their offsets give under one newest year",
-                requirement_ids=[self.id],
-            )
+        _reject_repeats((_predicate_key(p) for p in self.predicates), what="predicate")
         return self
+
+
+def _predicate_key(predicate: Predicate) -> str:
+    """`predicate` in a form two statements of it share, its names in any order."""
+    if isinstance(predicate, EntityIn):
+        predicate = predicate.model_copy(update={"names": tuple(sorted(set(predicate.names)))})
+    return predicate.model_dump_json()
 
 
 DerivedRequirement = (
@@ -1583,6 +1597,20 @@ class AskBreakdown(StrictModel):
                 "party on each side"
             )
         return by
+
+
+class PeriodLicence(StrictModel):
+    """A step the user's own words asked to combine its years, as `propose_plan` granted it.
+
+    `propose_plan` writes it, never the model (`period_licences`), and it
+    holds while the step keeps this id and `step_kind` and combines its
+    years with this `reduction`, over however many years, or is a `rank`
+    stating no `reduction` (`period_licences_held`).
+    """
+
+    step_id: Identifier = Field(description="The step that combines its years.")
+    step_kind: Literal["aggregate", "rank"] = Field(description="The step's kind.")
+    reduction: Reduction = Field(description="How the step combines the years.")
 
 
 class AsksUnaccountedError(ValueError):
@@ -1828,10 +1856,14 @@ def _check_requirement_graph(
     draft -- and every requirement's output shape is legal
     under `planner.shapes.rejects`: a side's entity or a rank axis names a
     role the shape it reads actually carries, a growth window fits that
-    shape's own period, and a rank without a reduction leaves one value per
+    shape's own period and keeps both its years there as newer data arrives
+    (`planner.shapes.growth_endpoint_leaves`), and a rank without a reduction leaves one value per
     entity to rank on. A period that follows the newest data rests only on
     dataset requirements stating `period_end_open`
-    (`_check_rolling_reads_open_periods`).
+    (`_check_rolling_reads_open_periods`), and every period a run reads from
+    one newest year states that year, one the datasets it rests on hold
+    (`_check_rolling_years_agree`). An `ne`
+    removes a fixed year from fixed years (`_check_exclusions_fixed`).
 
     Under `AnswerMode.SERIES`, a dataset requirement left unread by every
     other requirement is legal: it is the answer. Under `AnswerMode.COMPUTED`,
@@ -1872,8 +1904,10 @@ def _check_requirement_graph(
                 "statistics, not the figure the question asks for; unread dataset "
                 f"requirements: {unread_datasets!r}"
             )
-    _build_shapes(requirements_by_id)
+    _check_exclusions_fixed(requirements_by_id)
     _check_rolling_reads_open_periods(requirements_by_id)
+    _check_rolling_years_agree(requirements_by_id)
+    _build_shapes(requirements_by_id)
 
 
 def rolls(requirement: EvidenceRequirement) -> bool:
@@ -1924,6 +1958,80 @@ def dataset_roots(
     )
 
 
+def reached(node: str, reads: Mapping[str, Iterable[str]]) -> set[str]:
+    """`node` and every node it reads under `reads`, directly or through others."""
+    found: set[str] = set()
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current not in found:
+            found.add(current)
+            pending.extend(reads[current])
+    return found
+
+
+def rolling_groups(
+    reads: Mapping[str, Iterable[str]], *, rolling: Sequence[str]
+) -> list[list[str]]:
+    """`rolling` split into the groups that count from one newest year.
+
+    Two nodes share a group when some node of `reads` reads both, directly
+    or through others, and the relation is transitive. Each group and the
+    list of them keep the order of `rolling`. A plan's requirements and a
+    workflow's steps group alike (`compiler.rolling.anchor_groups`), so the
+    rule a plan is held to is the one its run resolves by.
+    """
+    group_of = {node: {node} for node in rolling}
+    for node in reads:
+        below = reached(node, reads)
+        together = [member for member in rolling if member in below]
+        merged = set().union(*(group_of[member] for member in together))
+        for member in merged:
+            group_of[member] = merged
+    return [
+        [member for member in rolling if member in group_of[node]]
+        for node in rolling
+        if node == min(group_of[node], key=rolling.index)
+    ]
+
+
+def anchored_over(
+    reads: Mapping[str, Iterable[str]], *, rolling: Sequence[str], retrievals: Collection[str]
+) -> dict[str, frozenset[str]]:
+    """The retrievals each node of `reads` has the newest year it counts from resolved over.
+
+    A node counts from the newest year of the one group of `rolling` it
+    reaches (`rolling_groups`), and the run resolves that year over the
+    retrievals the group's members reach, whatever reads them beside or
+    above (`compiler.rolling.anchor_groups`). A node reaching no rolling
+    node maps to an empty set.
+    """
+    found = dict.fromkeys(reads, frozenset[str]())
+    for members in rolling_groups(reads, rolling=rolling):
+        below = set().union(*(reached(member, reads) for member in members))
+        roots = frozenset(below.intersection(retrievals))
+        for node in reads:
+            if not reached(node, reads).isdisjoint(members):
+                found[node] = roots
+    return found
+
+
+def _rolling_reads(
+    requirements_by_id: Mapping[str, EvidenceRequirement], *, joining: str | None = None
+) -> tuple[dict[str, tuple[Identifier, ...]], list[str]]:
+    """What each requirement reads, and the requirements that roll, `joining` among them when named."""
+    reads = {
+        requirement_id: inputs_of(requirement)
+        for requirement_id, requirement in requirements_by_id.items()
+    }
+    rolling = [
+        requirement_id
+        for requirement_id, requirement in requirements_by_id.items()
+        if rolls(requirement) or requirement_id == joining
+    ]
+    return reads, rolling
+
+
 def rolling_readers(
     requirements_by_id: Mapping[str, EvidenceRequirement], dataset_id: str
 ) -> list[EvidenceRequirement]:
@@ -1933,6 +2041,28 @@ def rolling_readers(
         for requirement in requirements_by_id.values()
         if rolls(requirement) and dataset_id in dataset_roots(requirements_by_id, requirement.id)
     ]
+
+
+def read_from_first_year(
+    requirements_by_id: Mapping[str, EvidenceRequirement], dataset_id: str
+) -> bool:
+    """Whether dataset requirement `dataset_id` is retrieved from the first year its dataset holds.
+
+    One stating `period_end_open` that a start following the newest data
+    reads (`rolls_from_its_start` among its `rolling_readers`) is, since
+    that start can sit before the stated period
+    (`submission.service._open_window`). Its stated first year then bounds
+    nothing.
+    """
+    requirement = requirements_by_id[dataset_id]
+    return (
+        isinstance(requirement, DatasetRequirement)
+        and requirement.period_end_open
+        and any(
+            rolls_from_its_start(reader)
+            for reader in rolling_readers(requirements_by_id, dataset_id)
+        )
+    )
 
 
 def _check_rolling_reads_open_periods(
@@ -1972,6 +2102,128 @@ def _check_rolling_reads_open_periods(
         )
 
 
+def _rolling_years(requirement: EvidenceRequirement) -> list[tuple[int, RelativePeriod]]:
+    """Each year `requirement` states that follows the newest data, with its relative period."""
+    if isinstance(requirement, GrowthRequirement | RankRequirement):
+        rolling = requirement.rolling
+        if rolling is None:
+            return []
+        bounds = (
+            (requirement.window_start, rolling.window_start),
+            (requirement.window_end, rolling.window_end),
+        )
+        return [
+            (year, period) for year, period in bounds if year is not None and period is not None
+        ]
+    if isinstance(requirement, FilterRequirement):
+        return [
+            (predicate.year, predicate.rolling)
+            for predicate in requirement.predicates
+            if isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
+        ]
+    return []
+
+
+def _check_rolling_years_agree(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
+    """Reject rolling years that stand for different newest years where a run reads one, or for one the data lacks.
+
+    The run resolves one newest year for each group of rolling requirements
+    (`rolling_groups`, as `compiler.rolling.anchor_groups` groups their
+    steps) and writes every rolling year of the group as that year moved by
+    its offset (`compiler.rolling.resolved_arguments`). Every rule here
+    reads the years a plan states, so all of a group's rolling years state
+    one newest year (`RelativePeriod.latest_implied_by`): within one filter
+    or window, and across the steps one result reads. That year is one the
+    datasets the group rests on hold today: no later than the last year of
+    any of their periods, the years Search found them over. A newest year
+    before it stays, since the run's newest year is one at least half the
+    series hold, and the last year can be one few of them hold.
+
+    Raises:
+        RollingPlanError: `RollingIssue.YEARS_DISAGREE`, naming the group's
+            requirements.
+    """
+    reads, rolling = _rolling_reads(requirements_by_id)
+    for members in rolling_groups(reads, rolling=rolling):
+        implied = {
+            member: sorted(
+                {
+                    period.latest_implied_by(year)
+                    for year, period in _rolling_years(requirements_by_id[member])
+                }
+            )
+            for member in members
+        }
+        newest = {year for years in implied.values() for year in years}
+        if len(newest) > 1:
+            stated = "; ".join(f"{member!r} {years!r}" for member, years in implied.items())
+            raise RollingPlanError(
+                RollingIssue.YEARS_DISAGREE,
+                f"{members!r} count from one newest year, and their rolling years, less their "
+                f"offsets, give different ones ({stated}); state each rolling year as the "
+                "newest year the data holds today moved by its offset",
+                requirement_ids=members,
+            )
+        held = min(
+            root.period.end
+            for member in members
+            for root_id in dataset_roots(requirements_by_id, member)
+            if isinstance(root := requirements_by_id[root_id], DatasetRequirement)
+        )
+        if any(year > held for year in newest):
+            raise RollingPlanError(
+                RollingIssue.YEARS_DISAGREE,
+                f"{members!r} state rolling years, less their offsets, as newest year {min(newest)}, "
+                f"after {held}, the last year the datasets they read hold; state each rolling "
+                "year as the newest year the data holds today moved by its offset",
+                requirement_ids=members,
+            )
+
+
+def _check_exclusions_fixed(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
+    """Reject a filter's `ne` that follows the newest data, or that reads years newer data moves.
+
+    A rolling `ne` removes another year each time newer data arrives. Over
+    a dataset retrieved with `period_end_open`, a year a fixed `ne` removes
+    can become the newest year, or the year a later bound that follows the
+    newest data names, which then holds no row. So an `ne` names a fixed
+    year over datasets of fixed years alone.
+
+    Raises:
+        RollingPlanError: `RollingIssue.EXCLUSION_ROLLS`, naming the filters.
+    """
+    open_ends = {
+        requirement.id
+        for requirement in requirements_by_id.values()
+        if isinstance(requirement, DatasetRequirement) and requirement.period_end_open
+    }
+    refused = sorted(
+        requirement.id
+        for requirement in requirements_by_id.values()
+        if isinstance(requirement, FilterRequirement)
+        and any(
+            isinstance(predicate, PeriodThreshold)
+            and predicate.op == "ne"
+            and (
+                predicate.rolling is not None
+                or not open_ends.isdisjoint(dataset_roots(requirements_by_id, requirement.id))
+            )
+            for predicate in requirement.predicates
+        )
+    )
+    if refused:
+        raise RollingPlanError(
+            RollingIssue.EXCLUSION_ROLLS,
+            f"{refused!r} remove a year with `ne` that follows the newest data, or from a "
+            "dataset retrieved with `period_end_open`, so newer data can make the removed year "
+            "the one a step reads; state `ne` on a fixed "
+            "year over datasets retrieved without `period_end_open`, and to leave out the "
+            "newest year keep the years up to the one before it with op `lte` and `rolling` "
+            "at offset -1",
+            requirement_ids=refused,
+        )
+
+
 def frame_shapes(requirements: Iterable[EvidenceRequirement]) -> dict[str, FrameShape]:
     """Return each requirement's output shape, by id, for a plan that already validated."""
     return _build_shapes({requirement.id: requirement for requirement in requirements})
@@ -1986,11 +2238,46 @@ def _build_shapes(requirements_by_id: dict[str, EvidenceRequirement]) -> dict[st
     confirms the input may feed it. Nothing here skips a check for want of a
     single upstream dataset requirement to walk to: a role dimension always
     names exactly one, by construction of every transform.
+
+    Raises:
+        RollingPlanError: `RollingIssue.SIDE_UNANCHORED`, naming the first
+            two-sided step pairing an open side with a side on a newest year
+            not resolved over it (`planner.shapes.anchor_misses`), or
+            `RollingIssue.YEARS_RUN_OUT`, naming the first step whose years
+            newer data leaves empty (`planner.shapes.years_run_out`), or
+            the first growth whose window year newer data takes out of its
+            input (`planner.shapes.growth_endpoint_leaves`).
     """
+    reads, rolling = _rolling_reads(requirements_by_id)
+    over = anchored_over(
+        reads,
+        rolling=rolling,
+        retrievals=[
+            requirement_id
+            for requirement_id, requirement in requirements_by_id.items()
+            if isinstance(requirement, DatasetRequirement)
+        ],
+    )
     shapes_by_id: dict[str, FrameShape] = {}
     for requirement_id in _topological_order(requirements_by_id):
         requirement = requirements_by_id[requirement_id]
-        shapes_by_id[requirement_id] = _shape_of(requirement, shapes_by_id, requirements_by_id)
+        shape = _shape_of(requirement, shapes_by_id, requirements_by_id)
+        sides = [shapes_by_id[input_id] for input_id in reads[requirement_id]]
+        missed = anchor_misses(sides, over[requirement_id]) if len(sides) > 1 else None
+        if missed is not None:
+            raise RollingPlanError(
+                RollingIssue.SIDE_UNANCHORED,
+                f"{requirement_id!r}: {missed}",
+                requirement_ids=[requirement_id],
+            )
+        run_out = years_run_out(shape)
+        if run_out is not None:
+            raise RollingPlanError(
+                RollingIssue.YEARS_RUN_OUT,
+                f"{requirement_id!r}: {run_out}",
+                requirement_ids=[requirement_id],
+            )
+        shapes_by_id[requirement_id] = shape
     return shapes_by_id
 
 
@@ -2016,9 +2303,15 @@ def _topological_order(requirements_by_id: dict[str, EvidenceRequirement]) -> li
     return order
 
 
-def _dataset_shape(requirement: DatasetRequirement) -> FrameShape:
+def _dataset_shape(
+    requirement: DatasetRequirement, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> FrameShape:
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
+
+    Its years run on past `period` with `period_end_open`, and start at the
+    dataset's first year when a reader of it in `requirements_by_id` has it
+    retrieved from there (`read_from_first_year`).
 
     A requirement reading its source's StatVars separately carries an
     uncounted number of measures (`None`): the plan has no source yet to
@@ -2059,6 +2352,8 @@ def _dataset_shape(requirement: DatasetRequirement) -> FrameShape:
         period=requirement.period,
         measures=measures,
         place_typed=names_no_place(requirement),
+        end_open=requirement.period_end_open,
+        from_first_year=read_from_first_year(requirements_by_id, requirement.id),
     )
 
 
@@ -2082,11 +2377,13 @@ def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape)
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        step_id=requirement.id,
     )
 
 
 def _growth_shape(requirement: GrowthRequirement, input_shape: FrameShape) -> FrameShape:
-    reason = shape_rejects(ShapeVerb.GROWTH, input_shape, change=requirement.change)
+    window = Period(start=requirement.window_start, end=requirement.window_end)
+    reason = shape_rejects(ShapeVerb.GROWTH, input_shape, change=requirement.change, window=window)
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     if input_shape.period is not None and (
@@ -2098,8 +2395,20 @@ def _growth_shape(requirement: GrowthRequirement, input_shape: FrameShape) -> Fr
             f"{requirement.window_end}) falls outside its input's period "
             f"({input_shape.period.start}-{input_shape.period.end})"
         )
-    window = Period(start=requirement.window_start, end=requirement.window_end)
-    return grown(input_shape, change=requirement.change, window=window)
+    leaves = growth_endpoint_leaves(input_shape, window, requirement.rolling)
+    if leaves is not None:
+        raise RollingPlanError(
+            RollingIssue.YEARS_RUN_OUT,
+            f"{requirement.id!r}: {leaves}",
+            requirement_ids=[requirement.id],
+        )
+    return grown(
+        input_shape,
+        change=requirement.change,
+        window=window,
+        rolling=requirement.rolling,
+        step_id=requirement.id,
+    )
 
 
 def _selected_role(roles: Sequence[RoleDimension], axis: str | None) -> RoleDimension:
@@ -2129,6 +2438,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         window=window,
         per_period=requirement.per_period,
         reduction=requirement.reduction,
+        rolling=requirement.rolling,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
@@ -2139,9 +2449,7 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
             "narrowing filter; a named rank needs a visible FilterRequirement with an EntityIn "
             "on that role, or state among='population' instead"
         )
-    reduction_reason = _rank_reduction_reason(
-        requirement, input_shape, years=windowed_years(input_shape.period, window)
-    )
+    reduction_reason = _rank_reduction_reason(requirement, input_shape)
     if reduction_reason is not None:
         raise ValueError(reduction_reason)
     return ranked(
@@ -2150,12 +2458,12 @@ def _rank_shape(requirement: RankRequirement, input_shape: FrameShape) -> FrameS
         window=window,
         per_period=requirement.per_period,
         limit=requirement.limit,
+        rolling=requirement.rolling,
+        step_id=requirement.id,
     )
 
 
-def _rank_reduction_reason(
-    requirement: RankRequirement, input_shape: FrameShape, *, years: Period | None
-) -> str | None:
+def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape) -> str | None:
     """Return why `requirement` needs a reduction it does not state, or `None` when it has enough.
 
     A rank orders entities by one value each. An axis over an input carrying
@@ -2163,10 +2471,14 @@ def _rank_reduction_reason(
     the other role's rows to one value per axis entity per (period, in
     per-period mode). Short of that, `per_period=True` ranks each period on
     its own and never needs a reduction just to collapse years together;
-    `per_period=False` needs one unless its input already holds one row per
-    entity, or `years`, the years of its input its window keeps
-    (`shapes.windowed_years`), are one: a 2020-2025 window over 2015-2020
-    ranks each entity's 2020 row.
+    `per_period=False` needs one unless its input holds one row per entity,
+    or the years of its input its window keeps (`_years_read`) are one and
+    newer data adds none: a 2020-2025 window over 2015-2020 ranks each
+    entity's 2020 row. 2024 alone today is 2024 and 2025 once 2025 arrives
+    when the window's end alone follows the newest data, or when nothing
+    fixes the last year of a dataset retrieved with no end year. A window
+    stays one year with both ends fixed on it, or both following the newest
+    data at one offset.
     """
     if requirement.reduction is not None:
         return None
@@ -2178,42 +2490,17 @@ def _rank_reduction_reason(
         )
     if requirement.per_period or input_shape.one_row_per_entity:
         return None
-    if years is not None and years.end > years.start:
-        return (
-            f"{requirement.id!r} ranks entities over {years.start}-{years.end} with no "
-            "reduction, so no entity has a single value to rank on; to rank one year set "
-            "window_start and window_end to that year, or, only for an ask marked (across "
-            "years), state a reduction to combine the years"
-        )
-    return None
-
-
-def _check_unreduced_rank_stays_one_year(
-    requirement: RankRequirement,
-    shapes_by_id: Mapping[str, FrameShape],
-    requirements_by_id: Mapping[str, EvidenceRequirement],
-) -> None:
-    """Reject a rank with no reduction over years that are, or newer data makes, more than one.
-
-    `_rank_reduction_reason` reads the years off the stated periods. The
-    years the rank holds when it runs (`_years_held`) are several too when
-    its dataset is retrieved from its first year, or when only the end of
-    its window follows the newest data: 2024 alone today is 2024 and 2025
-    once 2025 arrives, and no entity then has a single value to rank on. A
-    window stays one year with both ends fixed on it, or both following the
-    newest data at one offset.
-    """
-    input_shape = shapes_by_id[requirement.input_id]
-    if (
-        requirement.reduction is not None
-        or requirement.per_period
-        or input_shape.one_row_per_entity
-    ):
-        return
-    held = _years_held(requirement, shapes_by_id, requirements_by_id)
+    held = _years_read(requirement, input_shape)
     if held is None or not held.several:
-        return
-    raise ValueError(
+        return None
+    if not (held.from_first_year or held.follows_newest):
+        return (
+            f"{requirement.id!r} ranks entities over {held.phrase()} with no reduction, so no "
+            "entity has a single value to rank on; to rank one year set window_start and "
+            "window_end to that year, or, only for an ask marked (across years), state a "
+            "reduction to combine the years"
+        )
+    return (
         f"{requirement.id!r} ranks entities over {held.phrase()} with no reduction, so no "
         "entity keeps a single value to rank on; to rank one year state window_start and "
         "window_end on that year, with `rolling` unset for a fixed year or naming both at "
@@ -2224,24 +2511,21 @@ def _check_unreduced_rank_stays_one_year(
 
 def _filter_shape(requirement: FilterRequirement, input_shape: FrameShape) -> FrameShape:
     place_level = keeps_one_level(requirement.predicates)
+    years = year_filter(input_shape.period, requirement.predicates, drift=input_shape.drift)
+    if isinstance(years, str):
+        raise ValueError(f"{requirement.id!r}: {years}")
     reason = shape_rejects(
         ShapeVerb.FILTER,
         input_shape,
         place_level=place_level,
         period_threshold=states_period_threshold(requirement.predicates),
+        years=years,
     )
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
     narrowed_roles = tuple(p.role for p in requirement.predicates if isinstance(p, EntityIn))
-    years = year_filter(input_shape.period, requirement.predicates)
-    if isinstance(years, str):
-        raise ValueError(f"{requirement.id!r}: {years}")
     return filtered(
-        input_shape,
-        narrowed_roles=narrowed_roles,
-        period=years.period,
-        pins_one_year=years.leaves_one_year,
-        keeps_one_level=place_level,
+        input_shape, narrowed_roles=narrowed_roles, years=years, keeps_one_level=place_level
     )
 
 
@@ -2429,15 +2713,13 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
 ) -> FrameShape:
     """Return the output shape `requirement` produces, raising on the first illegal input."""
     if isinstance(requirement, DatasetRequirement):
-        return _dataset_shape(requirement)
+        return _dataset_shape(requirement, requirements_by_id)
     if isinstance(requirement, AggregateRequirement):
         return _aggregate_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, GrowthRequirement):
         return _growth_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, RankRequirement):
-        shape = _rank_shape(requirement, shapes_by_id[requirement.input_id])
-        _check_unreduced_rank_stays_one_year(requirement, shapes_by_id, requirements_by_id)
-        return shape
+        return _rank_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, FilterRequirement):
         return _filter_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, ShareOfRequirement):
@@ -2738,6 +3020,15 @@ class Plan(StrictModel):
             "several years taken together."
         ),
     )
+    period_licences: Annotated[tuple[PeriodLicence, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_REQUIREMENTS,
+        description=(
+            "The steps whose years the user's own words, as the planner read them, ask "
+            "to combine into one figure or one ranking, each held while its step "
+            "combines them that way (`period_licences_held`)."
+        ),
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -2977,7 +3268,9 @@ class Plan(StrictModel):
         (whether it lands before approval or mid-execution) always needs a
         fresh look, and the operations translated from the previous decisions
         may no longer fit the new ones, so the new version starts where a first
-        draft does.
+        draft does. It clears `period_licences` too, which `propose_plan`
+        writes on the amended plan from this one's
+        (`period_licences_held`).
 
         Args:
             decisions: The decisions this patch adds or replaces, keyed by
@@ -3038,6 +3331,7 @@ class Plan(StrictModel):
                 "asks": asks,
                 "ask_breakdowns": breakdowns,
                 "asks_across_years": across_years,
+                "period_licences": (),
                 "translation": None,
                 "workflow": None,
                 "version": self.version + 1,
@@ -3279,14 +3573,16 @@ class PeriodReductionGap(NamedTuple):
     """A step that turns several years into one figure for a result no ask across years asks for.
 
     `step_id` is the reducing step and `held` the years it reduces
-    (`YearsHeld`).
+    (`YearsHeld`), with the dataset requirement it rests on.
     `output_id` is the first answering result computed from it
     (`answering_results`) that answers an ask `plan.asks_across_years` does
     not number, or answers no ask, and `asks` the numbers of those asks,
     empty when it answers none. `asked_across` says another answering
     result computed from the step answers an ask across years, so the step
-    itself is asked for. `dataset_id` is the first dataset requirement the
-    step rests on.
+    itself is asked for. `together_with` names the other steps whose
+    one-year changes the plan has to make with this one for
+    `held.one_year` to be admitted, empty where it is admitted alone
+    (`_one_year_offered`).
     """
 
     step_id: str
@@ -3294,17 +3590,10 @@ class PeriodReductionGap(NamedTuple):
     asks: tuple[int, ...]
     held: YearsHeld
     asked_across: bool
-    dataset_id: str
-
-    @property
-    def years(self) -> Period:
-        """The years the step reduces today (`YearsHeld.years`)."""
-        return self.held.years
+    together_with: tuple[str, ...] = ()
 
 
-def unstated_period_reductions(
-    plan: Plan, *, amendment_entry: bool = False, previous: Plan | None = None
-) -> list[PeriodReductionGap]:
+def unstated_period_reductions(plan: Plan) -> list[PeriodReductionGap]:
     """Each step of `plan` that reduces across years for a result no ask across years asks for.
 
     A dataset requirement's `period` is the window of the search that found
@@ -3315,54 +3604,27 @@ def unstated_period_reductions(
     every answering result computed from it (`answering_results`), the step
     included, answers at least one ask and every ask it answers is one
     `plan.asks_across_years` numbers: the asks the orchestrator, which holds
-    the user's words, marked as one figure over several years. A result
+    the user's words, marked as one figure over several years. It passes
+    too when `plan.period_licences` holds a licence for it, with its kind
+    and `reduction`: the planner, where it reads the user's own words, said
+    they ask for that figure (`period_licences_held`). Otherwise a result
     that answers no ask, a step no answering result is computed from, and a
     plan with no asks license nothing.
-
-    A user who amends the plan at the approval card speaks to the planner,
-    and no ask changes. In such an entry (`amendment_entry`,
-    `AMENDMENT_ENTRY_STATE_KEY`) a step also passes when it cites a decision
-    resolved by `user` that states the reduction
-    (`_user_period_decisions`) and is the entry's own: `previous`, the plan
-    the call amends, makes no decision with the same `chosen` and `fixes`
-    under any slot (`_Carried.holds`). A decision `previous` already made
-    was made for the plan as it stood, and an amendment about something
-    else does not renew it. In any entry such a step passes when `previous`
-    held the licence for it (`_licence_carried`): a replan that narrows the
-    years keeps the total the user asked for.
 
     Requires a plan whose requirements already validated.
     """
     requirements_by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
-    decisions = {decision.slot: decision for decision in plan.decisions}
     shapes = _build_shapes(requirements_by_id)
     across_years = set(plan.asks_across_years)
+    licensed = set(plan.period_licences)
     asks_of: dict[str, list[int]] = {output: [] for output in answering_results(plan)}
     for answer in plan.answered:
         for output in answer.outputs:
             asks_of[output].append(answer.ask)
-    carried: _Carried | None = None
-    if previous is not None:
-        carried_steps = {
-            requirement.id: requirement for requirement in previous.evidence_requirements
-        }
-        carried = _Carried(
-            steps=carried_steps,
-            shapes=_build_shapes(carried_steps),
-            decisions={decision.slot: decision for decision in previous.decisions},
-        )
     gaps: list[PeriodReductionGap] = []
     for step in plan.evidence_requirements:
-        reduced = _years_reduced(step, shapes, requirements_by_id)
-        if reduced is None:
-            continue
-        stated = _user_period_decisions(step, decisions)
-        made_now = amendment_entry and any(
-            carried is None or not carried.holds(made) for made in stated.values()
-        )
-        if stated and (
-            made_now or (carried is not None and _licence_carried(step, stated, carried))
-        ):
+        reduced = _years_reduced(step, shapes)
+        if reduced is None or _licence_for(step) in licensed:
             continue
         computed = [
             output for output in asks_of if step.id in _upstream(output, requirements_by_id)
@@ -3384,68 +3646,295 @@ def unstated_period_reductions(
                     asks=offending[1],
                     held=reduced,
                     asked_across=asked_across,
-                    dataset_id=shapes[step.id].roots[0],
                 )
             )
-    return gaps
+    return _one_year_offered(gaps, plan)
 
 
-class _Carried(NamedTuple):
-    """The plan a call amends, as `_licence_carried` reads it: its steps, their shapes and its decisions, by id and slot."""
+def _one_year_offered(gaps: list[PeriodReductionGap], plan: Plan) -> list[PeriodReductionGap]:
+    """`gaps` with the one year a refusal offers each step: one `plan` is admitted with once it reads it.
 
-    steps: Mapping[str, EvidenceRequirement]
-    shapes: Mapping[str, FrameShape]
-    decisions: Mapping[str, Decision]
-
-    def holds(self, decision: Decision) -> bool:
-        """Whether the plan already made `decision`: one with its `chosen` and `fixes`, under any slot."""
-        return any(
-            made.chosen == decision.chosen and made.fixes == decision.fixes
-            for made in self.decisions.values()
-        )
-
-
-def _licence_carried(
-    step: EvidenceRequirement,
-    stated: Mapping[str, Decision],
-    previous: _Carried,
-) -> bool:
-    """Whether `previous` held the licence `stated`, the `user` decisions `step` cites, gives it.
-
-    The step of the same id in `previous` reduced years itself
-    (`_years_reduced`), with the same `reduction`, citing those same
-    decisions, so the user's decision licensed it there. Its years and
-    what sits under it may have changed since, as when a replan after a failed run
-    narrows them. A decision cited where no years were reduced, over one
-    year say, licensed nothing to carry, and a user who asked for one total
-    did not ask for a maximum.
+    Each step is offered the first year tried (`_one_year_tried`) whose
+    change, made to that step alone, gives a plan that passes
+    (`_one_year_admits`). The steps not asked across years that no such
+    year passes for are then tried together, each on its first year tried
+    and then each on its last: the two sides of one pairing can each match
+    the other only once both read one year. Where one of those plans
+    passes, each of them is offered its year in it, together with the
+    others (`PeriodReductionGap.together_with`). Every other step is
+    offered none.
     """
-    before = previous.steps.get(step.id)
-    return (
-        isinstance(step, AggregateRequirement | RankRequirement)
-        and isinstance(before, AggregateRequirement | RankRequirement)
-        and type(before) is type(step)
-        and before.reduction == step.reduction
-        and _user_period_decisions(before, previous.decisions) == stated
-        and _years_reduced(before, previous.shapes, previous.steps) is not None
+    tried = {gap.step_id: _one_year_tried(gap.held, gap.step_id, plan) for gap in gaps}
+    alone: dict[str, OneYearRead] = {}
+    for step_id, candidates in tried.items():
+        read = next((read for read in candidates if _one_year_admits(plan, {step_id: read})), None)
+        if read is not None:
+            alone[step_id] = read
+    unmet = [
+        gap.step_id
+        for gap in gaps
+        if tried[gap.step_id] and gap.step_id not in alone and not gap.asked_across
+    ]
+    together: dict[str, OneYearRead] = {}
+    if len(unmet) > 1:
+        joint = ({step_id: tried[step_id][at] for step_id in unmet} for at in (0, -1))
+        together = next((reads for reads in joint if _one_year_admits(plan, reads)), {})
+    return [
+        gap._replace(
+            held=gap.held._replace(one_year=alone.get(gap.step_id, together.get(gap.step_id))),
+            together_with=tuple(step_id for step_id in together if step_id != gap.step_id)
+            if gap.step_id in together
+            else (),
+        )
+        for gap in gaps
+    ]
+
+
+def _one_year_tried(held: YearsHeld, step_id: str, plan: Plan) -> list[OneYearRead]:
+    """The one years tried for `step_id` in `plan`, in order; none where `held` holds no year it can read alone.
+
+    The year first tried is `held.one_year`. Where it follows the newest
+    data, the change that reads it makes the step roll, or read a filter
+    that rolls, so its rolling year joins the group the step's own rolling
+    years would (`rolling_groups`) and is stated under the newest year the
+    other rolling years of that group stand for. Where they stand for
+    several, the year tried disagrees with one of them, so
+    `_one_year_admits` refuses it (`rolling_years_disagree`). The year tried
+    next is the last year the step holds today, fixed.
+    """
+    read = held.one_year
+    if read is None:
+        return []
+    requirements_by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    tried = [OneYearRead(year=held.years.end, offset=None)]
+    if read.offset is not None:
+        reads, rolling = _rolling_reads(requirements_by_id, joining=step_id)
+        (members,) = [group for group in rolling_groups(reads, rolling=rolling) if step_id in group]
+        newest = {
+            period.latest_implied_by(year)
+            for member in members
+            if member != step_id
+            for year, period in _rolling_years(requirements_by_id[member])
+        }
+        year = read.year if not newest else newest.pop() + read.offset
+        tried.insert(0, OneYearRead(year=year, offset=read.offset))
+    return tried
+
+
+def _one_year_admits(plan: Plan, reads: Mapping[str, OneYearRead]) -> bool:
+    """Whether `plan` passes once each step `reads` names reads its year there (`one_year_followed`).
+
+    It passes when it validates as a `Plan`, the rules every plan
+    `propose_plan` records is built under: a rolling year can leave the
+    step no year, a fixed year can be passed by a first year that follows
+    the newest data, and a window a decision the rank cites fixes stays as
+    the decision states it. It passes only when it also retrieves from the
+    first year it holds exactly the datasets `plan` does
+    (`read_from_first_year`). Each dataset is then retrieved over the window
+    `plan` gives it (`submission.service._window_pins`), so the change
+    meets no retrieval rule `plan` does not and leaves every other result's
+    years unchanged.
+    """
+    followed = list(plan.evidence_requirements)
+    for step_id, read in reads.items():
+        followed = one_year_followed(followed, step_id, read)
+    before = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    after = {requirement.id: requirement for requirement in followed}
+    if _retrieved_from_first_year(after) != _retrieved_from_first_year(before):
+        return False
+    try:
+        Plan.model_validate(
+            {
+                **plan.model_dump(),
+                "evidence_requirements": followed,
+                "translation": None,
+                "workflow": None,
+            }
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def _retrieved_from_first_year(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> frozenset[str]:
+    """The dataset requirements retrieved from the first year their dataset holds (`read_from_first_year`)."""
+    return frozenset(
+        requirement_id
+        for requirement_id in requirements_by_id
+        if read_from_first_year(requirements_by_id, requirement_id)
     )
+
+
+def one_year_followed(
+    requirements: Sequence[EvidenceRequirement], step_id: str, read: OneYearRead
+) -> list[EvidenceRequirement]:
+    """`requirements` once the step `step_id` reads the one year `read` names, and nothing else changes.
+
+    This is the change a `period_reduction_unstated` refusal offers
+    (`submission.service.OneYear`). A rank sets its own window on the year,
+    both ends rolling at `read.offset` where it follows the newest data. An
+    aggregate reads its own input through a new filter keeping the year with
+    op `eq`, rolling at that offset, under the first free id of `one_year`,
+    `one_year_2` and on.
+    """
+    rolling = None if read.offset is None else RelativePeriod(offset=read.offset)
+    (index,) = [i for i, step in enumerate(requirements) if step.id == step_id]
+    step = requirements[index]
+    followed = list(requirements)
+    if isinstance(step, RankRequirement):
+        window = (
+            None if rolling is None else RollingWindow(window_start=rolling, window_end=rolling)
+        )
+        followed[index] = step.model_copy(
+            update={"window_start": read.year, "window_end": read.year, "rolling": window}
+        )
+        return followed
+    assert isinstance(step, AggregateRequirement), step
+    taken = {requirement.id for requirement in requirements}
+    filter_id = next(
+        candidate
+        for candidate in itertools.chain(
+            ("one_year",), (f"one_year_{n}" for n in itertools.count(2))
+        )
+        if candidate not in taken
+    )
+    one_year = FilterRequirement(
+        id=filter_id,
+        input_id=step.input_id,
+        predicates=(PeriodThreshold(op="eq", year=read.year, rolling=rolling),),
+    )
+    followed[index : index + 1] = [one_year, step.model_copy(update={"input_id": filter_id})]
+    return followed
+
+
+def period_licences_held(
+    plan: Plan, *, named: Sequence[str], previous: Plan | None
+) -> tuple[PeriodLicence, ...]:
+    """The licences `plan` holds: those of `previous` it keeps, and one for each step `named`.
+
+    `named` is the `across_years` of the `propose_plan` call that states
+    `plan`, the steps whose years the user's own words, as the planner read
+    them, ask to combine. Only a call made where the planner reads those
+    words names any (`submission.service.admit`). A licence of `previous`,
+    the plan the call amends, holds while `plan` states a step of its id and
+    kind that combines its years with the licensed reduction
+    (`_keeps_licence`), whatever years it reads: a replan that narrows the
+    years to one and a later one that widens them again keep the figure the
+    user asked for. It lies unused while a `rank` of its id states no
+    `reduction`, and admits the rank again once it states the licensed
+    one. An `aggregate` grouping by `period`, a `rank` set `per_period`, a
+    step stating another reduction, a step of another kind and a removed
+    step drop it, since each states another figure. A step
+    renamed together with its decisions holds no licence of its old id, and
+    one named again in the same call takes a new one. A restart (`previous`
+    `None`) holds only the steps it names.
+
+    Raises:
+        ValueError: If `named` names a step `plan` does not state, or one
+            that keeps its years.
+    """
+    steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    granted = {name: _licence_for(steps.get(name)) for name in named}
+    refused = sorted(name for name, licence in granted.items() if licence is None)
+    if refused:
+        raise ValueError(
+            f"`across_years` names {', '.join(map(repr, refused))}, which the plan states as "
+            "no step that combines years: name an `aggregate` whose `group_by` leaves out "
+            "`period`, or a `rank` with a `reduction` and `per_period` false"
+        )
+    held = {
+        licence.step_id: licence
+        for licence in (previous.period_licences if previous is not None else ())
+        if _keeps_licence(steps.get(licence.step_id), licence)
+    }
+    held.update((name, licence) for name, licence in granted.items() if licence is not None)
+    return tuple(held[step_id] for step_id in steps if step_id in held)
+
+
+def licences_restated(
+    named: Sequence[str],
+    *,
+    requirements: Sequence[EvidenceRequirement],
+    previous: Plan | None,
+) -> frozenset[str]:
+    """The steps of `named` whose licence `previous` already holds, as `requirements` state them.
+
+    Naming such a step grants nothing `period_licences_held` would not
+    carry anyway.
+    """
+    held = set(previous.period_licences) if previous is not None else set()
+    return frozenset(
+        requirement.id
+        for requirement in requirements
+        if requirement.id in named and _licence_for(requirement) in held
+    )
+
+
+def _keeps_licence(step: EvidenceRequirement | None, licence: PeriodLicence) -> bool:
+    """Whether `step`, of the licence's id, keeps `licence`.
+
+    It keeps it while it combines its years with the licensed reduction, or
+    is a `rank` of that kind stating no `reduction`, which reads one year.
+    An `aggregate` grouping by `period` and a `rank` set `per_period` state
+    a figure for each year, which drops it.
+    """
+    if step is None or step.kind != licence.step_kind:
+        return False
+    if isinstance(step, RankRequirement) and step.reduction is None:
+        return not step.per_period
+    return _licence_for(step) == licence
+
+
+def _licence_for(step: EvidenceRequirement | None) -> PeriodLicence | None:
+    """The licence `step` needs to combine its years; `None` when it keeps them.
+
+    An `aggregate` whose `group_by` lacks `period`, and a `rank` with a
+    `reduction` and `per_period` false, combine the years they read.
+    """
+    if isinstance(step, AggregateRequirement):
+        if GroupBy.PERIOD in step.group_by:
+            return None
+    elif isinstance(step, RankRequirement):
+        if step.reduction is None or step.per_period:
+            return None
+    else:
+        return None
+    return PeriodLicence(step_id=step.id, step_kind=step.kind, reduction=step.reduction)
+
+
+class OneYearRead(NamedTuple):
+    """The one year a step can read in place of the years it holds, and how newer data moves it.
+
+    `year` is the year it reads today, and `offset` the offset from the
+    anchor at which a bound following the newest data keeps it, `None` for
+    a fixed year.
+    """
+
+    year: int
+    offset: int | None
 
 
 class YearsHeld(NamedTuple):
     """The years a step reads from its input, one row per entity for each (`_years_held`).
 
     `years` are the years it holds today. `from_first_year` says they start
-    at the first year `dataset_id` holds, whatever `years.start` states: the
+    at the first year `dataset_id` holds, whatever `years.start` states. The
     dataset is retrieved from there, and nothing above it sets a later
     start. `follows_newest` says newer data adds later years, and `until`
     the last year a fixed bound lets them reach, `None` when nothing stops
-    them.
+    them. `one_year` is the year the step can read alone and every series
+    keeps holding as newer data arrives (`_one_year_read`). A refusal
+    offers one the plan reading it is admitted with, `None` where no year
+    is (`_one_year_offered`).
     """
 
     years: Period
     from_first_year: bool
     follows_newest: bool
     until: int | None
+    one_year: OneYearRead | None
     dataset_id: str
 
     @property
@@ -3466,57 +3955,55 @@ class YearsHeld(NamedTuple):
 
 
 def _years_reduced(
-    requirement: EvidenceRequirement,
-    shapes_by_id: Mapping[str, FrameShape],
-    requirements_by_id: Mapping[str, EvidenceRequirement],
+    requirement: EvidenceRequirement, shapes_by_id: Mapping[str, FrameShape]
 ) -> YearsHeld | None:
     """The years `requirement` turns into one figure per entity; `None` when it reduces none.
 
-    An `aggregate` that groups by `period`, and a `rank` that is
-    `per_period` or states no `reduction`, keep the years. Any other
-    aggregate or rank reduces the years its input holds (`_years_held`)
-    when they are several (`YearsHeld.several`).
+    A step that combines the years it reads (`_licence_for`) reduces the
+    years its input holds (`_years_held`) when they are several
+    (`YearsHeld.several`). An `aggregate` that groups by `period`, and a
+    `rank` that is `per_period` or states no `reduction`, keep them.
     """
-    if isinstance(requirement, AggregateRequirement):
-        if GroupBy.PERIOD in requirement.group_by:
-            return None
-    elif isinstance(requirement, RankRequirement):
-        if requirement.reduction is None or requirement.per_period:
-            return None
-    else:
+    if _licence_for(requirement) is None:
         return None
-    held = _years_held(requirement, shapes_by_id, requirements_by_id)
+    assert isinstance(requirement, AggregateRequirement | RankRequirement)
+    held = _years_held(requirement, shapes_by_id[requirement.input_id])
     return held if held is not None and held.several else None
 
 
 def _years_held(
-    requirement: AggregateRequirement | RankRequirement,
-    shapes_by_id: Mapping[str, FrameShape],
-    requirements_by_id: Mapping[str, EvidenceRequirement],
+    requirement: AggregateRequirement | RankRequirement, input_shape: FrameShape
 ) -> YearsHeld | None:
-    """The years `requirement` reads per entity from its input; `None` when its input holds no series of years.
+    """The years `requirement` reads per entity from `input_shape`; `None` when it holds no series of years.
 
     The input holds years per entity when its rows are labelled with the
     years they were observed in (`TimeLabel.OBSERVATION`). Every
     `planner.shapes` transform keeps that reading: a step that collapses the
     years labels its rows a `SPAN`, one that picks a year per entity labels
     them `PICKED`, each two-sided verb takes the narrower label of its sides
-    and the years both cover, and a filter or a window that leaves one year
-    narrows `period` to it. `FrameShape.one_row_per_entity` answers whether
-    a rank needs a reduction, and is set on a `sum_of` holding a series of
-    years.
+    and the years both hold, and a filter or a window that leaves one year
+    narrows `period` to it. The years are those `_years_read` finds.
+    """
+    if input_shape.time is not TimeLabel.OBSERVATION:
+        return None
+    return _years_read(requirement, input_shape)
 
-    The years are the input's `period` once a rank's own window is applied
-    (`shapes.windowed_years`). `planner.shapes` reads them off the stated
-    periods, and a dataset a start following the newest data reads is
-    retrieved from the first year it holds (`_year_ends`), so they start
-    earlier where a bound sets an earlier first year, and at the dataset's
-    first year where none sets one. They follow the newest data when the
-    step rests on a dataset retrieved with no end year and newer data can
-    add years after the one they end in today: one year then becomes
-    several once newer data exists. They stay one year when the last year
-    is fixed there, or when the first year follows the newest data with it,
-    which a window does with both ends at one offset.
+
+def _years_read(
+    requirement: AggregateRequirement | RankRequirement, input_shape: FrameShape
+) -> YearsHeld | None:
+    """The years of `input_shape` `requirement` reads; `None` when no dataset requirement bounds them.
+
+    They are the input's `period` and its `drift` once a rank's own window
+    is applied (`shapes.windowed`). Each `planner.shapes` transform states
+    how newer data moves them: a dataset retrieved from its first year
+    holds every year before the stated period too, until a bound sets a
+    first year, and one retrieved with no end year adds each newer year
+    until a fixed bound stops it. They stay one year when the last year is
+    fixed there, or when the first year and the last both follow the
+    anchor, which a window does with both ends at one offset. A first year
+    that follows the anchor ahead of an end open to the data keeps every
+    later year a series reports (`PeriodDrift.widens`).
     """
     window: Period | None = None
     if (
@@ -3525,183 +4012,35 @@ def _years_held(
         and requirement.window_end is not None
     ):
         window = Period(start=requirement.window_start, end=requirement.window_end)
-    input_shape = shapes_by_id[requirement.input_id]
-    years = windowed_years(input_shape.period, window)
-    if input_shape.time is not TimeLabel.OBSERVATION or years is None:
+    rolling = requirement.rolling if isinstance(requirement, RankRequirement) else None
+    years, drift = windowed(input_shape, window, rolling)
+    if years is None:
         return None
-    ends = _year_ends(requirement.input_id, requirements_by_id)
-    if isinstance(requirement, RankRequirement):
-        ends = ends.within(_window_ends(requirement))
-    if ends.first is not None and ends.first < years.start:
-        years = Period(start=ends.first, end=years.end)
-    open_ended = any(
-        isinstance(root := requirements_by_id[root_id], DatasetRequirement) and root.period_end_open
-        for root_id in input_shape.roots
-    )
-    follows_newest = (
-        open_ended
-        and ends.following_first != years.start
-        and (ends.until is None or ends.until > years.end)
-    )
     return YearsHeld(
         years=years,
-        from_first_year=ends.first is None,
-        follows_newest=follows_newest,
-        until=ends.until if follows_newest else None,
+        from_first_year=drift.from_first_year,
+        follows_newest=drift.widens,
+        until=drift.until if drift.widens else None,
+        one_year=_one_year_read(years, drift),
         dataset_id=input_shape.roots[0],
     )
 
 
-def _later(first: int | None, second: int | None) -> int | None:
-    """The later of two first years, `None` standing for no bound."""
-    if first is None or second is None:
-        return first if second is None else second
-    return max(first, second)
+def _one_year_read(years: Period, drift: PeriodDrift) -> OneYearRead:
+    """The one year of `years`, moving as `drift` says, that a step can read and keep holding.
 
-
-class _YearEnds(NamedTuple):
-    """The years a frame holds, and how they move as newer data arrives.
-
-    `first` is the first year it holds today, `None` for a dataset read from
-    the first year it holds with nothing above it setting one.
-    `following_first` is the latest first year a bound that follows the
-    newest data sets, `None` when none does: the frame's first year moves
-    with the newest data when it is `first`. `until` is the last year the
-    frame can come to hold: the year its years end in today for a frame
-    retrieved over fixed years, a later one where a bound is the first thing
-    to stop an open-ended retrieval, and `None` when nothing stops it.
+    It is the last year held today. A last year that newer data moves
+    follows the anchor at the offset of the bound that sets it, or at 0
+    where it is open to each series' newest, which at offset 0 the anchor
+    marks for half the series at least. A fixed last year, and one a fixed
+    bound stops (`until`), give a fixed year, since a year on the anchor
+    over years a fixed bound caps runs out (`planner.shapes.anchor_year_stays`).
     """
-
-    first: int | None
-    following_first: int | None
-    until: int | None
-
-    def within(self, bounds: _YearEnds) -> _YearEnds:
-        """These years once `bounds` cut them, keeping the later start and the earlier end.
-
-        The end reaches the earlier of the two last years: a fixed last
-        year does not stop a moving end until newer data reaches it.
-        """
-        stops = [year for year in (self.until, bounds.until) if year is not None]
-        return _YearEnds(
-            first=_later(self.first, bounds.first),
-            following_first=_later(self.following_first, bounds.following_first),
-            until=min(stops, default=None),
-        )
-
-
-# Bounds that cut nothing.
-_UNBOUNDED = _YearEnds(first=None, following_first=None, until=None)
-
-
-def _window_ends(requirement: RankRequirement | GrowthRequirement) -> _YearEnds:
-    """The bounds `requirement`'s window sets on the years it reads; `_UNBOUNDED` with no window.
-
-    A start or an end stated with `rolling` follows the newest data. A
-    fixed `window_end` lets the years reach that year and no further.
-    """
-    if requirement.window_start is None or requirement.window_end is None:
-        return _UNBOUNDED
-    rolling = requirement.rolling
-    rolls_at_its_start = rolling is not None and rolling.window_start is not None
-    rolls_at_its_end = rolling is not None and rolling.window_end is not None
-    return _YearEnds(
-        first=requirement.window_start,
-        following_first=requirement.window_start if rolls_at_its_start else None,
-        until=None if rolls_at_its_end else requirement.window_end,
-    )
-
-
-def _threshold_ends(predicate: PeriodThreshold) -> _YearEnds:
-    """The bounds a filter's year threshold sets on the years it reads.
-
-    `gt`, `gte` and `eq` set the first year, the year after for `gt`, which
-    follows the newest data when the threshold is `rolling`. `lt`, `lte`
-    and `eq` set the last: a rolling one follows, and a fixed one lets the
-    years reach it, the year before for `lt`, and no further. `ne` removes
-    a year and bounds neither end.
-    """
-    fixed = predicate.rolling is None
-    first = None
-    if predicate.op in ("gt", "gte", "eq"):
-        first = predicate.year + 1 if predicate.op == "gt" else predicate.year
-    last = predicate.year - 1 if predicate.op == "lt" else predicate.year
-    return _YearEnds(
-        first=first,
-        following_first=None if fixed else first,
-        until=last if predicate.op in ("lt", "lte", "eq") and fixed else None,
-    )
-
-
-def _year_ends(
-    requirement_id: str, requirements_by_id: Mapping[str, EvidenceRequirement]
-) -> _YearEnds:
-    """The years `requirement_id`'s result holds, and how they move as newer data arrives.
-
-    A dataset requirement holds its `period`, and with `period_end_open`
-    every later year too. One that a start following the newest data reads
-    (`rolls_from_its_start` among its `rolling_readers`) is retrieved from
-    the first year the dataset holds (`submission.service._open_window`), so
-    its stated first year bounds nothing. A filter's year thresholds
-    (`_threshold_ends`) and a rank's or a growth's window (`_window_ends`)
-    cut the years their input holds (`_YearEnds.within`). A step reading two
-    inputs holds the years both cover, cut the same way. Every other step
-    holds its input's years.
-    """
-    requirement = requirements_by_id[requirement_id]
-    if isinstance(requirement, DatasetRequirement):
-        whole_history = requirement.period_end_open and any(
-            rolls_from_its_start(reader)
-            for reader in rolling_readers(requirements_by_id, requirement_id)
-        )
-        return _YearEnds(
-            first=None if whole_history else requirement.period.start,
-            following_first=None,
-            until=None if requirement.period_end_open else requirement.period.end,
-        )
-    inputs = inputs_of(requirement)
-    ends = _year_ends(inputs[0], requirements_by_id)
-    for other in inputs[1:]:
-        ends = ends.within(_year_ends(other, requirements_by_id))
-    if isinstance(requirement, RankRequirement | GrowthRequirement):
-        return ends.within(_window_ends(requirement))
-    if isinstance(requirement, FilterRequirement):
-        for predicate in requirement.predicates:
-            if isinstance(predicate, PeriodThreshold):
-                ends = ends.within(_threshold_ends(predicate))
-    return ends
-
-
-def _user_period_decisions(
-    requirement: EvidenceRequirement, decisions: Mapping[str, Decision]
-) -> dict[str, Decision]:
-    """The decisions `requirement` cites that are resolved by `user` and state one figure over its years, by slot.
-
-    `requirement` is a step `_years_reduced` finds years under. For an
-    `aggregate` such a decision's `fixes` names `group_by`, the field that
-    leaves `period` out. For a `rank` it names `per_period`, which the rank
-    states false: the years ranked together. A cited decision fixes the
-    values the requirement states
-    (`_check_requirements_honour_their_decisions`). A rank's `window_start`
-    and `window_end` say which years it covers, a `reduction` decision how
-    the years combine and a `period` decision which years are retrieved;
-    none says they become one figure. A slot `decisions` does not hold
-    states nothing.
-    """
-    stated: dict[str, Decision] = {}
-    for slot in requirement.decision_ids:
-        decision = decisions.get(slot)
-        if decision is None or decision.resolved_by is not ResolvedBy.USER:
-            continue
-        fixes = decision.fixes
-        if fixes is None:
-            continue
-        if isinstance(requirement, AggregateRequirement):
-            if fixes.group_by is not None:
-                stated[slot] = decision
-        elif fixes.per_period is False:
-            stated[slot] = decision
-    return stated
+    if not anchor_year_stays(drift):
+        return OneYearRead(year=years.end, offset=None)
+    if drift.end is EndDrift.DATA:
+        return OneYearRead(year=years.end, offset=0)
+    return OneYearRead(year=years.end, offset=drift.end_offset)
 
 
 def _upstream(

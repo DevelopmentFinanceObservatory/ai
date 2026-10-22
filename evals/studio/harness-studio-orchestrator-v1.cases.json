@@ -42,7 +42,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -84,7 +86,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya from 2015 to 2022",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya from 2015 to 2022"
+            ]
           }
         },
         {
@@ -138,14 +142,18 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
           "call": "plan",
           "args": {
             "brief": "Life expectancy in Kenya, any recent years",
-            "asks": []
+            "asks": [
+              "Life expectancy in Kenya, any recent years"
+            ]
           }
         },
         {
@@ -303,7 +311,15 @@
               }
             ],
             "question": "How fast did life expectancy grow in Kenya since 2000?",
-            "answer_mode": "computed"
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "life_expectancy_by_period"
+                ]
+              }
+            ]
           }
         },
         {
@@ -326,7 +342,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -427,7 +445,15 @@
               }
             ],
             "question": "How fast did life expectancy grow in Kenya since 2000?",
-            "answer_mode": "computed"
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "life_expectancy_by_period"
+                ]
+              }
+            ]
           }
         },
         {
@@ -552,7 +578,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -600,7 +628,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {

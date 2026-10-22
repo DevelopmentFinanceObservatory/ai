@@ -727,7 +727,11 @@ _PAUSES = {
         _ask_user_answer,
     ),
     "plan": (
-        lambda: call("plan", brief="rank donors of education aid to Kenya", asks=[]),
+        lambda: call(
+            "plan",
+            brief="rank donors of education aid to Kenya",
+            asks=["rank donors of education aid to Kenya"],
+        ),
         _approval,
     ),
 }

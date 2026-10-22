@@ -9,6 +9,7 @@ completed with a resolved period, analysis-mcp's own op-spec models read them.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -75,6 +76,7 @@ from planner.records import (
     RollingWindow,
     ValueThreshold,
 )
+from planner.shapes import FIXED, EndDrift, PeriodDrift, StartDrift
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import JsonValue
 
@@ -350,9 +352,14 @@ def test_a_rolling_operation_resolves_the_shape_a_fixed_one_does(
             order=["debt", "change"],
         )
         assert reasons == []
-        return shapes["change"]
+        return shapes["change"].shape
 
-    assert resolved(LAST_FIVE) == resolved(None)
+    rolling, fixed = resolved(LAST_FIVE), resolved(None)
+
+    assert replace(rolling, drift=FIXED) == fixed
+    assert rolling.drift == PeriodDrift(
+        start=StartDrift.ANCHOR, start_offset=-5, end=EndDrift.ANCHOR, end_offset=0
+    )
 
 
 # --- The population ------------------------------------------------------------------

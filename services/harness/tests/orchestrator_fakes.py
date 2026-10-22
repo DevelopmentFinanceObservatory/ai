@@ -213,8 +213,10 @@ def make_charts_call(*charts: Mapping[str, Any]) -> types.Part:
 
 
 def plan_call(brief: str, *asks: str) -> types.Part:
-    """A `plan` call handing `brief` and its `asks` to the planner."""
-    return call("plan", brief=brief, asks=list(asks))
+    """A `plan` call handing `brief` and its `asks` to the planner. Given no
+    asks, it lists `brief` as the one output asked for, since the `plan` tool
+    refuses a call that lists none."""
+    return call("plan", brief=brief, asks=list(asks or (brief,)))
 
 
 def approve_answer(revision: object, *, at: datetime | None = None) -> dict[str, Any]:

@@ -295,7 +295,11 @@ def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
 async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question():
     planner = RefusingPlanner()
     runner, model = orchestrator_runner(
-        call("plan", brief="Niger's Global Fund receipts as a share of health spending", asks=[]),
+        call(
+            "plan",
+            brief="Niger's Global Fund receipts as a share of health spending",
+            asks=["Niger's Global Fund receipts as a share of health spending"],
+        ),
         types.Part.from_text(text="The share could not be calculated."),
         planner=planner,
     )
@@ -371,9 +375,17 @@ async def test_the_planner_entry_runs_alone_from_a_plan_calls_hand_off(
 async def test_a_failed_plan_gives_the_plan_call_back_once():
     planner = RefusingPlanner()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
-        call("plan", brief="Kenya's CRS aid as a share of GDP", asks=[]),
-        call("plan", brief="Kenya's aid as a share of GDP, any source", asks=[]),
+        call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
+        call(
+            "plan",
+            brief="Kenya's CRS aid as a share of GDP",
+            asks=["Kenya's CRS aid as a share of GDP"],
+        ),
+        call(
+            "plan",
+            brief="Kenya's aid as a share of GDP, any source",
+            asks=["Kenya's aid as a share of GDP, any source"],
+        ),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
@@ -397,7 +409,7 @@ async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(fina
     whole) fails the same way for any brief, so the plan call is not given back
     and the hand-back does not offer one."""
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
+        call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=RefusingPlanner(final=final),
     )
@@ -413,7 +425,8 @@ async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(fina
 
 async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
     """A plan call lists the asks for its own plan only: a later call with
-    none leaves no earlier call's asks for the planner to account for."""
+    one ask and no breakdowns leaves no earlier call's asks, breakdowns, or
+    across-years marks for the planner to account for."""
     planner = RefusingPlanner()
     asks = ["a chart of France's aid to Guatemala", "the total since 2010 by donor"]
     runner, _ = orchestrator_runner(
@@ -422,7 +435,11 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
             brief="France's aid to Guatemala since 2010",
             asks=[asks[0], {"text": asks[1], "by": ["donor"], "across_years": True}],
         ),
-        call("plan", brief="France's bilateral aid to Guatemala", asks=[]),
+        call(
+            "plan",
+            brief="France's bilateral aid to Guatemala",
+            asks=["France's bilateral aid to Guatemala"],
+        ),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
@@ -430,18 +447,18 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
 
     await run_turn(runner, types.UserContent("France's aid to Guatemala since 2010?"))
 
-    assert planner.asks == [tuple(asks), ()]
+    assert planner.asks == [tuple(asks), ("France's bilateral aid to Guatemala",)]
     assert planner.breakdowns == [(AskBreakdown(ask=1, by=("donor",)),), ()]
     assert planner.across_years == [(1,), ()]
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state.get(ASKS_STATE_KEY) is None
+    assert session.state.get(ASKS_STATE_KEY) == ["France's bilateral aid to Guatemala"]
     assert session.state.get(ASK_BREAKDOWNS_STATE_KEY) is None
     assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
 async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt", asks=[]),
+        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(FailingPlanner()),
     )
@@ -463,7 +480,7 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
     assert failures == [{"code": "internal_error"}]
 
     bare, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt", asks=[]), planner=FailingPlanner()
+        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]), planner=FailingPlanner()
     )
     await open_session(bare)
     with pytest.raises(PlannerSeamError):
@@ -523,7 +540,11 @@ async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(caplog):
 
 async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         types.Part.from_text(text="Uganda next."),
         planner=ScriptedPlannerModel(),
@@ -941,7 +962,11 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
     step's data, so the plan call is not given back and the step's spec_id
     is refused to `fetch`; another refusal leaves both open."""
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="That part is unavailable."),
         planner=ScriptedPlannerModel(),
         tool_surface=RefusingGetDataSurface(code),
@@ -966,7 +991,11 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Here is what the plan computed."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -996,7 +1025,11 @@ async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not
 
 async def test_an_amendment_redrafts_and_the_amended_plan_runs():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1072,7 +1105,11 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     start, the new card says why, and approving that one runs it."""
     surface = _CountingSurface()
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
@@ -1123,7 +1160,11 @@ async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
     and its card says nothing of the earlier one, which no card of this
     call showed."""
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_describes,
@@ -1165,7 +1206,11 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
     )
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
@@ -1197,7 +1242,11 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 
     monkeypatch.setattr(execute_module, "execute_approved_plan", stored_unreadable)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1222,7 +1271,11 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again():
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
@@ -1246,7 +1299,7 @@ async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_ag
 
 async def test_a_hand_back_is_still_in_view_after_a_later_pause():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service", asks=[]),
+        call("plan", brief="Kenya's debt service", asks=["Kenya's debt service"]),
         call(
             "ask_user",
             question="Which years?",
@@ -1274,8 +1327,8 @@ async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_
     planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")
     seam._agent.model = planner_llm
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt, first brief", asks=[]),
-        call("plan", brief="Kenya's debt, second brief", asks=[]),
+        call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
+        call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(seam),
     )
@@ -1332,7 +1385,11 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
     its block in that turn's record stays the one a later turn pins from."""
     monkeypatch.setattr(plan_display, "step_rows", _rows_led_by_a_wide_step(plan_display.step_rows))
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1394,7 +1451,7 @@ class _NoisySurface(ScriptedSurface):
 
 async def test_step_summaries_reach_the_agent_without_frame_references_or_operation_notes():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's life expectancy", asks=[]),
+        call("plan", brief="Kenya's life expectancy", asks=["Kenya's life expectancy"]),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=_NoisySurface(),

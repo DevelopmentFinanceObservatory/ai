@@ -13,14 +13,18 @@ newest period and exists only once the retrievals it is taken over have run.
 
 A newest period belongs to a group of rolling steps (`anchor_groups`). Two
 rolling steps are in one group when some step reads both, directly or through
-other steps, and the relation is transitive. A frame computed from two rolling
-steps states one period. A group's `roots` are the retrievals its rolling steps
-rest on, and its `population` the series of those retrievals that count. A
-retrieval no rolling step of the group reads is in neither, so a dataset of
-fixed years joined above a rolling step, and a dataset only another card reads,
-do not move the group's period. At run time the caller resolves each group's
-period over its population and the frames of its roots, after those retrievals
-and before the group's steps, and sends each step `resolved_arguments`: the
+other steps, and the relation is transitive (`planner.plan.rolling_groups`
+holds a plan's rolling years to one newest year per group). A frame computed
+from two rolling steps states one period. A group's `roots` are the retrievals
+its rolling steps rest on, and its `population` the series of those
+retrievals that count. A retrieval no rolling step of the group reads is in
+neither, so a dataset of fixed years joined above a rolling step, and a
+dataset only another card reads, do not move the group's period
+(`planner.plan.anchored_over` backs the plan's refusal to pair an open dataset
+with a rolling step's period that is not resolved over it). At run time the
+caller resolves each group's period over its population and the frames of its
+roots, after those retrievals and before the group's steps, and sends each
+step `resolved_arguments`: the
 literals rewritten from the period, and the key. `rolling_bounds` lists those
 literals.
 
@@ -37,12 +41,13 @@ frames do.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from common.rolling import anchor_populations, canonical_populations
 from dfo_frame_grammar import ANCHOR_RULE, shift_period
+from planner.plan import anchored_over, reached, rolling_groups
 from planner.records import RelativePeriod, RollingWindow
 from planner.workflow import Binding, Workflow, WorkflowStep
 from pydantic import JsonValue
@@ -137,11 +142,10 @@ def anchor_groups(workflow: Workflow) -> tuple[AnchorGroup, ...]:
     }
     retrievals = {binding.step_id for binding in workflow.evidence_bindings}
     args = {step.id: step.args for step in workflow.steps}
+    rolling = [step.id for step in workflow.steps if is_rolling(step)]
+    over = anchored_over(reads, rolling=rolling, retrievals=retrievals)
     groups: list[AnchorGroup] = []
-    for members in _grouped(
-        reads, rolling=[step.id for step in workflow.steps if is_rolling(step)]
-    ):
-        reached = set().union(*(_under(step_id, reads) for step_id in members))
+    for members in rolling_groups(reads, rolling=rolling):
         populations = [rolling_population(args[step_id]) for step_id in members]
         first = populations[0]
         if first is None or any(population != first for population in populations):
@@ -152,41 +156,11 @@ def anchor_groups(workflow: Workflow) -> tuple[AnchorGroup, ...]:
         groups.append(
             AnchorGroup(
                 steps=tuple(members),
-                roots=tuple(step_id for step_id in reads if step_id in reached & retrievals),
+                roots=tuple(step_id for step_id in reads if step_id in over[members[0]]),
                 population=tuple(first),
             )
         )
     return tuple(groups)
-
-
-def _under(step_id: str, reads: Mapping[str, Iterable[str]]) -> set[str]:
-    """`step_id` and every step it reads, directly or through other steps."""
-    found: set[str] = set()
-    pending = [step_id]
-    while pending:
-        current = pending.pop()
-        if current not in found:
-            found.add(current)
-            pending.extend(reads[current])
-    return found
-
-
-def _grouped(reads: Mapping[str, Iterable[str]], *, rolling: Sequence[str]) -> list[list[str]]:
-    """`rolling` split into groups. Two steps share one when some step of `reads`
-    reads both, directly or through other steps, transitively. Each group and
-    the list of them keep the order of `rolling`."""
-    group_of = {step_id: {step_id} for step_id in rolling}
-    for step_id in reads:
-        below = _under(step_id, reads)
-        together = [member for member in rolling if member in below]
-        merged = set().union(*(group_of[member] for member in together))
-        for member in merged:
-            group_of[member] = merged
-    return [
-        [member for member in rolling if member in group_of[step_id]]
-        for step_id in rolling
-        if step_id == min(group_of[step_id], key=rolling.index)
-    ]
 
 
 def step_populations(
@@ -257,11 +231,11 @@ def step_populations(
         for step_id in terminal
     }
     populations: dict[str, list[dict[str, Any]]] = {}
-    for members in _grouped(reads, rolling=rolling):
+    for members in rolling_groups(reads, rolling=rolling):
         group = canonical_populations(
             population
             for step_id in terminal
-            if not _under(step_id, reads).isdisjoint(members)
+            if not reached(step_id, reads).isdisjoint(members)
             for population in above[step_id]
         )
         populations.update(dict.fromkeys(members, group))
