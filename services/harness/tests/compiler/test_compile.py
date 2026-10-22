@@ -35,6 +35,7 @@ from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
 from compiler.sources import member_digest, source_from_spec_block
 from compiler.surface import ToolSchema
+from data_mcp.definition_writes import windowed_identity
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
 from planner.operations import (
@@ -4677,9 +4678,24 @@ def _ids_debt_total(
     source: SourceFactory,
     *,
     level_filter: bool,
+    windowed: bool = False,
 ) -> CompileResult:
-    """A total over every IDS debtor, `across=('country',)`, with or without a level filter."""
-    ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
+    """A total over every IDS debtor, `across=('country',)`, with or without a level filter.
+
+    `windowed` retrieves the copy `submission.service._window_pins` pins in
+    place of a search over 2024 alone: its identity over the requirement's
+    own years.
+    """
+    identity: dict[str, Any] = {
+        "stat_var": "DebtServicePaid",
+        "requested_window": {"kind": "range", "start_year": 2024, "end_year": 2024},
+    }
+    spec_id, identity = (
+        windowed_identity(identity, {"kind": "range", "start_year": 2015, "end_year": 2024})
+        if windowed
+        else (SPEC_KENYA, identity)
+    )
+    ids = source(spec_id=spec_id, identity=identity, entities=(), open_entity_axes=(_IDS_DEBTORS,))
     countries_req, countries = _countries_of("health", role="country", strict=True)
     reads = "countries" if level_filter else "fetch"
     total_req = AggregateRequirement(
@@ -4724,14 +4740,19 @@ def test_a_total_over_ids_debtors_by_country_needs_no_level_filter(
     assert total.args["group_by"] == ["time_period"]
 
 
+@pytest.mark.parametrize("windowed", [False, True], ids=["as-searched", "windowed-pin"])
 def test_a_level_filter_over_ids_debtors_reads_the_debtors_type_column(
-    build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    windowed: bool,
 ) -> None:
-    result = _ids_debt_total(build, decision, source, level_filter=True)
+    result = _ids_debt_total(build, decision, source, level_filter=True, windowed=windowed)
 
     assert result.ok, result.issues
     assert result.workflow is not None
     retrieve, countries, _ = result.workflow.steps
+    assert (retrieve.args["spec_id"] == SPEC_KENYA) is not windowed
     assert retrieve.args["place_types"] is True
     assert retrieve.args["without_party_totals"] is True
     assert countries.args == {

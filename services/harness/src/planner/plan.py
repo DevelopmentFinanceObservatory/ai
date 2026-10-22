@@ -115,6 +115,7 @@ from planner.shapes import (
     grown,
     growth_endpoint_leaves,
     joined,
+    level_filter,
     place_role,
     quotiented,
     ranked,
@@ -913,16 +914,6 @@ class DatasetRequirement(TaggedModel):
                 "against every member, drop the word from `across` and state the rank's "
                 "among='population'"
             )
-
-
-def names_no_place(requirement: DatasetRequirement) -> bool:
-    """Whether `requirement` names no place: its `across` states the place party.
-
-    Its retrieval holds every place with data at every level, or the
-    countries where apis cannot list them all, so a rank, a total or a
-    share over it needs a `PlaceLevel` filter first (`planner.shapes`).
-    """
-    return any(across_party(word) == "place" for word in requirement.across)
 
 
 # --- Calculation vocabulary -----------------------------------------------
@@ -2365,7 +2356,6 @@ def _dataset_shape(
         roles=roles,
         period=requirement.period,
         measures=measures,
-        place_typed=names_no_place(requirement),
         end_open=requirement.period_end_open,
         from_first_year=read_from_first_year(requirements_by_id, requirement.id),
     )
@@ -2523,51 +2513,21 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     )
 
 
-def _place_level_roles(
-    predicate: PlaceLevel, roles: Sequence[RoleDimension]
-) -> tuple[RoleDimension, ...]:
-    """The one role a level predicate targets, including an unambiguous open flow side."""
-    if predicate.role is not None:
-        return roles_named(roles, predicate.role)
-    places = tuple(role for role in roles if role.place)
-    if places:
-        return places
-    open_roles = tuple(role for role in roles if role.open)
-    return open_roles if len(open_roles) == 1 else ()
-
-
 def _filter_shape(
     requirement: FilterRequirement,
     input_shape: FrameShape,
 ) -> FrameShape:
-    place_level = keeps_one_level(requirement.predicates)
     years = year_filter(input_shape.period, requirement.predicates, drift=input_shape.drift)
     if isinstance(years, str):
         raise ValueError(f"{requirement.id!r}: {years}")
-    levelled_role_keys: set[tuple[Identifier, str | None]] = set()
-    if place_level:
-        for predicate in requirement.predicates:
-            if not isinstance(predicate, PlaceLevel):
-                continue
-            candidates = _place_level_roles(predicate, input_shape.roles)
-            if len(candidates) > 1:
-                named = predicate.role or "an omitted role"
-                raise ValueError(
-                    f"{requirement.id!r}: a place_level filter names {named!r}, which resolves "
-                    f"to {len(candidates)} roles; state one role"
-                )
-            if len(candidates) == 1:
-                levelled_role_keys.add((candidates[0].requirement_id, candidates[0].role))
-    level_available = bool(levelled_role_keys) and all(
-        role.level_filterable
-        for role in input_shape.roles
-        if (role.requirement_id, role.role) in levelled_role_keys
-    )
+    levels = level_filter(input_shape.roles, requirement.predicates)
+    if isinstance(levels, str):
+        raise ValueError(f"{requirement.id!r}: {levels}")
     reason = shape_rejects(
         ShapeVerb.FILTER,
         input_shape,
-        place_level=place_level,
-        place_level_available=level_available,
+        place_level=keeps_one_level(requirement.predicates),
+        place_level_available=levels.available,
         period_threshold=states_period_threshold(requirement.predicates),
         years=years,
     )
@@ -2578,8 +2538,7 @@ def _filter_shape(
         input_shape,
         narrowed_roles=narrowed_roles,
         years=years,
-        keeps_one_level=place_level,
-        levelled_role_keys=tuple(levelled_role_keys),
+        levelled_role_keys=levels.role_keys,
     )
 
 

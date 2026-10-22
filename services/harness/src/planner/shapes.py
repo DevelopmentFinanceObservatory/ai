@@ -42,6 +42,7 @@ from planner.records import (
     Identifier,
     Period,
     PeriodThreshold,
+    PlaceLevel,
     Predicate,
     RankAmong,
     Reduction,
@@ -304,8 +305,10 @@ class FrameShape:
     a retrieval that names no place holds every place with data, the world,
     regions, countries and their subdivisions alike, until a place-level
     filter keeps one. `place_typed` is whether a place-level filter may read
-    the frame: that retrieval, read through filters only, since every other
-    verb drops the place-type column the compiler asks `get_data` for.
+    the frame: a retrieval's open role, read through filters only, since
+    every other verb drops the place-type column the compiler asks
+    `get_data` for. Both read the roles (`RoleDimension.mixed_levels` and
+    `level_filterable`).
 
     `composed_unit` is whether the frame's values are in a unit two measures
     compose, dollars per person: a `quotient_of`'s result, and whatever a
@@ -342,11 +345,19 @@ class FrameShape:
     limited: bool
     roots: tuple[Identifier, ...]
     unsummable_axes: tuple[str, ...] | None = None
-    mixed_levels: bool = False
-    place_typed: bool = False
     composed_unit: bool = False
     drift: PeriodDrift = FIXED
     span_of: Identifier | None = None
+
+    @property
+    def mixed_levels(self) -> bool:
+        """Whether any role holds places at more than one level."""
+        return any(role.mixed_levels for role in self.roles)
+
+    @property
+    def place_typed(self) -> bool:
+        """Whether any role carries the place-type column a place-level filter reads."""
+        return any(role.level_filterable for role in self.roles)
 
 
 class NamedRole(Protocol):
@@ -357,6 +368,19 @@ class NamedRole(Protocol):
 
     @property
     def place(self) -> bool: ...
+
+
+class LevelRole(NamedRole, Protocol):
+    """What `level_filter` reads of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
+
+    @property
+    def requirement_id(self) -> Identifier: ...
+
+    @property
+    def open(self) -> bool: ...
+
+    @property
+    def level_filterable(self) -> bool: ...
 
 
 # The phrase a refusal tells the planner to write for a place dimension whose
@@ -933,8 +957,6 @@ def retrieved(
     period: Period,
     measures: MeasureCount,
     unsummable_axes: tuple[str, ...] | None = None,
-    place_typed: bool = False,
-    mixed_levels: bool = False,
     end_open: bool = False,
     from_first_year: bool = False,
 ) -> FrameShape:
@@ -948,13 +970,13 @@ def retrieved(
     values are kept, and this function states which requirement a role
     belongs to and whether it is narrowed.
     `measures` and `unsummable_axes` are the caller's (see `FrameShape`).
-    `place_typed` lets a place-level filter read the retrieval, which
-    names no place. `mixed_levels` says it holds places at every level. The
-    plan states the first for a requirement whose `across` names the place
-    (`planner.plan.names_no_place`), since it cannot know which axis the word
-    covers. The compiler states both from the selected source: only a
-    source that leaves `observationAbout` open over several places mixes
-    levels (`compiler.evidence.opens_place_axis`).
+    Each role states whether a place-level filter may read it
+    (`level_filterable`) and whether it holds places at every level
+    (`mixed_levels`). The plan marks every open role filterable and none
+    mixed, since it cannot know which axis an `across` word covers. The
+    compiler states both from the selected source: only a source that leaves
+    `observationAbout` open over several places mixes levels
+    (`compiler.evidence.opens_place_axis`).
 
     `end_open` says the retrieval states no end year (`period_end_open`), so
     newer data adds years after `period`, up to each series' own newest
@@ -963,28 +985,8 @@ def retrieved(
     following the newest data over it asks for
     (`planner.plan.read_from_first_year`).
     """
-    stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
-    # Older callers represented the one unqualified place dimension only by
-    # FrameShape's summary flags. Preserve that narrow compatibility path,
-    # but never promote an ambiguous or non-place role from global state.
-    if (mixed_levels or place_typed) and not any(
-        role.mixed_levels or role.level_filterable for role in stamped
-    ):
-        places = tuple(role for role in stamped if role.place)
-        if len(places) == 1:
-            target = _role_key(places[0])
-            stamped = tuple(
-                replace(
-                    role,
-                    mixed_levels=mixed_levels,
-                    level_filterable=place_typed,
-                )
-                if _role_key(role) == target
-                else role
-                for role in stamped
-            )
     return FrameShape(
-        roles=stamped,
+        roles=tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles),
         measures=measures,
         value=ValueKind.MEASURED,
         time=TimeLabel.OBSERVATION,
@@ -994,8 +996,6 @@ def retrieved(
         limited=False,
         roots=(requirement_id,),
         unsummable_axes=unsummable_axes,
-        mixed_levels=any(role.mixed_levels for role in stamped),
-        place_typed=any(role.level_filterable for role in stamped),
         drift=PeriodDrift(
             from_first_year=from_first_year, end=EndDrift.DATA if end_open else EndDrift.FIXED
         ),
@@ -1066,7 +1066,6 @@ def aggregated(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=_span_of(time, shape, step_id),
@@ -1120,7 +1119,6 @@ def grown(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit and change is GrowthChange.ABSOLUTE,
         drift=replace(windowed(shape, window, rolling)[1], decided_by_data=False),
         span_of=step_id,
@@ -1181,7 +1179,6 @@ def ranked(
             and spans_years(period, drift),
             limited=limited,
             roots=shape.roots,
-            mixed_levels=any(role.mixed_levels for role in roles),
             composed_unit=shape.composed_unit and limit is not None,
             drift=drift,
             span_of=shape.span_of,
@@ -1197,7 +1194,6 @@ def ranked(
         limited=limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=_span_of(TimeLabel.SPAN, shape, step_id) if window is None else step_id,
@@ -1361,12 +1357,71 @@ def year_filter(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class LevelFilter:
+    """What a filter's `PlaceLevel` predicates keep at one level.
+
+    `role_keys` names, as `(requirement_id, role)`, each role a predicate
+    targets (`level_roles`), in predicate order. `available` is whether there
+    is one and each carries the place-type column a level reads
+    (`RoleDimension.level_filterable`).
+    """
+
+    role_keys: tuple[tuple[Identifier, str | None], ...] = ()
+    available: bool = False
+
+
+def level_roles[R: LevelRole](predicate: PlaceLevel, roles: Sequence[R]) -> tuple[R, ...]:
+    """The roles of `roles` a `PlaceLevel` keeps one level of.
+
+    A predicate stating its `role` targets the dimensions that phrase names
+    (`roles_named`). One stating none targets every place dimension, else
+    the one open role, such as a flow side, and nothing when several are
+    open. One result is a selection. None, or several, is a refusal each
+    caller words.
+    """
+    if predicate.role is not None:
+        return roles_named(roles, predicate.role)
+    places = tuple(role for role in roles if role.place)
+    if places:
+        return places
+    open_roles = tuple(role for role in roles if role.open)
+    return open_roles if len(open_roles) == 1 else ()
+
+
+def level_filter(roles: Sequence[LevelRole], predicates: Sequence[Predicate]) -> LevelFilter | str:
+    """Read the `PlaceLevel` predicates in `predicates` against `roles`.
+
+    Each predicate keeps one level of the role it targets (`level_roles`).
+    A predicate targeting several roles returns the refusal reason. One
+    targeting none levels nothing, and a filter with no levelled role, or
+    one whose role lost its place-type column, reads a level only where the
+    frame is `place_typed` (`rejects`).
+    """
+    keys: dict[tuple[Identifier, str | None], None] = {}
+    for predicate in predicates:
+        if not isinstance(predicate, PlaceLevel):
+            continue
+        targets = level_roles(predicate, roles)
+        if len(targets) > 1:
+            named = predicate.role or "an omitted role"
+            return (
+                f"a place_level filter names {named!r}, which resolves to {len(targets)} "
+                "roles; state one role"
+            )
+        for target in targets:
+            keys[(target.requirement_id, target.role)] = None
+    available = bool(keys) and all(
+        role.level_filterable for role in roles if (role.requirement_id, role.role) in keys
+    )
+    return LevelFilter(role_keys=tuple(keys), available=available)
+
+
 def filtered(
     shape: FrameShape,
     *,
     narrowed_roles: Sequence[str | None],
     years: YearFilter,
-    keeps_one_level: bool = False,
     levelled_role_keys: Sequence[tuple[Identifier, str | None]] = (),
 ) -> FrameShape:
     """The shape `filter` produces: everything `shape` carries, plus what got narrowed.
@@ -1385,9 +1440,9 @@ def filtered(
     the years span, or newer data makes them span, more than one
     (`spans_years`), since a single period has no gap between periods, and
     always keeps `limited`. A `PICKED` frame narrowed to one year is a
-    plain `OBSERVATION`: every row left is in that year. A filter that
-    `keeps_one_level` (a `PlaceLevel` predicate) leaves its places at one
-    level. Every filter keeps the place-type column its input carries. A
+    plain `OBSERVATION`: every row left is in that year. A filter leaves
+    the roles of `levelled_role_keys` (`level_filter`) at one level. Every
+    filter keeps the place-type column its input carries. A
     value threshold over rows labelled with their own years leaves years
     only the data decides (`PeriodDrift.decided_by_data`). Over a span it
     keeps rows whose one label a step has already written.
@@ -1400,13 +1455,6 @@ def filtered(
         for role in roles_named(shape.roles, phrase)
     ]
     levelled = set(levelled_role_keys)
-    # A pre-role-facts direct use of this helper can still identify exactly
-    # one place dimension. It must not turn an arbitrary global summary into
-    # a country filter when several dimensions are present.
-    if keeps_one_level and not levelled:
-        places = tuple(role for role in shape.roles if role.place)
-        if len(places) == 1:
-            levelled = {_role_key(places[0])}
     roles = tuple(
         replace(
             role,
@@ -1432,8 +1480,6 @@ def filtered(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=any(role.mixed_levels for role in roles),
-        place_typed=any(role.level_filterable for role in roles),
         composed_unit=shape.composed_unit,
         drift=drift,
         span_of=shape.span_of,
@@ -1484,7 +1530,6 @@ def shared(
         roots=_merged_roots(numerator.roots, denominator.roots),
         drift=drift,
         span_of=_merged_span_of(numerator, denominator),
-        mixed_levels=any(role.mixed_levels for role in roles),
     )
 
 
@@ -1523,7 +1568,6 @@ def quotiented(
         and spans_years(period, drift),
         limited=numerator.limited or (denominator_axis is not None and denominator.limited),
         roots=_merged_roots(numerator.roots, denominator.roots),
-        mixed_levels=any(role.mixed_levels for role in roles),
         composed_unit=True,
         drift=drift,
         span_of=_merged_span_of(numerator, denominator),
@@ -1608,7 +1652,6 @@ def joined(left: FrameShape, right: FrameShape) -> FrameShape:
         roots=_merged_roots(left.roots, right.roots),
         drift=drift,
         span_of=_merged_span_of(left, right),
-        mixed_levels=any(role.mixed_levels for role in shared_roles),
     )
 
 

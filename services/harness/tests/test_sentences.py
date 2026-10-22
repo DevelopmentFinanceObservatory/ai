@@ -116,13 +116,13 @@ def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
             "detail": {
                 "kind": "requirement_needs_repair",
                 "requirement_id": "aid_by_donor",
-                "constraint": "level_filter_on_flow_axis",
+                "constraint": "family_unsummable",
             },
         }
     )
 
     assert "'aid_by_donor'" in text
-    assert COMPILE_REASONS[CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS] in text
+    assert COMPILE_REASONS[CompileIssueCode.FAMILY_UNSUMMABLE] in text
 
 
 def test_the_budget_refusal_is_stated_as_a_per_entry_budget_in_the_user_s_terms() -> None:

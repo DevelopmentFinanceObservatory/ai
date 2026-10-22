@@ -218,7 +218,6 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             return IssueResolution.UNSUPPORTED
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
-            | CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS
             | CompileIssueCode.RANK_AXIS_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
@@ -278,10 +277,6 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.INPUT_SHAPE_UNSUPPORTED: (
         "change the calculation, or the requirement it reads, so its input has a shape the "
         "calculation takes"
-    ),
-    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
-        "use bare across for the open flow axis, then bind a Country place_level filter to the "
-        "donor, creditor, recipient or debtor role"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (

@@ -77,7 +77,7 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.shapes import FIXED, EndDrift, PeriodDrift, StartDrift
-from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
+from planner.workflow import OpenEntityAxis, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import JsonValue
 
 SPEC_DEBT = "spec_" + "a" * 32
@@ -555,6 +555,56 @@ def test_a_place_level_filter_holds_the_population_to_that_level(
             }
         ]
     }
+
+
+def test_a_rolling_rank_over_a_strict_country_filter_holds_the_population_to_countries(
+    build: Compile, decision: DecisionFactory, source: SourceFactory
+) -> None:
+    # Every recipient's debt service, kept to the countries, ranked over the
+    # last five years. The strict level reaches the rank's population, which
+    # analysis-mcp's op-spec rule reads at compile time
+    # (`compiler.arguments.op_spec_errors`): a strict level names a level column.
+    every_recipient = source(
+        entities=(), open_entity_axes=(OpenEntityAxis(column="destination", member_count=134),)
+    )
+    debt = DatasetRequirement(
+        id="annual_debt_service",
+        decision_ids=["measure"],
+        measure="external debt service",
+        across=("recipient",),
+        period=Period(start=2015, end=2024),
+        period_end_open=True,
+    )
+    predicates = (PlaceLevel(level=PlaceType.COUNTRY, role="recipient", strict=True),)
+    countries_req = FilterRequirement(
+        id="countries",
+        decision_ids=["measure"],
+        input_id="annual_debt_service",
+        predicates=predicates,
+    )
+    countries = FilterOperation(
+        id="countries", requirement_id="countries", input="debt", predicates=predicates
+    )
+    ranked_req, ranked = _rank_pair(axis="recipient")
+    ranked_req = ranked_req.model_copy(update={"input_id": "countries"})
+    ranked = ranked.model_copy(update={"input": "countries"})
+
+    result = build(
+        [debt, countries_req, ranked_req],
+        [_retrieve(spec_id=every_recipient.spec_id), countries, ranked],
+        terminal=["ranked"],
+        decisions=[decision(), _population_decision(decision)],
+        discovered={"annual_debt_service": every_recipient},
+    )
+
+    assert _step(result, "ranked").args["rolling"]["population"] == [
+        {
+            "spec_id": every_recipient.spec_id,
+            "bindings": {},
+            "levels": {"destination_type": "Country"},
+            "strict_levels": ["destination_type"],
+        }
+    ]
 
 
 # --- Issues --------------------------------------------------------------------------

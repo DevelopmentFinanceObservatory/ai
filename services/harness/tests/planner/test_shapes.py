@@ -133,14 +133,12 @@ def test_a_role_level_filter_leaves_another_roles_mixed_levels_in_place() -> Non
         cut_per_period=False,
         limited=False,
         roots=("req_a",),
-        mixed_levels=True,
     )
 
     kept = filtered(
         shape,
         narrowed_roles=(),
         years=YearFilter(period=_PERIOD, leaves_one_year=False),
-        keeps_one_level=True,
         levelled_role_keys=((recipient.requirement_id, recipient.role),),
     )
 
@@ -176,7 +174,6 @@ def test_a_country_filtered_branch_does_not_rewrite_the_shared_broad_branch() ->
         broad,
         narrowed_roles=(),
         years=YearFilter(period=_PERIOD, leaves_one_year=False),
-        keeps_one_level=True,
         levelled_role_keys=((recipient.requirement_id, recipient.role),),
     )
 
@@ -2113,11 +2110,18 @@ def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() ->
 def _every_place() -> FrameShape:
     return retrieved(
         requirement_id="req_a",
-        roles=(RoleDimension(role="country", requirement_id="req_a", open=True, place=True),),
+        roles=(
+            RoleDimension(
+                role="country",
+                requirement_id="req_a",
+                open=True,
+                place=True,
+                mixed_levels=True,
+                level_filterable=True,
+            ),
+        ),
         period=_PERIOD,
         measures=1,
-        place_typed=True,
-        mixed_levels=True,
     )
 
 
@@ -2126,7 +2130,7 @@ def _countries(shape: FrameShape) -> FrameShape:
         shape,
         narrowed_roles=(),
         years=YearFilter(period=shape.period, leaves_one_year=False),
-        keeps_one_level=True,
+        levelled_role_keys=(("req_a", "country"),),
     )
 
 

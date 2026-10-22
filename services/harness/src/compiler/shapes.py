@@ -45,7 +45,6 @@ from planner.plan import (
     EvidenceRequirement,
     anchored_over,
     keeps_one_level,
-    names_no_place,
     read_from_first_year,
     states_period_threshold,
 )
@@ -55,7 +54,6 @@ from planner.records import (
     EntityIn,
     Identifier,
     PeriodThreshold,
-    PlaceLevel,
     Predicate,
     StatVarReading,
 )
@@ -67,8 +65,8 @@ from planner.shapes import (
     ShapeVerb,
     anchor_misses,
     growth_endpoint_leaves,
+    level_filter,
     place_role,
-    roles_named,
     year_filter,
     years_run_out,
 )
@@ -343,7 +341,7 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
         return (
             None
             if upstream is None
-            else _filter_resolved(operation, upstream, operations, sources, retrieve_by_requirement)
+            else _filter_resolved(operation, upstream, sources, retrieve_by_requirement)
         )
     if isinstance(operation, ShareOfOperation):
         numerator = _input_shape(operation.numerator.input, operations, shapes)
@@ -438,10 +436,9 @@ def _retrieve_resolved(
     that leaves its place axis open carries every level of place
     (`compiler.evidence.opens_place_axis`), and `compiler.evidence` refuses
     one under a requirement whose `across` does not name the place party. A
-    place-level filter may read a requirement whose `across` names the place
-    (`planner.plan.names_no_place`), but `compile._check_level_filters`
-    refuses one whose place word covers a flow axis. Its years run on past
-    its period and start at the dataset's first year as
+    place-level filter may read any open role, a flow side included, which
+    is the one role `compile` can ask `get_data` for the type column of. Its
+    years run on past its period and start at the dataset's first year as
     `planner.plan._dataset_shape` states them.
     """
     source = sources.get(operation.id)
@@ -538,8 +535,6 @@ def _retrieve_resolved(
         period=requirement.period,
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
-        place_typed=names_no_place(requirement),
-        mixed_levels=opens_place_axis(source.open_entity_axes),
         end_open=requirement.period_end_open,
         from_first_year=read_from_first_year(requirements, requirement.id),
     )
@@ -691,39 +686,20 @@ def _resolved_narrowed_roles(
 def _filter_resolved(
     operation: FilterOperation,
     upstream: ResolvedShape,
-    operations: Mapping[str, Operation],
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
 ) -> ResolvedShape | str:
-    place_level = keeps_one_level(operation.predicates)
     years = year_filter(upstream.shape.period, operation.predicates, drift=upstream.shape.drift)
     if isinstance(years, str):
         return years
-    levelled_role_keys: set[tuple[Identifier, str | None]] = set()
-    if place_level:
-        for predicate in operation.predicates:
-            if not isinstance(predicate, PlaceLevel):
-                continue
-            candidates = _place_level_roles(predicate, upstream.columns)
-            if len(candidates) > 1:
-                named = predicate.role or "an omitted role"
-                return (
-                    f"a place_level filter names {named!r}, which resolves to "
-                    f"{len(candidates)} roles on this input; state one role"
-                )
-            if len(candidates) == 1:
-                candidate = candidates[0]
-                levelled_role_keys.add((candidate.requirement_id, candidate.role))
-    level_available = bool(levelled_role_keys) and all(
-        role.level_filterable
-        for role in upstream.columns
-        if (role.requirement_id, role.role) in levelled_role_keys
-    )
+    levels = level_filter(upstream.columns, operation.predicates)
+    if isinstance(levels, str):
+        return levels
     reason = _rejects(
         ShapeVerb.FILTER,
         upstream.shape,
-        place_level=place_level,
-        place_level_available=level_available,
+        place_level=keeps_one_level(operation.predicates),
+        place_level_available=levels.available,
         period_threshold=states_period_threshold(operation.predicates),
         years=years,
     )
@@ -736,23 +712,9 @@ def _filter_resolved(
         upstream.shape,
         narrowed_roles=narrowed_roles,
         years=years,
-        keeps_one_level=place_level,
-        levelled_role_keys=tuple(levelled_role_keys),
+        levelled_role_keys=levels.role_keys,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
-
-
-def _place_level_roles(
-    predicate: PlaceLevel, roles: Sequence[ResolvedRole]
-) -> tuple[ResolvedRole, ...]:
-    """The one role a level predicate targets, including an unambiguous open flow side."""
-    if predicate.role is not None:
-        return roles_named(roles, predicate.role)
-    places = tuple(role for role in roles if role.place)
-    if places:
-        return places
-    open_roles = tuple(role for role in roles if role.open)
-    return open_roles if len(open_roles) == 1 else ()
 
 
 def _share_of_resolved(

@@ -2180,7 +2180,7 @@ _AMBIGUOUS = {
     [
         (_AMBIGUOUS, _AMBIGUOUS, True),
         (_repair("family_unsummable"), _repair("family_unsummable"), True),
-        (_repair("level_filter_on_flow_axis"), _repair("family_unsummable"), False),
+        (_repair("input_shape_unsupported"), _repair("family_unsummable"), False),
     ],
     ids=["same-choice", "same-repair", "different-repairs"],
 )

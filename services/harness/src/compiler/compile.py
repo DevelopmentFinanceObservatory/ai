@@ -67,7 +67,14 @@ from planner.records import (
     StrictModel,
     ValueThreshold,
 )
-from planner.shapes import PLACE_PHRASE, ValueKind, place_role, role_named, roles_named
+from planner.shapes import (
+    PLACE_PHRASE,
+    ValueKind,
+    level_roles,
+    place_role,
+    role_named,
+    roles_named,
+)
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -145,7 +152,6 @@ class CompileIssueCode(StrEnum):
     DANGLING_INPUT = "dangling_input"
     INPUT_IS_TERMINAL = "input_is_terminal"
     INPUT_SHAPE_UNSUPPORTED = "input_shape_unsupported"
-    LEVEL_FILTER_ON_FLOW_AXIS = "level_filter_on_flow_axis"
     RANK_AXIS_REQUIRED = "rank_axis_required"
     SHARE_AXIS_REQUIRED = "share_axis_required"
     SHARE_KEY_UNKNOWN = "share_key_unknown"
@@ -2363,15 +2369,11 @@ class _Build:
         return args, {"frame_ref": _frame_from(operation.input)}
 
     def _place_level_column(self, operation: FilterOperation, predicate: PlaceLevel) -> str | None:
-        """The input role whose type column a place-level predicate reads."""
+        """The input role whose type column a place-level predicate reads (`level_roles`)."""
         resolved = self.shapes.get(operation.input)
         if resolved is None:
             return None
-        candidates = (
-            roles_named(resolved.columns, predicate.role)
-            if predicate.role is not None
-            else self._unqualified_level_roles(resolved.columns)
-        )
+        candidates = level_roles(predicate, resolved.columns)
         if len(candidates) != 1:
             named = predicate.role or "an omitted role"
             self._issue(
@@ -2382,14 +2384,6 @@ class _Build:
             )
             return None
         return candidates[0].column
-
-    @staticmethod
-    def _unqualified_level_roles(columns: Sequence[ResolvedRole]) -> tuple[ResolvedRole, ...]:
-        places = tuple(role for role in columns if role.place)
-        if places:
-            return places
-        open_roles = tuple(role for role in columns if role.open)
-        return open_roles if len(open_roles) == 1 else ()
 
     def _entity_in_argument(
         self, operation: FilterOperation, predicate: EntityIn

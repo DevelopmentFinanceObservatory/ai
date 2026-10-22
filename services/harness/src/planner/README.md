@@ -189,7 +189,7 @@ per-head figure or "divide one by the other". An `axis` or a
 places that state none.
 
 A dataset requirement whose `across` states the place party, such as
-`'country'`, names no place (`planner.plan.names_no_place`). When its source
+`'country'`, names no place. When its source
 leaves `observationAbout` open, the retrieval holds every place with data at
 every level: the world, regions, World Bank groups, countries and their
 subdivisions, or the countries alone when apis cannot list them all. A rank,
@@ -198,14 +198,16 @@ over it are refused until a filter with a `PlaceLevel` predicate keeps one
 level, named by its Data Commons type (`PlaceType`: `Country`, `Continent`,
 `AdministrativeArea1` and the rest). That filter reads the requirement directly
 or through other filters, and states one level. The rule lives in
-`planner.shapes.rejects` (`FrameShape.mixed_levels` and `place_typed`). The plan
-permits the filter, since it cannot know which axis the word covers, and the
-compiler demands it from the selected source
-(`compiler.evidence.opens_place_axis`); analysis-mcp refuses the same calls at
-run time as `place_levels_mixed`. Where the word covers a flow axis instead, as
-IDS holds its debtors on `destination`, the axis holds parties served without
-their group totals, and the compiler refuses a level filter there as
-`level_filter_on_flow_axis`.
+`planner.shapes.rejects` (`FrameShape.mixed_levels` and `place_typed`, each
+read from the frame's roles), and `planner.shapes.level_filter` names the role
+each `PlaceLevel` keeps one level of. The plan permits the filter, since it
+cannot know which axis the word covers, and the compiler demands it from the
+selected source (`compiler.evidence.opens_place_axis`); analysis-mcp refuses
+the same calls at run time as `place_levels_mixed`. Where the word covers a flow
+axis instead, as IDS holds its debtors on `destination`, the axis holds parties
+served without their group totals. A `PlaceLevel` naming that `role` reads the
+flow side's type column, and sets `strict` to keep a party's countries, so
+analysis-mcp refuses the filter when a party on the role has no known type.
 The planner's instruction tells it to take the level the question names,
 choose `Country` as its own default when the question names none and reads
 as a comparison of countries, and ask the user when the question's word
