@@ -175,7 +175,7 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
         "the result names follow" in text
     )
     assert (
-        "Across years, prices get a question of their own, even when the result lists no "
+        "Over several years, prices get a question of their own, even when the result lists no "
         "`other_prices`. Its first option is the prices search read, in words and without a "
         "spec_id. Each `other_prices` entry follows, or constant prices when the result lists "
         "none" in text

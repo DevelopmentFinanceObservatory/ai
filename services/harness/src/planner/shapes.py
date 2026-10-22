@@ -1808,7 +1808,7 @@ def _rejects_growth_time(shape: FrameShape) -> str | None:
     """Return why `shape`'s periods are no series for growth to read, or `None` when they are."""
     if shape.time is TimeLabel.PICKED:
         return (
-            f"growth reads each entity's series across years, and {_PICKED}; compute the "
+            f"growth reads each entity's series over several years, and {_PICKED}; compute the "
             "growth over the source's series, then take the max or min of its result"
         )
     if shape.time is not TimeLabel.OBSERVATION:
