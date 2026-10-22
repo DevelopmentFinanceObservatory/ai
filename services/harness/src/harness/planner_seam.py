@@ -150,6 +150,7 @@ from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_fail
 from translator.referral import USER_DECIDES
 from translator.tool import Translate, permitted_repair
 
+from harness import plan_display
 from harness.agents import create_planner_with_translator
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -1255,7 +1256,7 @@ class PlannerSeam:
                 _READINGS_CONTEXT.format(readings=ledger.text),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
-                _plan_context(prior_plan, stated=ledger.other_counts),
+                _plan_context(_as_authored(prior_plan), stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
                 _asks_section(asks, ask_breakdowns, asks_across_years),
                 ask,
@@ -1582,6 +1583,21 @@ def _warning_codes(warnings: object) -> tuple[str, ...]:
     return tuple(str(code) for code in codes if code)
 
 
+def _as_authored(prior_plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`prior_plan` as the model wrote it, for `_plan_context` to render.
+
+    A stored plan holds the copies the split of whole-history reads added
+    (`Plan.rolling_copies`), which the model did not write and cannot
+    patch by name. The render shows the plan without them
+    (`plan_display.shown_plan`), and the stored plan is saved as it is. A plan
+    with none differs from its authored form only in `first_years`, which
+    `_plan_context` leaves out, so it passes through unvalidated.
+    """
+    if not prior_plan or not prior_plan.get("rolling_copies"):
+        return prior_plan
+    return plan_display.shown_plan(Plan.model_validate(prior_plan)).model_dump(mode="json")
+
+
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:
     """The plan being changed, rendered field by field as a digest.
 
@@ -1687,6 +1703,10 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         "evidence_requirements",
         "translation",
         "workflow",
+        # Code writes both (`Plan.rolling_copies`, `Plan.first_years`), so the
+        # digest leaves them out.
+        "rolling_copies",
+        "first_years",
     }
     lines.extend(f"{key}: {_scalar(prior_plan[key])}" for key in sorted(set(prior_plan) - known))
     return "\n".join(lines) + "\n"

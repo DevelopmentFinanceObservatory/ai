@@ -12,7 +12,13 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from harness.plan_display import _label, operation_rows, requirement_rows, step_rows
+from harness.plan_display import (
+    _label,
+    operation_rows,
+    requirement_rows,
+    shown_plan,
+    step_rows,
+)
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -37,6 +43,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -78,6 +85,8 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+
+from .split_plan import SPEC_DEBT, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -2159,6 +2168,8 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
                 predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
             ),
         ],
+        # The dataset starts where the plan does, so reading it whole splits nothing.
+        first_years=[FirstYear(requirement_id="debt", year=2015)],
     )
 
     sentences = {str(row["id"]): row["sentence"] for row in requirement_rows(plan)}
@@ -2181,3 +2192,51 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
         _label(plan.requirement("last_five"), plan)
         == f"Growth in {measure}, 2019-2024, following the newest year"
     )
+
+
+# --- A plan whose dataset is read from its first year -------------------------------
+
+
+def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFactory) -> None:
+    """`debt_history` is code's copy of `debt` for the rolling growth. The card names
+    `debt` once, and the growth reads `debt`'s source."""
+    plan = stored_split_plan(decision)
+
+    steps = step_rows(plan)
+
+    assert [row["id"] for row in steps] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
+    assert "debt_history" not in repr([steps, requirement_rows(plan), operation_rows(plan)])
+
+
+def test_the_card_states_a_series_answer_over_the_years_the_plan_states(
+    decision: DecisionFactory,
+) -> None:
+    """The copy reads from 2000. The total beside it keeps 2015-2024."""
+    plan = stored_split_plan(decision)
+
+    total = next(row for row in step_rows(plan) if row["id"] == "total")
+
+    assert str(total["description"]).endswith("Result: one figure per year, 2015-2024.")
+
+
+def test_the_shown_plan_is_the_authored_plan_with_the_compiled_parts_folded(
+    decision: DecisionFactory,
+) -> None:
+    """Sources and bindings of the copy go together, and a warning on the copy names its origin once."""
+    plan = stored_split_plan(decision)
+
+    shown = shown_plan(plan)
+
+    assert shown == shown_plan(shown)
+    assert (shown.rolling_copies, shown.first_years) == ((), ())
+    growth = shown.requirement("last_five")
+    assert isinstance(growth, GrowthRequirement)
+    assert growth.input_id == "debt"
+    assert shown.workflow is not None
+    assert [(b.requirement_id, b.spec_id) for b in shown.workflow.evidence_bindings] == [
+        ("debt", SPEC_DEBT)
+    ]
+    assert [source.spec_id for source in shown.workflow.sources] == [SPEC_DEBT]
+    assert [issue.requirement_id for issue in shown.workflow.warnings] == ["debt"]

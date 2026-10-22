@@ -21,6 +21,7 @@ graph, outside this package.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -37,6 +38,8 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.planner_seam import _not_ready
+from harness.sentences import refusal_sentence
 from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
@@ -76,6 +79,7 @@ from translator.tool import (
 )
 
 from ..described_nodes import stat_var_node
+from ..split_plan import SPEC_DEBT_HISTORY, split_draft
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -1222,3 +1226,65 @@ def test_return_to_planner_carries_the_source_names_search_offered(
     assert result["outcome"] == "referred"
     assert result["referral"]["ambiguous_sources"] == [group.model_dump(mode="json")]
     assert result["referral"]["candidates"] == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(
+            {
+                "kind": ReferralKind.PINNED_SOURCE_NOT_FOUND.value,
+                "requirement_id": "debt_history",
+                "reason": f"'debt_history' pins {SPEC_DEBT_HISTORY!r}, which this revision's "
+                "discovery did not find.",
+            },
+            id="discovery-stop",
+        ),
+        pytest.param(
+            _compile_failure_action(
+                [
+                    CompileIssue(
+                        code=CompileIssueCode.SOURCE_UNUSABLE,
+                        reason=f"source {SPEC_DEBT_HISTORY} cannot serve requirement "
+                        "'debt_history': the source starts after the years asked",
+                        operation_id="debt_history",
+                        requirement_id="debt_history",
+                    )
+                ],
+                requirement_of={"debt_history": "debt_history"},
+            ).arguments,
+            id="compile-issue",
+        ),
+    ],
+)
+async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
+    real_schemas: list[ToolSchema],
+    decision: Callable[..., Any],
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, Any],
+) -> None:
+    """The model wrote `debt` and the split added the copy `debt_history`, so the referral names `debt` to the model.
+
+    The referral in session state keeps the copy's id, which the discovery
+    log's records key on.
+    """
+
+    async def run_translate(tool_context: Any, *, core: TranslatorCore) -> dict[str, object]:
+        return core.return_to_planner(tool_context=tool_context, **arguments)
+
+    monkeypatch.setattr(translator.tool, "run_translate", run_translate)
+    context = context_holding(split_draft(decision))
+
+    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(context)
+
+    assert answer["kind"] == arguments["kind"]
+    assert answer["requirement_id"] == "debt"
+    assert "'debt'" in str(answer["reason"])
+    assert "debt_history" not in json.dumps(answer)
+    sentence = refusal_sentence(_not_ready(answer))
+    assert "'debt'" in sentence
+    assert "debt_history" not in sentence
+    stored = load_referral(context.state)
+    assert stored is not None
+    assert stored.requirement_id == "debt_history"

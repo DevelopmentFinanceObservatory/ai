@@ -1047,13 +1047,33 @@ def _period_issues(
                 requirement_id=requirement.id,
                 detail=(
                     f"the source covers {evidence.window.start}-{evidence.window.end}, "
-                    f"the requirement asks for {period.start}-{period.end}"
+                    f"{_asked_for(period, evidence)}"
                 ),
                 found=evidence.window.model_dump(),
                 required=period.model_dump(),
             )
         ]
     return []
+
+
+def _asked_for(period: Period, evidence: RetrievalEvidence) -> str:
+    """What a `window_short` finding says the retrieval was asked for.
+
+    That is the requirement's `period`, and also the years the retrieval
+    requested where its identity's `requested_window` starts before it, as
+    for a read of the dataset from its first year on record
+    (`planner.plan.open_window`, `HistorySplit.whole_history`). The finding
+    is judged against `period`.
+    """
+    asked = f"the requirement asks for {period.start}-{period.end}"
+    requested = (evidence.identity or {}).get("requested_window")
+    if not isinstance(requested, dict) or requested.get("kind") != "range":
+        return asked
+    start, end = requested.get("start_year"), requested.get("end_year")
+    if not isinstance(start, int) or start >= period.start:
+        return asked
+    years = f"every year from {start}" if end is None else f"{start}-{end}"
+    return f"{asked}, and its retrieval requests {years}"
 
 
 # --- Scope: what the definition itself binds ---------------------------------
@@ -2021,8 +2041,7 @@ def _series_issues(
                     requirement_id=requirement.id,
                     detail=(
                         f"series {one.stat_var} for {list(one.entity_refs)!r} covers "
-                        f"{reach.start}-{reach.end}, the requirement asks for "
-                        f"{period.start}-{period.end}"
+                        f"{reach.start}-{reach.end}, {_asked_for(period, evidence)}"
                     ),
                     found=reach.model_dump(),
                     required=period.model_dump(),

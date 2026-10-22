@@ -5535,6 +5535,33 @@ def test_rolling_years_no_result_reads_together_may_state_two_newest_years(
     assert _plan(decision(), evidence_requirements=[requirement(period_end_open=True), *steps])
 
 
+def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """A total per year and a growth rolling from its start both read 'f', so
+    the growth reads a copy of 'f' over the dataset's whole history
+    ('f_history'). The refusal of the years the copy and the growth state
+    names 'f', in its requirements and in its text."""
+    steps = [
+        _years("f", _DATASET, _lte(2023, 0)),
+        AggregateRequirement(
+            id="total",
+            decision_ids=["measure"],
+            input_id="f",
+            reduction=Reduction.SUM,
+            group_by=(GroupBy.PERIOD,),
+        ),
+        _rolling_growth("f"),
+    ]
+
+    with pytest.raises(ValidationError) as raised:
+        _plan(decision(), evidence_requirements=[requirement(period_end_open=True), *steps])
+
+    error = _rolling_error(raised.value)
+    assert (error.issue, error.requirement_ids) == (RollingIssue.YEARS_DISAGREE, ("f", "growth"))
+    assert "('f' [2023]; 'growth' [2024])" in str(error)
+
+
 def _sum(step_id: str, left: str, right: str) -> SumOfRequirement:
     return SumOfRequirement(
         id=step_id,

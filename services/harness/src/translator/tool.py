@@ -50,12 +50,17 @@ from google.adk.tools.tool_context import ToolContext
 from planner.operations import Translation
 from planner.plan import (
     DatasetRequirement,
+    HistorySplit,
     Plan,
     UnsupportedOperation,
+    authored_text,
+    load_plan,
+    origin_of,
     plan_revision,
     record_optional_decline,
     record_unsupported,
     save_plan,
+    split_of,
 )
 from planner.records import EvidenceIssueCode
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
@@ -779,6 +784,59 @@ def _planner_answer(result: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str, object]:
+    """`answer` naming each requirement by the id the model wrote, under the plan's `split`.
+
+    `answer` is a referral as the planner reads it, or a translation verdict
+    carrying `named_in_place_of_across`. The draft translation runs on holds
+    the copies the split of whole-history reads added
+    (`Plan.rolling_copies`). Discovery, the compiler and the referral saved
+    in session state name a copy by its own id, which the model did not write
+    and cannot patch or pin, so the answer it reads names the copy's origin
+    (`planner.plan.origin_of`) in `requirement_id`, each stale pin's and each
+    named group's, and in the
+    prose of `reason` and each `repair`. Discovery and the compiler build
+    that prose with ids interpolated at dozens of sites, so it is rewritten
+    here (`planner.plan.authored_text`). A stale pin naming the
+    referral's own requirement once mapped, or one listed before it, is
+    dropped, as is a named group repeating one before it.
+    """
+    if not split.copies:
+        return answer
+
+    def prose(entry: dict[str, object]) -> dict[str, object]:
+        return entry | {
+            field: authored_text(text, split)
+            for field in ("reason", "repair")
+            if isinstance(text := entry.get(field), str)
+        }
+
+    def named(entries: object) -> list[dict[str, object]]:
+        return [
+            prose(entry | {"requirement_id": origin_of(split, str(entry["requirement_id"]))})
+            for entry in cast("list[dict[str, object]]", entries)
+        ]
+
+    mapped = prose(answer)
+    if isinstance(requirement_id := answer.get("requirement_id"), str):
+        mapped["requirement_id"] = origin_of(split, requirement_id)
+    if "stale_pins" in answer:
+        listed = {mapped.get("requirement_id")}
+        stale_pins: list[dict[str, object]] = []
+        for pin in named(answer["stale_pins"]):
+            if pin["requirement_id"] not in listed:
+                listed.add(pin["requirement_id"])
+                stale_pins.append(pin)
+        mapped["stale_pins"] = stale_pins
+    if "named_in_place_of_across" in answer:
+        groups: list[dict[str, object]] = []
+        for group in named(answer["named_in_place_of_across"]):
+            if group not in groups:
+                groups.append(group)
+        mapped["named_in_place_of_across"] = groups
+    return mapped
+
+
 def build_translate(*, surface: ToolSurface) -> Translate:
     """Build the translation `propose_plan` runs on every plan it records, closing over `surface`.
 
@@ -802,7 +860,8 @@ def build_translate(*, surface: ToolSurface) -> Translate:
             plan goes back on, whose `outcome` says what it asks of the
             planner. Either carries `named_in_place_of_across` when a group
             was named, each entry the requirement, the entity named and the
-            `across` dropped.
+            `across` dropped. Each names a requirement by the id the model
+            wrote (`authored_answer`).
         """
         with resolving_once():
             named = await name_pinned_groups(tool_context, surface=surface)
@@ -822,6 +881,7 @@ def build_translate(*, surface: ToolSurface) -> Translate:
                     for group in named
                 ]
             }
-        return answer
+        plan = load_plan(tool_context.state)
+        return answer if plan is None else authored_answer(answer, split_of(plan))
 
     return translate

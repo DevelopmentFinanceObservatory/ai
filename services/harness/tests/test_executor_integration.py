@@ -76,6 +76,7 @@ from planner.plan import (
     DecisionFixes,
     Entity,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     Plan,
     PlanStatus,
@@ -1273,6 +1274,7 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
                 id="recent_growth", decision_ids=["measure"], input_id="recent_years", **window
             ),
         ],
+        first_years=[FirstYear(requirement_id="oda_disbursed", year=2015)],
         status=PlanStatus.DRAFT,
     )
     translation = Translation(

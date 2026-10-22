@@ -22,9 +22,12 @@ from executor.ledger import RunLedger
 from executor.outcomes import StepRecord
 from google.adk import Context
 from planner.plan import (
+    HistorySplit,
     Plan,
     SessionState,
+    authored_text,
     load_asks,
+    split_of,
 )
 from planner.workflow import Workflow as PlanWorkflow
 
@@ -353,6 +356,32 @@ def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
     return " ".join(sentences) or "Its result is not available."
 
 
+def authored_report(report: Any, plan: Plan) -> Any:
+    """`report`, part of what a run of `plan` reports, with each copy named by the requirement it copies in every string it holds.
+
+    A run executes `plan` as stored, beside the copies the split of
+    whole-history reads added (`Plan.rolling_copies`), so a stop names a
+    copy's step and requirement, which exist only in the stored plan. What `execute` hands the planner and what `plan_done` hands the
+    orchestrator and the plan record read through
+    `planner.plan.authored_text`. The run's outcome, and the `failed_step`
+    `execute` hands `plan_done`, keep the copy's ids, which the run's lineage
+    and `_stopped_steps` look steps up by.
+    """
+    if not plan.rolling_copies:
+        return report
+    return _authored(report, split_of(plan))
+
+
+def _authored(value: Any, split: HistorySplit) -> Any:
+    if isinstance(value, str):
+        return authored_text(value, split)
+    if isinstance(value, list):
+        return [_authored(item, split) for item in value]
+    if isinstance(value, dict):
+        return {key: _authored(item, split) for key, item in value.items()}
+    return value
+
+
 def _stopped_steps(workflow: PlanWorkflow | None, failed_step: str | None) -> set[str]:
     """`failed_step` and every step of `workflow` whose bindings trace back to
     it. Steps are in run order, so one pass sees each step's inputs first."""
@@ -676,12 +705,13 @@ def plan_done_node(
         record = ""
         plan = readable_plan(ctx, ctx.state.get("plan"))
         if plan is not None:
+            stopped = _stopped_steps(plan.workflow, failed.get("step_id") if failed else None)
+            failed = authored_report(failed, plan)
             plan_record = record_plan(
                 ctx.state, plan, failed=failed, run_id=run.get("run_id") if run else None
             )
             record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
             if plan_record.asks and not unrecorded:
-                stopped = _stopped_steps(plan.workflow, failed.get("step_id") if failed else None)
                 asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
         if (failed or unfinished) and asks:
             asks = [

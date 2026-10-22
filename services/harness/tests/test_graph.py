@@ -23,6 +23,7 @@ from typing import Any, cast
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from compiler.evidence import check_evidence, evidence_from_source
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -62,6 +63,7 @@ from harness.graph import answer as answer_module
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
+    _planner_refusal,
     _replan_refusal,
     _start_relayed,
 )
@@ -70,6 +72,7 @@ from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -87,6 +90,7 @@ from planner.operations import AggregateOperation, GrowthOperation, RetrieveOper
 from planner.plan import (
     ASKS_STATE_KEY,
     AggregateRequirement,
+    Coverage,
     DatasetRequirement,
     Decision,
     Entity,
@@ -94,6 +98,7 @@ from planner.plan import (
     Period,
     PlanStatus,
     ResolvedBy,
+    open_window,
     plan_revision,
 )
 from planner.plan import Plan as PlannerPlan
@@ -114,6 +119,7 @@ from .orchestrator_fakes import (
     run_turn,
     visited_nodes,
 )
+from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, stored_split_plan
 
 SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -2569,6 +2575,108 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "source_unverified",
         "message": "the source states no provenance",
     }
+
+
+_GET_DATA = ToolId(server="data-mcp", name="get_data")
+
+
+@pytest.mark.parametrize(
+    ("stop", "ids"),
+    [
+        pytest.param(
+            Refused(
+                revision="rev1",
+                refusal=RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET,
+                detail=(
+                    "step 'last_five' would start in 1995, counted from 2023, before 2000, "
+                    f"the first year {SPEC_DEBT_HISTORY} holds"
+                ),
+                step_id="last_five",
+                requirement_id="debt_history",
+                payload=ToolFailure(
+                    code="rolling_window_outside_dataset",
+                    message="The data for external debt service paid starts in 2000.",
+                    retry_mode="do_not_retry",
+                ),
+            ),
+            ("last_five", "debt"),
+            id="rolled-start-before-the-copy",
+        ),
+        pytest.param(
+            RediscoveryNeeded(
+                revision="rev1",
+                step_id="debt_history",
+                tool=_GET_DATA,
+                requirement_id="debt_history",
+                spec_id=SPEC_DEBT_HISTORY,
+                refusal=ToolFailure(
+                    code="upstream_version_changed", message="", retry_mode="refresh_then_retry"
+                ),
+                completed=(),
+            ),
+            ("debt", "debt"),
+            id="copy-retrieval-needs-rediscovery",
+        ),
+    ],
+)
+async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
+    decision: Callable[..., Decision],
+    stop: Refused | RediscoveryNeeded,
+    ids: tuple[str, str],
+) -> None:
+    """A run stopped on a copy the split added (`debt_history`) tells the planner,
+    the agent and the plan record of the step and requirement the model wrote
+    (`debt`), and names no copy."""
+    plan = stored_split_plan(decision)
+
+    refusal = _planner_refusal(stop, plan=plan)
+    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
+    node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
+    (handed,) = [event async for event in plan_done(cast("Any", ctx), node_input)]
+
+    assert (refusal["step_id"], refusal["requirement_id"]) == ids
+    assert "debt_history" not in json.dumps(refusal)
+    assert "debt_history" not in json.dumps(handed)
+    (record,) = ctx.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
+    assert [step["id"] for step in record["steps"] if step["failed"]] == [ids[0]]
+
+
+def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retrieval_requested(
+    decision: Callable[..., Decision], source: Callable[..., SelectedSource]
+) -> None:
+    """The copy keeps its origin's stated 2015-2024 and is retrieved from the
+    dataset's first year. The gap the planner reads names the origin and both."""
+    plan = stored_split_plan(decision)
+    copy = plan.requirement("debt_history")
+    assert isinstance(copy, DatasetRequirement)
+    retrieved = source(
+        spec_id=SPEC_DEBT_HISTORY,
+        coverage_window=Period(start=FIRST_YEAR, end=2023),
+        identity={"stat_var": "DebtServicePaid", "requested_window": open_window(FIRST_YEAR)},
+    )
+    findings = check_evidence(
+        copy.model_copy(update={"coverage": Coverage(on_missing="fail")}),
+        evidence_from_source(retrieved),
+    )
+    stop = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'debt_history' is not met by what 'get_data' returned",
+        step_id="debt_history",
+        requirement_id="debt_history",
+        issues=tuple(findings),
+    )
+
+    refusal = _planner_refusal(stop, plan=plan)
+
+    (gap,) = [issue for issue in refusal["issues"] if issue["code"] == "window_short"]
+    assert gap["requirement_id"] == "debt"
+    assert gap["detail"] == (
+        "the source covers 2000-2023, the requirement asks for 2015-2024, "
+        "and its retrieval requests every year from 2000"
+    )
+    assert "debt_history" not in json.dumps(refusal)
 
 
 @pytest.mark.parametrize("kind", list(RefusalKind))

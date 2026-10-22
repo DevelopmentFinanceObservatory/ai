@@ -38,6 +38,8 @@ from planner.plan import (
     search_pin_slot,
 )
 
+from .split_plan import SPEC_DEBT, stored_split_plan
+
 _FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "turn_records_recorded.json").read_text()
 )
@@ -895,3 +897,16 @@ def test_plan_record_keeps_translator_source_account_across_turns():
     reading = record.source_readings(observed_at=datetime(2026, 10, 10, tzinfo=UTC))[0]
     assert reading.provenance_ref == "provenance/CRS"
     assert reading.provenance_account == "provider"
+
+
+def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> None:
+    """`debt_history` is code's copy of `debt` for a rolling growth. The record has
+    one step, source and period for `debt`, and one warning, which names `debt`."""
+    record = PlanRecord.from_plan(stored_split_plan(decision))
+
+    assert [step.id for step in record.steps] == ["debt", "total", "last_five"]
+    assert [source.spec_id for source in record.sources] == [SPEC_DEBT]
+    assert [period.requirement_ids for period in record.periods] == [("debt",)]
+    assert [(warning.code, warning.requirement_id) for warning in record.warnings] == [
+        ("window_short", "debt")
+    ]

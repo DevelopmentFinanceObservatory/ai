@@ -66,6 +66,7 @@ def _resolve(
     *operations: Operation,
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
+    whole_history: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, ResolvedShape], list[str]]:
     """`shapes_for` over `operations`, in the order given -- every fixture here already lists them upstream-first."""
     return shapes_for(
@@ -73,6 +74,7 @@ def _resolve(
         requirements=requirements,
         sources=sources,
         order=[op.id for op in operations],
+        whole_history=whole_history or {},
     )
 
 
@@ -102,6 +104,28 @@ def test_retrieve_wraps_the_requirement_entities_role_with_its_column_and_narrow
     assert resolved.shape.roles == (resolved.shape.roles[0],)  # one role dimension
     assert resolved.shape.roles[0].role == "debtor"
     assert resolved.shape.roles[0].requirement_id == "annual_debt_service"
+
+
+@pytest.mark.parametrize(
+    ("whole_history", "start"),
+    [({}, 2015), ({"annual_debt_service": 1990}, 1990)],
+    ids=["stated-period", "whole-history"],
+)
+def test_a_retrieval_starts_at_the_first_year_the_plan_reads_its_dataset_from(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    whole_history: dict[str, int],
+    start: int,
+) -> None:
+    shapes, issues = _resolve(
+        _retrieve(),
+        requirements={"annual_debt_service": requirement(period_end_open=True)},
+        sources={"debt": source()},
+        whole_history=whole_history,
+    )
+
+    assert issues == []
+    assert shapes["debt"].shape.period == Period(start=start, end=2024)
 
 
 def test_retrieve_marks_a_column_surplus_when_the_source_resolves_an_unnamed_label(

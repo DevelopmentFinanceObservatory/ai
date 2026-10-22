@@ -126,6 +126,7 @@ from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 
 from .search_results import search_result_parts
+from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 
 SPEC = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -1790,6 +1791,34 @@ def test_the_plan_section_writes_structured_values_with_non_ascii_text_as_writte
     assert rendered.count(name) == 1
     assert "  fixes: measure\n" in rendered
     assert "\\u" not in rendered
+
+
+def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
+    """The stored plan holds `debt_history`, code's copy of `debt` for a rolling growth.
+
+    The model patches requirements by id and did not write the copy, so the
+    digest names `debt`, its one source and its one binding, and omits both
+    fields code writes.
+    """
+    stored = stored_split_plan(decision)
+
+    message = _seam()._message(
+        fresh=True,
+        question="QUESTION_TEXT",
+        prior_plan=stored.model_dump(mode="json"),
+        refusal=None,
+        amendment=None,
+        canvas_digest=None,
+        conversation_digest=None,
+    )
+
+    assert "debt_history" not in message
+    assert "rolling_copies" not in message
+    assert "first_years" not in message
+    assert f"- evidence: debt from {SPEC_DEBT} (step debt)" in message
+    assert message.count("- evidence:") == 1
+    assert message.count(" -- external debt service paid") == 1
+    assert SPEC_DEBT_HISTORY not in message
 
 
 def test_the_plan_section_names_the_source_a_requirement_s_evidence_came_from(

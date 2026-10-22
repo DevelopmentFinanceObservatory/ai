@@ -45,6 +45,7 @@ import hashlib
 import itertools
 import json
 import logging
+import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime
@@ -2130,6 +2131,24 @@ def origin_of(split: HistorySplit, step_id: str) -> str:
     return split.origins().get(step_id, step_id)
 
 
+def authored_text(text: str, split: HistorySplit) -> str:
+    """`text` naming, in place of each copy `split` added, the requirement it copies.
+
+    Each copy id is matched as a whole identifier, so an id the model wrote
+    that only starts with one (`aid_history_2` beside `aid_history`) keeps
+    its name. Outward text built on the split plan reads through it: the
+    refusals its rules raise (`Plan`'s validation) and the referrals the
+    translator hands back (`translator.tool.authored_answer`).
+    """
+    origins = split.origins()
+    if not origins:
+        return text
+    copy_id = re.compile(
+        "(?<![A-Za-z0-9_])(" + "|".join(map(re.escape, origins)) + ")(?![A-Za-z0-9_])"
+    )
+    return copy_id.sub(lambda match: origins[match[1]], text)
+
+
 def whole_history_split(
     requirements: Sequence[EvidenceRequirement],
     *,
@@ -2159,7 +2178,7 @@ def whole_history_split(
     originals keep their stated years for every other reader. Nothing is
     dropped, so no origin is left unread.
 
-    On its own output, with its `copies`, it changes nothing: every
+    On its own output, with its `copies`, it changes nothing, since every
     whole-history read is then read only by its rolling-start readers and
     the steps between.
     """
@@ -2504,7 +2523,7 @@ def _build_shapes(
     names exactly one, by construction of every transform. `whole_history`
     names each dataset requirement read from the first year its dataset
     holds on record, with that year, where its shape starts
-    (`_dataset_shape`); every other one starts at its stated period.
+    (`_dataset_shape`). Every other one starts at its stated period.
     `origins` maps each copy `whole_history_split` added to the requirement
     it copies, which a refusal names in its place: a copy reads other
     years than its origin, and the model wrote only the origin. A copy
@@ -3270,8 +3289,8 @@ class Plan(StrictModel):
             "requirement."
         ),
     )
-    # The model writes at most `MAX_PLAN_REQUIREMENTS` (`_record_fits_the_size_limit`);
-    # `whole_history_split` copies each of them at most once.
+    # The model writes at most `MAX_PLAN_REQUIREMENTS` (`_record_fits_the_size_limit`),
+    # and `whole_history_split` copies each of them at most once.
     evidence_requirements: tuple[EvidenceRequirement, ...] = Field(
         default=(),
         max_length=2 * MAX_PLAN_REQUIREMENTS,
@@ -3434,7 +3453,9 @@ class Plan(StrictModel):
         `first_years` does not hold is refused before any shape is built
         (`OpenPeriodFault.FIRST_YEAR_UNKNOWN`). A plan carrying
         `rolling_copies` carries exactly the split of the plan the model
-        wrote (`_check_copies_are_the_split`).
+        wrote (`_check_copies_are_the_split`). A refusal of the split
+        requirements names the requirements the model wrote, in its ids and
+        its text (`_naming_origins`).
         """
         slots = [decision.slot for decision in self.decisions]
         _reject_repeats(slots, what="decision slot")
@@ -3471,7 +3492,7 @@ class Plan(StrictModel):
                 whole_history=split.whole_history,
                 origins=split.origins(),
             )
-        except RollingPlanError as error:
+        except ValueError as error:
             raise _naming_origins(error, split) from error
         decisions_by_slot = {decision.slot: decision for decision in self.decisions}
         _check_requirements_honour_their_decisions(self.evidence_requirements, decisions_by_slot)
@@ -3832,13 +3853,13 @@ def split_of(plan: Plan) -> HistorySplit:
 
 
 def authored(plan: Plan) -> Plan:
-    """`plan` as the model wrote it: no copy `rolling_copies` names, and neither field the split writes.
+    """`plan` as the model wrote it, without the copies `rolling_copies` names and with both fields the split writes empty.
 
     Every input naming a copy names its origin again, and `rolling_copies`
     and `first_years` are empty. The split of the result under `plan`'s
     `first_years` is `plan` again, and on a plan with no copies this
     changes only `first_years`. The result is not validated, since a
-    rolling-start read in it needs the first years it no longer carries;
+    rolling-start read in it needs the first years it no longer carries.
     `translation` and `workflow` are `plan`'s own.
     """
     origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
@@ -3917,16 +3938,28 @@ def _check_copies_are_the_split(plan: Plan) -> None:
         )
 
 
-def _naming_origins(error: RollingPlanError, split: HistorySplit) -> RollingPlanError:
-    """`error` naming, in place of each copy among its requirements, the requirement it copies."""
-    named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
-    return RollingPlanError(
-        error.issue,
-        str(error),
-        requirement_ids=list(named),
-        fault=error.fault,
-        spec_id=error.spec_id,
-    )
+def _naming_origins(error: ValueError, split: HistorySplit) -> ValueError:
+    """`error` naming, in its text and its requirements, the requirement each copy among them copies.
+
+    The rules over the requirements as they run raise a `RollingPlanError`,
+    an `UnsupportedPlanError` or a plain `ValueError`
+    (`_check_requirement_graph`). Each comes back as its own kind.
+    """
+    message = authored_text(str(error), split)
+    if isinstance(error, RollingPlanError):
+        named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
+        return RollingPlanError(
+            error.issue,
+            message,
+            requirement_ids=list(named),
+            fault=error.fault,
+            spec_id=error.spec_id,
+        )
+    if isinstance(error, UnsupportedPlanError):
+        return UnsupportedPlanError(error.operation, message)
+    if type(error) is ValueError:
+        return ValueError(message)
+    return error
 
 
 class ResultScopeGap(NamedTuple):

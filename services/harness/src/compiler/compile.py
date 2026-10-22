@@ -51,7 +51,7 @@ from planner.operations import (
     Translation,
 )
 from planner.parties import across_party
-from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level
+from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level, split_of
 from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
@@ -341,6 +341,7 @@ class _Build:
         self.discovered = discovered
         self.capabilities = capabilities
         self.requirements = {r.id: r for r in plan.evidence_requirements}
+        self.whole_history = split_of(plan).whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []
         self.operations: dict[str, Operation] = {}
@@ -641,6 +642,7 @@ class _Build:
             requirements=self.requirements,
             sources=self.sources,
             order=self.order,
+            whole_history=self.whole_history,
         )
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")

@@ -45,7 +45,6 @@ from planner.plan import (
     EvidenceRequirement,
     anchored_over,
     keeps_one_level,
-    read_from_first_year,
     states_period_threshold,
 )
 from planner.records import (
@@ -153,6 +152,7 @@ def shapes_for(
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
     order: Sequence[str],
+    whole_history: Mapping[str, int],
 ) -> tuple[dict[str, ResolvedShape], list[str]]:
     """Walk `operations` in `order`, resolving one `ResolvedShape` per operation that has one.
 
@@ -172,6 +172,10 @@ def shapes_for(
         sources: The source discovered for each retrieval, by *operation* id.
         order: Operation ids topologically ordered so every input precedes
             its reader.
+        whole_history: The first year on record of each dataset requirement
+            read from its dataset's first year, by requirement id, where its
+            shape starts (`planner.plan.HistorySplit.whole_history`). Every
+            other retrieval starts at its stated period.
 
     Returns:
         A `(shapes_by_id, issues)` pair: the shape resolved for each
@@ -216,7 +220,13 @@ def shapes_for(
         if operation is None:
             continue
         built = _resolve(
-            operation, operations, shapes, requirements, sources, retrieve_by_requirement
+            operation,
+            operations,
+            shapes,
+            requirements,
+            sources,
+            retrieve_by_requirement,
+            whole_history,
         )
         if built is None:
             continue
@@ -324,9 +334,15 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
+    whole_history: Mapping[str, int],
 ) -> ResolvedShape | str | None:
     if isinstance(operation, RetrieveOperation):
-        return _retrieve_resolved(operation, requirements, sources)
+        return _retrieve_resolved(
+            operation,
+            requirements,
+            sources,
+            first_year=whole_history.get(operation.requirement_id),
+        )
     if isinstance(operation, AggregateOperation):
         upstream = _input_shape(operation.input, operations, shapes)
         return None if upstream is None else _aggregate_resolved(operation, upstream)
@@ -409,6 +425,8 @@ def _retrieve_resolved(
     operation: RetrieveOperation,
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
+    *,
+    first_year: int | None,
 ) -> ResolvedShape | None:
     """The shape a fresh retrieval carries, with each role wrapped by its source column.
 
@@ -438,8 +456,8 @@ def _retrieve_resolved(
     one under a requirement whose `across` does not name the place party. A
     place-level filter may read any open role, a flow side included, which
     is the one role `compile` can ask `get_data` for the type column of. Its
-    years run on past its period and start at the dataset's first year as
-    `planner.plan._dataset_shape` states them.
+    years run on past its period, and start at `first_year` for a read of the
+    dataset's whole history, as `planner.plan._dataset_shape` states them.
     """
     source = sources.get(operation.id)
     requirement = requirements.get(operation.requirement_id)
@@ -532,11 +550,12 @@ def _retrieve_resolved(
     shape = _retrieved(
         requirement_id=operation.requirement_id,
         roles=tuple(dims),
-        period=requirement.period,
+        period=requirement.period
+        if first_year is None
+        else Period(start=first_year, end=requirement.period.end),
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
         end_open=requirement.period_end_open,
-        from_first_year=read_from_first_year(requirements, requirement.id),
     )
     return ResolvedShape(shape=shape, columns=tuple(columns))
 

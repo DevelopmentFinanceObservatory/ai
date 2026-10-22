@@ -145,6 +145,7 @@ from planner.plan import (
     recorded_identity,
     retrieves_period,
     save_plan,
+    split_of,
     windowed_pins,
 )
 from planner.records import (
@@ -1960,7 +1961,11 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
 
 
 async def _recorded_source(
-    tool_context: ToolContext, *, requirement: DatasetRequirement, surface: ToolSurface
+    tool_context: ToolContext,
+    *,
+    requirement: DatasetRequirement,
+    first_year: int | None,
+    surface: ToolSurface,
 ) -> SelectedSource | dict[str, object] | None:
     """The source of the dataset `requirement` pins, read from Search's answer for its identity on record.
 
@@ -1968,7 +1973,8 @@ async def _recorded_source(
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one a search in the conversation recorded for the pin itself
     (`planner.plan.recorded_identity`) when its window is that period, or
-    a range with no end year for a requirement stating `period_end_open`
+    a range with no end year for a requirement stating `period_end_open`,
+    from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
     is resolved through data-mcp (`resolve_definition`), which stores the
     definition for the plan's `get_data`, and the source is read from
@@ -1991,7 +1997,9 @@ async def _recorded_source(
     if (
         recorded is None
         or identity is None
-        or not retrieves_period(identity.get("requested_window"), requirement)
+        or not retrieves_period(
+            identity.get("requested_window"), requirement, first_year=first_year
+        )
     ):
         return None
     try:
@@ -2168,7 +2176,12 @@ async def _pin_source(
         tool_context, plan=plan, requirement=requirement
     )
     if source is None:
-        source = await _recorded_source(tool_context, requirement=requirement, surface=surface)
+        source = await _recorded_source(
+            tool_context,
+            requirement=requirement,
+            first_year=split_of(plan).whole_history.get(requirement.id),
+            surface=surface,
+        )
     if isinstance(source, dict):
         return source
     honoured = source is not None

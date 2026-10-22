@@ -26,7 +26,7 @@ from compiler.evidence import (
 from compiler.sources import member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
-from planner.plan import Coverage, DatasetRequirement, Entity, Unit
+from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
 from planner.records import EvidenceIssue, Period, ResolvedSourceMention, StatVarReading
 from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 
@@ -1344,6 +1344,49 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
         for issue in issues
         if issue.code in _PER_SERIES_CODES
     ] == found
+
+
+@pytest.mark.parametrize(
+    ("start_year", "asked"),
+    [
+        pytest.param(
+            1990,
+            "the requirement asks for 2015-2024, and its retrieval requests every year from 1990",
+            id="read-from-the-first-year",
+        ),
+        pytest.param(2015, "the requirement asks for 2015-2024", id="read-from-the-stated-start"),
+    ],
+)
+def test_a_short_series_states_the_years_its_retrieval_requested(
+    requirement: RequirementFactory, start_year: int, asked: str
+) -> None:
+    """A read of a dataset from its first year on record is held to the stated
+    period, and its gap says what it requested as well."""
+    manifest = _manifest()
+    identity = {"stat_var": "DebtServicePaid", "requested_window": open_window(start_year)}
+    manifest = manifest.model_copy(
+        update={"definition": manifest.definition.model_copy(update={"identity": identity})}
+    )
+    evidence = evidence_from_manifest(
+        manifest,
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                observations=34,
+                first={"value": 1.0, "period": "1990"},
+                latest={"value": 2.0, "period": "2023"},
+            )
+        ),
+    )
+
+    (gap,) = [
+        issue
+        for issue in check_evidence(requirement(), evidence)
+        if issue.code is EvidenceIssueCode.WINDOW_SHORT
+    ]
+
+    assert gap.detail == (f"series DebtServicePaid for ['country/KEN'] covers 1990-2023, {asked}")
+    assert gap.required == {"start": 2015, "end": 2024}
 
 
 @pytest.mark.parametrize("series_stats", [None, _series_stats()], ids=["none", "empty"])

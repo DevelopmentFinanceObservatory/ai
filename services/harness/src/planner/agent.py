@@ -78,7 +78,7 @@ from translator.discovery import (
     resolved_spec,
 )
 from translator.referral import USER_DECIDES, clear_referral, load_referral
-from translator.tool import Translate
+from translator.tool import Translate, authored_answer
 
 from planner.declaration import PlanTool
 from planner.plan import (
@@ -106,6 +106,7 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
+    split_of,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -544,7 +545,7 @@ def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, objec
             "The translator referred this plan back; settle the referral with the user "
             "and propose again before executing.",
             outcome=Outcome.REFUSED,
-            detail={"referral": referral.model_dump(mode="json")},
+            detail={"referral": authored_answer(referral.model_dump(mode="json"), split_of(plan))},
             action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME)
             if asks_user
             else PROPOSE_PLAN_PROPOSER.action(),

@@ -14,7 +14,7 @@ states no other reduction (`planner.plan.period_licences_held`).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -57,6 +57,7 @@ from planner.plan import (
     SumOfRequirement,
     Unit,
     UnsupportedOperation,
+    WindowedPin,
     answering_results,
     authored,
     current_recorded_identity,
@@ -64,6 +65,7 @@ from planner.plan import (
     inputs_of,
     load_plan,
     one_year_followed,
+    origin_of,
     period_licences_held,
     plan_revision,
     record_optional_decline,
@@ -72,6 +74,7 @@ from planner.plan import (
     split_of,
     unstated_period_reductions,
     whole_history_split,
+    windowed_pins,
 )
 from planner.records import (
     MAX_ENTITIES,
@@ -94,7 +97,7 @@ from planner.records import (
 from planner.shapes import VALUE_KEPT_SPAN_PAIRS
 from planner.tool_results import Outcome, ProblemCode
 from pydantic import ValidationError
-from submission.service import OneYear
+from submission.service import OneYear, _window_pins
 
 from ..decision_drafts import drafts
 
@@ -2581,8 +2584,8 @@ def test_the_one_year_each_refusal_offers_is_admitted(
     by, under the newest year the step's other rolling years stand for,
     where the dataset's first year is on record, since the rolling year
     reads its whole history through copies of its own and every other step
-    keeps its years. It is fixed where no first year is: for a dataset with
-    no pin, or one whose pin no answer over every year states. The plan
+    keeps its years. It is fixed where no first year is on record, for a
+    dataset with no pin or one whose pin no answer over every year states. The plan
     that follows the change is admitted, and every other step, the
     dataset's `period` and the inputs between the step and the dataset
     included, is left as stated."""
@@ -2621,15 +2624,55 @@ def test_the_one_year_each_refusal_offers_is_admitted(
     unpinned = {"source_spec_id"}
     assert [
         step.model_dump(exclude=unpinned)
-        for step in stored.evidence_requirements
+        for step in authored(stored).evidence_requirements
         if step.id not in (refused_step, "one_year")
     ] == [step.model_dump(exclude=unpinned) for step in requirements if step.id != refused_step]
     _, before = _step_of(requirements, refused_step)
     if change is OneYear.FILTER:
-        assert stored.requirement("one_year").input_id == before.input_id
+        assert authored(stored).requirement("one_year").input_id == before.input_id
         assert stored.requirement(refused_step).input_id == "one_year"
     else:
         assert stored.requirement(refused_step).input_id == before.input_id
+    kept = [
+        output
+        for output in answering_results(stored)
+        if output not in _computed_from(stored, refused_step)
+    ]
+    windowed, minted = _window_pins(
+        _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)), shown=pins
+    )
+    assert _windows_read(stored, windowed_pins(ctx.state), kept) == _windows_read(
+        windowed, {copy.spec_id: copy for copy in minted}, kept
+    )
+
+
+def _windows_read(
+    plan: Plan, minted: Mapping[str, WindowedPin], outputs: Iterable[str]
+) -> dict[str, dict[str, object]]:
+    """For each of `outputs`, what each retrieval it rests on reads, by the dataset requirement the model wrote.
+
+    A retrieval pinning a copy `minted` holds reads that copy's
+    `requested_window`, and one pinning its source as it stands reads the
+    source's own window, named by its pin.
+    """
+    split = split_of(plan)
+    by_id = {requirement.id: requirement for requirement in split.requirements}
+
+    def datasets(step_id: str) -> set[str]:
+        inputs = inputs_of(by_id[step_id])
+        return {step_id} if not inputs else set().union(*map(datasets, inputs))
+
+    read: dict[str, dict[str, object]] = {}
+    for output in outputs:
+        read[output] = {}
+        for dataset_id in sorted(datasets(output)):
+            dataset = by_id[dataset_id]
+            assert isinstance(dataset, DatasetRequirement)
+            pin = dataset.source_spec_id
+            read[output][origin_of(split, dataset_id)] = (
+                minted[pin].identity["requested_window"] if pin in minted else pin
+            )
+    return read
 
 
 def _from_newest(id: str, offset: int) -> FilterRequirement:
@@ -3327,7 +3370,7 @@ def test_a_start_rolling_over_a_dataset_with_no_first_year_on_record_is_refused(
     decision: Callable[..., Decision], pin: str | None, first_year: int | None, spec_id: str | None
 ) -> None:
     """The rank reads the dataset from its first year, and none is on record,
-    so the plan is refused before its years are read; with 1990 on record
+    so the plan is refused before its years are read. With 1990 on record
     it is admitted."""
     dataset = _open(period=_SINCE_2015).model_copy(update={"source_spec_id": pin})
 
@@ -3350,8 +3393,8 @@ def test_a_start_rolling_above_a_max_by_donor_reads_the_stated_years(
 ) -> None:
     """The filter's first year follows the newest data, but it bounds the year
     each donor's max fell in, so 'aid' keeps 2015-2024 and the max picks over
-    those years. The filter is refused for its own reason: newer data moves
-    its first year past the year a max fell in."""
+    those years. The filter is refused for its own reason, that newer data
+    moves its first year past the year a max fell in."""
     peak = _total(id="peak", reduction=Reduction.MAX)
     since = FilterRequirement(
         id="since",
@@ -3416,7 +3459,7 @@ def test_a_sibling_of_a_rank_rolling_from_its_start_reads_the_stated_years(
     decision: Callable[..., Decision], sibling: list[EvidenceRequirement]
 ) -> None:
     """'aid' states 2020-2024 and `top` reads it from 1990, so a sibling
-    reading years before 2020 reads none: 2015 is no year of what it reads."""
+    reading years before 2020 reads none. 2015 is no year of what it reads."""
     with pytest.raises(ValidationError, match="2020-2024"):
         _model_plan(
             [_open(period=Period(start=2020, end=2024)), _TOP, *sibling],
@@ -3515,7 +3558,7 @@ def test_a_rolling_one_year_reads_a_copy_and_leaves_a_yearly_series_its_years(
     decision: Callable[..., Decision],
 ) -> None:
     """'aid' states 2020-2024. The total answering ask 0 is offered the
-    newest year as it moves; followed, its filter reads a copy of 'aid'
+    newest year as it moves. Followed, its filter reads a copy of 'aid'
     from 1990, and the total per year answering ask 1 keeps 2020 on."""
     plan = _model_plan(
         [_open(period=Period(start=2020, end=2024)), _YEARLY, _total()],
@@ -3559,7 +3602,7 @@ def test_the_requirement_limit_counts_the_requirements_the_model_wrote(
     decision: Callable[..., Decision],
 ) -> None:
     """Twenty-four requirements, which the split takes to twenty-five, are
-    admitted; a twenty-fifth the model writes is refused."""
+    admitted, and a twenty-fifth the model writes is refused."""
     donors = [
         FilterRequirement(
             id=f"donor_{n}",
