@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -100,6 +100,7 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
+    record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
     save_plan,
@@ -1062,6 +1063,10 @@ class ToolContextSession:
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record `operation` as answered `unsupported` in this planner entry."""
         record_unsupported(self.tool_context.state, operation)
+
+    def record_reduction_refused(self, asks: Iterable[int]) -> None:
+        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
+        record_reduction_refused_asks(self.tool_context.state, asks)
 
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state."""

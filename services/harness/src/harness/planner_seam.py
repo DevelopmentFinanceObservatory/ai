@@ -116,6 +116,7 @@ from planner.plan import (
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
+    REDUCTION_REFUSED_ASKS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
@@ -561,7 +562,9 @@ class PlannerSeam:
                 ctx.session.state[PLAN_STATE_KEY] = None
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
                 # A first draft may decline an ask no requirement kind states,
-                # which no tool's answer could ever earn. A replan or an
+                # which no tool's answer could ever earn, except one a
+                # `period_reduction_unstated` refusal named
+                # (`submission.service._declinable`). A replan or an
                 # amendment earns each decline from a tool's answer.
                 record_optional_decline(
                     cast(SessionState, ctx.session.state),
@@ -711,14 +714,16 @@ class PlannerSeam:
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
-        # `TERMINAL_DECLINES_STATE_KEY`, `COMPILE_FAILURES_STATE_KEY` and
-        # `AMENDMENT_ENTRY_STATE_KEY` too. The declines an ask-the-user resume
-        # still owes or may make, the failures it may repeat, and the
-        # amendment that opened it are this entry's own.
+        # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
+        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
+        # The declines an ask-the-user resume still owes or may make, the
+        # failures it may repeat, and the amendment that opened it are this
+        # entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
             TERMINAL_DECLINES_STATE_KEY,
+            REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
         ):

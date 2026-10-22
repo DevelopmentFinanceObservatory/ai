@@ -36,6 +36,7 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    Decline,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -52,11 +53,13 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
+    UnsupportedOperation,
     current_recorded_identity,
     load_plan,
     one_year_followed,
     period_licences_held,
     plan_revision,
+    record_optional_decline,
     save_pin_sources,
     save_plan,
     unstated_period_reductions,
@@ -209,6 +212,7 @@ def _propose(
     decisions: list[Decision],
     *,
     answered: Sequence[AskAnswer] | None = None,
+    declined: Sequence[Decline] = (),
     across_years: Sequence[str] = (),
     removed_decisions: Sequence[str] = (),
     reads_user_words: bool = False,
@@ -232,6 +236,7 @@ def _propose(
         answered=(
             [AskAnswer(ask=0, outputs=(requirements[-1].id,))] if answered is None else answered
         ),
+        declined=list(declined),
         across_years=list(across_years),
         amends_version=recorded.version if recorded is not None and not restart else None,
         starts_new_plan=restart,
@@ -298,6 +303,48 @@ def test_one_figure_over_years_answers_an_ask_across_years(
     assert admitted["outcome"] == Outcome.OK.value, admitted
     recorded = load_plan(marked.state)
     assert recorded is not None and recorded.asks_across_years == (0,)
+
+
+def _declined(ask: int) -> Decline:
+    return Decline(
+        ask=(ASK, OTHER_ASK)[ask], code=UnsupportedOperation.NO_OPERATION_COVERS, ask_ref=ask
+    )
+
+
+@pytest.mark.parametrize(
+    ("declined", "answers", "outcome"),
+    [
+        pytest.param((0, 1), False, (Outcome.INVALID_INPUT, "decline_unearned"), id="refused"),
+        pytest.param((1,), True, (Outcome.OK, None), id="unrefused"),
+    ],
+)
+def test_a_first_draft_declines_no_ask_a_reduction_refusal_named(
+    decision: Callable[..., Decision],
+    declined: tuple[int, ...],
+    answers: bool,
+    outcome: tuple[Outcome, str | None],
+) -> None:
+    """A first draft's permission to decline as `no_operation_covers`
+    (`harness.planner_seam`) covers no ask a `period_reduction_unstated`
+    refusal named in the entry, and still covers an ask it did not name."""
+    ctx = _context(asks=(ASK, OTHER_ASK))
+    record_optional_decline(ctx.state, UnsupportedOperation.NO_OPERATION_COVERS, terminal=True)
+    _refused(
+        _propose(ctx, [_aid(), _total()], [decision()], declined=[_declined(1)]),
+        _gap(years=EVERY_YEAR),
+    )
+
+    result = _propose(
+        ctx,
+        [_aid(), _YEARLY] if answers else [],
+        [decision()] if answers else [],
+        answered=[AskAnswer(ask=0, outputs=("yearly",))] if answers else (),
+        declined=[_declined(ask) for ask in declined],
+    )
+
+    assert (result["outcome"], result.get("code")) == (outcome[0].value, outcome[1]), result
+    if not answers:
+        assert result["detail"]["asks"] == [0]
 
 
 @pytest.mark.parametrize("step", sorted(_STEPS))

@@ -168,6 +168,12 @@ OPTIONAL_DECLINES_STATE_KEY = "planner:optional_declines"
 # no evidence requirements remain, including first-draft asks no kind states.
 TERMINAL_DECLINES_STATE_KEY = "planner:terminal_declines"
 
+# The asks a `period_reduction_unstated` refusal named in the planner's
+# current entry, by number. No optional decline covers one of them
+# (`submission.service._declinable`). Cleared and kept with
+# `UNSUPPORTED_STATE_KEY`.
+REDUCTION_REFUSED_ASKS_STATE_KEY = "planner:reduction_refused_asks"
+
 # The session-state slot holding a `PinSource` for every spec_id the
 # planner was shown this entry, keyed by spec_id in the order it was shown
 # (`pin_sources`). `harness.planner_seam` writes it from the search
@@ -4628,8 +4634,19 @@ def record_optional_decline(
         )
 
 
+def load_reduction_refused_asks(state: SessionState) -> frozenset[int]:
+    """Return every ask a `period_reduction_unstated` refusal named in the planner's current entry."""
+    return frozenset(state.get(REDUCTION_REFUSED_ASKS_STATE_KEY) or ())
+
+
+def record_reduction_refused_asks(state: SessionState, asks: Iterable[int]) -> None:
+    """Add `asks` to those a `period_reduction_unstated` refusal named in the planner's current entry."""
+    state[REDUCTION_REFUSED_ASKS_STATE_KEY] = sorted(load_reduction_refused_asks(state) | set(asks))
+
+
 def clear_unsupported(state: SessionState) -> None:
-    """Forget the `unsupported` answers and optional declines, as a new planner entry starts."""
+    """Forget the `unsupported` answers, optional declines and refused asks, as a new planner entry starts."""
     state[UNSUPPORTED_STATE_KEY] = []
     state[OPTIONAL_DECLINES_STATE_KEY] = []
     state[TERMINAL_DECLINES_STATE_KEY] = []
+    state[REDUCTION_REFUSED_ASKS_STATE_KEY] = []
