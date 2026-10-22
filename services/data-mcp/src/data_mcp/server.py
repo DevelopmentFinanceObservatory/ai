@@ -29,8 +29,7 @@ from starlette.responses import JSONResponse
 from data_mcp import search_tool
 from data_mcp.artifact_resource import serve_artifact
 from data_mcp.catalogue_counts import catalogue_counts
-from data_mcp.client import UpstreamClient
-from data_mcp.client_holder import aclose_client, set_client
+from data_mcp.client_holder import aclose_client, build_client, set_client
 from data_mcp.definition_store import (
     CachingDefinitionStore,
     DefinitionStore,
@@ -185,7 +184,7 @@ def main() -> None:
     settings = Settings()
     configure_logging()
     init_telemetry(service_name="data-mcp")
-    set_client(UpstreamClient(settings=settings))
+    set_client(build_client(settings))
     apply_gate(mcp, token=settings.mcp_api_token, disabled=settings.mcp_auth_disabled)
     logger.info("Starting data-mcp on port %d", settings.port)
     mcp.run(transport="streamable-http", host="0.0.0.0", port=settings.port)

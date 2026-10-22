@@ -1,12 +1,11 @@
 """`harness.wire` against the contract's own fixtures.
 
-The fixtures in `wire_fixtures/studio/` are the contract drafts' studio payload
-fixtures verbatim (`dfofrontendpayloads.md`, 2026-08-04) -- the shapes the
-frontend team builds against. Three things are pinned here: every event
+The fixtures in `wire_fixtures/studio/` are the studio payload fixtures
+the frontend team builds against. Three things are pinned here: every event
 fixture round-trips bit-for-bit through `STUDIO_FRAME_ADAPTER` (parse, then
 `model_dump(mode="json", exclude_unset=True)` reproduces the fixture
 exactly); every request fixture parses through `STUDIO_REQUEST_ADAPTER`
-with the docs' `session_id` accepted as the deprecated alias for
+with the fixtures' `session_id` accepted as the deprecated alias for
 `conversation_id` (contract delta 5) and round-trips up to that one rename;
 and the boundary refuses what the contract says it refuses: unknown
 members, unknown discriminators, out-of-vocabulary enum values.
@@ -47,16 +46,19 @@ from harness.wire import (
     MessageDelta,
     OperationAxis,
     OperationVerb,
+    OptionAnswer,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
     PlanStep,
     PlanVersioned,
     Seed,
+    SkippedAnswer,
     SpecBlock,
     SpecRef,
     Suggestions,
     Surface,
+    TextAnswer,
     TurnRequest,
     check_resolved_bounds,
     usable_component,
@@ -79,6 +81,7 @@ EVENT_FIXTURES = {
     "event-11-error.json": ErrorFrame,
     "event-12-done.json": Done,
     "event-13-elicitation-skippable.json": ElicitationRequest,
+    "event-14-elicitation-questions.json": ElicitationRequest,
 }
 
 REQUEST_FIXTURES = {
@@ -93,6 +96,7 @@ REQUEST_FIXTURES = {
     "request-09-composition-set-card-meta.json": CompositionMutation,
     "request-10-cancel.json": CancelRequest,
     "request-11-turn-seeded.json": TurnRequest,
+    "request-12-interrupt-answers.json": InterruptResponse,
 }
 
 
@@ -121,9 +125,8 @@ def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
     """The turn/interrupt fixtures carry `session_id`; v1 parses it as
     the deprecated alias of `conversation_id` (delta 5) and serialisation
     writes `conversation_id`, so their round-trip is exact up to that one
-    rename. The composition.mutate fixture is delta-adjusted on disk (the
-    drafts' shape carried no conversation identifier; delta 5 adds one), so
-    it round-trips exactly as stored."""
+    rename. The composition.mutate fixture is delta-adjusted on disk (delta 5
+    adds a conversation identifier), so it round-trips exactly as stored."""
     raw = _load(name)
 
     request = STUDIO_REQUEST_ADAPTER.validate_python(raw)
@@ -137,8 +140,9 @@ def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
 
 def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> None:
     """`exclude_unset` round-trips hide defaults, so pin them here: a turn
-    adds its card to the canvas unless told otherwise, and an elicitation
-    is a closed single choice unless it says it takes free text or a skip."""
+    adds its card to the canvas unless told otherwise, and an elicitation's
+    question is a closed single choice unless it says it takes free text or
+    a skip, as is the pause as a whole."""
     turn = STUDIO_REQUEST_ADAPTER.validate_python(_load("request-01-turn.json"))
     assert isinstance(turn, TurnRequest)
     assert turn.auto_add is True
@@ -148,11 +152,13 @@ def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> N
 
     closed = STUDIO_FRAME_ADAPTER.validate_python(_load("event-09-elicitation-request.json"))
     assert isinstance(closed, ElicitationRequest)
-    assert closed.allow_free_text is False
+    assert closed.questions[0].allow_free_text is False
+    assert closed.questions[0].skippable is False
     assert closed.skippable is False
     open_ended = STUDIO_FRAME_ADAPTER.validate_python(_load("event-13-elicitation-skippable.json"))
     assert isinstance(open_ended, ElicitationRequest)
-    assert open_ended.allow_free_text is True
+    assert open_ended.questions[0].allow_free_text is True
+    assert open_ended.questions[0].skippable is False
     assert open_ended.skippable is True
 
 
@@ -400,6 +406,73 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_ANSWER = {
+    "kind": "interrupt.response",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "interrupt_id": "int_1",
+    "decision": "answer",
+}
+
+
+def test_interrupt_answers_parse_by_kind() -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(
+        {
+            **_ANSWER,
+            "answers": {
+                "q1": {"kind": "option", "option_id": "spec_1"},
+                "q2": {"kind": "text", "text": "constant prices"},
+                "q3": {"kind": "skipped"},
+            },
+        }
+    )
+
+    assert isinstance(accepted, InterruptResponse)
+    assert accepted.answers == {
+        "q1": OptionAnswer(kind="option", option_id="spec_1"),
+        "q2": TextAnswer(kind="text", text="constant prices"),
+        "q3": SkippedAnswer(kind="skipped"),
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"kind": "option"}, id="option-without-id"),
+        pytest.param({"kind": "option", "option_id": "a", "text": "b"}, id="option-and-text"),
+        pytest.param({"kind": "text", "text": ""}, id="empty-text"),
+        pytest.param({"kind": "skipped", "option_id": "a"}, id="skipped-with-id"),
+        pytest.param({"kind": "delegated"}, id="unknown-kind"),
+        pytest.param({"option_id": "a"}, id="no-kind"),
+    ],
+)
+def test_an_interrupt_answer_is_exactly_one_of_its_kinds(answer: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_ANSWER, "answers": {"q1": answer}})
+
+
+def _questions(*ids: str) -> list[dict[str, Any]]:
+    return [{"id": id_, "question": "Which?", "input": "single_select"} for id_ in ids]
+
+
+@pytest.mark.parametrize(
+    "questions",
+    [
+        pytest.param([], id="none"),
+        pytest.param(_questions("q1", "q2", "q3", "q4"), id="four"),
+        pytest.param(_questions("q1", "q1"), id="repeated-id"),
+    ],
+)
+def test_an_elicitation_holds_one_to_three_distinct_questions(
+    questions: list[dict[str, Any]],
+) -> None:
+    frame = {"event": "elicitation.request", "seq": 0, "interrupt_id": "int_1"}
+    STUDIO_FRAME_ADAPTER.validate_python({**frame, "questions": _questions("q1", "q2", "q3")})
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python({**frame, "questions": questions})
 
 
 def test_a_seeded_turn_carries_each_search_spec_and_its_operations() -> None:
@@ -800,7 +873,7 @@ def test_a_target_year_outside_search_s_bounds_refuses_its_seed(target_year: obj
 
 
 def _region_members_block() -> dict[str, Any]:
-    """dfo-apis#1222's spec block for health expenditure per capita over Africa's countries."""
+    """The spec block for health expenditure per capita over Africa's countries."""
     fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
     return json.loads(fixture.read_text())["spec"]
 

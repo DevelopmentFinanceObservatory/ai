@@ -68,7 +68,7 @@ to 4 with `max_rows` as the claim, and decodes it. `get` is `open` then
 Every object this store keeps sits under the layout version `_LAYOUT`
 (`v4`): frames under `frames/v4/`, mint records under `mints/v4/` and anchor
 records under `anchors/v4/`. A pair can name other bytes from one layout to
-the next (under `v4` a dfo-apis pair holds that version's canonical frame,
+the next (under `v4` an apis service pair holds that version's canonical frame,
 where it held a rendering before), and a mint or anchor record describes the
 frames of the pairs it names, so the records move with the frames.
 
@@ -79,7 +79,7 @@ unit's JCS text. `frame_from_verified_parquet_bytes` reads it with
 `pq.read_table` and wraps the table with `Frame.from_table`, which checks
 the schema against the canonical frame schema and trusts the cells.
 
-A flow table minted before dfo-apis renamed its party-kind column holds
+A flow table minted before apis renamed its party-kind column holds
 `{role}_kind` where a current mint holds `{role}_party_kind`. The bucket keeps
 such a frame with no age rule, and every reader looks the column up by its
 current name, so a read renames the legacy column once, after the

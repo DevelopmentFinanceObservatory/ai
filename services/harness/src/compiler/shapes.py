@@ -45,7 +45,6 @@ from planner.plan import (
     EvidenceRequirement,
     anchored_over,
     keeps_one_level,
-    names_no_place,
     read_from_first_year,
     states_period_threshold,
 )
@@ -66,6 +65,7 @@ from planner.shapes import (
     ShapeVerb,
     anchor_misses,
     growth_endpoint_leaves,
+    level_filter,
     place_role,
     year_filter,
     years_run_out,
@@ -128,6 +128,9 @@ class ResolvedRole:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    mixed_levels: bool = False
+    levelled: bool = False
+    level_filterable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,10 +379,10 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
 
 
 def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
-    """The open axes of `source`'s family that dfo-apis may not sum over, or `None` when it has none.
+    """The open axes of `source`'s family that apis may not sum over, or `None` when it has none.
 
     A family varying along no open axis differs in something no slot
-    states, so whether dfo-apis can sum it is unknown.
+    states, so whether apis can sum it is unknown.
     """
     if not source.open_axes:
         return None
@@ -433,10 +436,9 @@ def _retrieve_resolved(
     that leaves its place axis open carries every level of place
     (`compiler.evidence.opens_place_axis`), and `compiler.evidence` refuses
     one under a requirement whose `across` does not name the place party. A
-    place-level filter may read a requirement whose `across` names the place
-    (`planner.plan.names_no_place`), but `compile._check_level_filters`
-    refuses one whose place word covers a flow axis. Its years run on past
-    its period and start at the dataset's first year as
+    place-level filter may read any open role, a flow side included, which
+    is the one role `compile` can ask `get_data` for the type column of. Its
+    years run on past its period and start at the dataset's first year as
     `planner.plan._dataset_shape` states them.
     """
     source = sources.get(operation.id)
@@ -489,6 +491,11 @@ def _retrieve_resolved(
                 requirement_id=operation.requirement_id,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                # An open entity axis is the only retrieval role for which
+                # compilation can request the matching enrichment column.
+                # Breakdown codes are never entity types.
+                level_filterable=is_open,
             )
         )
         columns.append(
@@ -501,6 +508,8 @@ def _retrieve_resolved(
                 surplus=surplus,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                level_filterable=is_open,
             )
         )
     if requirement.breakdown is not None:
@@ -526,8 +535,6 @@ def _retrieve_resolved(
         period=requirement.period,
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
-        place_typed=names_no_place(requirement),
-        mixed_levels=opens_place_axis(source.open_entity_axes),
         end_open=requirement.period_end_open,
         from_first_year=read_from_first_year(requirements, requirement.id),
     )
@@ -550,7 +557,15 @@ def _carry_columns(
     for dim in roles:
         prior = by_key.get((dim.role, dim.requirement_id))
         if prior is not None:
-            result.append(replace(prior, narrowed=dim.narrowed))
+            result.append(
+                replace(
+                    prior,
+                    narrowed=dim.narrowed,
+                    mixed_levels=dim.mixed_levels,
+                    levelled=dim.levelled,
+                    level_filterable=dim.level_filterable,
+                )
+            )
     return tuple(result)
 
 
@@ -674,14 +689,17 @@ def _filter_resolved(
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
 ) -> ResolvedShape | str:
-    place_level = keeps_one_level(operation.predicates)
     years = year_filter(upstream.shape.period, operation.predicates, drift=upstream.shape.drift)
     if isinstance(years, str):
         return years
+    levels = level_filter(upstream.columns, operation.predicates)
+    if isinstance(levels, str):
+        return levels
     reason = _rejects(
         ShapeVerb.FILTER,
         upstream.shape,
-        place_level=place_level,
+        place_level=keeps_one_level(operation.predicates),
+        place_level_available=levels.available,
         period_threshold=states_period_threshold(operation.predicates),
         years=years,
     )
@@ -694,7 +712,7 @@ def _filter_resolved(
         upstream.shape,
         narrowed_roles=narrowed_roles,
         years=years,
-        keeps_one_level=place_level,
+        levelled_role_keys=levels.role_keys,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 

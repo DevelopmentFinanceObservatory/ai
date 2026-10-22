@@ -5,10 +5,12 @@ per-series figures.
 `artifacts` list, by its `rendering` shape alone -- the same way
 `frame_materialisation._select_parquet_artifact` already picks the frame
 artifact off the same list. `fetch_series_statistics` then reads it: a
-link lookup through `data_mcp.artifact_resource.read_artifact` (the same hop
-`frame_materialisation` uses), a streamed GET on that link that follows its
-redirect to the object store and refuses once the downloaded body exceeds
-`artifact.bytes` (the advertised size) rather than buffering an oversized body in full, a check of the fetched
+link lookup through `data_mcp.artifact_resource.artifact_link` (the same hop
+`frame_materialisation` uses), a streamed GET on that link through
+`UpstreamClient.stream_link`, which sends the ID token to dfo-apis only and
+follows its redirect to the object store without it, and that refuses once the
+downloaded body exceeds `artifact.bytes` (the advertised size) rather than
+buffering an oversized body in full, a check of the fetched
 bytes against `artifact.artifact_digest` (the same check
 `frame_materialisation._verify_parse_and_register` runs before it trusts a
 frame's bytes), and a read that checks the file's own `dfo.schema` metadata
@@ -22,13 +24,13 @@ A file holds a row per series, so its Parquet-metadata row count is checked
 before a single column is read, unless the mint's estimates continue its
 series (`continuing_method`, off the manifest's `trace.continuations`). A
 continued series holds a row for its reported method and a row for the
-continuing one and counts once, as dfo-apis' producer counts it
+continuing one and counts once, as apis' producer counts it
 (`materialise.statistics.SeriesStatisticsFile`), so such a file's series are
 counted from its rows (`_series_count`).
 
 `fetch_series_statistics_table` returns the verified file as an Arrow table
 in `SERIES_STATISTICS_ARROW_SCHEMA`, the producer's own schema
-(`materialise.statistics.SERIES_STATISTICS_SCHEMA` in dfo-apis'
+(`materialise.statistics.SERIES_STATISTICS_SCHEMA` in apis'
 `dfo-data-tools`): every column cast to its type, every non-nullable field
 free of nulls, and every `facet` a JSON object of the shape
 `SeriesStatisticsModel.facet` accepts. `fetch_series_statistics` converts
@@ -58,6 +60,7 @@ import pyarrow.parquet as pq
 from dfo_frame_grammar.columnar import array_kernel
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import (
     ArtifactEntry,
@@ -94,7 +97,7 @@ _ENTITY_TYPE = pa.struct(
     [pa.field("role", pa.string(), nullable=False), pa.field("ref", pa.string(), nullable=False)]
 )
 
-# The columns, types and nullability `series-statistics/1` carries, as dfo-apis'
+# The columns, types and nullability `series-statistics/1` carries, as apis'
 # producer writes them. Nullable exactly where `SeriesStatisticsModel` accepts
 # `None`: a series with one observation has no change.
 SERIES_STATISTICS_ARROW_SCHEMA = pa.schema(
@@ -230,7 +233,7 @@ async def fetch_series_statistics_table(
         expected_series: The series count the manifest that named `artifact`
             already promised (`manifest.series_count`) -- checked against the
             file's series once the fetch succeeds. `None` when the manifest
-            carries the artifact but no `series_count` (dfo-apis mints an
+            carries the artifact but no `series_count` (apis mints an
             all-years definition that way): there is no count to check.
         continuing: The method continuing the mint's series
             (`continuing_method(manifest)`), whose rows count no series of
@@ -247,7 +250,7 @@ async def fetch_series_statistics_table(
         order -- empty when `artifact` carries zero rows.
 
     Raises:
-        fastmcp.exceptions.ResourceError: `read_artifact` could not read the
+        fastmcp.exceptions.ResourceError: `artifact_link` could not read the
             artifact's link off the snapshot route.
         SeriesStatisticsSchemaError: the downloaded body exceeds `artifact
             .bytes` (the advertised size), the fetched bytes do not hash to
@@ -257,7 +260,8 @@ async def fetch_series_statistics_table(
             `SERIES_STATISTICS_ARROW_SCHEMA` or a facet `SeriesStatisticsModel`.
         httpx2.HTTPStatusError: the link answered with an error status, such
             as 410 `artifact_expired`, or its redirect target did.
-        httpx2.TransportError: the GET itself failed.
+        httpx2.TransportError: the GET itself failed, or no dfo-apis ID token
+            could be minted for it.
         TimeoutError: `deadline` passed before the link lookup and the GET
             finished.
     """
@@ -267,17 +271,19 @@ async def fetch_series_statistics_table(
     # the moment `get_data_tool` (or anything it imports) reaches for this
     # module -- the same deferred-import reasoning
     # `frame_materialisation._fetch_artifact_bytes_uncapped` already gives
-    # for its own `read_artifact` import.
-    from data_mcp.artifact_resource import read_artifact  # noqa: PLC0415
+    # for its own `artifact_link` import.
+    from data_mcp.artifact_resource import artifact_link  # noqa: PLC0415
 
     async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
-        link = await read_artifact(subject_id, content_version, artifact.artifact_digest)
-        async with httpx2.AsyncClient(
+        link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
+        # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
+        async with get_client().stream_link(
+            link,
+            timeout_s=_FETCH_TIMEOUT_S,
+            headers={"Accept-Encoding": "identity"},
             transport=transport,
-            timeout=httpx2.Timeout(_FETCH_TIMEOUT_S),
-            follow_redirects=True,
-        ) as client:
-            fetched = await _get_bounded(client, link["url"], max_bytes=artifact.bytes)
+        ) as response:
+            fetched = await _read_bounded(response, max_bytes=artifact.bytes)
     computed_digest = f"sha256:{hashlib.sha256(fetched).hexdigest()}"
     if computed_digest != artifact.artifact_digest:
         raise SeriesStatisticsSchemaError(
@@ -287,36 +293,36 @@ async def fetch_series_statistics_table(
     return _read(fetched, expected_series=expected_series, continuing=continuing)
 
 
-async def _get_bounded(client: httpx2.AsyncClient, url: str, *, max_bytes: int) -> bytes:
-    """Stream `url`'s body, refusing before it is buffered in full once it exceeds `max_bytes`.
+async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:
+    """Read a streamed `response`'s body, refusing before it is buffered in full once
+    it exceeds `max_bytes`.
 
-    `artifact.bytes` is dfo-apis' own advertised size for the artifact this link
+    `artifact.bytes` is apis' own advertised size for the artifact the link
     names; a body that outgrows it is refused chunk by chunk, so an
-    artifact whose advertised size understates what dfo-apis actually stored
-    never gets fully read into memory here. `Accept-Encoding: identity` keeps
-    the response uncompressed, so a chunk `aiter_bytes` yields is never larger
-    than the bytes read off the wire for it -- with compression allowed, a
-    small compressed read could decode into a chunk that alone exceeds
-    `max_bytes`, checked only after it was already appended. A `Content-Length`
-    over `max_bytes` is refused before any of the body is read at all.
+    artifact whose advertised size understates what apis actually stored
+    never gets fully read into memory here. The request must carry
+    `Accept-Encoding: identity`, which keeps the response uncompressed, so a chunk
+    `aiter_bytes` yields is never larger than the bytes read off the wire for it --
+    with compression allowed, a small compressed read could decode into a chunk
+    that alone exceeds `max_bytes`, checked only after it was already appended. A
+    `Content-Length` over `max_bytes` is refused before any of the body is read at
+    all.
     """
-    async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
-        response.raise_for_status()
-        content_length = response.headers.get("Content-Length")
-        if content_length is not None and int(content_length) > max_bytes:
+    response.raise_for_status()
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None and int(content_length) > max_bytes:
+        raise SeriesStatisticsSchemaError(
+            f"the response declared Content-Length={content_length}, over the "
+            f"artifact's advertised size of {max_bytes} byte(s)"
+        )
+    fetched = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(fetched) + len(chunk) > max_bytes:
             raise SeriesStatisticsSchemaError(
-                f"the response declared Content-Length={content_length}, over the "
-                f"artifact's advertised size of {max_bytes} byte(s)"
+                f"downloaded body exceeded the artifact's advertised size of {max_bytes} byte(s)"
             )
-        fetched = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(fetched) + len(chunk) > max_bytes:
-                raise SeriesStatisticsSchemaError(
-                    f"downloaded body exceeded the artifact's advertised size of "
-                    f"{max_bytes} byte(s)"
-                )
-            fetched += chunk
-        return bytes(fetched)
+        fetched += chunk
+    return bytes(fetched)
 
 
 def _read(data: bytes, *, expected_series: int | None, continuing: str | None) -> pa.Table:
@@ -382,7 +388,7 @@ def _read(data: bytes, *, expected_series: int | None, continuing: str | None) -
 
 
 def _series_count(table: pa.Table, *, continuing: str) -> int:
-    """The series `table`'s rows hold, counted as dfo-apis' producer counts them
+    """The series `table`'s rows hold, counted as apis' producer counts them
     (`materialise.statistics._FiguresFold`, by `series_index`'s rule)."""
     return len(set(series_index(table, continuing=continuing).to_pylist()))
 
@@ -391,7 +397,7 @@ def series_index(table: pa.Table, *, continuing: str | None) -> pa.Array:
     """The series each row of `table` belongs to, as the position of its series'
     head row: a row of the `continuing` method belongs to the first row of
     another method holding the same variable, entities and facet apart from
-    `measurementMethod`, as dfo-apis' producer folds them
+    `measurementMethod`, as apis' producer folds them
     (`materialise.statistics._FiguresFold`). Every other row heads its own
     series, so with nothing `continuing` each row is its own.
     """

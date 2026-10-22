@@ -35,6 +35,7 @@ import httpx2
 import pytest
 import resvg_py
 from common import refusal as refusal_module
+from common.apis_auth import AuthProvider, IdTokenProvider
 from common.caller import CALLER_HEADER, supplied_caller
 from common.materialisation import content_version as content_version_module
 from common.refusal import REFUSAL_META_KEY, internal_error_message
@@ -115,13 +116,15 @@ def _release_only_transport(release: dict[str, Any]) -> httpx2.MockTransport:
 def _mock_platform_assembler(release: dict[str, Any]) -> Any:
     """A factory dropped in for `server.PlatformAssembler`, backed by a `MockTransport`.
 
-    Matches `PlatformAssembler(settings=settings)`'s call shape; the real
-    class does the rest, so this exercises the real HTTP/retry/refusal path
+    Matches `PlatformAssembler(settings=settings, auth=auth)`'s call shape; the
+    real class does the rest, so this exercises the real HTTP/retry/refusal path
     against a served release document rather than a hand-rolled fake.
     """
 
-    def factory(*, settings: Settings) -> PlatformAssembler:
-        return PlatformAssembler(settings=settings, transport=_release_only_transport(release))
+    def factory(*, settings: Settings, auth: AuthProvider | None = None) -> PlatformAssembler:
+        return PlatformAssembler(
+            settings=settings, auth=auth, transport=_release_only_transport(release)
+        )
 
     return factory
 
@@ -134,8 +137,8 @@ def _stub_platform_assembler(stub: StubAssembler) -> Any:
     HTTP client wherever a test wants mounted tools without touching a wire.
     """
 
-    def factory(*, settings: Settings) -> StubAssembler:
-        del settings
+    def factory(*, settings: Settings, auth: AuthProvider | None = None) -> StubAssembler:
+        del settings, auth
         return stub
 
     return factory
@@ -252,6 +255,30 @@ async def test_healthz_reports_ok_once_mounted(monkeypatch: pytest.MonkeyPatch) 
 
     async with Client(mcp):
         assert server._health == {"status": "ok"}
+
+
+async def test_on_cloud_run_the_assembler_sends_an_id_token_for_the_apis_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+    monkeypatch.setattr(
+        server, "settings", Settings(dfo_apis_url="https://dfo-dev-apis-abc123.a.run.app/")
+    )
+    stub_factory = _stub_platform_assembler(StubAssembler())
+    auths: list[AuthProvider | None] = []
+
+    def factory(*, settings: Settings, auth: AuthProvider | None = None) -> StubAssembler:
+        auths.append(auth)
+        return stub_factory(settings=settings, auth=auth)
+
+    monkeypatch.setattr(server, "PlatformAssembler", factory)
+
+    async with Client(mcp):
+        pass
+
+    (auth,) = auths
+    assert isinstance(auth, IdTokenProvider)
+    assert auth.audience == "https://dfo-dev-apis-abc123.a.run.app"
 
 
 # --- frame store install failure -----------------------------------------------
@@ -1650,7 +1677,7 @@ async def test_an_apps_client_gets_a_notice_view_for_a_refusal(
 
 def _write_refusing_platform_assembler() -> Any:
     """A factory for `server.PlatformAssembler` whose platform serves the
-    release and answers every revise with dfo-apis's write_refused body,
+    release and answers every revise with the apis service's write_refused body,
     whose detail names the write-token header and REST routes."""
     problem = {
         "type": "/codes/write_refused",
@@ -1672,8 +1699,10 @@ def _write_refusing_platform_assembler() -> Any:
         assert request.method == "PATCH"
         return httpx2.Response(403, json=problem)
 
-    def factory(*, settings: Settings) -> PlatformAssembler:
-        return PlatformAssembler(settings=settings, transport=httpx2.MockTransport(handler))
+    def factory(*, settings: Settings, auth: AuthProvider | None = None) -> PlatformAssembler:
+        return PlatformAssembler(
+            settings=settings, auth=auth, transport=httpx2.MockTransport(handler)
+        )
 
     return factory
 
@@ -1683,7 +1712,7 @@ async def test_a_write_refused_reply_names_tools_and_no_platform_route_or_header
     monkeypatch: pytest.MonkeyPatch, apps_host: bool
 ) -> None:
     """The refusal's content, its structuredContent and an Apps host's
-    notice speak of write_component's arguments, never dfo-apis's REST
+    notice speak of write_component's arguments, never the apis service's REST
     routes or its write-token header."""
     monkeypatch.setattr(server, "PlatformAssembler", _write_refusing_platform_assembler())
 

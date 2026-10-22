@@ -1166,7 +1166,7 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
 ) -> None:
     """Each retrieval reads place types for its level filter, so `get_data` holds its
     frame under a `content_version` of its own (`frame_ref_for`), and the lineage is
-    keyed by that frame. dfo-apis minted and serves the manifest's pair, so the card
+    keyed by that frame. apis minted and serves the manifest's pair, so the card
     lists each retrieval under it."""
     every_country = (OpenEntityAxis(column="observationAbout", member_count=217),)
     debt_source = source(entities=(), open_entity_axes=every_country)
@@ -1180,13 +1180,13 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
         open_entity_axes=every_country,
     )
     plan = _level_filtered_join_plan(decision, debt_source, gdp_source, real_schemas)
-    by_place = {"role_keys": ["observationAbout"]}
+    typed_places = {"role_keys": ["observationAbout", "observationAbout_type"]}
     retrievals = [
         manifest_for(
             side,
             content_version=minted["content_version"],
             frame_ref=frame_ref_for(**minted, columns=("observationAbout_type",)).model_dump(),
-            **by_place,
+            **typed_places,
         )
         for side, minted in ((debt_source, _DEBT_FRAME), (gdp_source, _GDP_FRAME))
     ]
@@ -1202,9 +1202,10 @@ async def test_a_join_of_two_level_filtered_retrievals_lists_the_pairs_dfo_apis_
         responses={
             "get_data": [ok(retrieval) for retrieval in retrievals],
             "filter": [
-                ok({**RESULT_FRAME, **by_place, "spec_id": "ops_" + digit * 32}) for digit in "56"
+                ok({**RESULT_FRAME, **typed_places, "spec_id": "ops_" + digit * 32})
+                for digit in "56"
             ],
-            "join": [ok({**RESULT_FRAME, **by_place, "stat_var_count": 2})],
+            "join": [ok({**RESULT_FRAME, **typed_places, "stat_var_count": 2})],
         },
     )
     store = ProvenanceStore()

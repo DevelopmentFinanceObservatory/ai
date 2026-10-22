@@ -2,7 +2,7 @@
 component of a `write_component` outcome: the resolved revision as `payload`
 and the wire fact summary mapped from the platform's.
 
-The platform's summary is replayed from the payload under dfo-apis's rules
+The platform's summary is replayed from the payload under the apis service's rules
 (`assembler.reply.build_fact_summary`): at most `FACT_SUMMARY_SERIES_CAP`
 series, each with its first and last value at three significant figures and
 the coordinates the platform stored for it, and `series_cut` counting the
@@ -18,7 +18,7 @@ from harness.mcp_client import _wire_fact_summary
 
 from .resolved_revision import resolved_revision
 
-# dfo-apis's `FACT_SUMMARY_SERIES_CAP` (dfo-data-tools' `assembler/limits.py`).
+# The apis service's `FACT_SUMMARY_SERIES_CAP` (dfo-data-tools' `assembler/limits.py`).
 FACT_SUMMARY_SERIES_CAP = 12
 
 STAT_VAR = "dcid:LifeExpectancy_Person"

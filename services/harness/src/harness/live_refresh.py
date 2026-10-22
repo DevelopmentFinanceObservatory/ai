@@ -9,23 +9,23 @@ in the materialisation store and the map of runs in flight.
 
 One refresh (`LiveRefresh._refresh`):
 
-1. Reads the component revision from dfo-apis and takes its stored intent's
+1. Reads the component revision from apis and takes its stored intent's
    frame. A dataset (`spec_`) frame is refused. The website refreshes those
-   against dfo-apis itself.
-2. Reads the frame's recipe from dfo-apis.
-3. Asks dfo-apis' frame refresh about each root's dataset pair, at most
+   against apis itself.
+2. Reads the frame's recipe from apis.
+3. Asks apis' frame refresh about each root's dataset pair, at most
    `MAX_CONCURRENT_ROOT_CHECKS` at once. A root still building answers
    `pending`, and every root current answers `current`.
 4. Computes the replay key of the recipe on the roots' current pairs
-   (`common.recipe.replay_key`) and asks dfo-apis for the frame stored under it.
+   (`common.recipe.replay_key`) and asks apis for the frame stored under it.
    A hit is rendered without replaying.
 5. Otherwise replays the recipe (`harness.recipe_replay.replay_recipe`), which
    mints the roots, runs the verbs, and publishes the frame with its recipe.
    The replayer reads the replay key once more before it publishes, under the
    key of the recipe it built, so a frame another instance published while this
    one replayed is not sent twice.
-6. Has dfo-apis render the stored revision on the frame, and answers the render
-   as dfo-apis gave it.
+6. Has apis render the stored revision on the frame, and answers the render
+   as apis gave it.
 
 Time. A refresh starts a deadline of `Settings.live_refresh_deadline_s`. The
 replayer starts no mint, verb, or publish after it. A step in flight is not cut
@@ -57,6 +57,7 @@ from typing import Any, Final
 
 from analysis_mcp.execution_identity import current_execution_identity
 from common import live_apis
+from common.apis_auth import apis_auth_provider
 from common.live_apis import (
     DatasetVersion,
     FramePair,
@@ -107,8 +108,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# Frame refresh calls to dfo-apis in flight at once for one card's roots. Each can
-# take one of the two materialise slots a dfo-apis instance has.
+# Frame refresh calls to apis in flight at once for one card's roots. Each can
+# take one of the two materialise slots an apis instance has.
 MAX_CONCURRENT_ROOT_CHECKS: Final = 2
 
 # How long after its deadline a run is cancelled. The deadline stops new steps.
@@ -147,7 +148,7 @@ NOT_CONFIGURED: Final = "refresh_not_configured"
 
 # Every refusal the route writes under a code of its own. Any other code in a 422
 # answer is passed through unchanged from the service that refused, and is
-# permanent: a dfo-apis refusal that is not retryable (frame refresh, replay
+# permanent: an apis service refusal that is not retryable (frame refresh, replay
 # lookup, render), or a `harness.recipe_replay.Refused` (the replayer's own codes,
 # `rows_over_refresh_budget` among them, and the mint's, verb's, and publish's).
 # `upstream_unavailable` is the only refusal a retry can clear. A wait is a 200
@@ -263,8 +264,8 @@ _CURRENT: Final = _Answer(status=200, body={"status": "current"}, outcome="curre
 
 
 def _apis_refusal(exc: LiveApisError) -> _Answer:
-    """What a failed dfo-apis call makes of the refresh: `upstream_unavailable` for
-    no answer, a 5xx, or a refusal dfo-apis marks retryable, else its own code."""
+    """What a failed apis call makes of the refresh: `upstream_unavailable` for
+    no answer, a 5xx, or a refusal apis marks retryable, else its own code."""
     if exc.retryable or exc.status is None or exc.status >= 500:
         return _refusal(UPSTREAM_UNAVAILABLE, f"dfo-apis did not serve the call: {exc}")
     return _refusal(exc.code or DFO_APIS_REFUSED, exc.detail or str(exc))
@@ -323,7 +324,7 @@ class LiveRefresh:
         """Build the refresh over its dependencies.
 
         Args:
-            apis: The dfo-apis client, holding both principals.
+            apis: The apis client, holding both principals.
             call_tool: Calls an analysis-mcp tool by name, for the replayer.
             publish: Publishes a replayed frame with its recipe.
             row_budget: The rows replays may hold at once, apart from the
@@ -358,7 +359,7 @@ class LiveRefresh:
 
     async def dataset_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
         """The stored versions of the dataset `spec_id` names, newest first,
-        read through this refresh's dfo-apis client: the reader
+        read through this refresh's apis client: the reader
         `data_mcp.mint_recovery.recover_mint_record` rebuilds a root's mint
         record from (`harness.mcp_client.McpExecutor.publish_result`)."""
         return await self._apis.list_versions(spec_id=spec_id)
@@ -481,7 +482,7 @@ class LiveRefresh:
         return frame
 
     async def _check_roots(self, records: Sequence[MintRecord]) -> list[RefreshResult]:
-        """dfo-apis' frame refresh answer for each root's dataset pair, in order.
+        """apis' frame refresh answer for each root's dataset pair, in order.
 
         Raises:
             LiveApisError: The first failure among the calls, after which the rest are cancelled.
@@ -518,7 +519,7 @@ class LiveRefresh:
 
         Raises:
             LiveApisNotConfigured: The datasets principal is unset.
-            LiveApisError: A dfo-apis call the replayer does not turn into an outcome.
+            LiveApisError: An apis service call the replayer does not turn into an outcome.
             ToolSurfaceUnavailableError: An analysis tool call did not complete.
         """
         for _ in range(2):
@@ -543,7 +544,7 @@ class LiveRefresh:
 def build_live_refresh(*, settings: Settings) -> LiveRefresh:
     """The process's `LiveRefresh`, built from settings. Opens no connection.
 
-    dfo-apis' origin and the datasets principal are presentation-mcp's
+    apis' origin and the datasets principal are presentation-mcp's
     (`DFO_APIS_URL`, `DATASETS_FIRST_PARTY_PRINCIPAL`), since the publish goes
     through its `PlatformAssembler`, built here so it does not depend on the
     presentation tools having mounted. The verbs run on a tool surface of the
@@ -562,12 +563,14 @@ def build_live_refresh(*, settings: Settings) -> LiveRefresh:
             "on two max_frame_rows inputs could never be replayed; raise "
             "LIVE_REFRESH_ROWS_IN_FLIGHT_MAX"
         )
+    auth = apis_auth_provider(base_url=presentation.dfo_apis_url)
     apis = LiveApisClient(
         base_url=presentation.dfo_apis_url,
         datasets_principal=presentation.datasets_first_party_principal,
         live_refresh_principal=settings.live_refresh_principal,
+        auth=auth,
     )
-    assembler = PlatformAssembler(settings=presentation)
+    assembler = PlatformAssembler(settings=presentation, auth=auth)
     surface = build_tool_surface(settings=settings)
     return LiveRefresh(
         apis=apis,

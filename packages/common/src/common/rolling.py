@@ -81,6 +81,7 @@ __all__ = [
     "canonical_levels",
     "canonical_populations",
     "canonical_roots",
+    "canonical_strict_levels",
     "population_order",
     "rolling_roots",
 ]
@@ -92,7 +93,7 @@ _DIGEST_HEX_LENGTH = 32
 _ROLLING = "rolling"
 _PRIMARY_SLOT = "frame_ref"
 _SLOT_SUFFIX = "_frame_ref"
-# The columns that are no part of a series: `dfo-apis`' assembler groups rows
+# The columns that are no part of a series: `apis`' assembler groups rows
 # into series by every other column.
 NON_SERIES_COLUMNS = frozenset({"time_period", "value", "status"})
 # Each entity binding of a two-sided verb, and the frame slot it narrows.
@@ -144,6 +145,11 @@ def canonical_levels(levels: Mapping[str, str]) -> dict[str, str]:
     return dict(sorted(canonical.items()))
 
 
+def canonical_strict_levels(columns: Iterable[str]) -> tuple[str, ...]:
+    """The strict level columns in their one spelling."""
+    return tuple(sorted({unicodedata.normalize("NFC", column) for column in columns}))
+
+
 def canonical_bindings(bindings: Mapping[str, Iterable[str]]) -> dict[str, tuple[str, ...]]:
     """`bindings` in its one spelling. See the module docstring.
 
@@ -174,12 +180,18 @@ def canonical_populations(populations: Iterable[Mapping[str, Any]]) -> list[dict
     keyed: dict[tuple[str, bytes], dict[str, Any]] = {}
     for population in populations:
         bindings = canonical_bindings(population.get("bindings", {}))
+        levels = canonical_levels(population.get("levels") or {})
         entry: dict[str, Any] = {
             "spec_id": population["spec_id"],
             "bindings": {column: list(values) for column, values in bindings.items()},
         }
-        if levels := canonical_levels(population.get("levels") or {}):
+        if levels:
             entry["levels"] = levels
+        if strict_levels := canonical_strict_levels(population.get("strict_levels") or ()):
+            unknown = sorted(set(strict_levels) - set(levels))
+            if unknown:
+                raise ValueError(f"strict_levels name columns without a level: {unknown!r}")
+            entry["strict_levels"] = list(strict_levels)
         keyed[population_order(entry)] = entry
     return [keyed[key] for key in sorted(keyed)]
 
@@ -228,15 +240,18 @@ class _Narrowing:
         self.levels: dict[str, set[str]] = (
             {column: set(levels) for column, levels in above.levels.items()} if above else {}
         )
+        self.strict_levels: set[str] = set(above.strict_levels) if above else set()
 
     def bind(self, column: str, values: Iterable[str]) -> None:
         """Bind `column` to `values`, keeping what an earlier binding on it also allows."""
         kept = set(values)
         self.bindings[column] = self.bindings[column] & kept if column in self.bindings else kept
 
-    def hold(self, column: str, level: str) -> None:
+    def hold(self, column: str, level: str, *, strict: bool = False) -> None:
         """Hold the place-type `column` to `level`, beside any level it is already held to."""
         self.levels.setdefault(column, set()).add(level)
+        if strict:
+            self.strict_levels.add(column)
 
 
 def _sides(
@@ -256,7 +271,9 @@ def _sides(
             if predicate.get("kind") == "category_match":
                 kept.bind(predicate["column"], predicate["values"])
             elif predicate.get("kind") == "place_level":
-                kept.hold(predicate["column"], predicate["level"])
+                kept.hold(
+                    predicate["column"], predicate["level"], strict=predicate.get("strict", False)
+                )
         for parameter, entity_slot in _ENTITY_SLOTS.items():
             if entity_slot == slot:
                 for column, value in (parameters.get(parameter) or {}).items():
@@ -337,5 +354,13 @@ def anchor_populations(
                 # No place sits at two of the levels a filter keeps.
                 raise PopulationEmptyError(spec_id=spec_id, column=column)
             (levels[column],) = held
-        populations.append({"spec_id": spec_id, "bindings": bindings, "levels": levels})
+        strict_levels = sorted(set(levels) & kept.strict_levels)
+        populations.append(
+            {
+                "spec_id": spec_id,
+                "bindings": bindings,
+                "levels": levels,
+                "strict_levels": strict_levels,
+            }
+        )
     return canonical_populations(populations)

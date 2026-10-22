@@ -127,7 +127,7 @@ class HarnessCode(StrEnum):
     # not published. The frame store could not be reached or refused the read,
     # the dataset's versions could not be read, the replay recipe could not be
     # built, the store no longer holds the frame, no publisher is wired, and
-    # dfo-apis holds the frame under a recipe of another normal form.
+    # apis holds the frame under a recipe of another normal form.
     STORE_UNAVAILABLE = "store_unavailable"
     STORE_REFUSED = "store_refused"
     DATASET_VERSIONS_UNAVAILABLE = "dataset_versions_unavailable"
@@ -430,11 +430,11 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     `definite` part binding a named set as its published total carries
     `group_readings`, a sentence each saying so (`_total_readings`). A
     `definite` part whose count Search elected beside others carries
-    `counted_as` and `alternatives`, each by its own spec_id
-    (`measure_choice`), and `source_codes`, the publisher codes of the family
-    it found, each with its source's label when the part binds that source
-    (`data_mcp.digest.source_codes`). The top-level fields above read the
-    first part only.
+    `counted_as`, with `alternatives` (other counts) and `other_prices`, each
+    by its own spec_id (`measure_choice`), and `source_codes`, the publisher
+    codes of the family it found, each with its source's label when the part
+    binds that source (`data_mcp.digest.source_codes`). The top-level fields
+    above read the first part only.
 
     `skills`, on every branch, reads the whole envelope: the skills the
     envelope's `skills` map attaches to any part's specs, as
@@ -610,26 +610,32 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
 
 
 def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
-    """The count Search elected for `spec` and the other counts it offers, as data.
+    """The count Search elected for `spec` and the other counts and prices it offers, as data.
 
     `counted_as` is `resolved.measure_label`. `alternatives` holds each
-    `resolved.alternative_measures` entry on axis "what" as `{spec_id, label}`,
-    in wire order; an entry missing its spec_id or label is left out, as
-    data-mcp's `digest._measure_choice` leaves it out. Empty when no
-    alternative remains.
+    `resolved.alternative_measures` entry on axis "what" (another count,
+    "net disbursements") and `other_prices` each on axis "unit" (the same
+    count in other prices, "constant prices"), both as `{spec_id, label}`
+    in wire order. An entry missing its spec_id or label is left out, as
+    data-mcp's `digest._measure_choice` leaves it out, and so is a list
+    left empty. Empty when no alternative remains.
     """
     resolved = spec.get("resolved") or {}
     label = resolved.get("measure_label")
-    alternatives = [
-        {"spec_id": spec_id, "label": alternative["label"]}
-        for alternative in resolved.get("alternative_measures") or ()
-        if alternative.get("axis") == "what"
-        and alternative.get("label")
-        and (spec_id := (alternative.get("definition") or {}).get("spec_id"))
-    ]
-    if not isinstance(label, str) or not label or not alternatives:
+    choice: dict[str, Any] = {}
+    for axis, key in (("what", "alternatives"), ("unit", "other_prices")):
+        offered = [
+            {"spec_id": spec_id, "label": alternative["label"]}
+            for alternative in resolved.get("alternative_measures") or ()
+            if alternative.get("axis") == axis
+            and alternative.get("label")
+            and (spec_id := (alternative.get("definition") or {}).get("spec_id"))
+        ]
+        if offered:
+            choice[key] = offered
+    if not isinstance(label, str) or not label or not choice:
         return {}
-    return {"counted_as": label, "alternatives": alternatives}
+    return {"counted_as": label, **choice}
 
 
 def _total_readings(spec: Mapping[str, Any]) -> list[str]:

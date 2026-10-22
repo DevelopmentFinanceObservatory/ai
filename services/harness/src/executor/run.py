@@ -433,7 +433,7 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     A manifest with neither `series_count` nor a statistics artifact (an
     old record) needs no fetch and answers `None`, matching a manifest that
     never carried statistics at all. One that carries the artifact but no
-    `series_count` (dfo-apis mints an all-years definition that way) is
+    `series_count` (apis mints an all-years definition that way) is
     fetched with no row count to check. `series_count == 0` answers an empty
     table directly, with no fetch either -- `_series_issues` treats `None`
     and no rows alike as
@@ -1859,7 +1859,19 @@ class _Run:
                 self.columns.get(binding.from_step) if binding is not None else None
             )
             return
-        compiled = {*step.expected_role_keys, *(entity.role for entity in source.entities)}
+        base_columns = {
+            *step.expected_role_keys,
+            *(entity.role for entity in source.entities),
+            *(axis.column for axis in source.open_entity_axes or ()),
+        }
+        compiled = {
+            *base_columns,
+            *(
+                f"{column}{suffix}"
+                for column in base_columns
+                for suffix in ("_type", "_party_kind")
+            ),
+        }
         try:
             self.columns[step.id] = retrieved_frame_columns(
                 result.structured_content or {}, compiled=compiled

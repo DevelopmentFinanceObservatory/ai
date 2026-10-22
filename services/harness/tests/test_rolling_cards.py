@@ -3,7 +3,7 @@
 
 The frames, traces, anchor records and replays are real: `Scene`
 (`test_recipe_replay.py`) runs analysis-mcp's own functions over an in-memory
-store, with dfo-apis as `FakeApis`. One reporter of three holds 2023, so the
+store, with apis as `FakeApis`. One reporter of three holds 2023, so the
 latest year over all three is 2022 and the latest year over that reporter alone
 is 2023.
 """

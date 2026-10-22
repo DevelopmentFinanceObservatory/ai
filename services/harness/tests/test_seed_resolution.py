@@ -626,7 +626,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
 
 
 def _refused_mint(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis's 409 `spec_not_exportable`, answering a `spec_id` mint."""
+    """The apis service's 409 `spec_not_exportable`, answering a `spec_id` mint."""
     assert request.url.path == "/api/datasets"
     return httpx2.Response(
         409,
@@ -709,7 +709,7 @@ class _Describes(_Steps):
 
 
 def _ask_user_answer(pause: types.FunctionCall) -> dict[str, Any]:
-    return {"result": {"spec_id": "o1"}}
+    return {"result": {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}}}
 
 
 def _approval(pause: types.FunctionCall) -> dict[str, Any]:
@@ -721,8 +721,12 @@ _PAUSES = {
     "ask_user": (
         lambda: call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         _ask_user_answer,
     ),
@@ -781,8 +785,12 @@ async def test_a_turn_paused_without_a_seed_node_run_resumes_without_taking_its_
     runner, model = orchestrator_runner(
         call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         types.Part.from_text(text="Here are the donors."),
         executor=steps,

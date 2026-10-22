@@ -9,13 +9,13 @@ engine built on the Cloud SQL Python Connector (PSC, IAM auth) when
 `session_store_instance_connection_name` is set -- the shape a deployed
 `ai` Cloud Run instance connecting to Postgres over IAM auth needs.
 
-The connector path mirrors dfo-apis' `dataset_store.connection.build_connector`
+The connector path mirrors apis' `dataset_store.connection.build_connector`
 (`refresh_strategy="lazy"`, so a Cloud Run freeze/thaw cycle never hands out
 a stale token; `ip_type=IPTypes.PSC`, the only reachable path to the
 platform Postgres instance) and diverges from it only because ADK's
 `DatabaseSessionService` needs a SQLAlchemy `AsyncEngine`, not a bare
 DB-API connection pool: `create_async_connector` / `connect_async(...,
-"asyncpg", ...)` / `close_async()` replace dfo-apis' synchronous
+"asyncpg", ...)` / `close_async()` replace apis' synchronous
 `Connector` / `pg8000` / `close()` calls one level down.
 """
 

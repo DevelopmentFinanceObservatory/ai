@@ -1,4 +1,4 @@
-"""Place types: the column dfo-apis enriches a place column with, and the level a row sits at.
+"""Place types: the column apis enriches a place column with, and the level a row sits at.
 
 A mint asked for `{role}_type` in its `options.columns` fills it from the place's Data
 Commons `typeOf`, every value sorted and comma-joined: `Country`, `Place` for Earth,
@@ -14,7 +14,7 @@ types `Country` and `AdministrativeArea1` with no NUTS type, such as Hong Kong, 
 Greenland, stays a country: its sovereign state's figures leave it out.
 
 Several places sit at one level when some level in `PLACE_LEVELS` is one of every place's
-levels (`at_one_level`): the countries a level filter kept, or the countries dfo-apis serves
+levels (`at_one_level`): the countries a level filter kept, or the countries apis serves
 when it falls back from every place. `PLACE_LEVELS` holds the types whose places do not contain
 one another, so a rank or a sum across places at one level counts each figure once. A type
 outside `PLACE_LEVELS` names no level. `UNGeoRegion` is such a type: the graph types both
@@ -24,11 +24,11 @@ countries typed `Country,Place` share `Place` and no level, and World Bank aggre
 One place alone sits at one level whatever its types.
 
 A flow's parties (`financingProvider`, `financingRecipient`) carry a kind instead, in a
-`{role}_party_kind` column (`kind_column`) dfo-apis fills from its code index: `party`, `total` or
+`{role}_party_kind` column (`kind_column`) apis fills from its code index: `party`, `total` or
 `residual`. DAC tables publish group totals as parties of their own: "Africa, Total", an
 income group, the G7. A total holds other parties' figures, so a sum across a flow role leaves
 it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
-parties. dfo-apis leaves the cell empty for a party it declares no kind for, and data-mcp
+parties. apis leaves the cell empty for a party it declares no kind for, and data-mcp
 writes that cell as `UNTYPED` too, which no kind names.
 """
 
@@ -72,7 +72,7 @@ _COUNTRY = "Country"
 _NUTS = frozenset({"EurostatNUTS1", "EurostatNUTS2", "EurostatNUTS3"})
 _SEPARATOR = ","
 
-# The kinds dfo-apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
+# The kinds apis serves in a `{role}_party_kind` cell. A total holds other parties' figures.
 PartyKind = Literal["party", "residual", "total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
 TOTAL_KIND: PartyKind = "total"

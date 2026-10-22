@@ -110,7 +110,7 @@ class StepRecord(StrictModel):
 
     @property
     def presented_ref(self) -> FrameRef:
-        """The pair the frame is described and drawn by: the one dfo-apis serves."""
+        """The pair the frame is described and drawn by: the one apis serves."""
         return self.manifest_ref or self.frame_ref
 
 

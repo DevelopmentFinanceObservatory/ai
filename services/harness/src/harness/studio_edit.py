@@ -60,7 +60,7 @@ from harness.wire import (
 
 logger = logging.getLogger(__name__)
 
-# Intent fields a revise patch may not name, as dfo-apis
+# Intent fields a revise patch may not name, as apis
 # `assembler.merge.merge_intent` refuses them.
 _CREATE_ONLY_FIELDS = ("type", "frame_ref")
 
@@ -290,7 +290,7 @@ async def _edit_flow(
 
 
 def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """`patch` applied to `stored` as dfo-apis `assembler.merge.merge_intent`
+    """`patch` applied to `stored` as apis `assembler.merge.merge_intent`
     applies a revise patch (RFC 7386 as the platform names it), at the top
     level only: absent keys survive, `null` deletes, and any other value
     replaces whole, objects and arrays included."""

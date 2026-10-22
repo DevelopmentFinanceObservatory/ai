@@ -1,7 +1,7 @@
 """A real `/api/search/resolve` envelope, pinned against a captured fixture.
 
 Every other digest test (`test_digest.py`, `digest_corpus.py`) builds its envelopes by
-hand, so none of them would notice dfo-apis changing the resolve door's wire shape.
+hand, so none of them would notice apis changing the resolve door's wire shape.
 This file reads a genuine response instead.
 """
 
@@ -22,8 +22,8 @@ def _load_captured_envelope(name: str = "resolve_population_guatemala.json") -> 
 
 def test_captured_envelope_renders_to_the_pinned_digest() -> None:
     """`resolve_population_guatemala.json` is a real `/api/search/resolve` response,
-    captured 2026-09-17 against a checkout of dfo-apis at commit `ed164c1e` -- the
-    commit the dev deployment runs -- for the parsed-door query "population for
+    captured against a checkout of the apis repository at commit `ed164c1e`, the
+    commit the dev deployment runs, for the parsed-door query "population for
     Guatemala since 2010" (issue 212's own query). This is the same round trip
     that produced `spec_ed5b608a610cdc5a4bc703cf7d1bc2d0`, the spec_id the issue
     reports an unpinned mint refusing on `over_ceiling`.

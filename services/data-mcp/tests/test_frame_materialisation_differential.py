@@ -1,11 +1,11 @@
 """Record-and-replay for the artifact decode step: every table in
 `fixtures/frame_materialisation_differential.jsonl` is written as a Parquet
-artifact shaped like dfo-apis's `get_data` output, decoded by
+artifact shaped like the apis service's `get_data` output, decoded by
 `frame_materialisation._frame_from_parquet_bytes`, and the outcome must equal
 the recorded one: the frame's `frame_sha256`, a `FrameError` category, or the
 type of any other exception.
 
-dfo-apis writes every column as a string except `value` (float64), and a
+apis writes every column as a string except `value` (float64), and a
 column whose cells are all null (`status` always, often `unit` and the facet
 axes) as a nullable string column. The fixture adds the other Arrow types the
 decoder accepts (`date32`, timestamps, decimals, integers, dictionaries, a unit

@@ -1,4 +1,4 @@
-"""Async HTTP `Assembler` implementation over dfo-apis' presentation surface.
+"""Async HTTP `Assembler` implementation over apis' presentation surface.
 
 Copies `data_mcp.client.UpstreamClient`'s shape: one `httpx2.AsyncClient`
 behind a retry loop bounded by wall-clock, problem-body parsing that keeps a
@@ -29,6 +29,7 @@ from dataclasses import replace
 from typing import Any, Self
 
 import httpx2
+from common.apis_auth import ApisAuthError, AuthProvider
 from common.materialisation import FrameRef, get_store
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudgetExhausted
 from opentelemetry import trace
@@ -52,11 +53,11 @@ _COMPONENTS_ROUTE = "/api/presentation/components"
 _COMPONENT_ROUTE = "/api/presentation/components/{component_id}"
 _FRAME_ROUTE = "/api/presentation/frames/{spec_id}/{content_version}"
 _RELEASE_ROUTE = "/api/presentation/release"
-# dfo-apis' own `datasets_api` surface, not `presentation_api` -- see
+# apis' own `datasets_api` surface, not `presentation_api`. See
 # `_ensure_published_pair`'s own docstring for why this client calls it.
 _PUBLISH_ROUTE = "/api/datasets/frames/publish"
 
-# These match dfo-apis' presentation path-parameter checks. They deliberately
+# These match apis' presentation path-parameter checks. They deliberately
 # admit well-formed unknown ids so the platform, rather than this client,
 # decides whether a referenced component or frame exists.
 _COMPONENT_ID_PATTERN = re.compile(r"^cmp_[A-Za-z0-9_-]{1,64}$")
@@ -64,13 +65,13 @@ _WRITE_TOKEN_PATTERN = re.compile(r"^cmw_[A-Za-z0-9_-]{1,64}$")
 _SPEC_ID_PATTERN = re.compile(r"^(?:spec|ops)_[a-z0-9]{1,64}$")
 _CONTENT_VERSION_PATTERN = re.compile(r"^(?:cv|ocv)_[a-z0-9]{1,64}$")
 
-# The largest request Cloud Run admits, measured on the wire. dfo-apis serves
+# The largest request Cloud Run admits, measured on the wire. apis serves
 # HTTP/1, and Cloud Run rejects an HTTP/1 request over 32 MiB with a bare 413
-# before dfo-apis sees it. The publish body is gzipped, so this bounds the
+# before apis sees it. The publish body is gzipped, so this bounds the
 # compressed bytes; `_publish_pair` refuses a larger one locally, with the figures.
 _PUBLISH_BODY_CEILING_BYTES = 32 * 1024 * 1024
 
-# dfo-apis's `MAX_PUBLISH_BODY_BYTES`: the most bytes its publish door decodes
+# The apis service's `MAX_PUBLISH_BODY_BYTES`: the most bytes its publish door decodes
 # from a gzipped body. `_publish_pair` refuses an uncompressed body over it, so
 # the door never refuses for size a body this client sends.
 _PUBLISH_DECODED_BODY_CEILING_BYTES = 129_000_000
@@ -79,11 +80,11 @@ _PUBLISH_DECODED_BODY_CEILING_BYTES = 129_000_000
 # time for a small gain on JSON this repetitive.
 _PUBLISH_GZIP_LEVEL = 1
 
-# The `constraint_id` values of the 409 `publish_conflict` dfo-apis answers when a
+# The `constraint_id` values of the 409 `publish_conflict` apis answers when a
 # publish carries a recipe that disagrees with the recipes it holds: the pair has a
 # recipe with another normal form or another replay key, or another frame holds
-# this replay key. dfo-apis records the frame before it compares recipes, so the
-# pair is published either way and keeps the recipe dfo-apis already holds for it,
+# this replay key. apis records the frame before it compares recipes, so the
+# pair is published either way and keeps the recipe apis already holds for it,
 # if any (`_publish_pair`).
 _NORMAL_FORM_CONFLICT = "recipe_requires_matching_normal_form_hash"
 _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
@@ -95,18 +96,18 @@ _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
 )
 
 # Sent only on the publish call (`_ensure_published_pair`'s own POST to
-# `_PUBLISH_ROUTE`) -- the one dfo-apis route this client calls that checks
+# `_PUBLISH_ROUTE`). It is the one apis route this client calls that checks
 # it (`datasets_api.doors.publish`, mirroring the pin door's identical
 # mechanism). Every other route on this surface ignores it, so it is never
 # attached to any other request `request()` issues.
 PRINCIPAL_HEADER = "x-dfo-principal"
 
-# Sent only on a revise: the component's write token, which dfo-apis checks
+# Sent only on a revise: the component's write token, which apis checks
 # before it merges a patch.
 WRITE_TOKEN_HEADER = "x-dfo-write-token"
 
-# The code dfo-apis answers a revise with when its write token is missing or
-# wrong (403, not retryable). dfo-apis's own detail and fix name its REST
+# The code apis answers a revise with when its write token is missing or
+# wrong (403, not retryable). The apis service's own detail and fix name its REST
 # routes and the write-token header, which a caller of this server cannot
 # use, so `_refusal` answers this code with the tool-level text below.
 WRITE_REFUSED = "write_refused"
@@ -126,7 +127,6 @@ _WRITE_REFUSED_FIX = (
 # `Accept`. Every caller here wants the buffered body.
 DEFAULT_ACCEPT_HEADER = "application/json"
 
-AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -307,10 +307,10 @@ def _frame_ref_or_refusal(frame_ref: Mapping[str, Any]) -> tuple[str, str] | Ref
 
 
 def _parse_problem_json(body: bytes) -> dict[str, Any] | None:
-    """Parse `body` as a dfo-apis problem document, ignoring `Content-Type`.
+    """Parse `body` as an apis service problem document, ignoring `Content-Type`.
 
     Returns `None` unless `retryable` is present as a real bool, which is
-    what separates a dfo-apis problem (`dfo_platform.problem.ProblemDetails`)
+    what separates an apis service problem (`dfo_platform.problem.ProblemDetails`)
     from a proxy's `{"error": "unavailable"}` on the same status.
     """
     if not body:
@@ -373,7 +373,7 @@ def _render_fix(exc: PlatformError) -> str | None:
 
 
 class PlatformAssembler:
-    """`Assembler` implementation calling dfo-apis' `/api/presentation/*` surface.
+    """`Assembler` implementation calling apis' `/api/presentation/*` surface.
 
     Use as an async context manager or call `aclose()` directly to release
     the connection pool.
@@ -393,7 +393,9 @@ class PlatformAssembler:
             settings: The service's `Settings`, supplying the base URL and
                 the `upstream_*` timeout/retry knobs.
             auth: Async credential provider, called once per call rather than
-                per attempt. Injects nothing by default.
+                per attempt. The deployed assembler gets
+                `common.apis_auth.apis_auth_provider`'s Cloud Run ID token.
+                Injects nothing by default.
             sleep: Backoff sleep, which tests replace to avoid waiting.
             transport: `httpx2` transport override, `httpx2.MockTransport` in
                 tests.
@@ -454,7 +456,7 @@ class PlatformAssembler:
         """Create a component, retrying transport failures and retryable 5xx replies.
 
         The write token is minted here, once per call, and sent in the body of
-        every attempt. dfo-apis treats it as the create's idempotency key: a
+        every attempt. apis treats it as the create's idempotency key: a
         repeat carrying the same token and intent returns the draft the first
         attempt stored, so a create is retried like any other call. One
         duplicate path remains: when every attempt fails, the model may call
@@ -700,15 +702,15 @@ class PlatformAssembler:
         }
 
     async def _platform_pair(self, spec_id: str, content_version: str) -> tuple[str, str]:
-        """The pair dfo-apis holds for the frame `{spec_id, content_version}`.
+        """The pair apis holds for the frame `{spec_id, content_version}`.
 
         `get_data` reports the pair its frame is held under in the shared
         store. A fetch with `place_types`, other `columns`, a `stat_vars` sum or
-        a `breakdown` is held under a pair of its own, which dfo-apis never
+        a `breakdown` is held under a pair of its own, which apis never
         stored, so the platform refuses it as `frame_unavailable`. The mint
-        record the store keeps beside that frame names the pair dfo-apis does
+        record the store keeps beside that frame names the pair apis does
         hold (`MintRecord.dataset`): the rendering's own dataset version, or
-        the summed version dfo-apis mints for a collapse. That pair is
+        the summed version apis mints for a collapse. That pair is
         returned when it differs from the one given, and the platform draws
         the dataset version's canonical frame.
 
@@ -745,7 +747,7 @@ class PlatformAssembler:
         return record.dataset.spec_id, record.dataset.content_version
 
     async def _ensure_published_pair(self, spec_id: str, content_version: str) -> Refusal | None:
-        """Ensure `{spec_id, content_version}` is published to dfo-apis'
+        """Ensure `{spec_id, content_version}` is published to apis'
         `datasets_api` surface before the caller's own platform request
         that needs it, when it needs publishing at all.
 
@@ -789,7 +791,7 @@ class PlatformAssembler:
             # network: an unconfigured principal refuses identically on
             # every call for every pair, so there is nothing this process
             # could learn by building the body or reaching the platform
-            # first. Reaching the platform anyway would collect dfo-apis'
+            # first. Reaching the platform anyway would collect apis'
             # own `publish_not_permitted` 403 -- accurate, but generic ("the
             # publish permission is not granted to this caller") next to
             # naming the actual missing setting here.
@@ -813,25 +815,25 @@ class PlatformAssembler:
     async def publish_frame(
         self, *, spec_id: str, content_version: str, recipe: Mapping[str, Any]
     ) -> bool | Refusal | NormalFormConflict:
-        """Publish the derived frame `{spec_id, content_version}` to dfo-apis
+        """Publish the derived frame `{spec_id, content_version}` to apis
         with `recipe`, for a caller that writes no component.
 
         This is the publish `_ensure_published_pair` runs ahead of a component
         write, with the caller's recipe in the body in place of one built here.
         It posts whether or not this process has published the pair before,
-        since an earlier publish may have carried no recipe, and dfo-apis
+        since an earlier publish may have carried no recipe, and apis
         answers a repeat with the version it holds. It takes the pair's publish
         lock, and a success is remembered as `_ensure_published_pair`'s is.
 
         Returns:
-            `True` when dfo-apis recorded the version with this call, and `False`
+            `True` when apis recorded the version with this call, and `False`
             when it already held it, including when it kept another recipe of the
             same normal form for the pair. A `NormalFormConflict` when it kept a
             recipe of another normal form, so no card of `recipe` is drawn on the
             frame. A `Refusal` when nothing
             was published: no principal is configured, the store holds no frame
             under the pair, the body cannot be built or is over a ceiling, or
-            dfo-apis refused it.
+            apis refused it.
         """
         if self._publish_principal is None:
             return _PUBLISH_NOT_CONFIGURED
@@ -862,11 +864,11 @@ class PlatformAssembler:
         The body carries `recipe`, or without one the frame's recipe when one
         can be built (`frame_publish.publish_body_for`). A 409 that names a
         recipe conflict (`_RECIPE_CONFLICT_CONSTRAINTS`) means the frame is
-        published and dfo-apis kept the recipe it held, so it is logged at
+        published and apis kept the recipe it held, so it is logged at
         warning with the pair and the publish stands.
 
         Returns:
-            Whether dfo-apis recorded the version with this call (`published
+            Whether apis recorded the version with this call (`published
             .created` of its answer, and `False` on a recipe conflict), a
             `NormalFormConflict` when the recipe it kept has another normal form,
             `None` when the store holds nothing to publish under the pair, or the
@@ -925,7 +927,7 @@ class PlatformAssembler:
                     # as a refusal of the caller's own request (the create/revise/
                     # describe call), when what actually failed is the publish this
                     # method ran ahead of it. Same code and retry mode either way --
-                    # dfo-apis' publish door and its ordinary presentation surface
+                    # the apis service's publish door and its ordinary presentation surface
                     # already share one code vocabulary (`request_invalid`,
                     # `service_unavailable`, ...), just the detail text is reworded.
                     base = self._refusal(exc)
@@ -955,7 +957,7 @@ class PlatformAssembler:
         principal: str | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> httpx2.Response:
-        """Issue one dfo-apis presentation call, retried within a wall-clock budget.
+        """Issue one apis presentation call, retried within a wall-clock budget.
 
         Args:
             method: HTTP method, e.g. "GET" or "POST".
@@ -980,10 +982,14 @@ class PlatformAssembler:
             The 2xx `httpx2.Response`.
 
         Raises:
-            PlatformError: dfo-apis returned a non-2xx response.
-            PlatformTransportError: no response was ever received.
+            PlatformError: apis returned a non-2xx response.
+            PlatformTransportError: no response was ever received, or the auth
+                provider could not mint a token and nothing was sent.
         """
-        request_headers = dict(await self._auth()) if self._auth else {}
+        try:
+            request_headers = dict(await self._auth()) if self._auth else {}
+        except ApisAuthError as exc:
+            raise PlatformTransportError(detail=f"no dfo-apis ID token: {exc}") from exc
         if principal is not None:
             request_headers[PRINCIPAL_HEADER] = principal
         request_headers.update(headers or {})

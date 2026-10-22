@@ -158,11 +158,15 @@ def test_a_planner_ask_marks_the_recommended_option_and_carries_its_rationale() 
     (frame,) = _translator()._interrupt_frames("call_1", args)
 
     assert frame.event == "elicitation.request"
-    assert [(o.id, o.recommended) for o in frame.options] == [
+    assert frame.skippable is True
+    (question,) = frame.questions
+    assert (question.id, question.question) == ("q1", "Which source did you mean?")
+    assert [(o.id, o.recommended) for o in question.options] == [
         ("spec_a", False),
         ("spec_b", True),
     ]
-    assert frame.rationale == "broader coverage of the requested years"
+    assert question.rationale == "broader coverage of the requested years"
+    assert (question.allow_free_text, question.skippable) == (True, False)
 
 
 def test_a_combination_ask_offers_its_options_and_takes_no_free_text() -> None:
@@ -175,30 +179,66 @@ def test_a_combination_ask_offers_its_options_and_takes_no_free_text() -> None:
 
     (frame,) = _translator()._interrupt_frames("call_1", args)
 
-    assert [(o.id, o.label) for o in frame.options] == [
+    (question,) = frame.questions
+    assert [(o.id, o.label) for o in question.options] == [
         (option["id"], option["label"]) for option in COMBINATION_OPTIONS
     ]
-    assert frame.allow_free_text is False
+    assert question.allow_free_text is False
+    assert frame.skippable is True
 
 
-def test_an_agent_ask_marks_no_option_recommended_and_carries_no_rationale() -> None:
-    # The `ask` node raises a `RequestInput` whose `payload` carries the
-    # agent's options as `candidates` and nothing about a recommendation --
-    # the shape `_request_input_call` hands over for `CLARIFY_INTERRUPT`.
-    args = {
-        "message": "Which reading did you mean?",
-        "payload": {
-            "candidates": [
-                {"spec_id": "spec_a", "label": "reading A"},
-                {"spec_id": "spec_b", "label": "reading B"},
-            ]
-        },
+def _asked(number: int) -> dict[str, object]:
+    """The `ask` node's payload entry for its `number`th question."""
+    return {
+        "id": f"q{number}",
+        "question": f"Question {number}?",
+        "candidates": [
+            {"spec_id": f"spec_{number}", "label": f"reading {number}"},
+            {"spec_id": "o2", "label": "something else"},
+        ],
     }
 
-    (frame,) = _translator()._interrupt_frames("clarify", args)
 
-    assert [o.recommended for o in frame.options] == [False, False]
-    assert frame.rationale is None
+@pytest.mark.parametrize(
+    ("count", "pause_skippable", "question_skippable"),
+    [
+        pytest.param(1, True, False, id="one-question-dismissed-as-a-whole"),
+        pytest.param(2, False, True, id="several-questions-each-left-to-the-agent"),
+    ],
+)
+def test_an_agent_ask_puts_each_question_with_its_own_options(
+    count: int, pause_skippable: bool, question_skippable: bool
+) -> None:
+    # The `ask` node raises a `RequestInput` whose `payload` carries the
+    # agent's questions, each with its options as `candidates`, and nothing
+    # about a recommendation.
+    asked = [_asked(number) for number in range(1, count + 1)]
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(
+        "clarify", {"message": "Question 1?", "payload": {"questions": asked}}
+    )
+
+    assert frame.skippable is pause_skippable
+    assert [
+        (q.id, q.question, [(o.id, o.label, o.recommended) for o in q.options or ()])
+        for q in frame.questions
+    ] == [
+        (
+            entry["id"],
+            entry["question"],
+            [(c["spec_id"], c["label"], False) for c in entry["candidates"]],
+        )
+        for entry in asked
+    ]
+    assert {(q.allow_free_text, q.skippable, q.rationale) for q in frame.questions} == {
+        (True, question_skippable, None)
+    }
+    pending = translator._conversation.pending[frame.interrupt_id]
+    assert pending.skippable is pause_skippable
+    assert [(q.id, q.options, q.skippable) for q in pending.questions] == [
+        (q.id, {o.id: o.label for o in q.options or ()}, q.skippable) for q in frame.questions
+    ]
 
 
 def _plan_payload(**extra: object) -> dict[str, object]:
@@ -1162,7 +1202,7 @@ def test_a_question_after_a_draft_that_named_no_drop_is_asked_as_is() -> None:
 
     (*_, asked) = translator.translate(_planner_ask("Which donors?"))
 
-    assert asked.question == "Which donors?"
+    assert asked.questions[0].question == "Which donors?"
 
 
 def test_the_segment_end_completes_a_line_still_running() -> None:

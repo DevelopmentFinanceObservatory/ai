@@ -310,6 +310,19 @@ class _CanvasView:
     hidden: list[str]
 
 
+@dataclass(frozen=True)
+class _PendingQuestion:
+    """One question of a pending elicitation, as `/interrupt` checks an
+    answer against it and writes it into the turn's record."""
+
+    id: str
+    question: str
+    # Each offered option id to its label. A label is `None` on a question
+    # restored from before questions were kept (`legacy`).
+    options: dict[str, str | None] = field(default_factory=dict)
+    skippable: bool = False
+
+
 @dataclass
 class _PendingInterrupt:
     """One wire interrupt id, mapped back to its ADK interrupt."""
@@ -321,7 +334,15 @@ class _PendingInterrupt:
     # compared against this rather than against `plan_version`, so a stale
     # plan card cannot approve a later plan sharing its version number.
     plan_revision: str | None = None
-    option_ids: frozenset[str] = frozenset()
+    # An elicitation's questions, in frame order. Empty for a plan.
+    questions: tuple[_PendingQuestion, ...] = ()
+    # The elicitation frame's top-level `skippable`. When true, the whole
+    # pause may be dismissed with `decision: "skip"`.
+    skippable: bool = False
+    # An elicitation stored before questions were kept: its one question is
+    # lifted from the flat option ids, and `/interrupt` also takes the
+    # single-answer `payload` for it.
+    legacy: bool = False
     # A "plan" interrupt's workflow step order at the moment `plan.proposed`
     # was built (`_RecordingSurface._step_order`, `studio_translate.py`).
     # Restored before a resumed segment starts so activity steps stay
@@ -338,9 +359,9 @@ class _PendingInterrupt:
     # once that segment ends, win or lose; a crashed segment leaves it set,
     # and the same answer resumes again on a fresh segment.
     resuming_segment: str | None = None
-    # The decision and payload `/interrupt` was called with, recorded
-    # alongside `resuming_segment` so a retried resume can be verified
-    # against what actually resumed.
+    # The decision, payload and answers `/interrupt` was called with,
+    # recorded alongside `resuming_segment` so a retried resume can be
+    # verified against what actually resumed.
     answer: dict[str, Any] | None = None
 
 
@@ -1122,7 +1143,17 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "kind": p.kind,
             "plan_version": p.plan_version,
             "plan_revision": p.plan_revision,
-            "option_ids": sorted(p.option_ids),
+            "questions": [
+                {
+                    "id": q.id,
+                    "question": q.question,
+                    "options": dict(q.options),
+                    "skippable": q.skippable,
+                }
+                for q in p.questions
+            ],
+            "skippable": p.skippable,
+            "legacy": p.legacy,
             "step_order": list(p.step_order),
             "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
@@ -1132,21 +1163,42 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
     }
 
 
-def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
-    return {
-        interrupt_id: _PendingInterrupt(
-            adk_id=entry["adk_id"],
-            kind=entry["kind"],
-            plan_version=entry.get("plan_version"),
-            plan_revision=entry.get("plan_revision"),
-            option_ids=frozenset(entry.get("option_ids") or ()),
-            step_order=tuple(entry.get("step_order") or ()),
-            step_labels=dict(entry.get("step_labels") or {}),
-            resuming_segment=entry.get("resuming_segment"),
-            answer=entry.get("answer"),
+def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
+    pending = _PendingInterrupt(
+        adk_id=entry["adk_id"],
+        kind=entry["kind"],
+        plan_version=entry.get("plan_version"),
+        plan_revision=entry.get("plan_revision"),
+        step_order=tuple(entry.get("step_order") or ()),
+        step_labels=dict(entry.get("step_labels") or {}),
+        resuming_segment=entry.get("resuming_segment"),
+        answer=entry.get("answer"),
+    )
+    if "questions" in entry:
+        pending.questions = tuple(
+            _PendingQuestion(
+                id=q["id"],
+                question=q["question"],
+                options=dict(q["options"]),
+                skippable=q["skippable"],
+            )
+            for q in entry["questions"]
         )
-        for interrupt_id, entry in data.items()
-    }
+        pending.skippable = entry["skippable"]
+        pending.legacy = entry["legacy"]
+    elif pending.kind == "elicitation":
+        # Saved before questions were kept. The flat `option_ids` lift into
+        # one question `q1` whose labels are unknown, and every such frame
+        # was skippable as a whole.
+        options: dict[str, str | None] = dict.fromkeys(entry.get("option_ids") or ())
+        pending.questions = (_PendingQuestion(id="q1", question="", options=options),)
+        pending.skippable = True
+        pending.legacy = True
+    return pending
+
+
+def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
+    return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
 
 
 def _serialize_durable(state: ConversationState) -> dict[str, Any]:

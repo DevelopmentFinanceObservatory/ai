@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from common.apis_auth import IdTokenProvider
 from data_mcp import client_holder
 from data_mcp.client import UpstreamClient
 
@@ -52,3 +53,34 @@ async def test_client_holder_rebuilds_after_close(monkeypatch: pytest.MonkeyPatc
         assert second._client.is_closed is False
     finally:
         await second.aclose()
+
+
+async def test_on_cloud_run_the_lazy_client_carries_the_apis_id_token_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main()` builds its client through the same `build_client`."""
+    monkeypatch.setenv("K_SERVICE", "dfo-dev-ai")
+    monkeypatch.setenv("DFO_APIS_URL", "https://dfo-apis.internal.example/")
+    monkeypatch.setenv("DFO_SITE_ORIGIN", "https://site.example")
+
+    client = client_holder.get_client()
+
+    try:
+        assert isinstance(client._auth, IdTokenProvider)
+        assert client._auth.audience == "https://dfo-apis.internal.example"
+    finally:
+        await client.aclose()
+
+
+async def test_off_cloud_run_the_lazy_client_sends_no_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("K_SERVICE", raising=False)
+
+    client = client_holder.get_client()
+
+    try:
+        assert client._auth is not None
+        assert await client._auth() == {}
+    finally:
+        await client.aclose()

@@ -570,7 +570,7 @@ async def test_mounted_analysis_mcp_aggregate_returns_a_real_digest_through_the_
 
 
 async def test_mounted_presentation_mcp_reports_zero_tools_when_no_platform_is_reachable() -> None:
-    """presentation-mcp's own lifespan fetches dfo-apis' `/api/presentation/release`
+    """presentation-mcp's own lifespan fetches apis' `/api/presentation/release`
     at startup and mounts its tools from that document; with no platform
     reachable in this in-process test, it comes up tool-less and degraded
     instead (see `presentation_mcp.server`'s tests, which mock that fetch and

@@ -46,7 +46,6 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     SumOfRequirement,
-    names_no_place,
 )
 from planner.records import (
     Breakdown,
@@ -1569,7 +1568,7 @@ def _open_axis_rank_plan(
     keeping `level` between the retrieval and the rank. A `dataset` that
     names its places, or covers a flow party, is ranked directly.
     """
-    levelled = names_no_place(dataset)
+    levelled = "country" in dataset.across
     ranks = "kept" if levelled else "health_spending"
     predicates = (PlaceLevel(level=level),)
     rank = RankRequirement(

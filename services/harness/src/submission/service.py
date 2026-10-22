@@ -32,7 +32,7 @@ caller's.
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, NamedTuple, Protocol
@@ -105,6 +105,8 @@ from planner.plan import (
     load_optional_declines,
     load_plan,
     load_plan_rounds,
+    load_reduction_refused_asks,
+    load_terminal_declines,
     load_unsupported,
     open_window,
     period_licences_held,
@@ -149,9 +151,10 @@ class SessionView(Protocol):
     recorded plan, its rounds, pins shown and windowed, histories read,
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
-    answered in this session. The two writes are the chain's only side
-    effects: an `unsupported` answer, recorded even though the call is
-    refused, and an admitted plan.
+    answered in this session. The three writes are the chain's only side
+    effects: an `unsupported` answer and the asks a `PERIOD_REDUCTION_UNSTATED`
+    refusal names, both recorded even though the call is refused, and an
+    admitted plan.
     """
 
     @property
@@ -177,6 +180,10 @@ class SessionView(Protocol):
 
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record that a proposal in this planner entry was answered `unsupported` for `operation`."""
+        ...
+
+    def record_reduction_refused(self, asks: Iterable[int]) -> None:
+        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
         ...
 
     def record_admission(self, admission: Admission) -> None:
@@ -305,7 +312,9 @@ def admit(
     `proposal.across_years` name a step, and each step it names takes a
     licence to combine its years (`planner.plan.period_licences_held`).
     `proposer` is the tool every refusal's `action` names. Writes nothing
-    but an `unsupported` answer (`SessionView.record_unsupported`).
+    but an `unsupported` answer (`SessionView.record_unsupported`) and the
+    asks a `PERIOD_REDUCTION_UNSTATED` refusal names
+    (`SessionView.record_reduction_refused`).
     """
     try:
         # ADK's arg preprocessing silently falls back to raw dicts for the
@@ -720,8 +729,7 @@ def _asks_unaccounted(exc: AsksUnaccountedError, proposer: Proposer) -> dict[str
     return problem(
         ProblemCode.ASKS_UNACCOUNTED,
         f"{exc}. Answer an ask in `answered` with the ids of the requirements whose results "
-        "answer it, or, when an `unsupported` answer or a `requirement_unmeetable` whose "
-        "reason names a decline earned it (see `declined`), "
+        "answer it, or, when `declined` permits it, "
         "decline it in `declined` with its number as `ask_ref`; an ask the plan computes in "
         "part takes one "
         "of each. A patch that answers or declines an ask replaces whatever accounted for it "
@@ -805,36 +813,72 @@ def _decline_unearned(
     recorded in this planner entry (`load_unsupported`): `propose_plan`'s or
     its translation's, or one a replan's run-time refusal stands for
     (`harness.planner_seam._earned_by_refusal`); or among its optional
-    declines (`load_optional_declines`). A decline carried unchanged from `previous`, the
-    plan this one amends, was earned when it was recorded; one restated with
-    the same `Decline.key` in other words is the same decline. A
-    `BREAKDOWN_NOT_KEPT` decline is earned by its own rule, which checks a
-    carried one too (`_breakdown_decline_unearned`).
+    declines (`load_optional_declines`), which hold `no_operation_covers`
+    in a first-draft entry (`harness.planner_seam`), for an ask no
+    `PERIOD_REDUCTION_UNSTATED` refusal named (`_declinable`). A decline carried
+    unchanged from `previous`, the plan this one amends, was earned when it
+    was recorded; one restated with the same `Decline.key` in other words is
+    the same decline. A `BREAKDOWN_NOT_KEPT` decline is earned by its own
+    rule, which checks a carried one too (`_breakdown_decline_unearned`).
+    `detail.asks` lists the refused asks a decline named, when there are any.
     """
-    earned = load_unsupported(view.state) | load_optional_declines(view.state)
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
-    unearned = sorted(
-        {
-            decline.code.value
-            for decline in plan.declined
-            if decline.key not in carried
-            and decline.code not in earned
-            and decline.code is not UnsupportedOperation.BREAKDOWN_NOT_KEPT
-        }
-    )
-    if not unearned:
+    declines = [
+        decline
+        for decline in plan.declined
+        if decline.key not in carried
+        and decline.code is not UnsupportedOperation.BREAKDOWN_NOT_KEPT
+        and not _declinable(decline, view, permitted=load_optional_declines(view.state))
+    ]
+    if not declines:
         return None
-    return problem(
-        ProblemCode.DECLINE_UNEARNED,
+    unearned = sorted({decline.code.value for decline in declines})
+    refused = sorted(
+        {decline.ask_ref for decline in declines if decline.ask_ref is not None}
+        & load_reduction_refused_asks(view.state)
+    )
+    message = (
         f"`declined` names {unearned!r}, and nothing in this planner entry earned that "
         "code. A decline is earned when a proposal or its `translation` answers `unsupported` "
         "with its code, when a `requirement_unmeetable` translation's reason says it earns "
         "that code, or when the refusal this entry replans from means no operation "
         "covers the step. To earn it, propose the computation the ask states; if nothing "
-        "carries it out, that answer names the code.",
-        outcome=Outcome.INVALID_INPUT,
-        detail={"operations": unearned},
+        "carries it out, that answer names the code."
     )
+    if refused:
+        message += (
+            f" A `period_reduction_unstated` refusal named ask {_ask_list(refused)} in this "
+            "entry, so a computation states it: make the change that refusal offers."
+        )
+    return problem(
+        ProblemCode.DECLINE_UNEARNED,
+        message,
+        outcome=Outcome.INVALID_INPUT,
+        detail={"operations": unearned} | ({"asks": refused} if refused else {}),
+    )
+
+
+def _declinable(
+    decline: Decline, view: SessionView, *, permitted: frozenset[UnsupportedOperation]
+) -> bool:
+    """Whether this planner entry earned `decline`, with `permitted` the declines it allows unasked.
+
+    A tool's `unsupported` answer with the decline's code earns it
+    (`load_unsupported`). An entry's permission (`permitted`) covers no ask
+    a `PERIOD_REDUCTION_UNSTATED` refusal named in the entry
+    (`load_reduction_refused_asks`): that refusal found a computation the
+    ask states, and offered the change that answers it.
+    """
+    if decline.code in load_unsupported(view.state):
+        return True
+    return decline.code in permitted and decline.ask_ref not in load_reduction_refused_asks(
+        view.state
+    )
+
+
+def _ask_list(asks: Sequence[int]) -> str:
+    """Name `asks` by number, joined with "and"."""
+    return " and ".join(str(ask) for ask in asks)
 
 
 def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, object] | None:
@@ -1077,12 +1121,14 @@ def _sides_covered(
 def _nothing_to_plan(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the answer for a plan that declines every ask and states nothing else.
 
-    Only declines this entry's `unsupported` answers required count: the
-    question is wholly beyond what the system computes, so the entry ends
-    on the declines, which the caller tells the user.
+    The entry's required declines and terminal optional declines can close
+    it, each as `_declinable` allows. An optional decline of incompatible sources still leaves their
+    separate figures to show, so that permission alone cannot close it.
     """
-    codes = {decline.code for decline in plan.declined}
-    if not codes or not codes <= load_unsupported(view.state):
+    terminal = load_terminal_declines(view.state)
+    if not plan.declined or not all(
+        _declinable(decline, view, permitted=terminal) for decline in plan.declined
+    ):
         return None
     return problem(
         ProblemCode.NOTHING_TO_PLAN,
@@ -1747,7 +1793,8 @@ def _unrecordable(
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
     A plan states at least one requirement, unless it declines every ask
-    (`_nothing_to_plan`). A patch carries forward what it
+    (`_nothing_to_plan`); one that states none and makes a decline nothing
+    earned is refused for the decline (`_decline_unearned`). A patch carries forward what it
     does not name, so the amended plan is checked whole for a pin a pending
     source choice did not offer (`_choice_not_offered`), for a
     sum of two datasets the user was not asked to combine
@@ -1763,11 +1810,15 @@ def _unrecordable(
     against `stated`, read with `reads_user_words`).
     """
     if not plan.evidence_requirements:
-        return _nothing_to_plan(plan, view) or _invalid_plan(
-            "A plan states at least one evidence requirement: what data the answer "
-            "rests on, citing the decisions that fixed it. State the requirements this "
-            "question needs, or name the ones a patch removes in "
-            "`removed_evidence_requirements`."
+        return (
+            _nothing_to_plan(plan, view)
+            or _decline_unearned(plan, previous, view)
+            or _invalid_plan(
+                "A plan states at least one evidence requirement: what data the answer "
+                "rests on, citing the decisions that fixed it. State the requirements this "
+                "question needs, or name the ones a patch removes in "
+                "`removed_evidence_requirements`."
+            )
         )
     return (
         _source_ref_unpicked(plan, view, previous)
@@ -1777,7 +1828,7 @@ def _unrecordable(
         or _breakdown_decline_unearned(stated, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
-        or _period_reduction_unstated(stated, reads_user_words=reads_user_words)
+        or _period_reduction_unstated(stated, view, reads_user_words=reads_user_words)
     )
 
 
@@ -1881,7 +1932,9 @@ def _one_year_together(together_with: Sequence[str]) -> str:
     )
 
 
-def _period_reduction_unstated(plan: Plan, *, reads_user_words: bool) -> dict[str, object] | None:
+def _period_reduction_unstated(
+    plan: Plan, view: SessionView, *, reads_user_words: bool
+) -> dict[str, object] | None:
     """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
 
     The rule is `planner.plan.unstated_period_reductions`, over the
@@ -1911,10 +1964,15 @@ def _period_reduction_unstated(plan: Plan, *, reads_user_words: bool) -> dict[st
     `one_year` is `None` where the step is asked for and keeps its years,
     and where it holds no year it can read in a plan
     `planner.plan._one_year_offered` passes, alone or with the others.
+
+    The asks the refusal names are recorded for the rest of the planner
+    entry (`SessionView.record_reduction_refused`), where no permission to
+    decline unasked covers them (`_declinable`).
     """
     gaps = unstated_period_reductions(plan)
     if not gaps:
         return None
+    view.record_reduction_refused(ask for gap in gaps for ask in gap.asks)
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
     offered: list[dict[str, object] | None] = []
@@ -2399,7 +2457,7 @@ def _window_pins(
     before it is retrieved.
 
     A requirement stating `period_end_open` is pinned to that identity over
-    a range with no end year (`_open_window`), which dfo-apis ends at the
+    a range with no end year (`_open_window`), which apis ends at the
     current year at every mint, so its retrieval reaches years published
     after the plan. `shown` are the datasets the planner was shown this
     entry (`planner.plan.pin_sources`) and `read` what `propose_plan` read

@@ -212,17 +212,12 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.SOURCE_PIN_VIOLATED
         ):
             return IssueResolution.DISCOVER_AGAIN
-        case (
-            CompileIssueCode.SOURCE_UNUSABLE
-            | CompileIssueCode.REQUIREMENT_UNMEETABLE
-            | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE
-        ):
+        case CompileIssueCode.SOURCE_UNUSABLE | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE:
             return IssueResolution.UNMEETABLE
         case CompileIssueCode.NO_CAPABILITY | CompileIssueCode.FRAME_UNIT_UNBOUND:
             return IssueResolution.UNSUPPORTED
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
-            | CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS
             | CompileIssueCode.RANK_AXIS_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
@@ -282,9 +277,6 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.INPUT_SHAPE_UNSUPPORTED: (
         "change the calculation, or the requirement it reads, so its input has a shape the "
         "calculation takes"
-    ),
-    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
-        "drop the filter's place_level predicate, or the filter when it states no other"
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
@@ -361,8 +353,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "state the same unit on both sides' requirements, so each source is retrieved in it"
     ),
     CompileIssueCode.FRAME_PRICE_BASES_DIFFER: (
-        "state one currency at current prices on both sides' requirements, so each source is "
-        "retrieved in it; no requirement may ask for constant prices"
+        "state one unit on both sides' requirements, either one currency at current prices or "
+        "one currency at constant prices of one base year, so each source is retrieved in it, "
+        "and keep a pinned source's own unit on its side"
     ),
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
         "on each requirement the reason names, state the unit it gives and leave its "
