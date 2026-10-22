@@ -74,7 +74,9 @@ class ResolvedGroup(StrictModel):
     `search` names the set it bound, keyed by the role column it fills
     (`resolved.entity_groups`). `label` is the set's name, and `ref` its own
     graph node, `None` when the graph holds none (a resolver group such as
-    "G7"). `total` is the party the dataset publishes as the set's own total
+    "G7"). `group_id` is the membership registry's id for a set with no
+    graph node, so a resubmit can name it again. `total` is the party the
+    dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
     when the role binds the set's members, one entity each. A requirement's
     `Entity` naming the label, case-folded, on the set's side of the flow is
@@ -85,11 +87,20 @@ class ResolvedGroup(StrictModel):
     role: str = Field(min_length=1)
     label: str = Field(min_length=1)
     ref: str | None = None
+    group_id: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda group_id: group_id is None
+    )
     # Left out of every dump while unset, so a source saved without it keeps
     # its serialised form.
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
+
+    @model_validator(mode="after")
+    def _one_id(self) -> ResolvedGroup:
+        if self.ref is not None and self.group_id is not None:
+            raise ValueError("a group carries ref or group_id, not both")
+        return self
 
 
 class OpenAxis(StrictModel):

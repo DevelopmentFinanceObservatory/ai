@@ -623,14 +623,22 @@ class SpecBlock(BaseModel):
 # The most code points a set's name may span, as apis bounds `EntityGroup.label`.
 MAX_SEED_GROUP_LABEL_CHARS = 120
 
+# The classes the Search API assigns to a whole-population total.
+type SeedPartyClass = Literal["official", "private", "residual"]
+
+# The closed `SeedPartyClass` vocabulary has three members.
+MAX_SEED_PARTY_CLASSES = 3
+
 
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
     `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`). The
-    members are apis' `EntityGroup` fields, and any other key is refused,
-    so a block from an older Search wire fails rather than losing its `ref`.
+    when it bound the members (`planner.workflow.ResolvedGroup.total`).
+    `group_id` identifies a membership-registry-only group, which has no
+    graph `ref`. Search derives `whole_of` and `side_classes` again when the
+    identity is resubmitted. Any other key is refused, so a block from an
+    older Search wire fails rather than losing its `ref`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -645,6 +653,21 @@ class SeedEntityGroup(BaseModel):
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
     )
+    group_id: str | None = Field(
+        default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda group_id: group_id is None
+    )
+    whole_of: tuple[SeedPartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+    side_classes: tuple[SeedPartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+
+    @model_validator(mode="after")
+    def _one_id(self) -> SeedEntityGroup:
+        if self.ref is not None and self.group_id is not None:
+            raise ValueError("a group carries ref or group_id, not both")
+        return self
 
 
 class SeedSpec(BaseModel):

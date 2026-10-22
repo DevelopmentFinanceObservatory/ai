@@ -889,6 +889,25 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
     } == {"observationAbout": {"ref": "africa", "label": "Africa", "entity_type": "Continent"}}
 
 
+def test_a_seed_accepts_a_new_api_whole_total_group() -> None:
+    """Whole metadata crosses the seed boundary during the staged API rollout."""
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {
+            "label": "all recipients",
+            "whole_of": ["official", "residual"],
+            "side_classes": ["official", "residual"],
+        }
+    }
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    group = seed.spec.entity_groups["observationAbout"]
+    assert group.whole_of == ("official", "residual")
+    assert group.side_classes == ("official", "residual")
+
+
 @pytest.mark.parametrize(
     "group",
     [

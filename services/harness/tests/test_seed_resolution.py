@@ -492,6 +492,56 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
     assert [(group.label, group.total) for group in source.groups] == [("Africa", "DACAfrica")]
 
 
+async def test_a_seed_drops_whole_total_metadata_when_resubmitting() -> None:
+    """Search derives whole metadata from the identity after the bridge accepts it."""
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {
+            "label": "all recipients",
+            "whole_of": ["official", "residual"],
+            "side_classes": ["official", "residual"],
+        }
+    }
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    search = GroupsSearchStub([block])
+
+    await resolve_seed(DataMcpDefinitions(InMemoryDefinitionStore(), search=search), taken)
+
+    (posted,) = search.posted
+    assert posted["input"]["entries"][0]["entity_groups"] == {
+        "observationAbout": {"label": "all recipients"}
+    }
+
+
+async def test_a_seed_resubmits_a_registry_only_group_id() -> None:
+    """A registry group has no graph ref, so its id must survive the seed bridge."""
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {
+            "label": "Africa (DAC)",
+            "group_id": "groups/OECD.DAC.Region.Africa",
+        }
+    }
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    search = GroupsSearchStub([block])
+
+    part = await resolve_seed(DataMcpDefinitions(InMemoryDefinitionStore(), search=search), taken)
+
+    (posted,) = search.posted
+    assert posted["input"]["entries"][0]["entity_groups"] == {
+        "observationAbout": {
+            "label": "Africa (DAC)",
+            "group_id": "groups/OECD.DAC.Region.Africa",
+        }
+    }
+    source = source_from_spec_block(resolved_spec(part, spec_id=block["spec_id"]))
+    assert [(group.label, group.ref, group.group_id) for group in source.groups] == [
+        ("Africa (DAC)", None, "groups/OECD.DAC.Region.Africa")
+    ]
+
+
 async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:
     # The browser hands over "African countries" as Search served it; the seed
     # node's resubmit posts Africa beside the identity, so Search's answer, the

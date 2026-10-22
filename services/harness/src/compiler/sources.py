@@ -644,6 +644,7 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     role=role,
                     label=label,
                     ref=_text(group.get("ref")),
+                    group_id=_text(group.get("group_id")),
                     total=_text(group.get("total")),
                 )
             )
@@ -813,11 +814,16 @@ def wire_groups(groups: Sequence[ResolvedGroup]) -> dict[str, dict[str, str]]:
     """`groups` as `resolved.entity_groups` states them, keyed by role column,
     for a resubmit to post beside the identity they stand for (`_groups`).
 
-    `total` is not posted. Search recomputes it from what the role binds,
-    and a server that predates the field refuses it.
+    `total` and whole-population fields are not posted. Search recomputes them
+    from what the role binds. `group_id` is posted for a registry-only group;
+    it is the only identifier when no graph `ref` exists.
     """
     return {
-        group.role: {"label": group.label, **({"ref": group.ref} if group.ref else {})}
+        group.role: {
+            "label": group.label,
+            **({"ref": group.ref} if group.ref else {}),
+            **({"group_id": group.group_id} if group.group_id else {}),
+        }
         for group in groups
     }
 
