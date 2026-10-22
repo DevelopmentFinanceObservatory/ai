@@ -86,9 +86,8 @@ def _shape(
     )
 
 
-# A period with no end year, and one its dataset is retrieved from its first year for.
+# A period with no end year.
 _END_OPEN = PeriodDrift(end=EndDrift.DATA)
-_HISTORY = PeriodDrift(from_first_year=True, end=EndDrift.DATA)
 # Both ends on the anchor, and a start on it ahead of an end open to the data.
 _MOVING = PeriodDrift(start=StartDrift.ANCHOR, start_offset=0, end=EndDrift.ANCHOR, end_offset=0)
 _ROLLING_START = PeriodDrift(start=StartDrift.ANCHOR, start_offset=0, end=EndDrift.DATA)
@@ -2176,13 +2175,13 @@ def _threshold(op: str, year: int, *, rolls: bool = False, offset: int = 0) -> P
             id="a-first-year-on-the-anchor-ahead-of-an-end-open-to-the-data",
         ),
         pytest.param(
-            (2024, 2024),
-            _HISTORY,
+            (1990, 2024),
+            _END_OPEN,
             (_threshold("gte", 2019, rolls=True),),
             (2019, 2024),
             _ROLLING_START,
             False,
-            id="a-first-year-before-the-stated-one-of-a-whole-history",
+            id="a-first-year-inside-a-whole-history",
         ),
         pytest.param(
             (2023, 2024),
@@ -2323,47 +2322,83 @@ def test_a_two_sided_verb_holds_no_year_either_side_removed(
 
 
 @pytest.mark.parametrize(
-    ("drift", "rolling", "years", "drift_left"),
+    ("first", "rolling", "years", "drift_left"),
     [
         pytest.param(
-            _END_OPEN,
+            2024,
             RollingWindow(window_end=_NEWEST),
             (2024, 2024),
             PeriodDrift(end=EndDrift.ANCHOR, end_offset=0),
             id="end-alone",
         ),
         pytest.param(
-            _END_OPEN,
+            2024,
             RollingWindow(window_start=_NEWEST, window_end=_NEWEST),
             (2024, 2024),
             _MOVING,
             id="both-ends",
         ),
-        pytest.param(_END_OPEN, None, (2024, 2024), FIXED, id="fixed-ends"),
-        pytest.param(_HISTORY, None, (2020, 2024), FIXED, id="a-fixed-start-before-the-stated-one"),
+        pytest.param(2024, None, (2024, 2024), FIXED, id="fixed-ends"),
+        pytest.param(1990, None, (2020, 2024), FIXED, id="a-fixed-start-inside-a-whole-history"),
     ],
 )
 def test_a_rank_window_says_how_newer_data_moves_the_years_it_keeps(
-    drift: PeriodDrift,
+    first: int,
     rolling: RollingWindow | None,
     years: tuple[int, int],
     drift_left: PeriodDrift,
 ) -> None:
-    shape = _shape(period=Period(start=2024, end=2024), drift=drift)
+    """A window over years open to the data from `first` to 2024."""
+    shape = _shape(period=Period(start=first, end=2024), drift=_END_OPEN)
     window = Period(start=years[0], end=2024)
 
     assert windowed(shape, window, rolling) == (Period(start=years[0], end=years[1]), drift_left)
 
 
 def test_a_two_sided_verb_holds_the_years_both_sides_hold_as_newer_data_moves_them() -> None:
-    """A whole history bounds no start, and a fixed end stops an open one."""
-    history = _shape(period=Period(start=2024, end=2024), drift=_HISTORY)
+    """A whole history from 1990 holds the other side's later start, and a
+    fixed end stops an open one."""
+    history = _shape(period=Period(start=1990, end=2024), drift=_END_OPEN)
     closed = _shape(period=Period(start=2020, end=2026))
 
     out = summed_sides(history, closed)
 
     assert out.period == Period(start=2020, end=2024)
     assert out.drift == PeriodDrift(end=EndDrift.DATA, until=2026)
+
+
+def _whole_history(first: int, start: str) -> FrameShape:
+    """A dataset read from its first year on record, `first`, to 2024 with no end year,
+    once a bound sets its start as `start` says: none, one following the newest data, or
+    a fixed year with a bound on the anchor trailing it.
+    """
+    if start == "fixed":
+        return _shape(period=Period(start=first, end=2024), drift=_END_OPEN)
+    offset = first - 2000 - 10
+    if start == "anchor":
+        drift = PeriodDrift(start=StartDrift.ANCHOR, start_offset=offset, end=EndDrift.DATA)
+        return _shape(period=Period(start=2024 + offset, end=2024), drift=drift)
+    drift = PeriodDrift(start=StartDrift.TRAILS, start_offset=offset - 20, end=EndDrift.DATA)
+    return _shape(period=Period(start=first + 5, end=2024), drift=drift)
+
+
+_STARTS = ("fixed", "anchor", "trails")
+
+
+@pytest.mark.parametrize("earlier", _STARTS)
+@pytest.mark.parametrize("later", _STARTS)
+def test_two_whole_histories_with_different_first_years_pair_alike_in_either_side_order(
+    earlier: str, later: str
+) -> None:
+    """One side read whole from 1990, the other from 2000, each with its start
+    set as `earlier` and `later` say. A whole history starts at its first year
+    like any other frame, so the pair holds the same years, moving the same
+    way, whichever side comes first."""
+    from_1990, from_2000 = _whole_history(1990, earlier), _whole_history(2000, later)
+
+    stated, swapped = summed_sides(from_1990, from_2000), summed_sides(from_2000, from_1990)
+
+    assert (stated.period, stated.drift) == (swapped.period, swapped.drift)
 
 
 @pytest.mark.parametrize(

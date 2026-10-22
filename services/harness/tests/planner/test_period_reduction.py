@@ -28,6 +28,8 @@ from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
     ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
+    MAX_PLAN_RECORD_CHARS,
+    MAX_PLAN_REQUIREMENTS,
     AggregateRequirement,
     AnswerMode,
     AskAnswer,
@@ -39,6 +41,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     OneYearRead,
     Period,
@@ -52,31 +55,42 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
+    answering_results,
+    authored,
     current_recorded_identity,
+    frame_shapes,
+    inputs_of,
     load_plan,
     one_year_followed,
     period_licences_held,
     plan_revision,
     save_pin_sources,
     save_plan,
+    split_of,
     unstated_period_reductions,
+    whole_history_split,
 )
 from planner.records import (
+    MAX_ENTITIES,
     BreakdownDimension,
     DenominatorScope,
     EntityIn,
     GroupBy,
     GrowthChange,
+    OpenPeriodFault,
     PeriodThreshold,
     RankAmong,
     RankDirection,
     Reduction,
     RelativePeriod,
+    RollingIssue,
+    RollingPlanError,
     RollingWindow,
     ValueThreshold,
 )
 from planner.shapes import VALUE_KEPT_SPAN_PAIRS
 from planner.tool_results import Outcome, ProblemCode
+from pydantic import ValidationError
 from submission.service import OneYear
 
 from ..decision_drafts import drafts
@@ -247,7 +261,6 @@ def _gap(
         "output_id": output,
         "asks": list(asks),
         "years": {"start": years.start, "end": years.end},
-        "from_first_year": False,
         "follows_newest": False,
         "until": None,
         "dataset_requirement_id": "aid",
@@ -1830,15 +1843,17 @@ def _keeping(*predicates: PeriodThreshold) -> FilterRequirement:
 
 @pytest.mark.usefixtures("aid_on_record")
 @pytest.mark.parametrize(
-    "steps",
+    ("steps", "reduces"),
     [
-        pytest.param([_total()], id="an-aggregate-with-no-bound"),
+        pytest.param([_total()], True, id="an-aggregate-with-no-bound"),
         pytest.param(
             [_keeping(PeriodThreshold(op="lte", year=2024)), _total(input_id="kept")],
+            False,
             id="under-lte",
         ),
         pytest.param(
             [_keeping(PeriodThreshold(op="lt", year=2025)), _total(input_id="kept")],
+            False,
             id="under-lt",
         ),
         pytest.param(
@@ -1847,24 +1862,30 @@ def _keeping(*predicates: PeriodThreshold) -> FilterRequirement:
                 _shares("all"),
                 _ranked(input_id="shares", reduction=Reduction.MEAN),
             ],
+            True,
             id="over-a-two-sided-step",
         ),
     ],
 )
-def test_a_reader_of_a_dataset_another_branch_reads_from_its_first_year_holds_those_years(
-    decision: Callable[..., Decision], steps: list[EvidenceRequirement]
+def test_a_reader_beside_a_branch_reading_the_whole_history_holds_the_stated_years(
+    decision: Callable[..., Decision], steps: list[EvidenceRequirement], reduces: bool
 ) -> None:
     """The plan states 2024 alone. `latest` follows the newest data from its
-    start, so 'aid' is retrieved from its first year for every step reading it."""
+    start, so it reads 'aid' from its first year through a copy of its own,
+    and every other step reads 2024 and each newer year: a total with no
+    bound reduces them, and one capped at 2024 reads one year."""
     ctx = _context(pins=_SHOWN_OPEN)
     aid = _open(period=ONE_YEAR_ONLY, decision_ids=("measure", "population", "pooled"))
 
     result = _propose(ctx, [aid, _latest_year(), *steps], [decision(), POPULATION, POOLED])
 
+    if not reduces:
+        assert result["outcome"] == Outcome.OK.value, result
+        return
     assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
     (gap,) = result["detail"]["gaps"]
-    assert (gap["requirement_id"], gap["from_first_year"]) == ("result", True)
-    assert "every year 'aid' holds" in result["message"]
+    assert (gap["requirement_id"], gap["years"]) == ("result", {"start": 2024, "end": 2024})
+    assert "the years from 2024 to the newest" in result["message"]
 
 
 @pytest.mark.usefixtures("aid_on_record")
@@ -1909,17 +1930,17 @@ def test_a_one_year_rank_with_no_reduction_that_newer_data_widens_is_refused(
 
 
 @pytest.mark.usefixtures("aid_on_record")
-def test_a_fixed_first_year_bounds_a_read_from_the_datasets_first_year(
+def test_a_fixed_window_beside_a_branch_reading_the_whole_history_ranks_the_stated_years(
     decision: Callable[..., Decision],
 ) -> None:
-    """A rank window from 2020 over a dataset stated as 2024 and retrieved from
-    its first year ranks 2020 to 2024."""
+    """A rank window over 2020-2024 beside `latest`, which reads 'aid' from its
+    first year, ranks the 2024 the dataset states, one year, and reduces none."""
     ctx = _context(pins=_SHOWN_OPEN)
     steps = [_latest_year(), _ranked(window_start=2020, window_end=2024)]
 
     result = _propose(ctx, [_open(period=ONE_YEAR_ONLY), *steps], [decision(), POPULATION])
 
-    _refused(result, _gap(years=Period(start=2020, end=2024)))
+    assert result["outcome"] == Outcome.OK.value, result
 
 
 @pytest.mark.usefixtures("aid_on_record")
@@ -1980,7 +2001,7 @@ def test_a_rank_with_no_reduction_over_a_window_that_stays_one_year_is_admitted(
 
 
 @pytest.mark.usefixtures("aid_on_record")
-def test_a_rank_with_no_reduction_and_no_window_holds_every_year_a_rolling_branch_retrieves(
+def test_a_rank_with_no_reduction_and_no_window_beside_a_rolling_branch_holds_the_open_years(
     decision: Callable[..., Decision],
 ) -> None:
     ctx = _context(pins=_SHOWN_OPEN)
@@ -1990,7 +2011,7 @@ def test_a_rank_with_no_reduction_and_no_window_holds_every_year_a_rolling_branc
     result = _propose(ctx, [_kenya_alone(end_open=True), newest, ranked], [decision(), POPULATION])
 
     assert result["code"] == ProblemCode.INVALID_PLAN.value, result
-    assert "every year 'aid' holds" in result["message"]
+    assert "the years from 2024 to the newest with no reduction" in result["message"]
 
 
 def _kept_from(year: int, input_id: str = "aid") -> FilterRequirement:
@@ -2244,250 +2265,253 @@ def _offered(
     return pytest.param(requirements, decisions, change, offset, sibling, year, id=id)
 
 
+# Each plan a `period_reduction_unstated` refusal offers one year to read, with
+# the change, its offset, the sibling answering ask 1 beside the refused step
+# and the year offered (`_offered`).
+_ONE_YEAR_OFFERS = [
+    _offered([_aid(), _ranked()], [POPULATION], OneYear.WINDOW, None, id="a-rank"),
+    _offered(
+        [
+            _open(period=ONE_YEAR_ONLY),
+            _ranked(window_start=2024, window_end=2024, rolling=RollingWindow(window_end=_NEWEST)),
+        ],
+        [POPULATION],
+        OneYear.WINDOW,
+        0,
+        id="a-rank-whose-window-end-alone-follows",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1))),
+            _ranked(input_id="kept"),
+        ],
+        [POPULATION],
+        OneYear.WINDOW,
+        -1,
+        id="a-rank-of-years-up-to-the-one-before-the-newest",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
+            _ranked(input_id="kept"),
+        ],
+        [POPULATION],
+        OneYear.WINDOW,
+        -1,
+        id="a-rank-of-years-before-the-newest",
+    ),
+    _offered([_aid(), _total()], [], OneYear.FILTER, None, id="a-total-of-fixed-years"),
+    _offered(
+        [_unpinned_open(), _total()],
+        [],
+        OneYear.FILTER,
+        None,
+        id="a-total-of-an-open-end-with-no-pin",
+    ),
+    _offered(
+        [_unpinned_open(), _ranked()],
+        [POPULATION],
+        OneYear.WINDOW,
+        None,
+        id="a-rank-of-an-open-end-with-no-pin",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _total()],
+        [],
+        OneYear.FILTER,
+        0,
+        id="a-total-of-an-open-end",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _kept_from(2024), _total(input_id="kept")],
+        [],
+        OneYear.FILTER,
+        0,
+        id="a-total-from-a-fixed-first-year-of-an-open-end",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _latest_year(), _total()],
+        [POPULATION],
+        OneYear.FILTER,
+        0,
+        id="a-total-beside-a-branch-reading-from-the-first-year",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _latest_year(), _ranked()],
+        [POPULATION],
+        OneYear.WINDOW,
+        0,
+        id="a-rank-beside-a-branch-reading-from-the-first-year",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _latest_year(), _france(), _total(input_id="france")],
+        [POPULATION],
+        OneYear.FILTER,
+        0,
+        id="a-total-of-one-donor-read-from-the-first-year",
+    ),
+    _offered(
+        [*_both(), _total(input_id="both")],
+        [POPULATION, POOLED],
+        OneYear.FILTER,
+        None,
+        id="a-total-of-a-sum",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="gte", year=2024, rolling=_NEWEST)),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        0,
+        id="a-total-from-a-first-year-on-the-anchor",
+    ),
+    _offered(
+        [
+            _open(period=ONE_YEAR_ONLY),
+            _keeping(PeriodThreshold(op="gte", year=2019, rolling=_FIVE_BACK)),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        0,
+        id="a-total-from-five-years-back",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(
+                PeriodThreshold(op="gte", year=2020),
+                PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
+            ),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        -1,
+        id="a-total-up-to-the-year-before-the-newest",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        -1,
+        id="a-total-of-the-years-before-the-newest",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="lte", year=2026)),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        None,
+        id="a-total-of-an-open-end-a-fixed-last-year-stops",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(
+                PeriodThreshold(op="lte", year=2026),
+                PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
+            ),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        None,
+        id="a-total-up-to-the-year-before-the-newest-a-fixed-last-year-stops",
+    ),
+    _offered(
+        [
+            _open(period=ONE_YEAR_ONLY),
+            _ranked(
+                id="yearly",
+                per_period=True,
+                window_start=2024,
+                window_end=2024,
+                rolling=RollingWindow(window_end=_NEWEST),
+            ),
+            _total(),
+        ],
+        [POPULATION],
+        OneYear.FILTER,
+        0,
+        id="a-total-of-an-open-end-beside-a-rolling-branch",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _ranked(
+                id="yearly",
+                per_period=True,
+                window_start=2024,
+                window_end=2024,
+                rolling=RollingWindow(window_end=_NEWEST),
+            ),
+            _keeping(PeriodThreshold(op="lte", year=2023)),
+            _total(input_id="kept"),
+        ],
+        [POPULATION],
+        OneYear.FILTER,
+        None,
+        id="a-total-of-fixed-years-beside-a-rank-of-the-newest",
+        sibling="yearly",
+    ),
+    _offered(
+        [_aid(), _YEARLY, _total()],
+        [],
+        OneYear.FILTER,
+        None,
+        id="a-total-beside-a-series-of-the-same-dataset",
+        sibling="yearly",
+    ),
+    _offered(
+        [
+            _aid(),
+            _total(id="yearly", group_by=(GroupBy.PERIOD,)),
+            GrowthRequirement(
+                id="change",
+                input_id="yearly",
+                window_start=2015,
+                window_end=2024,
+                change=GrowthChange.ABSOLUTE,
+            ),
+            _total(),
+        ],
+        [],
+        OneYear.FILTER,
+        None,
+        id="a-total-beside-a-growth-of-the-same-dataset",
+        sibling="change",
+    ),
+    _offered(
+        [
+            _open(period=Period(start=2020, end=2024)),
+            _keeping(PeriodThreshold(op="gte", year=2021, rolling=RelativePeriod(offset=-2))),
+            _total(input_id="kept"),
+        ],
+        [],
+        OneYear.FILTER,
+        0,
+        id="a-total-of-an-open-end-from-a-year-before-a-newest-year-the-data-passes",
+        year=2023,
+    ),
+]
+
+
 @pytest.mark.usefixtures("aid_on_record")
 @pytest.mark.parametrize(
-    ("requirements", "decisions", "change", "offset", "sibling", "year"),
-    [
-        _offered([_aid(), _ranked()], [POPULATION], OneYear.WINDOW, None, id="a-rank"),
-        _offered(
-            [
-                _open(period=ONE_YEAR_ONLY),
-                _ranked(
-                    window_start=2024, window_end=2024, rolling=RollingWindow(window_end=_NEWEST)
-                ),
-            ],
-            [POPULATION],
-            OneYear.WINDOW,
-            None,
-            id="a-rank-whose-window-end-alone-follows",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1))),
-                _ranked(input_id="kept"),
-            ],
-            [POPULATION],
-            OneYear.WINDOW,
-            None,
-            id="a-rank-of-years-up-to-the-one-before-the-newest",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
-                _ranked(input_id="kept"),
-            ],
-            [POPULATION],
-            OneYear.WINDOW,
-            None,
-            id="a-rank-of-years-before-the-newest",
-        ),
-        _offered([_aid(), _total()], [], OneYear.FILTER, None, id="a-total-of-fixed-years"),
-        _offered(
-            [_unpinned_open(), _total()],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-an-open-end-with-no-pin",
-        ),
-        _offered(
-            [_unpinned_open(), _ranked()],
-            [POPULATION],
-            OneYear.WINDOW,
-            None,
-            id="a-rank-of-an-open-end-with-no-pin",
-        ),
-        _offered(
-            [_open(period=ONE_YEAR_ONLY), _total()],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-an-open-end",
-        ),
-        _offered(
-            [_open(period=ONE_YEAR_ONLY), _kept_from(2024), _total(input_id="kept")],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-from-a-fixed-first-year-of-an-open-end",
-        ),
-        _offered(
-            [_open(period=ONE_YEAR_ONLY), _latest_year(), _total()],
-            [POPULATION],
-            OneYear.FILTER,
-            0,
-            id="a-total-beside-a-branch-reading-from-the-first-year",
-        ),
-        _offered(
-            [_open(period=ONE_YEAR_ONLY), _latest_year(), _ranked()],
-            [POPULATION],
-            OneYear.WINDOW,
-            0,
-            id="a-rank-beside-a-branch-reading-from-the-first-year",
-        ),
-        _offered(
-            [_open(period=ONE_YEAR_ONLY), _latest_year(), _france(), _total(input_id="france")],
-            [POPULATION],
-            OneYear.FILTER,
-            0,
-            id="a-total-of-one-donor-read-from-the-first-year",
-        ),
-        _offered(
-            [*_both(), _total(input_id="both")],
-            [POPULATION, POOLED],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-a-sum",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="gte", year=2024, rolling=_NEWEST)),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            0,
-            id="a-total-from-a-first-year-on-the-anchor",
-        ),
-        _offered(
-            [
-                _open(period=ONE_YEAR_ONLY),
-                _keeping(PeriodThreshold(op="gte", year=2019, rolling=_FIVE_BACK)),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            0,
-            id="a-total-from-five-years-back",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(
-                    PeriodThreshold(op="gte", year=2020),
-                    PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
-                ),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-up-to-the-year-before-the-newest",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="lt", year=2024, rolling=_NEWEST)),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-the-years-before-the-newest",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="lte", year=2026)),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-an-open-end-a-fixed-last-year-stops",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(
-                    PeriodThreshold(op="lte", year=2026),
-                    PeriodThreshold(op="lte", year=2023, rolling=RelativePeriod(offset=-1)),
-                ),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-up-to-the-year-before-the-newest-a-fixed-last-year-stops",
-        ),
-        _offered(
-            [
-                _open(period=ONE_YEAR_ONLY),
-                _ranked(
-                    id="yearly",
-                    per_period=True,
-                    window_start=2024,
-                    window_end=2024,
-                    rolling=RollingWindow(window_end=_NEWEST),
-                ),
-                _total(),
-            ],
-            [POPULATION],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-an-open-end-beside-a-rolling-branch",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _ranked(
-                    id="yearly",
-                    per_period=True,
-                    window_start=2024,
-                    window_end=2024,
-                    rolling=RollingWindow(window_end=_NEWEST),
-                ),
-                _keeping(PeriodThreshold(op="lte", year=2023)),
-                _total(input_id="kept"),
-            ],
-            [POPULATION],
-            OneYear.FILTER,
-            None,
-            id="a-total-of-fixed-years-beside-a-rank-of-the-newest",
-            sibling="yearly",
-        ),
-        _offered(
-            [_aid(), _YEARLY, _total()],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-beside-a-series-of-the-same-dataset",
-            sibling="yearly",
-        ),
-        _offered(
-            [
-                _aid(),
-                _total(id="yearly", group_by=(GroupBy.PERIOD,)),
-                GrowthRequirement(
-                    id="change",
-                    input_id="yearly",
-                    window_start=2015,
-                    window_end=2024,
-                    change=GrowthChange.ABSOLUTE,
-                ),
-                _total(),
-            ],
-            [],
-            OneYear.FILTER,
-            None,
-            id="a-total-beside-a-growth-of-the-same-dataset",
-            sibling="change",
-        ),
-        _offered(
-            [
-                _open(period=Period(start=2020, end=2024)),
-                _keeping(PeriodThreshold(op="gte", year=2021, rolling=RelativePeriod(offset=-2))),
-                _total(input_id="kept"),
-            ],
-            [],
-            OneYear.FILTER,
-            0,
-            id="a-total-of-an-open-end-from-a-year-before-a-newest-year-the-data-passes",
-            year=2023,
-        ),
-    ],
+    ("requirements", "decisions", "change", "offset", "sibling", "year"), _ONE_YEAR_OFFERS
 )
 def test_the_one_year_each_refusal_offers_is_admitted(
     decision: Callable[..., Decision],
@@ -2500,12 +2524,14 @@ def test_the_one_year_each_refusal_offers_is_admitted(
 ) -> None:
     """Each refusal offers a change to the refused step alone, on the last
     year its input holds. The year rolls at the offset newer data moves it
-    by, under the newest year the step's other rolling years stand for, where
-    the dataset is retrieved from its first year, and is fixed otherwise,
-    since a rolling year would retrieve the dataset's whole history for every
-    step reading it. The plan that follows the change is admitted, and every
-    other step, the dataset's `period` and the inputs between the step and
-    the dataset included, is left as stated."""
+    by, under the newest year the step's other rolling years stand for,
+    where the dataset's first year is on record, since the rolling year
+    reads its whole history through copies of its own and every other step
+    keeps its years. It is fixed where no first year is: for a dataset with
+    no pin, or one whose pin no answer over every year states. The plan
+    that follows the change is admitted, and every other step, the
+    dataset's `period` and the inputs between the step and the dataset
+    included, is left as stated."""
     cited = [decision(), *decisions]
     asks, answered = (ASK,), None
     if sibling is not None:
@@ -2981,13 +3007,13 @@ def _ranks_compared() -> list:
         pytest.param(
             _totals_paired(QuotientRequirement, open_=False),
             [POPULATION, POOLED],
-            {"bilateral_total": OneYear.FILTER, "imputed_total": OneYear.FILTER},
+            {"bilateral_total": (OneYear.FILTER, None), "imputed_total": (OneYear.FILTER, None)},
             id="a-quotient-of-totals-of-fixed-years",
         ),
         pytest.param(
             _ranks_compared(),
             [POPULATION],
-            {"by_sum": OneYear.WINDOW, "by_mean": OneYear.WINDOW},
+            {"by_sum": (OneYear.WINDOW, 0), "by_mean": (OneYear.WINDOW, 0)},
             id="a-comparison-of-ranks-of-open-years",
         ),
     ],
@@ -2996,12 +3022,13 @@ def test_the_sides_of_a_pairing_are_offered_one_year_together(
     decision: Callable[..., Decision],
     requirements: list[EvidenceRequirement],
     decisions: list[Decision],
-    offers: dict[str, OneYear],
+    offers: dict[str, tuple[OneYear, int | None]],
 ) -> None:
     """Each side of the pairing reduces 2020-2024, and either one read alone
     in 2024 matches no row of the other's span. Both read in 2024 match, so
-    the refusal offers each its year together with the other. The plan
-    following both is admitted, and one following either alone is not."""
+    the refusal offers each its year together with the other, on the newest
+    year where the sides' years follow it. The plan following both is
+    admitted, and one following either alone is not."""
     pins = {**_SHOWN_OPEN, SPEC: PinSource(provenance_ref="oecd/dac2a")}
     cited = [decision(), *decisions]
 
@@ -3013,16 +3040,18 @@ def test_the_sides_of_a_pairing_are_offered_one_year_together(
         step_id: {
             "change": change,
             "year": 2024,
-            "offset": None,
+            "offset": offset,
             "together_with": [other for other in offers if other != step_id],
         }
-        for step_id, change in offers.items()
+        for step_id, (change, offset) in offers.items()
     }
     for step_id in offers:
         others = " and ".join(repr(other) for other in offers if other != step_id)
         assert f"together with the one-year change offered to {others}" in refused["message"]
     reads = {
-        gap["requirement_id"]: OneYearRead(year=gap["one_year"]["year"], offset=None)
+        gap["requirement_id"]: OneYearRead(
+            year=gap["one_year"]["year"], offset=gap["one_year"]["offset"]
+        )
         for gap in gaps
     }
     followed = list(requirements)
@@ -3032,3 +3061,492 @@ def test_the_sides_of_a_pairing_are_offered_one_year_together(
         followed = one_year_followed(followed, step_id, read)
     admitted = _propose(_context(pins=pins), followed, cited)
     assert admitted["outcome"] == Outcome.OK.value, admitted
+
+
+# --- The whole-history split -------------------------------------------------
+#
+# A dataset read from its first year serves only the steps rolling from their
+# start (`planner.plan.whole_history_split`), and every other reader keeps its
+# stated years. These rows read the plan `propose_plan` validates before it
+# records the split: its requirements as the model wrote them, and the first
+# year on record of each dataset pinned to `_OPEN_SPEC`, which `_SHOWN_OPEN`
+# states as 1990.
+
+
+def _model_plan(
+    requirements: Sequence[EvidenceRequirement],
+    decisions: Sequence[Decision],
+    *,
+    asks: Sequence[str] = (ASK,),
+    answered: Sequence[AskAnswer] | None = None,
+    across_years: Sequence[int] = (),
+    first_year: int | None = 1990,
+) -> Plan:
+    """`requirements` as a plan answering `asks`, the last requirement answering ask 0 unless `answered` says otherwise.
+
+    Each dataset requirement stating `period_end_open` over `_OPEN_SPEC`
+    has `first_year` on record, none where it is `None`.
+    """
+    first_years = (
+        []
+        if first_year is None
+        else [
+            FirstYear(requirement_id=requirement.id, year=first_year)
+            for requirement in requirements
+            if isinstance(requirement, DatasetRequirement)
+            and requirement.period_end_open
+            and requirement.source_spec_id == _OPEN_SPEC
+        ]
+    )
+    return Plan(
+        question=ASK,
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=list(decisions),
+        evidence_requirements=list(requirements),
+        asks=list(asks),
+        answered=(
+            [AskAnswer(ask=0, outputs=(requirements[-1].id,))] if answered is None else answered
+        ),
+        asks_across_years=list(across_years),
+        first_years=first_years,
+    )
+
+
+def _recorded(plan: Plan) -> Plan:
+    """`plan` carrying its split, as `propose_plan` records it."""
+    split = split_of(plan)
+    return Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": split.requirements,
+            "rolling_copies": split.copies,
+        }
+    )
+
+
+def _reads(plan: Plan) -> dict[str, tuple[str, ...]]:
+    """What each requirement of `plan` reads once it is split."""
+    return {requirement.id: inputs_of(requirement) for requirement in split_of(plan).requirements}
+
+
+_TOP = _ranked(
+    id="top",
+    window_start=2024,
+    window_end=2024,
+    rolling=RollingWindow(window_start=_NEWEST, window_end=_NEWEST),
+)
+_SINCE_2015 = Period(start=2015, end=2024)
+_SERIES_AND_TOP = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+
+
+@pytest.mark.parametrize(
+    ("requirements", "answered", "copies", "reads", "starts"),
+    [
+        pytest.param(
+            [_open(period=_SINCE_2015), _TOP],
+            _SERIES_AND_TOP,
+            [("aid_history", "aid")],
+            {"aid": (), "aid_history": (), "top": ("aid_history",)},
+            {"aid": 2015, "aid_history": 1990},
+            id="a-series-beside-a-rank-rolling-from-its-start",
+        ),
+        pytest.param(
+            [
+                _open(period=_SINCE_2015),
+                _YEARLY,
+                _TOP.model_copy(update={"input_id": "yearly", "axis": "recipient"}),
+            ],
+            [AskAnswer(ask=0, outputs=("yearly",)), AskAnswer(ask=1, outputs=("top",))],
+            [("aid_history", "aid"), ("yearly_history", "yearly")],
+            {
+                "aid": (),
+                "aid_history": (),
+                "yearly": ("aid",),
+                "yearly_history": ("aid_history",),
+                "top": ("yearly_history",),
+            },
+            {"aid": 2015, "aid_history": 1990, "yearly": 2015, "yearly_history": 1990},
+            id="a-yearly-total-answering-and-read-by-the-rank",
+        ),
+        pytest.param(
+            [_open(period=_SINCE_2015), _TOP],
+            None,
+            [],
+            {"aid": (), "top": ("aid",)},
+            {"aid": 1990},
+            id="the-rank-alone",
+        ),
+        pytest.param(
+            [_open(period=EVERY_YEAR), _TOP],
+            _SERIES_AND_TOP,
+            [],
+            {"aid": (), "top": ("aid",)},
+            {"aid": 1990},
+            id="a-first-year-on-record-at-the-stated-start",
+        ),
+    ],
+)
+def test_only_the_readers_rolling_from_their_start_read_a_dataset_from_its_first_year(
+    decision: Callable[..., Decision],
+    requirements: list[EvidenceRequirement],
+    answered: list[AskAnswer] | None,
+    copies: list[tuple[str, str]],
+    reads: dict[str, tuple[str, ...]],
+    starts: dict[str, int],
+) -> None:
+    """`top` ranks the newest year, its start following the newest data, so it
+    reads 'aid' from 1990, the first year on record, when 'aid' states a later
+    start. A series answer or a total per year beside it keeps 2015-2024
+    through the dataset the model wrote, and `top` reads copies. With nothing
+    else reading 'aid', or with 1990 the stated start, nothing is copied."""
+    plan = _model_plan(
+        requirements,
+        [decision(), POPULATION],
+        asks=_BESIDE_A_SERIES if answered is not None else (ASK,),
+        answered=answered,
+    )
+
+    split = split_of(plan)
+    shapes = frame_shapes(plan)
+
+    assert [(copy.copy_id, copy.origin_id) for copy in split.copies] == copies
+    assert _reads(plan) == reads
+    assert {step_id: shapes[step_id].period.start for step_id in starts} == starts
+
+
+def test_a_recorded_split_is_its_own_split_and_reverses_to_the_model_plan(
+    decision: Callable[..., Decision],
+) -> None:
+    """Over two datasets, each copied for a growth rolling from its start
+    above their quotient, beside the quotient answering ask 0."""
+    aid, imputed = _open_series("aid"), _open_series("imputed", measure="imputed multilateral aid")
+    pair = QuotientRequirement(id="pair", numerator=_side("aid"), denominator=_side("imputed"))
+    growth = _growth(
+        input_id="pair",
+        rolling=RollingWindow(window_start=RelativePeriod(offset=-4), window_end=_NEWEST),
+    )
+    plan = _model_plan(
+        [aid, imputed, pair, growth],
+        [decision(), POPULATION, POOLED],
+        asks=_BESIDE_A_SERIES,
+        answered=[AskAnswer(ask=0, outputs=("pair",)), AskAnswer(ask=1, outputs=("change",))],
+    )
+
+    recorded = _recorded(plan)
+
+    assert [copy.copy_id for copy in recorded.rolling_copies] == [
+        "aid_history",
+        "pair_history",
+        "imputed_history",
+    ]
+    assert _reads(recorded)["pair_history"] == ("aid_history", "imputed_history")
+    assert split_of(recorded).requirements == recorded.evidence_requirements
+    assert authored(recorded).evidence_requirements == plan.evidence_requirements
+
+
+def test_a_recorded_plan_whose_copies_are_not_its_split_is_refused(
+    decision: Callable[..., Decision],
+) -> None:
+    recorded = _recorded(
+        _model_plan(
+            [_open(period=_SINCE_2015), _TOP],
+            [decision(), POPULATION],
+            asks=_BESIDE_A_SERIES,
+            answered=_SERIES_AND_TOP,
+        )
+    )
+    content = recorded.model_dump()
+    content["evidence_requirements"][-1]["input_id"] = "aid"
+
+    with pytest.raises(ValidationError, match="rolling copies are not the split"):
+        Plan.model_validate(content)
+
+
+@pytest.mark.parametrize(
+    ("pin", "first_year", "spec_id"),
+    [
+        pytest.param(_OPEN_SPEC, None, _OPEN_SPEC, id="a-pin-with-no-first-year-on-record"),
+        pytest.param(None, None, None, id="no-pin"),
+    ],
+)
+def test_a_start_rolling_over_a_dataset_with_no_first_year_on_record_is_refused(
+    decision: Callable[..., Decision], pin: str | None, first_year: int | None, spec_id: str | None
+) -> None:
+    """The rank reads the dataset from its first year, and none is on record,
+    so the plan is refused before its years are read; with 1990 on record
+    it is admitted."""
+    dataset = _open(period=_SINCE_2015).model_copy(update={"source_spec_id": pin})
+
+    with pytest.raises(ValidationError) as refused:
+        _model_plan([dataset, _TOP], [decision(), POPULATION], first_year=first_year)
+
+    error = refused.value.errors()[0]["ctx"]["error"]
+    assert isinstance(error, RollingPlanError)
+    assert (error.issue, error.fault, error.spec_id, error.requirement_ids) == (
+        RollingIssue.NEEDS_OPEN_PERIOD,
+        OpenPeriodFault.FIRST_YEAR_UNKNOWN,
+        spec_id,
+        ("aid",),
+    )
+    assert _model_plan([_open(period=_SINCE_2015), _TOP], [decision(), POPULATION])
+
+
+def test_a_start_rolling_above_a_max_by_donor_reads_the_stated_years(
+    decision: Callable[..., Decision],
+) -> None:
+    """The filter's first year follows the newest data, but it bounds the year
+    each donor's max fell in, so 'aid' keeps 2015-2024 and the max picks over
+    those years. The filter is refused for its own reason: newer data moves
+    its first year past the year a max fell in."""
+    peak = _total(id="peak", reduction=Reduction.MAX)
+    since = FilterRequirement(
+        id="since",
+        input_id="peak",
+        predicates=(PeriodThreshold(op="gte", year=2010, rolling=RelativePeriod(offset=-14)),),
+    )
+    requirements = [_open(period=_SINCE_2015), peak, since]
+
+    split = whole_history_split(
+        requirements,
+        answering={"since"},
+        first_years=[FirstYear(requirement_id="aid", year=1990)],
+        copies=(),
+    )
+    with pytest.raises(ValidationError, match="the first year the filter keeps, 2015-2024 today"):
+        _model_plan(requirements, [decision()], across_years=(0,))
+
+    assert (split.whole_history, split.copies) == ({}, ())
+
+
+def test_a_rolling_window_over_a_total_by_donor_reads_the_stated_years(
+    decision: Callable[..., Decision],
+) -> None:
+    """The rank's window starts 14 years back of the newest over each donor's
+    total, a span of the stated 2015-2024, whose first year newer data moves
+    out of the window, so it is refused by the span rules over those years."""
+    summed = _total(id="summed")
+    ranked = _ranked(
+        input_id="summed",
+        axis="recipient",
+        reduction=None,
+        window_start=2010,
+        window_end=2024,
+        rolling=RollingWindow(window_start=RelativePeriod(offset=-14), window_end=_NEWEST),
+    )
+
+    with pytest.raises(ValidationError, match="one span over 2015-2024"):
+        _model_plan(
+            [_open(period=_SINCE_2015), summed, ranked], [decision(), POPULATION], across_years=(0,)
+        )
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        pytest.param(
+            [_keeping(PeriodThreshold(op="lte", year=2015)), _total(input_id="kept")],
+            id="a-total-up-to-2015",
+        ),
+        pytest.param(
+            [_keeping(PeriodThreshold(op="lt", year=2016)), _total(input_id="kept")],
+            id="a-total-before-2016",
+        ),
+        pytest.param(
+            [_keeping(PeriodThreshold(op="eq", year=2015)), _total(input_id="kept")],
+            id="a-total-of-2015",
+        ),
+        pytest.param([_ranked(window_start=2010, window_end=2015)], id="a-rank-of-2010-2015"),
+    ],
+)
+def test_a_sibling_of_a_rank_rolling_from_its_start_reads_the_stated_years(
+    decision: Callable[..., Decision], sibling: list[EvidenceRequirement]
+) -> None:
+    """'aid' states 2020-2024 and `top` reads it from 1990, so a sibling
+    reading years before 2020 reads none: 2015 is no year of what it reads."""
+    with pytest.raises(ValidationError, match="2020-2024"):
+        _model_plan(
+            [_open(period=Period(start=2020, end=2024)), _TOP, *sibling],
+            [decision(), POPULATION],
+            asks=_BESIDE_A_SERIES,
+            answered=[AskAnswer(ask=0, outputs=("top",)), AskAnswer(ask=1, outputs=("result",))],
+            across_years=(1,),
+        )
+
+
+def test_a_window_rolling_from_its_start_over_years_up_to_2015_runs_out_of_years(
+    decision: Callable[..., Decision],
+) -> None:
+    """The rank reads 'aid' from 1990 through a filter keeping the years up to
+    2015, so the filter holds 1990-2015, and the rank's window, nine back of
+    the newest at both ends, moves past 2015 once newer data arrives."""
+    kept = _keeping(PeriodThreshold(op="lte", year=2015))
+    nine_back = RelativePeriod(offset=-9)
+    ranked = _ranked(
+        input_id="kept",
+        window_start=2015,
+        window_end=2015,
+        rolling=RollingWindow(window_start=nine_back, window_end=nine_back),
+    )
+
+    with pytest.raises(ValidationError) as refused:
+        _model_plan(
+            [_open(period=Period(start=2020, end=2024)), kept, ranked], [decision(), POPULATION]
+        )
+
+    error = refused.value.errors()[0]["ctx"]["error"]
+    assert isinstance(error, RollingPlanError)
+    assert (error.issue, error.requirement_ids) == (RollingIssue.YEARS_RUN_OUT, ("result",))
+    assert "leaves no year" not in str(error)
+
+
+def _computed_from(plan: Plan, step_id: str) -> set[str]:
+    """The requirements of `plan`, as it runs, whose result rests on `step_id`, itself included."""
+    reads = _reads(plan)
+    found = {step_id}
+    while grown := {node for node, inputs in reads.items() if found & set(inputs)} - found:
+        found |= grown
+    return found
+
+
+@pytest.mark.usefixtures("aid_on_record")
+@pytest.mark.parametrize(
+    ("requirements", "decisions", "change", "offset", "sibling", "year"), _ONE_YEAR_OFFERS
+)
+def test_the_one_year_each_gap_offers_is_admitted_and_leaves_every_other_result_its_years(
+    decision: Callable[..., Decision],
+    requirements: list[EvidenceRequirement],
+    decisions: list[Decision],
+    change: OneYear,
+    offset: int | None,
+    sibling: str | None,
+    year: int | None,
+) -> None:
+    """The year offered (`unstated_period_reductions`) is the one
+    `test_the_one_year_each_refusal_offers_is_admitted` reads off the
+    refusal. Followed on the plan the model wrote, the plan validates, and
+    every result answering it that is not computed from the refused step
+    keeps the years and the drift it read before."""
+    asks, answered = (ASK,), None
+    if sibling is not None:
+        asks = _BESIDE_A_SERIES
+        answered = [
+            AskAnswer(ask=0, outputs=(requirements[-1].id,)),
+            AskAnswer(ask=1, outputs=(sibling,)),
+        ]
+    plan = _model_plan(requirements, [decision(), *decisions], asks=asks, answered=answered)
+
+    (gap,) = unstated_period_reductions(plan)
+    read = gap.held.one_year
+    assert read is not None
+    followed = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": one_year_followed(requirements, gap.step_id, read),
+        }
+    )
+
+    assert (read.year, read.offset) == (gap.held.years.end if year is None else year, offset)
+    before, after = frame_shapes(plan), frame_shapes(followed)
+    kept = [
+        output
+        for output in answering_results(followed)
+        if output not in _computed_from(followed, gap.step_id)
+    ]
+    assert [(before[o].period, before[o].drift) for o in kept] == [
+        (after[o].period, after[o].drift) for o in kept
+    ]
+
+
+def test_a_rolling_one_year_reads_a_copy_and_leaves_a_yearly_series_its_years(
+    decision: Callable[..., Decision],
+) -> None:
+    """'aid' states 2020-2024. The total answering ask 0 is offered the
+    newest year as it moves; followed, its filter reads a copy of 'aid'
+    from 1990, and the total per year answering ask 1 keeps 2020 on."""
+    plan = _model_plan(
+        [_open(period=Period(start=2020, end=2024)), _YEARLY, _total()],
+        [decision()],
+        asks=_BESIDE_A_SERIES,
+        answered=[AskAnswer(ask=0, outputs=("result",)), AskAnswer(ask=1, outputs=("yearly",))],
+    )
+
+    (gap,) = unstated_period_reductions(plan)
+    assert gap.held.one_year == OneYearRead(year=2024, offset=0)
+    followed = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": one_year_followed(
+                list(plan.evidence_requirements), gap.step_id, gap.held.one_year
+            ),
+        }
+    )
+
+    shapes = frame_shapes(followed)
+    assert _reads(followed)["one_year"] == ("aid_history",)
+    assert (shapes["yearly"].period.start, shapes["aid_history"].period.start) == (2020, 1990)
+
+
+def test_a_total_over_a_dataset_first_held_in_its_stated_start_offers_no_earlier_year(
+    decision: Callable[..., Decision],
+) -> None:
+    """The dataset's first year on record is 2020, its stated start, so the
+    total's years are 2020-2024 and the year offered is the newest."""
+    plan = _model_plan(
+        [_open(period=Period(start=2020, end=2024)), _total()], [decision()], first_year=2020
+    )
+
+    (gap,) = unstated_period_reductions(plan)
+
+    assert gap.held.years == Period(start=2020, end=2024)
+    assert gap.held.one_year == OneYearRead(year=2024, offset=0)
+
+
+def test_the_requirement_limit_counts_the_requirements_the_model_wrote(
+    decision: Callable[..., Decision],
+) -> None:
+    """Twenty-four requirements, which the split takes to twenty-five, are
+    admitted; a twenty-fifth the model writes is refused."""
+    donors = [
+        FilterRequirement(
+            id=f"donor_{n}",
+            input_id="aid",
+            predicates=(EntityIn(names=(f"Donor {n}",), role="donor"),),
+        )
+        for n in range(MAX_PLAN_REQUIREMENTS - 2)
+    ]
+    requirements = [_open(period=_SINCE_2015), *donors, _TOP]
+
+    plan = _model_plan(requirements, [decision(), POPULATION])
+
+    assert len(plan.evidence_requirements) == MAX_PLAN_REQUIREMENTS
+    assert len(_recorded(plan).evidence_requirements) == MAX_PLAN_REQUIREMENTS + 1
+    extra = donors[0].model_copy(update={"id": "donor_extra"})
+    with pytest.raises(ValidationError, match=f"over the {MAX_PLAN_REQUIREMENTS} a plan may take"):
+        _model_plan([*requirements[:-1], extra, _TOP], [decision(), POPULATION])
+
+
+def test_the_size_limit_measures_the_plan_the_model_wrote(
+    decision: Callable[..., Decision],
+) -> None:
+    """A dataset naming many recipients takes over half the size limit, so its
+    copy takes the recorded plan past it, and the plan is admitted on the
+    size the model wrote."""
+    recipients = tuple(
+        Entity(name=f"Recipient {n:03d} " + "x" * 130, role="recipient")
+        for n in range(MAX_ENTITIES)
+    )
+    aid = _open(period=_SINCE_2015).model_copy(update={"entities": recipients})
+
+    plan = _model_plan(
+        [aid, _TOP], [decision(), POPULATION], asks=_BESIDE_A_SERIES, answered=_SERIES_AND_TOP
+    )
+
+    written, recorded = (
+        len(
+            record.model_dump_json(
+                include={"question", "answer_mode", "decisions", "evidence_requirements"}
+            )
+        )
+        for record in (plan, _recorded(plan))
+    )
+    assert written <= MAX_PLAN_RECORD_CHARS < recorded

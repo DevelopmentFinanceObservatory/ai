@@ -203,10 +203,6 @@ class StartDrift(StrEnum):
 class PeriodDrift:
     """How the years a frame holds differ from the `period` it states today, and how newer data moves them.
 
-    `from_first_year` says the frame holds every year its dataset holds up to
-    the period's end: the dataset is retrieved from its first year
-    (`submission.service._open_window`), and no bound above it sets a later
-    start, so the period's start bounds nothing, and that start is fixed.
     `start` says what sets the first year as newer data arrives, and
     `start_offset` is the offset on the anchor of the bound that sets it,
     or trails it, set exactly when `start` is not `FIXED`. `end`
@@ -231,7 +227,6 @@ class PeriodDrift:
     holds the label (`_rejects_rank_window`) reads these years alone.
     """
 
-    from_first_year: bool = False
     start: StartDrift = StartDrift.FIXED
     start_offset: int | None = None
     end: EndDrift = EndDrift.FIXED
@@ -243,7 +238,6 @@ class PeriodDrift:
     def __post_init__(self) -> None:
         assert (self.end is EndDrift.ANCHOR) == (self.end_offset is not None), self
         assert (self.start is not StartDrift.FIXED) == (self.start_offset is not None), self
-        assert not (self.from_first_year and self.start is not StartDrift.FIXED), self
 
     @property
     def widens(self) -> bool:
@@ -494,11 +488,9 @@ class _Years:
 
         `offset` is the offset on the anchor of the bound that sets that
         first year or trails it, set exactly when `moves` is not `FIXED`.
-        Over a frame read from its dataset's first year the bound sets the
-        start, an earlier year than the stated one included. Otherwise the
-        later start holds, and a following bound on the same year makes the
-        start follow. A following bound behind the start that holds, and a
-        following start a later fixed bound overtakes, trail it (`trail`).
+        The later start holds, and a following bound on the same year makes
+        the start follow. A following bound behind the start that holds, and
+        a following start a later fixed bound overtakes, trail it (`trail`).
         A first year that trails is fixed today, with its bound on the
         anchor trailing it.
         """
@@ -507,20 +499,17 @@ class _Years:
             assert offset is not None
             return self.from_year(first).trail(offset)
         drift = self.drift
-        if not drift.from_first_year and first <= self.start:
+        if first <= self.start:
             if offset is None:
                 return self
             if first < self.start:
                 return self.trail(offset)
         if offset is not None:
-            moved = replace(
-                drift, from_first_year=False, start=StartDrift.ANCHOR, start_offset=offset
-            )
+            moved = replace(drift, start=StartDrift.ANCHOR, start_offset=offset)
             return replace(self, start=first, drift=moved)
         trails = drift.start is not StartDrift.FIXED
         moved = replace(
             drift,
-            from_first_year=False,
             start=StartDrift.TRAILS if trails else StartDrift.FIXED,
             start_offset=drift.start_offset if trails else None,
         )
@@ -574,8 +563,7 @@ class _Years:
     def within(self, other: Period, drift: PeriodDrift) -> _Years:
         """The years these and `other`, moving as `drift` says, both hold.
 
-        A side read from its dataset's first year bounds no start. Otherwise
-        the first year of `other` bounds these as it moves (`from_year`),
+        The first year of `other` bounds these as it moves (`from_year`),
         so either side order gives the same years. A year either side
         removed is removed from both, and years the data decides on either
         side are decided by the data on both.
@@ -588,8 +576,7 @@ class _Years:
                 decided_by_data=self.drift.decided_by_data or drift.decided_by_data,
             ),
         )
-        if not drift.from_first_year:
-            years = years.from_year(other.start, moves=drift.start, offset=drift.start_offset)
+        years = years.from_year(other.start, moves=drift.start, offset=drift.start_offset)
         years = years.to_year(other.end, moves=drift.end, offset=drift.end_offset)
         if drift.until is not None:
             years = years.to_year(drift.until, moves=EndDrift.FIXED)
@@ -870,11 +857,10 @@ def _follows_the_anchor(drift: PeriodDrift) -> bool:
 def spans_years(period: Period | None, drift: PeriodDrift = FIXED) -> bool:
     """Whether `period` covers, or newer data makes it cover, more than one year; an unbounded one may.
 
-    It comes to cover more when it holds every year its dataset holds, or
-    when newer data adds years at its end that no moving start takes away
-    (`PeriodDrift.widens`).
+    It comes to cover more when newer data adds years at its end that no
+    moving start takes away (`PeriodDrift.widens`).
     """
-    return period is None or period.end > period.start or drift.from_first_year or drift.widens
+    return period is None or period.end > period.start or drift.widens
 
 
 def _shape_spans_years(shape: FrameShape) -> bool:
@@ -923,7 +909,6 @@ def retrieved(
     place_typed: bool = False,
     mixed_levels: bool = False,
     end_open: bool = False,
-    from_first_year: bool = False,
 ) -> FrameShape:
     """The shape a fresh `get_data` retrieval carries.
 
@@ -945,10 +930,7 @@ def retrieved(
 
     `end_open` says the retrieval states no end year (`period_end_open`), so
     newer data adds years after `period`, up to each series' own newest
-    (`EndDrift.DATA`). `from_first_year` says it is
-    retrieved from the first year its dataset holds, which a start
-    following the newest data over it asks for
-    (`planner.plan.read_from_first_year`).
+    (`EndDrift.DATA`).
     """
     stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
     return FrameShape(
@@ -964,9 +946,7 @@ def retrieved(
         unsummable_axes=unsummable_axes,
         mixed_levels=mixed_levels,
         place_typed=place_typed,
-        drift=PeriodDrift(
-            from_first_year=from_first_year, end=EndDrift.DATA if end_open else EndDrift.FIXED
-        ),
+        drift=PeriodDrift(end=EndDrift.DATA if end_open else EndDrift.FIXED),
     )
 
 
@@ -1274,10 +1254,7 @@ def year_filter(
     such a threshold sets moves with it, a last year it sets follows the
     anchor at the offset of that year (`EndDrift.ANCHOR`), the threshold's
     own for `lte` and `eq` and one less for `lt`, and a fixed last year
-    stops a `period` that newer data widens there. Over years read from
-    their dataset's first year (`PeriodDrift.from_first_year`) a first year
-    any threshold sets is where they start, before the stated one included,
-    and with none set the first year is unknown. `year
+    stops a `period` that newer data widens there. `year
     >= 2024` over 2024 with no end year leaves 2024 today and 2025 with it
     once 2025 arrives, so it leaves no one year. A first year that follows
     the newest data below a fixed last year leaves years today, and newer
@@ -2201,12 +2178,6 @@ def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> s
     to cover every year of the picked period, less the years a filter
     removed from the picked side, today and as newer data moves both
     (`span_end_leaves`). An unknown period on either side covers none known.
-    A picked side read from its dataset's first year
-    (`PeriodDrift.from_first_year`) carries any year back to that first
-    year, whatever start it states, so a series held from a later first
-    year misses some. Bounding the picked side's input from the series'
-    first year, following the newest data where the series' does, admits
-    the pair.
     """
     if shape.time is other.time:
         return (
@@ -2218,22 +2189,6 @@ def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> s
     unmatched = _picked_counterpart_misses(verb, series)
     if unmatched is not None:
         return unmatched
-    if (
-        picked.drift.from_first_year
-        and not series.drift.from_first_year
-        and series.period is not None
-    ):
-        bound = (
-            "with the same first year as the other side, following the newest data as it does"
-            if series.drift.start is StartDrift.ANCHOR
-            else f"from {series.period.start} as well"
-        )
-        return (
-            f"{verb} matches the two sides on their years, and one side holds each entity's "
-            "max or min at the year it fell in, any year back to its dataset's first year, "
-            f"while the other side's years start at {series.period.start}, so an entity whose "
-            f"value fell earlier has no year to match; bound the max or min's input {bound}"
-        )
     if (
         series.period is not None
         and picked.period is not None

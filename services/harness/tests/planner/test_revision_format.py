@@ -159,7 +159,10 @@ def test_a_rolling_period_enters_the_revision_once_stated() -> None:
     content = plan.model_dump(mode="json")
     latest = {"anchor": "latest", "offset": 0}
     nine_back = {"anchor": "latest", "offset": -9}
-    content["evidence_requirements"][0]["period_end_open"] = True
+    opened = content["evidence_requirements"][0]
+    opened["period_end_open"] = True
+    # Its first year on record is its stated start, so nothing is read whole.
+    content["first_years"] = [{"requirement_id": opened["id"], "year": opened["period"]["start"]}]
     for section in (content["evidence_requirements"], content["translation"]["operations"]):
         recent, growth = section[1], section[2]
         recent["predicates"][0]["rolling"] = nine_back

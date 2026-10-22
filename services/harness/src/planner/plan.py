@@ -1613,6 +1613,28 @@ class PeriodLicence(StrictModel):
     reduction: Reduction = Field(description="How the step combines the years.")
 
 
+class RollingCopy(StrictModel):
+    """A requirement `whole_history_split` added, as a copy of one the model wrote.
+
+    `propose_plan` writes it, never the model (`Plan.rolling_copies`).
+    """
+
+    copy_id: Identifier = Field(description="The copy's id.")
+    origin_id: Identifier = Field(description="The id of the requirement it copies.")
+
+
+class FirstYear(StrictModel):
+    """The first year on record of the dataset a dataset requirement pins, as `propose_plan` read it.
+
+    `propose_plan` writes it, never the model (`Plan.first_years`). It keys
+    on the model's requirement id, which a windowed pin never moves, and a
+    copy of the requirement reads its origin's entry.
+    """
+
+    requirement_id: Identifier = Field(description="The dataset requirement.")
+    year: Year = Field(description="The first year its dataset holds.")
+
+
 class AsksUnaccountedError(ValueError):
     """A plan leaves an ask the brief lists unaccounted for, or answers or declines one twice.
 
@@ -1717,12 +1739,8 @@ class AskRoleDroppedError(ValueError):
         )
 
 
-def roles_not_kept(
-    breakdowns: Sequence[AskBreakdown],
-    answered: Sequence[AskAnswer],
-    requirements: Iterable[EvidenceRequirement],
-) -> dict[int, tuple[PartyRole, ...]]:
-    """Each ask in `breakdowns` whose answer drops a party it breaks down by, with those parties.
+def roles_not_kept(plan: Plan) -> dict[int, tuple[PartyRole, ...]]:
+    """Each ask of `plan.ask_breakdowns` whose answer drops a party it breaks down by, with those parties.
 
     An output keeps a party when a role dimension of its shape names it, in
     the ask's word or another on the same side of the flow
@@ -1739,12 +1757,12 @@ def roles_not_kept(
     shortest way to an output that keeps them all. An ask `answered` does
     not answer keeps none.
     """
-    if not breakdowns:
+    if not plan.ask_breakdowns:
         return {}
-    shapes = frame_shapes(requirements)
-    outputs = {answer.ask: answer.outputs for answer in answered}
+    shapes = frame_shapes(plan)
+    outputs = {answer.ask: answer.outputs for answer in plan.answered}
     dropped: dict[int, tuple[PartyRole, ...]] = {}
-    for breakdown in breakdowns:
+    for breakdown in plan.ask_breakdowns:
         kept = [
             [
                 dimension.role
@@ -1761,13 +1779,7 @@ def roles_not_kept(
     return dropped
 
 
-def _check_asks_keep_their_parties(
-    asks: Sequence[str],
-    breakdowns: Sequence[AskBreakdown],
-    answered: Sequence[AskAnswer],
-    declined: Sequence[Decline],
-    requirements: Sequence[EvidenceRequirement],
-) -> None:
+def _check_asks_keep_their_parties(plan: Plan) -> None:
     """Reject a plan whose answer to an ask drops a party the ask breaks down by.
 
     Each breakdown names an ask the brief lists, once. An answered ask whose
@@ -1776,19 +1788,20 @@ def _check_asks_keep_their_parties(
     decline naming it, since a decline under another code names another part
     of the ask. Without one the plan raises `AskRoleDroppedError`.
     """
+    asks, breakdowns = plan.asks, plan.ask_breakdowns
     numbers = [breakdown.ask for breakdown in breakdowns]
     if unlisted := sorted(set(numbers) - set(range(len(asks)))):
         raise ValueError(f"the brief lists {len(asks)} asks; no breakdown of ask {unlisted!r}")
     _reject_repeats([str(number) for number in numbers], what="ask breakdown")
     exempt = {
         decline.ask_ref
-        for decline in declined
+        for decline in plan.declined
         if decline.code is UnsupportedOperation.BREAKDOWN_NOT_KEPT
     }
-    answer_numbers = {answer.ask for answer in answered}
+    answer_numbers = {answer.ask for answer in plan.answered}
     dropped = {
         number: roles
-        for number, roles in roles_not_kept(breakdowns, answered, requirements).items()
+        for number, roles in roles_not_kept(plan).items()
         if number in answer_numbers and number not in exempt
     }
     if dropped:
@@ -1844,8 +1857,29 @@ class AnswerMode(TitlelessEnum):
     COMPUTED = "computed"
 
 
+def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) -> None:
+    """Reject requirements reading one the plan does not state, or reading in a cycle."""
+    read_ids = {
+        input_id
+        for requirement in requirements_by_id.values()
+        for input_id in inputs_of(requirement)
+    }
+    unknown_inputs = sorted(read_ids - set(requirements_by_id))
+    if unknown_inputs:
+        raise ValueError(
+            f"evidence requirements read requirements this plan does not state: {unknown_inputs!r}"
+        )
+    cycle = _find_cycle(dict(requirements_by_id))
+    if cycle is not None:
+        raise ValueError(f"evidence requirements do not form a DAG; cycle: {list(cycle)!r}")
+
+
 def _check_requirement_graph(
-    requirements_by_id: dict[str, EvidenceRequirement], *, answer_mode: AnswerMode
+    requirements_by_id: dict[str, EvidenceRequirement],
+    *,
+    answer_mode: AnswerMode,
+    whole_history: Mapping[str, int],
+    origins: Mapping[str, str],
 ) -> None:
     """Reject requirements that do not agree with each other.
 
@@ -1864,22 +1898,16 @@ def _check_requirement_graph(
     one newest year states that year, one the datasets it rests on hold
     (`_check_rolling_years_agree`). An `ne`
     removes a fixed year from fixed years (`_check_exclusions_fixed`).
+    `whole_history` and `origins` are as `_build_shapes` takes them.
 
     Under `AnswerMode.SERIES`, a dataset requirement left unread by every
     other requirement is legal: it is the answer. Under `AnswerMode.COMPUTED`,
     the same requirement is rejected -- a retrieved series carries a
     reference and statistics, not the figure a computed answer asks for.
     """
+    _check_reads_resolve(requirements_by_id)
     requirements = tuple(requirements_by_id.values())
     read_ids = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
-    unknown_inputs = sorted(read_ids - set(requirements_by_id))
-    if unknown_inputs:
-        raise ValueError(
-            f"evidence requirements read requirements this plan does not state: {unknown_inputs!r}"
-        )
-    cycle = _find_cycle(requirements_by_id)
-    if cycle is not None:
-        raise ValueError(f"evidence requirements do not form a DAG; cycle: {list(cycle)!r}")
     terminal_kinds = {r.id: r.kind for r in requirements if isinstance(r, _TERMINAL_REQUIREMENTS)}
     over_combined = sorted(
         f"{_READER_PHRASES[reader.kind]} of {_COMBINED_PHRASES[terminal_kinds[input_id]]} "
@@ -1895,6 +1923,8 @@ def _check_requirement_graph(
             f"join: {'; '.join(over_combined)}",
         )
     if answer_mode == AnswerMode.COMPUTED:
+        # A copy read stands for its origin read in the plan the model wrote.
+        read_ids |= {origins[input_id] for input_id in read_ids if input_id in origins}
         unread_datasets = sorted(
             r.id for r in requirements if is_dataset(r) and r.id not in read_ids
         )
@@ -1907,7 +1937,7 @@ def _check_requirement_graph(
     _check_exclusions_fixed(requirements_by_id)
     _check_rolling_reads_open_periods(requirements_by_id)
     _check_rolling_years_agree(requirements_by_id)
-    _build_shapes(requirements_by_id)
+    _build_shapes(requirements_by_id, whole_history=whole_history, origins=origins)
 
 
 def rolls(requirement: EvidenceRequirement) -> bool:
@@ -2032,37 +2062,252 @@ def _rolling_reads(
     return reads, rolling
 
 
-def rolling_readers(
-    requirements_by_id: Mapping[str, EvidenceRequirement], dataset_id: str
-) -> list[EvidenceRequirement]:
-    """The requirements stating a period that follows the newest data, among those resting on `dataset_id`."""
-    return [
-        requirement
-        for requirement in requirements_by_id.values()
-        if rolls(requirement) and dataset_id in dataset_roots(requirements_by_id, requirement.id)
-    ]
-
-
-def read_from_first_year(
-    requirements_by_id: Mapping[str, EvidenceRequirement], dataset_id: str
+def passes_observation_years(
+    requirements_by_id: Mapping[str, EvidenceRequirement], reader_id: str, dataset_id: str
 ) -> bool:
-    """Whether dataset requirement `dataset_id` is retrieved from the first year its dataset holds.
+    """Whether `reader_id` reads dataset requirement `dataset_id` through steps that keep its years.
 
-    One stating `period_end_open` that a start following the newest data
-    reads (`rolls_from_its_start` among its `rolling_readers`) is, since
-    that start can sit before the stated period
-    (`submission.service._open_window`). Its stated first year then bounds
-    nothing.
+    Every step on the way, `dataset_id` included and `reader_id` left out,
+    has to pass the years each row was observed in up to the next: a growth
+    does not, nor does a step that combines the years it reads
+    (`_licence_for`), and a two-sided step does only when both its sides
+    do. A start that follows the newest data, read through such steps,
+    bounds the years the dataset holds; read above a collapse, it bounds
+    the years the collapse picked or summed, and the dataset keeps its
+    stated period (`whole_history_split`).
     """
-    requirement = requirements_by_id[dataset_id]
-    return (
-        isinstance(requirement, DatasetRequirement)
-        and requirement.period_end_open
-        and any(
-            rolls_from_its_start(reader)
-            for reader in rolling_readers(requirements_by_id, dataset_id)
-        )
+    return any(
+        dataset_id in dataset_roots(requirements_by_id, input_id)
+        and _keeps_observation_years(requirements_by_id, input_id)
+        for input_id in inputs_of(requirements_by_id[reader_id])
     )
+
+
+def _keeps_observation_years(
+    requirements_by_id: Mapping[str, EvidenceRequirement], step_id: str
+) -> bool:
+    """Whether `step_id` and every step it is computed from pass their input's years on (`passes_observation_years`)."""
+    step = requirements_by_id[step_id]
+    if isinstance(step, DatasetRequirement):
+        return True
+    if isinstance(step, GrowthRequirement) or _licence_for(step) is not None:
+        return False
+    return all(
+        _keeps_observation_years(requirements_by_id, input_id) for input_id in inputs_of(step)
+    )
+
+
+class HistorySplit(NamedTuple):
+    """A plan's requirements once every read of a dataset's whole history serves only its rolling-start readers.
+
+    `requirements` are the requirements as split, `copies` each clone with
+    its origin (the plan's own `rolling_copies` first), and `whole_history`
+    each dataset requirement read from its first year on record, by id,
+    with that year, the year its shape starts at (`_build_shapes`).
+    `first_years_read` names the model's dataset requirements whose first
+    year the split reads, and `first_year_unknown` those of them the plan's
+    `first_years` holds no year for (`whole_history_split`).
+    """
+
+    requirements: tuple[EvidenceRequirement, ...]
+    copies: tuple[RollingCopy, ...]
+    whole_history: dict[str, int]
+    first_years_read: tuple[str, ...]
+    first_year_unknown: tuple[str, ...]
+
+    def origins(self) -> dict[str, str]:
+        """Each clone's id mapped to its origin's."""
+        return {copy.copy_id: copy.origin_id for copy in self.copies}
+
+
+def origin_of(split: HistorySplit, step_id: str) -> str:
+    """The id of the model's requirement `step_id` copies, or `step_id` itself where it copies none.
+
+    Outward text names a step by it: a refusal's requirement ids and the
+    dataset requirement a period-reduction gap reads.
+    """
+    return split.origins().get(step_id, step_id)
+
+
+def whole_history_split(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    answering: Collection[str],
+    first_years: Iterable[FirstYear],
+    copies: Iterable[RollingCopy],
+) -> HistorySplit:
+    """`requirements` split so a dataset read from its first year serves only its rolling-start readers.
+
+    A dataset requirement D stating `period_end_open` is read from its first
+    year on record by its rolling-start readers R: each requirement
+    `rolls_from_its_start` holds for that reads D through steps keeping its
+    years (`passes_observation_years`). Its first year is the one
+    `first_years` holds for D, or for the origin `copies` names when D is a
+    clone. Where that year is at or after D's stated start, the whole
+    history and the stated period hold the same rows and nothing splits.
+
+    Otherwise let H be the steps on R's paths from D, D included and R left
+    out, and O those of H that a step outside H and R reads or that answer
+    the plan (`answering`). With O empty, D itself is the whole-history
+    read. Else O and every step of H a step of O is computed from are each
+    copied under the first free id of `{stem}_history`, `{stem}_history_2`
+    and on (`stem` the origin's first 52 characters), placed after the
+    origin, with each input among them naming its copy, and every other
+    step of H and every reader in R reading a step among them reads its
+    copy instead. The copy of D is the whole-history read, and the
+    originals keep their stated years for every other reader. Nothing is
+    dropped, so no origin is left unread.
+
+    On its own output, with its `copies`, it changes nothing: every
+    whole-history read is then read only by its rolling-start readers and
+    the steps between.
+    """
+    years = {entry.requirement_id: entry.year for entry in first_years}
+    made = list(copies)
+    origins = {copy.copy_id: copy.origin_id for copy in made}
+    split = list(requirements)
+    whole: dict[str, int] = {}
+    read: list[str] = []
+    unknown: list[str] = []
+    datasets = [r for r in requirements if isinstance(r, DatasetRequirement) and r.period_end_open]
+    for dataset in datasets:
+        by_id = {requirement.id: requirement for requirement in split}
+        readers = {
+            reader.id
+            for reader in split
+            if rolls_from_its_start(reader)
+            and passes_observation_years(by_id, reader.id, dataset.id)
+        }
+        if not readers:
+            continue
+        origin = origins.get(dataset.id, dataset.id)
+        read.append(origin)
+        first_year = years.get(origin)
+        if first_year is None:
+            unknown.append(origin)
+            continue
+        if first_year >= dataset.period.start:
+            continue
+        cloned, rerouted = _history_copies(by_id, dataset.id, readers=readers, answering=answering)
+        if not cloned:
+            whole[dataset.id] = first_year
+            continue
+        split = _with_copies(split, cloned, rerouted=rerouted)
+        made.extend(RollingCopy(copy_id=copy_id, origin_id=step_id) for step_id, copy_id in cloned)
+        whole[dict(cloned)[dataset.id]] = first_year
+    return HistorySplit(
+        requirements=tuple(split),
+        copies=tuple(made),
+        whole_history=whole,
+        first_years_read=tuple(read),
+        first_year_unknown=tuple(unknown),
+    )
+
+
+def _history_copies(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+    dataset_id: str,
+    *,
+    readers: Collection[str],
+    answering: Collection[str],
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """The steps `whole_history_split` copies for `dataset_id`, each with its copy's id, and the steps to read the copies.
+
+    The copies are in plan order, and none where no step between the
+    dataset and its rolling-start `readers` is read by anything else or
+    answers the plan. The steps to read them are the `readers` and the
+    steps between left uncopied.
+    """
+    reads_of: dict[str, list[str]] = {step_id: [] for step_id in requirements_by_id}
+    for requirement in requirements_by_id.values():
+        for input_id in inputs_of(requirement):
+            reads_of[input_id].append(requirement.id)
+    between = {
+        step_id
+        for reader in readers
+        for step_id in _upstream(reader, requirements_by_id)
+        if step_id not in readers and dataset_id in _upstream(step_id, requirements_by_id)
+    }
+    shared = {
+        step_id
+        for step_id in between
+        if step_id in answering
+        or any(user not in between and user not in readers for user in reads_of[step_id])
+    }
+    if not shared:
+        return [], set()
+    copied = between & set().union(*(_upstream(step_id, requirements_by_id) for step_id in shared))
+    taken = set(requirements_by_id)
+    cloned = [
+        (step_id, _copy_id(step_id, taken)) for step_id in requirements_by_id if step_id in copied
+    ]
+    return cloned, (between - copied) | set(readers)
+
+
+def _copy_id(origin_id: str, taken: set[str]) -> str:
+    """The first free id of `{stem}_history`, `{stem}_history_2` and on, which it then takes."""
+    stem = origin_id[:52]
+    copy_id = next(
+        candidate
+        for candidate in itertools.chain(
+            (f"{stem}_history",), (f"{stem}_history_{n}" for n in itertools.count(2))
+        )
+        if candidate not in taken
+    )
+    taken.add(copy_id)
+    return copy_id
+
+
+def _with_copies(
+    requirements: Sequence[EvidenceRequirement],
+    cloned: Sequence[tuple[str, str]],
+    *,
+    rerouted: Collection[str],
+) -> list[EvidenceRequirement]:
+    """`requirements` with each step of `cloned` followed by its copy, and each step `rerouted` reading the copies."""
+    renamed = dict(cloned)
+    split: list[EvidenceRequirement] = []
+    for requirement in requirements:
+        if requirement.id in rerouted:
+            split.append(_reading(requirement, renamed))
+            continue
+        split.append(requirement)
+        if requirement.id in renamed:
+            copy = _reading(requirement, renamed).model_copy(update={"id": renamed[requirement.id]})
+            split.append(copy)
+    return split
+
+
+def _reading(requirement: EvidenceRequirement, renamed: Mapping[str, str]) -> EvidenceRequirement:
+    """`requirement` reading, for each input `renamed` names, the requirement it maps to."""
+    if isinstance(requirement, DatasetRequirement) or renamed.keys().isdisjoint(
+        inputs_of(requirement)
+    ):
+        return requirement
+
+    def side(read: RequirementSide) -> RequirementSide:
+        return read.model_copy(update={"input_id": renamed.get(read.input_id, read.input_id)})
+
+    if isinstance(requirement, ComparisonRequirement):
+        update: dict[str, object] = {
+            "minuend": side(requirement.minuend),
+            "subtrahend": side(requirement.subtrahend),
+        }
+    elif isinstance(requirement, SumOfRequirement):
+        update = {"left": side(requirement.left), "right": side(requirement.right)}
+    elif isinstance(requirement, ShareOfRequirement | QuotientRequirement):
+        update = {
+            "numerator": side(requirement.numerator),
+            "denominator": side(requirement.denominator),
+        }
+    elif isinstance(requirement, JoinRequirement):
+        update = {
+            "left_id": renamed.get(requirement.left_id, requirement.left_id),
+            "right_id": renamed.get(requirement.right_id, requirement.right_id),
+        }
+    else:
+        update = {"input_id": renamed.get(requirement.input_id, requirement.input_id)}
+    return requirement.model_copy(update=update)
 
 
 def _check_rolling_reads_open_periods(
@@ -2224,12 +2469,30 @@ def _check_exclusions_fixed(requirements_by_id: Mapping[str, EvidenceRequirement
         )
 
 
-def frame_shapes(requirements: Iterable[EvidenceRequirement]) -> dict[str, FrameShape]:
-    """Return each requirement's output shape, by id, for a plan that already validated."""
-    return _build_shapes({requirement.id: requirement for requirement in requirements})
+def frame_shapes(plan: Plan) -> dict[str, FrameShape]:
+    """Return each requirement's output shape, by id, for a plan that already validated.
+
+    The shapes are those of the plan as it runs (`split_of`), so they hold
+    a key for each copy the split adds beside the plan's own requirements.
+    """
+    return _split_shapes(split_of(plan))
 
 
-def _build_shapes(requirements_by_id: dict[str, EvidenceRequirement]) -> dict[str, FrameShape]:
+def _split_shapes(split: HistorySplit) -> dict[str, FrameShape]:
+    """The shapes of `split`'s requirements, each whole-history read starting at its first year."""
+    return _build_shapes(
+        {requirement.id: requirement for requirement in split.requirements},
+        whole_history=split.whole_history,
+        origins=split.origins(),
+    )
+
+
+def _build_shapes(
+    requirements_by_id: dict[str, EvidenceRequirement],
+    *,
+    whole_history: Mapping[str, int],
+    origins: Mapping[str, str],
+) -> dict[str, FrameShape]:
     """Walk every requirement in topological order, rejecting an illegal shape as it is found.
 
     Each requirement's output shape is computed from its inputs' -- already
@@ -2237,7 +2500,16 @@ def _build_shapes(requirements_by_id: dict[str, EvidenceRequirement]) -> dict[st
     `planner.shapes` states for its kind, after `planner.shapes.rejects`
     confirms the input may feed it. Nothing here skips a check for want of a
     single upstream dataset requirement to walk to: a role dimension always
-    names exactly one, by construction of every transform.
+    names exactly one, by construction of every transform. `whole_history`
+    names each dataset requirement read from the first year its dataset
+    holds on record, with that year, where its shape starts
+    (`_dataset_shape`); every other one starts at its stated period.
+    `origins` maps each copy `whole_history_split` added to the requirement
+    it copies, which a refusal names in its place: a copy reads other
+    years than its origin, and the model wrote only the origin. A copy
+    that is not a dataset requirement passes its input's years on
+    (`passes_observation_years`), so it writes no span named for itself,
+    and its shape is built under its origin's id.
 
     Raises:
         RollingPlanError: `RollingIssue.SIDE_UNANCHORED`, naming the first
@@ -2261,21 +2533,29 @@ def _build_shapes(requirements_by_id: dict[str, EvidenceRequirement]) -> dict[st
     shapes_by_id: dict[str, FrameShape] = {}
     for requirement_id in _topological_order(requirements_by_id):
         requirement = requirements_by_id[requirement_id]
-        shape = _shape_of(requirement, shapes_by_id, requirements_by_id)
+        named = origins.get(requirement_id, requirement_id)
+        if named != requirement_id and not isinstance(requirement, DatasetRequirement):
+            requirement = requirement.model_copy(update={"id": named})
+        shape = _shape_of(
+            requirement,
+            shapes_by_id,
+            requirements_by_id,
+            first_year=whole_history.get(requirement_id),
+        )
         sides = [shapes_by_id[input_id] for input_id in reads[requirement_id]]
         missed = anchor_misses(sides, over[requirement_id]) if len(sides) > 1 else None
         if missed is not None:
             raise RollingPlanError(
                 RollingIssue.SIDE_UNANCHORED,
-                f"{requirement_id!r}: {missed}",
-                requirement_ids=[requirement_id],
+                f"{named!r}: {missed}",
+                requirement_ids=[named],
             )
         run_out = years_run_out(shape)
         if run_out is not None:
             raise RollingPlanError(
                 RollingIssue.YEARS_RUN_OUT,
-                f"{requirement_id!r}: {run_out}",
-                requirement_ids=[requirement_id],
+                f"{named!r}: {run_out}",
+                requirement_ids=[named],
             )
         shapes_by_id[requirement_id] = shape
     return shapes_by_id
@@ -2303,15 +2583,13 @@ def _topological_order(requirements_by_id: dict[str, EvidenceRequirement]) -> li
     return order
 
 
-def _dataset_shape(
-    requirement: DatasetRequirement, requirements_by_id: Mapping[str, EvidenceRequirement]
-) -> FrameShape:
+def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -> FrameShape:
     """The shape a fresh retrieval carries: one role dimension per role phrase the entities
     state, then one open dimension per `across` word, then the breakdown's.
 
-    Its years run on past `period` with `period_end_open`, and start at the
-    dataset's first year when a reader of it in `requirements_by_id` has it
-    retrieved from there (`read_from_first_year`).
+    Its years run on past `period` with `period_end_open`, and start at
+    `first_year` for a read of its dataset's whole history, the first year
+    the dataset holds on record (`_build_shapes`).
 
     A requirement reading its source's StatVars separately carries an
     uncounted number of measures (`None`): the plan has no source yet to
@@ -2346,14 +2624,14 @@ def _dataset_shape(
         roles = (*roles, breakdown)
     separate = requirement.stat_vars is StatVarReading.SEPARATE and requirement.breakdown is None
     measures = None if separate else 1
+    period = requirement.period
     return retrieved(
         requirement_id=requirement.id,
         roles=roles,
-        period=requirement.period,
+        period=period if first_year is None else Period(start=first_year, end=period.end),
         measures=measures,
         place_typed=names_no_place(requirement),
         end_open=requirement.period_end_open,
-        from_first_year=read_from_first_year(requirements_by_id, requirement.id),
     )
 
 
@@ -2493,7 +2771,7 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     held = _years_read(requirement, input_shape)
     if held is None or not held.several:
         return None
-    if not (held.from_first_year or held.follows_newest):
+    if not held.follows_newest:
         return (
             f"{requirement.id!r} ranks entities over {held.phrase()} with no reduction, so no "
             "entity has a single value to rank on; to rank one year set window_start and "
@@ -2710,10 +2988,15 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     requirement: EvidenceRequirement,
     shapes_by_id: dict[str, FrameShape],
     requirements_by_id: dict[str, EvidenceRequirement],
+    *,
+    first_year: int | None,
 ) -> FrameShape:
-    """Return the output shape `requirement` produces, raising on the first illegal input."""
+    """Return the output shape `requirement` produces, raising on the first illegal input.
+
+    `first_year` starts a dataset requirement's shape (`_dataset_shape`).
+    """
     if isinstance(requirement, DatasetRequirement):
-        return _dataset_shape(requirement, requirements_by_id)
+        return _dataset_shape(requirement, first_year=first_year)
     if isinstance(requirement, AggregateRequirement):
         return _aggregate_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, GrowthRequirement):
@@ -2974,9 +3257,11 @@ class Plan(StrictModel):
             "requirement."
         ),
     )
+    # The model writes at most `MAX_PLAN_REQUIREMENTS` (`_record_fits_the_size_limit`);
+    # `whole_history_split` copies each of them at most once.
     evidence_requirements: tuple[EvidenceRequirement, ...] = Field(
         default=(),
-        max_length=MAX_PLAN_REQUIREMENTS,
+        max_length=2 * MAX_PLAN_REQUIREMENTS,
         description=(
             f"What the answer rests on, at most {MAX_PLAN_REQUIREMENTS} requirements: a "
             "dataset requirement per measure and source, naming every entity, and a derived "
@@ -3029,6 +3314,23 @@ class Plan(StrictModel):
             "combines them that way (`period_licences_held`)."
         ),
     )
+    rolling_copies: Annotated[tuple[RollingCopy, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_REQUIREMENTS,
+        description=(
+            "The requirements `propose_plan` added so that only a step rolling from its "
+            "start reads a dataset's whole history, each with the requirement it copies "
+            "(`whole_history_split`)."
+        ),
+    )
+    first_years: Annotated[tuple[FirstYear, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=MAX_PLAN_REQUIREMENTS,
+        description=(
+            "The first year on record of the dataset each dataset requirement pins, for the "
+            "requirements a step rolling from its start reads."
+        ),
+    )
     translation: Translation | None = None
     workflow: Workflow | None = None
     version: int = 1
@@ -3047,14 +3349,22 @@ class Plan(StrictModel):
 
     @model_validator(mode="after")
     def _record_fits_the_size_limit(self) -> Plan:
-        """Reject a plan whose model-authored part serialises past `MAX_PLAN_RECORD_CHARS`.
+        """Reject a plan whose model-authored part states more than `MAX_PLAN_REQUIREMENTS` requirements or serialises past `MAX_PLAN_RECORD_CHARS`.
 
         The field limits bound each string and collection on its own, and a
         plan that fills many of them at once is still far past what the
         planner's brief can carry. The message names the measured size and the
-        parts that take the most of it, so the model can shorten those.
+        parts that take the most of it, so the model can shorten those. Both
+        limits measure the plan the model wrote (`authored`), without the
+        copies `whole_history_split` adds.
         """
-        record = self.model_dump(mode="json", include=_MODEL_AUTHORED)
+        written = authored(self)
+        if len(written.evidence_requirements) > MAX_PLAN_REQUIREMENTS:
+            raise ValueError(
+                f"the plan states {len(written.evidence_requirements)} evidence requirements, "
+                f"over the {MAX_PLAN_REQUIREMENTS} a plan may take"
+            )
+        record = written.model_dump(mode="json", include=_MODEL_AUTHORED)
         size = _serialised_chars(record)
         if size <= MAX_PLAN_RECORD_CHARS:
             return self
@@ -3103,6 +3413,15 @@ class Plan(StrictModel):
         (`_check_asks_accounted`), and an answer keeps in one output every
         party its ask breaks down by unless that part is declined
         (`_check_asks_keep_their_parties`).
+
+        The requirements are judged as they run: split so each dataset read
+        from its first year serves only its rolling-start readers
+        (`split_of`), the split being the identity on a plan already split.
+        A dataset requirement whose first year the split reads and
+        `first_years` does not hold is refused before any shape is built
+        (`OpenPeriodFault.FIRST_YEAR_UNKNOWN`). A plan carrying
+        `rolling_copies` carries exactly the split of the plan the model
+        wrote (`_check_copies_are_the_split`).
         """
         slots = [decision.slot for decision in self.decisions]
         _reject_repeats(slots, what="decision slot")
@@ -3125,20 +3444,27 @@ class Plan(StrictModel):
             uncited = sorted(set(slots) - cited)
             if uncited:
                 raise ValueError(f"no evidence requirement cites the decisions {uncited!r}")
-        _check_requirement_graph(
-            {r.id: r for r in self.evidence_requirements}, answer_mode=self.answer_mode
-        )
+        _check_reads_resolve({r.id: r for r in self.evidence_requirements})
+        _check_first_years(self)
+        split = split_of(self)
+        if split.first_year_unknown:
+            raise _first_year_unknown(self, split.first_year_unknown[0])
+        if self.rolling_copies:
+            _check_copies_are_the_split(self)
+        try:
+            _check_requirement_graph(
+                {requirement.id: requirement for requirement in split.requirements},
+                answer_mode=self.answer_mode,
+                whole_history=split.whole_history,
+                origins=split.origins(),
+            )
+        except RollingPlanError as error:
+            raise _naming_origins(error, split) from error
         decisions_by_slot = {decision.slot: decision for decision in self.decisions}
         _check_requirements_honour_their_decisions(self.evidence_requirements, decisions_by_slot)
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
         _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
-        _check_asks_keep_their_parties(
-            self.asks,
-            self.ask_breakdowns,
-            self.answered,
-            self.declined,
-            self.evidence_requirements,
-        )
+        _check_asks_keep_their_parties(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self
@@ -3247,6 +3573,7 @@ class Plan(StrictModel):
         ask_breakdowns: Sequence[AskBreakdown] = (),
         asks_across_years: Sequence[int] = (),
         answered: Sequence[AskAnswer] = (),
+        first_years: Sequence[FirstYear] | None = None,
     ) -> Plan:
         """Return a new, incremented-version `Plan` with a patch applied.
 
@@ -3270,7 +3597,9 @@ class Plan(StrictModel):
         may no longer fit the new ones, so the new version starts where a first
         draft does. It clears `period_licences` too, which `propose_plan`
         writes on the amended plan from this one's
-        (`period_licences_held`).
+        (`period_licences_held`). The patch applies to the plan the model
+        wrote (`authored`), so the amended plan carries no
+        `rolling_copies`, and its validation splits it again.
 
         Args:
             decisions: The decisions this patch adds or replaces, keyed by
@@ -3302,6 +3631,10 @@ class Plan(StrictModel):
             answered: The answers this patch adds or replaces, keyed by
                 `ask`. One replaces whatever accounted for its ask before,
                 a decline included.
+            first_years: The first years on record the amended plan reads
+                its datasets' whole history from (`whole_history_split`).
+                Omitted, it keeps this plan's for the dataset requirements
+                it still states.
 
         Returns:
             A new `Plan`; `self` is unchanged.
@@ -3313,18 +3646,24 @@ class Plan(StrictModel):
         breakdowns = self.ask_breakdowns if asks is None else tuple(ask_breakdowns)
         across_years = self.asks_across_years if asks is None else tuple(asks_across_years)
         asks = self.asks if asks is None else tuple(asks)
+        requirements = _patched(
+            authored(self).evidence_requirements,
+            evidence_requirements,
+            removed_evidence_requirements,
+            key="id",
+        )
+        if first_years is None:
+            stated = {r.id for r in requirements if isinstance(r, DatasetRequirement)}
+            first_years = [entry for entry in self.first_years if entry.requirement_id in stated]
         return Plan.model_validate(
             {
                 **self.model_dump(),
                 "question": self.question if question is None else question,
                 "answer_mode": self.answer_mode if answer_mode is None else answer_mode,
                 "decisions": _patched(self.decisions, decisions, removed_decisions, key="slot"),
-                "evidence_requirements": _patched(
-                    self.evidence_requirements,
-                    evidence_requirements,
-                    removed_evidence_requirements,
-                    key="id",
-                ),
+                "evidence_requirements": requirements,
+                "rolling_copies": (),
+                "first_years": tuple(first_years),
                 **_patched_accounts(
                     self, answered=answered, declined=declined, same_asks=asks == self.asks
                 ),
@@ -3464,6 +3803,119 @@ def plan_revision(plan: Plan) -> str:
     return hashlib.sha256(rfc8785.dumps(content)).hexdigest()
 
 
+def split_of(plan: Plan) -> HistorySplit:
+    """`plan`'s requirements as they run, each whole-history read serving only its rolling-start readers.
+
+    The split of its requirements under the results answering it and its
+    `first_years`, continued from its `rolling_copies` (`whole_history_split`).
+    On a plan already split it is the identity.
+    """
+    return whole_history_split(
+        plan.evidence_requirements,
+        answering=answering_results(plan),
+        first_years=plan.first_years,
+        copies=plan.rolling_copies,
+    )
+
+
+def authored(plan: Plan) -> Plan:
+    """`plan` as the model wrote it: no copy `rolling_copies` names, and neither field the split writes.
+
+    Every input naming a copy names its origin again, and `rolling_copies`
+    and `first_years` are empty. The split of the result under `plan`'s
+    `first_years` is `plan` again, and on a plan with no copies this
+    changes only `first_years`. The result is not validated, since a
+    rolling-start read in it needs the first years it no longer carries;
+    `translation` and `workflow` are `plan`'s own.
+    """
+    origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    return plan.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                _reading(requirement, origins)
+                for requirement in plan.evidence_requirements
+                if requirement.id not in origins
+            ),
+            "rolling_copies": (),
+            "first_years": (),
+        }
+    )
+
+
+def _check_first_years(plan: Plan) -> None:
+    """Reject `first_years` naming a requirement twice, or one that is no dataset requirement of `plan`."""
+    named = [entry.requirement_id for entry in plan.first_years]
+    _reject_repeats(named, what="first year")
+    datasets = {r.id for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)}
+    if unknown := sorted(set(named) - datasets):
+        raise ValueError(f"first years name no dataset requirement of this plan: {unknown!r}")
+
+
+def _first_year_unknown(plan: Plan, requirement_id: str) -> RollingPlanError:
+    """`RollingIssue.NEEDS_OPEN_PERIOD` for a dataset requirement read from a first year `plan` does not hold.
+
+    It carries the requirement's pin as `spec_id`, `None` when it pins
+    none. `submission.service` words it from what the session read.
+    """
+    requirement = plan.requirement(requirement_id)
+    assert isinstance(requirement, DatasetRequirement), requirement
+    return RollingPlanError(
+        RollingIssue.NEEDS_OPEN_PERIOD,
+        f"{requirement_id!r} is read from a start that follows the newest data, which needs "
+        "the first year its dataset holds, and none is on record. Where the window covers "
+        "several years, state the start as a fixed year and roll only the end; a window of "
+        "one year cannot, so drop `rolling` and `period_end_open` there for fixed years",
+        requirement_ids=[requirement_id],
+        fault=OpenPeriodFault.FIRST_YEAR_UNKNOWN,
+        spec_id=requirement.source_spec_id,
+    )
+
+
+def _check_copies_are_the_split(plan: Plan) -> None:
+    """Reject `rolling_copies` other than the split of the plan the model wrote.
+
+    The split of `authored(plan)` under `plan.first_years` has to give
+    `plan`'s requirements and copies, apart from each copy's
+    `source_spec_id`, which `submission.service._window_pins` moves to the
+    copy's own windowed pin.
+    """
+    written = authored(plan)
+    again = whole_history_split(
+        written.evidence_requirements,
+        answering=answering_results(written),
+        first_years=plan.first_years,
+        copies=(),
+    )
+    copies = {copy.copy_id for copy in plan.rolling_copies}
+
+    def unpinned(requirements: Iterable[EvidenceRequirement]) -> list[EvidenceRequirement]:
+        return [
+            requirement.model_copy(update={"source_spec_id": None})
+            if requirement.id in copies and isinstance(requirement, DatasetRequirement)
+            else requirement
+            for requirement in requirements
+        ]
+
+    if again.copies != plan.rolling_copies or unpinned(again.requirements) != unpinned(
+        plan.evidence_requirements
+    ):
+        raise ValueError(
+            "the plan's rolling copies are not the split of the requirements the model wrote"
+        )
+
+
+def _naming_origins(error: RollingPlanError, split: HistorySplit) -> RollingPlanError:
+    """`error` naming, in place of each copy among its requirements, the requirement it copies."""
+    named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
+    return RollingPlanError(
+        error.issue,
+        str(error),
+        requirement_ids=list(named),
+        fault=error.fault,
+        spec_id=error.spec_id,
+    )
+
+
 class ResultScopeGap(NamedTuple):
     """A result given per member of a party nobody named, with no decision saying it should be.
 
@@ -3529,11 +3981,14 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     The results checked are those `answering_results` names, except a
     dataset requirement of an `AnswerMode.SERIES` plan that no ask names:
     that is the series retrieved as asked, one per member, for a chart to
-    draw. Requires a plan whose requirements already validated.
+    draw. Requires a plan whose requirements already validated, and reads
+    them as they run (`split_of`), naming for each gap the dataset
+    requirement the model wrote.
     """
-    requirements_by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    split = split_of(plan)
+    requirements_by_id = {requirement.id: requirement for requirement in split.requirements}
     decisions = {decision.slot: decision for decision in plan.decisions}
-    shapes = _build_shapes(requirements_by_id)
+    shapes = _split_shapes(split)
     by = {breakdown.ask: breakdown.by for breakdown in plan.ask_breakdowns}
     listed: dict[str, set[str]] = {}
     for answer in plan.answered:
@@ -3565,7 +4020,7 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
                 for slot in dataset.decision_ids
             ):
                 continue
-            gaps.append(ResultScopeGap(output_id, ask, role.role, dataset.id))
+            gaps.append(ResultScopeGap(output_id, ask, role.role, origin_of(split, dataset.id)))
     return gaps
 
 
@@ -3611,10 +4066,14 @@ def unstated_period_reductions(plan: Plan) -> list[PeriodReductionGap]:
     that answers no ask, a step no answering result is computed from, and a
     plan with no asks license nothing.
 
-    Requires a plan whose requirements already validated.
+    Requires a plan whose requirements already validated, and reads them as
+    they run (`split_of`). A copy the split adds passes its input's years on
+    (`passes_observation_years`), so it reduces none, and each gap's
+    `held.dataset_id` names the dataset requirement the model wrote.
     """
-    requirements_by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
-    shapes = _build_shapes(requirements_by_id)
+    split = split_of(plan)
+    requirements_by_id = {requirement.id: requirement for requirement in split.requirements}
+    shapes = _split_shapes(split)
     across_years = set(plan.asks_across_years)
     licensed = set(plan.period_licences)
     asks_of: dict[str, list[int]] = {output: [] for output in answering_results(plan)}
@@ -3622,10 +4081,11 @@ def unstated_period_reductions(plan: Plan) -> list[PeriodReductionGap]:
         for output in answer.outputs:
             asks_of[output].append(answer.ask)
     gaps: list[PeriodReductionGap] = []
-    for step in plan.evidence_requirements:
+    for step in split.requirements:
         reduced = _years_reduced(step, shapes)
         if reduced is None or _licence_for(step) in licensed:
             continue
+        reduced = reduced._replace(dataset_id=origin_of(split, reduced.dataset_id))
         computed = [
             output for output in asks_of if step.id in _upstream(output, requirements_by_id)
         ] or [step.id]
@@ -3724,29 +4184,28 @@ def _one_year_tried(held: YearsHeld, step_id: str, plan: Plan) -> list[OneYearRe
 def _one_year_admits(plan: Plan, reads: Mapping[str, OneYearRead]) -> bool:
     """Whether `plan` passes once each step `reads` names reads its year there (`one_year_followed`).
 
-    It passes when it validates as a `Plan`, the rules every plan
+    The change is made to the plan the model wrote (`authored`), as the
+    planner would make it, and passes when that plan validates as a
+    `Plan` under `plan`'s `first_years`, the rules every plan
     `propose_plan` records is built under: a rolling year can leave the
     step no year, a fixed year can be passed by a first year that follows
     the newest data, and a window a decision the rank cites fixes stays as
-    the decision states it. It passes only when it also retrieves from the
-    first year it holds exactly the datasets `plan` does
-    (`read_from_first_year`). Each dataset is then retrieved over the window
-    `plan` gives it (`submission.service._window_pins`), so the change
-    meets no retrieval rule `plan` does not and leaves every other result's
-    years unchanged.
+    the decision states it. Validation splits it (`split_of`), so a year
+    that follows the newest data reads its dataset's whole history through
+    copies of its own and every other result keeps the years it read. A
+    dataset whose first year `plan` does not hold cannot be read so, and
+    the change fails there.
     """
-    followed = list(plan.evidence_requirements)
+    written = authored(plan)
+    followed = list(written.evidence_requirements)
     for step_id, read in reads.items():
         followed = one_year_followed(followed, step_id, read)
-    before = {requirement.id: requirement for requirement in plan.evidence_requirements}
-    after = {requirement.id: requirement for requirement in followed}
-    if _retrieved_from_first_year(after) != _retrieved_from_first_year(before):
-        return False
     try:
         Plan.model_validate(
             {
-                **plan.model_dump(),
+                **written.model_dump(),
                 "evidence_requirements": followed,
+                "first_years": plan.first_years,
                 "translation": None,
                 "workflow": None,
             }
@@ -3754,17 +4213,6 @@ def _one_year_admits(plan: Plan, reads: Mapping[str, OneYearRead]) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _retrieved_from_first_year(
-    requirements_by_id: Mapping[str, EvidenceRequirement],
-) -> frozenset[str]:
-    """The dataset requirements retrieved from the first year their dataset holds (`read_from_first_year`)."""
-    return frozenset(
-        requirement_id
-        for requirement_id in requirements_by_id
-        if read_from_first_year(requirements_by_id, requirement_id)
-    )
 
 
 def one_year_followed(
@@ -3919,19 +4367,15 @@ class OneYearRead(NamedTuple):
 class YearsHeld(NamedTuple):
     """The years a step reads from its input, one row per entity for each (`_years_held`).
 
-    `years` are the years it holds today. `from_first_year` says they start
-    at the first year `dataset_id` holds, whatever `years.start` states. The
-    dataset is retrieved from there, and nothing above it sets a later
-    start. `follows_newest` says newer data adds later years, and `until`
-    the last year a fixed bound lets them reach, `None` when nothing stops
-    them. `one_year` is the year the step can read alone and every series
-    keeps holding as newer data arrives (`_one_year_read`). A refusal
-    offers one the plan reading it is admitted with, `None` where no year
-    is (`_one_year_offered`).
+    `years` are the years it holds today. `follows_newest` says newer data
+    adds later years, and `until` the last year a fixed bound lets them
+    reach, `None` when nothing stops them. `one_year` is the year the step
+    can read alone and every series keeps holding as newer data arrives
+    (`_one_year_read`). A refusal offers one the plan reading it is admitted
+    with, `None` where no year is (`_one_year_offered`).
     """
 
     years: Period
-    from_first_year: bool
     follows_newest: bool
     until: int | None
     one_year: OneYearRead | None
@@ -3940,15 +4384,12 @@ class YearsHeld(NamedTuple):
     @property
     def several(self) -> bool:
         """Whether they are, or newer data makes them, more than one year."""
-        return self.years.end > self.years.start or self.from_first_year or self.follows_newest
+        return self.years.end > self.years.start or self.follows_newest
 
     def phrase(self) -> str:
         """The years as a refusal names them."""
         start, end = self.years.start, self.years.end
         stops = "" if self.until is None else f", as far as {self.until},"
-        if self.from_first_year:
-            newer = f" and each newer one{stops}" if self.follows_newest else ""
-            return f"every year {self.dataset_id!r} holds up to {end}{newer}"
         if self.follows_newest:
             return f"the years from {start} to the newest{stops}"
         return f"{start}-{end}"
@@ -3996,14 +4437,12 @@ def _years_read(
 
     They are the input's `period` and its `drift` once a rank's own window
     is applied (`shapes.windowed`). Each `planner.shapes` transform states
-    how newer data moves them: a dataset retrieved from its first year
-    holds every year before the stated period too, until a bound sets a
-    first year, and one retrieved with no end year adds each newer year
-    until a fixed bound stops it. They stay one year when the last year is
-    fixed there, or when the first year and the last both follow the
-    anchor, which a window does with both ends at one offset. A first year
-    that follows the anchor ahead of an end open to the data keeps every
-    later year a series reports (`PeriodDrift.widens`).
+    how newer data moves them: a dataset retrieved with no end year adds
+    each newer year until a fixed bound stops it. They stay one year when
+    the last year is fixed there, or when the first year and the last both
+    follow the anchor, which a window does with both ends at one offset. A
+    first year that follows the anchor ahead of an end open to the data
+    keeps every later year a series reports (`PeriodDrift.widens`).
     """
     window: Period | None = None
     if (
@@ -4018,7 +4457,6 @@ def _years_read(
         return None
     return YearsHeld(
         years=years,
-        from_first_year=drift.from_first_year,
         follows_newest=drift.widens,
         until=drift.until if drift.widens else None,
         one_year=_one_year_read(years, drift),
@@ -4194,20 +4632,21 @@ def open_window(start_year: int) -> dict[str, object]:
     return {"kind": "range", "start_year": start_year}
 
 
-def retrieves_period(window: object, requirement: DatasetRequirement) -> bool:
+def retrieves_period(
+    window: object, requirement: DatasetRequirement, *, first_year: int | None
+) -> bool:
     """Whether `window`, an identity's `requested_window`, is one `requirement` is retrieved over.
 
     A closed requirement is retrieved over its `period` exactly. One stating
-    `period_end_open` is retrieved over a range with no end year that
-    starts no later than its period (`planner.agent._window_pins` starts it
-    at the period's start or at the first year the dataset holds).
+    `period_end_open` is retrieved over a range with no end year, from
+    `first_year` where it reads its dataset's whole history, the year the
+    plan's split reads it from (`HistorySplit.whole_history`), and from its
+    period's start otherwise (`submission.service._window_pins`).
     """
     if not requirement.period_end_open:
         return window == period_window(requirement.period)
-    if not isinstance(window, Mapping) or window.get("kind") != "range" or "end_year" in window:
-        return False
-    start = window.get("start_year")
-    return isinstance(start, int) and start <= requirement.period.start
+    start = requirement.period.start if first_year is None else first_year
+    return window == open_window(start)
 
 
 class FullHistory(NamedTuple):

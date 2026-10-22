@@ -149,7 +149,7 @@ def test_which_sectors_received_the_most_aid_in_kenya_ranks_each_sector_s_total(
         [decision(), _every_sector(decision)], [_aid_to_kenya(), _by_sector(), _sector_rank()]
     )
 
-    shapes = frame_shapes(plan.evidence_requirements)
+    shapes = frame_shapes(plan)
     sector = RoleDimension(role="sector", requirement_id="aid_to_kenya", breakdown=True)
     assert shapes["aid_to_kenya"].roles == (
         RoleDimension(role="recipient", requirement_id="aid_to_kenya"),
@@ -185,7 +185,7 @@ def test_a_sector_ranking_sets_beside_another_year_by_a_per_period_rank_or_a_gro
 
     plan = _plan(decisions, [since_2019, _by_sector(), reader])
 
-    (role,) = frame_shapes(plan.evidence_requirements)[reader.id].roles
+    (role,) = frame_shapes(plan)[reader.id].roles
     assert role.role == "sector"
 
 

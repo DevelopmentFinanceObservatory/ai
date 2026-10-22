@@ -172,6 +172,10 @@
     "input_id",
     "predicates"
   ],
+  "planner.plan.FirstYear": [
+    "requirement_id",
+    "year"
+  ],
   "planner.plan.GrowthRequirement": [
     "kind",
     "id",
@@ -230,6 +234,10 @@
   "planner.plan.RequirementSide": [
     "input_id",
     "entity"
+  ],
+  "planner.plan.RollingCopy": [
+    "copy_id",
+    "origin_id"
   ],
   "planner.plan.ShareOfRequirement": [
     "kind",
