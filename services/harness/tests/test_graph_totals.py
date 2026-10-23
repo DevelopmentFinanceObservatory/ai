@@ -82,10 +82,13 @@ from planner.plan import (
 )
 from planner.records import (
     DenominatorScope,
+    EvidenceIssue,
+    EvidenceIssueCode,
     GroupBy,
     Period,
     PeriodThreshold,
     Reduction,
+    Severity,
     StatVarReading,
 )
 from planner.workflow import (
@@ -913,6 +916,74 @@ async def test_a_rank_over_a_quotient_that_left_keys_out_still_says_so(
     assert notes[:-1] == _stat_var_totals(surface, outcome, plan=plan)
     assert "2 recipient entries" in notes[-1]
     assert answer_notes(surface, outcome, plan=plan, terminals=["ranked_op"]) == notes
+    assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+
+
+def _with_gaps(
+    outcome: Accepted, step_id: str, *gaps: EvidenceIssue, window: Period | None
+) -> Accepted:
+    """`outcome` with retrieval `step_id`'s evidence holding `gaps` over `window`."""
+    return outcome.model_copy(
+        update={
+            "evidence": tuple(
+                record.model_copy(update={"gaps": gaps, "window": window})
+                if record.step_id == step_id
+                else record
+                for record in outcome.evidence
+            )
+        }
+    )
+
+
+def _finding(code: EvidenceIssueCode, required: str) -> EvidenceIssue:
+    return EvidenceIssue(
+        code=code,
+        severity=Severity.WARNING,
+        requirement_id="aid",
+        detail="",
+        required=required,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "window", "stated"),
+    [
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            Period(start=2015, end=2024),
+            ["Uganda has no data from 2015 to 2024 and was left out."],
+            id="span",
+        ),
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            Period(start=2024, end=2024),
+            ["Uganda has no data in 2024 and was left out."],
+            id="one-year",
+        ),
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            None,
+            ["Uganda has no data in the years retrieved and was left out."],
+            id="no-window",
+        ),
+        pytest.param(EvidenceIssueCode.WINDOW_SHORT, None, [], id="other-gap"),
+    ],
+)
+async def test_an_entity_a_retrieval_left_out_is_named_under_every_answer_it_feeds(
+    schemas: dict[str, ToolSchema],
+    code: EvidenceIssueCode,
+    window: Period | None,
+    stated: list[str],
+) -> None:
+    """The rank over the quotient rests on the aid retrieval, which held no
+    series for Uganda: the note names it beside the rank's other notes, and
+    is confined to the terminals it sits under."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    aid = next(record.step_id for record in outcome.evidence if record.requirement_id == "aid")
+    outcome = _with_gaps(outcome, aid, _finding(code, "Uganda"), window=window)
+
+    assert answer_notes(surface, outcome, plan=plan) == stated
     assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
 
 

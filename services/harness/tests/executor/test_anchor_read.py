@@ -26,6 +26,7 @@ from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Decision,
+    Entity,
     FilterRequirement,
     FirstYear,
     GrowthRequirement,
@@ -34,7 +35,7 @@ from planner.plan import (
     current_discovery_time_left,
     plan_revision,
 )
-from planner.records import Period, PeriodThreshold, RelativePeriod, RollingWindow
+from planner.records import EntityIn, Period, PeriodThreshold, RelativePeriod, RollingWindow
 from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource
 from translator import tool
@@ -284,6 +285,62 @@ async def test_a_refused_retrieval_stops_the_translation_with_the_code_the_run_g
         ReferralKind.REQUIREMENT_UNMEETABLE.value,
         "annual_debt_service",
         "no_data_at_source",
+    )
+    assert [name for name, _ in surface.calls] == ["get_data"]
+    assert context.plan() == draft
+
+
+async def test_a_rolling_step_reading_a_left_out_entity_alone_stops_the_translation(
+    decision: Callable[..., Decision],
+    requirement: Callable[..., DatasetRequirement],
+    wide_source: Callable[..., SelectedSource],
+    manifest: Callable[..., dict[str, Any]],
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The retrieval holds Kenya's series alone, so Ghana is left out, and the
+    rolling filter keeping Ghana's newest year stops the read as the run stops
+    (`executor.run._Run._check_left_out_narrowings`), before `resolve_anchor`."""
+    dataset = requirement(
+        entities=[Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor")],
+        period_end_open=True,
+    )
+    draft = Plan(
+        question="What did Ghana pay to service its debt in the newest year?",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset,
+            FilterRequirement(
+                id="newest",
+                decision_ids=["measure"],
+                input_id=dataset.id,
+                predicates=(
+                    EntityIn(names=("Ghana",)),
+                    PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),
+                ),
+            ),
+        ],
+        first_years=[FirstYear(requirement_id=dataset.id, year=2015)],
+        status=PlanStatus.DRAFT,
+    )
+    context = _Context(draft, wide_source())
+    surface = ScriptedSurface(
+        schemas=real_schemas,
+        responses={"get_data": [ok(manifest())], "resolve_anchor": [_anchor("2024")]},
+    )
+
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    detail = answer["detail"]
+    assert (detail["code"], detail["step_id"], detail["requirement_id"]) == (
+        "entity_missing",
+        "newest",
+        "annual_debt_service",
+    )
+    referral = answer["action"]["arguments"]
+    assert (referral["kind"], referral["requirement_id"]) == (
+        ReferralKind.REQUIREMENT_UNMEETABLE.value,
+        "annual_debt_service",
     )
     assert [name for name, _ in surface.calls] == ["get_data"]
     assert context.plan() == draft

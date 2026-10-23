@@ -170,7 +170,15 @@ statistics fetch that times out or fails in transit (`StatisticsUnreachableError
 stops the run as `transport_failed`, and an artifact the run cannot trust or
 read (`StatisticsUnusableError`) as `step_result_unusable`: neither says anything
 about the data. An error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
-on the evidence instead of stopping it.
+on the evidence instead of stopping it, and so is a named entity the approved
+source resolved but the retrieval holds no series for, such as a donor whose
+reporting stopped before the period, while another named entity on the same
+column of the approved source remains: the run answers for the rest, and the answer names the one left
+out (`harness.graph.answer._left_out_entity_sentences`). A step that narrows
+to left-out entities alone, a side narrowed to one or a filter keeping only
+them, stops the run as `requirement_unmet` before the first derived step, naming
+that step (`_check_left_out_narrowings`, reading the narrowings off the
+compiled arguments through `compiler.frame_columns.entity_narrowings`).
 
 **No in-place refresh: what a tool says can be retried is retried, and what
 needs rediscovering goes back to the planner.** A transport failure and a

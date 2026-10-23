@@ -26,7 +26,10 @@ column for raises `UnboundColumnError` before the call.
 `_COLUMN_SITES` lists every argument `compiler.compile` writes a role column
 into, per tool. `tests/executor/test_wide_frame.py` compiles and runs every
 verb over a flow frame and fails if a flow-axis name reaches a call, so a
-column-naming argument missing from the table shows there.
+column-naming argument missing from the table shows there. The same table
+says which arguments narrow a frame to named entities (`entity_narrowings`),
+which the executor reads to refuse a step that reads only entities a
+retrieval left out.
 
 A rolling step also names columns in `rolling.population`, and those are
 columns of the workflow's retrieved frames, whichever frame the step reads.
@@ -168,6 +171,7 @@ class _Form(Enum):
 
     NAMES = auto()  # a list of column names
     KEYS = auto()  # an object keyed by column name
+    ENTITIES = auto()  # an object keyed by column name, each value an entity ref
     VALUES = auto()  # an object whose values are column names
     PREDICATES = auto()  # a list of predicate objects, each naming its `column`
 
@@ -194,8 +198,8 @@ def _analysis(name: str) -> ToolId:
 # entity binding, the numerator's key columns, and `denominator_by`, whose keys
 # are the numerator's columns and whose values are the denominator's.
 _DIVIDING_SITES = (
-    _ColumnSite("numerator_entity", _Form.KEYS, FRAME_PARAMETER),
-    _ColumnSite("denominator_entity", _Form.KEYS, "denominator_frame_ref"),
+    _ColumnSite("numerator_entity", _Form.ENTITIES, FRAME_PARAMETER),
+    _ColumnSite("denominator_entity", _Form.ENTITIES, "denominator_frame_ref"),
     _ColumnSite("numerator_by", _Form.NAMES, FRAME_PARAMETER),
     _ColumnSite("denominator_by", _Form.KEYS, FRAME_PARAMETER),
     _ColumnSite("denominator_by", _Form.VALUES, "denominator_frame_ref"),
@@ -212,12 +216,12 @@ _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
         _ColumnSite("right_keys", _Form.VALUES, "right_frame_ref"),
     ),
     _analysis("compare"): (
-        _ColumnSite("left_entity", _Form.KEYS, FRAME_PARAMETER),
-        _ColumnSite("right_entity", _Form.KEYS, "right_frame_ref"),
+        _ColumnSite("left_entity", _Form.ENTITIES, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.ENTITIES, "right_frame_ref"),
     ),
     _analysis("sum_of"): (
-        _ColumnSite("left_entity", _Form.KEYS, FRAME_PARAMETER),
-        _ColumnSite("right_entity", _Form.KEYS, "right_frame_ref"),
+        _ColumnSite("left_entity", _Form.ENTITIES, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.ENTITIES, "right_frame_ref"),
     ),
     _analysis("share_of"): _DIVIDING_SITES,
     _analysis("quotient_of"): _DIVIDING_SITES,
@@ -275,6 +279,49 @@ def bound_arguments(
             _POPULATION: bound_populations(population, roots=roots),
         }
     return rewritten
+
+
+@dataclass(frozen=True, slots=True)
+class EntityNarrowing:
+    """A step's narrowing of the frame it reads through `frame` to the rows of
+    named entities: those whose role column `column` holds one of `refs`."""
+
+    frame: str
+    column: str
+    refs: frozenset[str]
+
+
+def entity_narrowings(tool: ToolId, arguments: Mapping[str, JsonValue]) -> list[EntityNarrowing]:
+    """Each narrowing to named entities that `arguments`, as compiled, make:
+    a side's entity binding, and a filter's `category_match` predicate.
+
+    Columns are spelled the way the approved source spells its roles. A
+    `category_match` on a column no entity sits on (`unit`, a type
+    column) is listed too, and its values match no entity's ref.
+    """
+    narrowings: list[EntityNarrowing] = []
+    for site in _COLUMN_SITES.get(tool, ()):
+        value = arguments.get(site.parameter)
+        if site.form is _Form.ENTITIES and isinstance(value, dict):
+            narrowings.extend(
+                EntityNarrowing(frame=site.frame, column=column, refs=frozenset({ref}))
+                for column, ref in value.items()
+                if isinstance(ref, str)
+            )
+        elif site.form is _Form.PREDICATES and isinstance(value, list):
+            narrowings.extend(
+                EntityNarrowing(
+                    frame=site.frame,
+                    column=column,
+                    refs=frozenset(ref for ref in refs if isinstance(ref, str)),
+                )
+                for item in value
+                if isinstance(item, dict)
+                and item.get("kind") == "category_match"
+                and isinstance(column := item.get("column"), str)
+                and isinstance(refs := item.get("values"), list)
+            )
+    return narrowings
 
 
 def rolling_population(arguments: Mapping[str, JsonValue]) -> list[JsonValue] | None:
@@ -543,7 +590,7 @@ def _rewrite(value: JsonValue, form: _Form, column: Callable[[str], str]) -> Jso
     """
     if form is _Form.NAMES and isinstance(value, list):
         return [column(item) if isinstance(item, str) else item for item in value]
-    if form is _Form.KEYS and isinstance(value, dict):
+    if form in (_Form.KEYS, _Form.ENTITIES) and isinstance(value, dict):
         return {column(key): item for key, item in value.items()}
     if form is _Form.VALUES and isinstance(value, dict):
         return {key: column(item) if isinstance(item, str) else item for key, item in value.items()}
