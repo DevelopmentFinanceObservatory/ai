@@ -56,6 +56,11 @@ FLOW_ROLE_COLUMNS: Mapping[str, str] = MappingProxyType(
 )
 PARTY_ROLES: frozenset[str] = frozenset(FLOW_ROLE_COLUMNS.values())
 
+# The population a search names for the total across each flow party role's whole side.
+WHOLE_SIDE_POPULATIONS: Mapping[str, str] = MappingProxyType(
+    {"financingProvider": "all donors", "financingRecipient": "all recipients"}
+)
+
 # Every role a `{role}_type` column can describe, in sorted order.
 TYPED_ROLES: tuple[str, ...] = tuple(sorted({PLACE_ROLE, *PARTY_ROLES}))
 

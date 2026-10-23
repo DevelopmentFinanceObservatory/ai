@@ -1740,8 +1740,12 @@ async def get_data(
                 "party_kind is party, residual, or total for a group total such as "
                 '"Africa, Total", which sums and ranks leave out; party_class is official, '
                 'private or residual; party_whole is "true" on the published total of a whole population '
-                'such as "Official Donors, Total", which adds up with the other whole totals '
-                'when they are the only rows, and "false" elsewhere. A cell reads "untyped" '
+                'such as "Official Donors, Total", and "false" elsewhere. Whole totals add up '
+                "with each other when they are the only rows. Beside members of a class a whole "
+                "total does not hold, it stays: summed with them on a side a sum pools, and as "
+                "its own row on a side an operation groups by. A whole total that may hold a "
+                "member is left out of a grouped side and refuses on a pooled one. A side an "
+                'operation ranks leaves every total out beside its members. A cell reads "untyped" '
                 "where the party has no value. Set it for a spec that "
                 "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
@@ -1754,9 +1758,13 @@ async def get_data(
         Field(
             description=(
                 "On a flow frame, leave out the group totals (kind total, such as DAC Countries "
-                "Total or the G7) from each side the spec leaves open, and add the party kinds; "
-                "a side the spec names, or one holding only totals, keeps every row, and the "
-                "digest names what was left out. On a spec with no flow side it changes nothing."
+                "Total or the G7) from each side the spec leaves open, and add the party cells as "
+                "place_types does, so the side's members can be compared or ranked without "
+                "totals among them. A sum of these members can differ from the source's "
+                "published total. For a total across the whole side, search naming the "
+                'population ("all donors") with no operation over that side. A side the spec '
+                "names, or one holding only totals, keeps every row, and the digest names what "
+                "was left out. On a spec with no flow side it changes nothing."
             )
         ),
     ] = False,
@@ -1841,10 +1849,11 @@ async def get_data(
         stat_vars: "sum" for a family's total as one series, "separate"
             (the default) for one series per StatVar.
         place_types: Whether to add the places' types (`observationAbout_type`), or
-            each party's type and kind on a flow frame, for a spec that names no place.
+            each party's type and its kind, class and whole cells on a flow frame, for a
+            spec that names no place.
         without_party_totals: Whether a flow frame leaves out the group totals of each side
-            the spec leaves open, and adds the party kinds. On a spec with no flow side it
-            changes nothing.
+            the spec leaves open, to compare or rank its members, and adds the party cells as
+            `place_types` does. On a spec with no flow side it changes nothing.
         breakdown: The code system and hierarchy level to sum the family
             within, as described above.
 

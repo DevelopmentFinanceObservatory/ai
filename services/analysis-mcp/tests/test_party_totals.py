@@ -413,27 +413,52 @@ async def test_the_aggregate_tool_reports_the_totals_it_left_out(store) -> None:
     assert "party_total (totals of other parties" in result.content[0].text
 
 
-_FILTER_RETRY = f"category_match on {_RECIPIENT!r}"
 # The kinds a filter keeps to compare or rank the members, leaving out the totals and the
 # unallocated residuals.
 _MEMBER_KINDS = {"member_kinds": ["party"]}
 
 
+_RECIPIENT_PHRASES = (
+    "category_match on 'financingRecipient'",
+    '("all recipients")',
+    "to sum the members, keep party and residual",
+)
+
+
 @pytest.mark.parametrize(
-    ("frame", "fix", "retry"),
+    ("frame", "column", "fix", "phrases"),
     [
         (
             lambda: _frame({"country/MAR": ("party", 600.0), "geoId/06": ("untyped", 1.0)}),
+            _KINDS,
             {"types": ["party", "untyped"], **_MEMBER_KINDS},
-            _FILTER_RETRY,
+            _RECIPIENT_PHRASES,
         ),
         (
             lambda: _frame({"DACAfrica": ("total", 5400.0), "DACAsia": ("total", 2000.0)}),
+            _KINDS,
             {"types": ["total"], **_MEMBER_KINDS},
-            _FILTER_RETRY,
+            _RECIPIENT_PHRASES,
+        ),
+        # The donor side names donors, not recipients, as the population to search for.
+        (
+            lambda: provider_frame(
+                {
+                    "country/FRA": (OFFICIAL, 600.0),
+                    "geoId/06": (("untyped", "untyped", "false"), 1.0),
+                }
+            ),
+            PROVIDER_KINDS,
+            {"types": ["party", "untyped"], **_MEMBER_KINDS},
+            (
+                "category_match on 'financingProvider'",
+                '("all donors")',
+                "to sum the members, keep party and residual",
+            ),
         ),
         (
             lambda: _recipient_frame(_ALL_RECIPIENTS),
+            _KINDS,
             {
                 "types": ["party", "total"],
                 "whole_total": "DACAllRecipients",
@@ -445,15 +470,24 @@ _MEMBER_KINDS = {"member_kinds": ["party"]}
                     {"column": _KINDS, "values": ["party", "residual"]},
                 ],
             },
-            f"category_match on {_KINDS!r} keeping party and residual",
+            (
+                f"category_match on '{_RECIPIENT}_party_whole' keeping true",
+                f"category_match on {_KINDS!r} keeping party and residual",
+            ),
         ),
         # A filter adds no kind column, so only a retrieval with kinds is offered.
-        (lambda: _frame(kinds=False), {"types": []}, "place_types=true"),
+        (lambda: _frame(kinds=False), _KINDS, {"types": []}, ("place_types=true",)),
     ],
-    ids=["no-kind", "every-one-a-total", "whole-total-beside-members", "no-kind-column"],
+    ids=[
+        "no-kind",
+        "every-one-a-total",
+        "no-kind-donor-side",
+        "whole-total-beside-members",
+        "no-kind-column",
+    ],
 )
 async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_column(
-    store, frame, fix: dict[str, list[str]], retry: str
+    store, frame, column: str, fix: dict[str, list[str]], phrases: tuple[str, ...]
 ) -> None:
     digest = secrets.token_hex(16)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
@@ -467,13 +501,15 @@ async def test_the_aggregate_tool_refuses_unpoolable_parties_with_the_party_colu
 
     assert result.is_error is True
     refusal = result.structured_content
+    assert refusal is not None
     assert refusal["code"] == "place_levels_mixed"
-    assert refusal["fix"] == {"column": _KINDS, **fix}
-    # The retry names the party column, not a place_level filter on the kind column, or
-    # the retrieval that adds the kind column, or for a whole total beside members a filter
-    # on the kind column; never a filter that keeps several parties.
-    assert retry in result.content[0].text
-    assert (_FILTER_RETRY in result.content[0].text) == (retry == _FILTER_RETRY)
+    assert refusal["retry_mode"] == "correct_and_retry"
+    assert refusal["fix"] == {"column": column, **fix}
+    # The role and the side's population are written out, with no placeholder left in the text.
+    assert all(phrase in refusal["message"] for phrase in phrases)
+    assert "{" not in refusal["message"]
+    # A frame with no kind column is offered no filter that keeps several parties.
+    assert ("category_match" in refusal["message"]) == bool(fix["types"])
 
 
 _OFFICIAL = "DACOfficialDonors"

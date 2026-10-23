@@ -324,8 +324,9 @@ class AskedOutput(BaseModel):
     over: list[PartyRole] = Field(
         default=[],
         description=(
-            "each party the output totals across, every member summed into one figure: "
-            '["donor"] for "total aid from all donors"'
+            "each party the output totals across into one figure: "
+            '["donor"] for "total aid from all donors". Such a party stays out of open_roles, '
+            "and the search call names the population as an entity"
         ),
     )
     across_years: bool = Field(
@@ -1380,9 +1381,23 @@ def build_orchestrator_tools(
         `entities`, as spoken. Use `to` for a recipient and `from` for a
         donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
         creditor" or "which donors" question leaves that flow side open in
-        `open_roles`. A rank over `origin` or `destination` also opens that
-        side. Keep `open_roles` when the user explicitly asks to break down
-        that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
+        `open_roles`. A total across a side leaves it out of `open_roles` and
+        names the population the user asked for: "aid to Ethiopia from all
+        donors" names "all donors" as a `from` entity, which covers official
+        and private donors, and a donor side left unnamed on DAC2a covers
+        official donors only. For a named population, search binds the
+        source's published total. Where the source publishes none, search
+        departs `whole_total_unpublished` and returns the members, whose sum
+        is the total. Where the source holds no series of that total, such as
+        "official donors" on the CRS, search finds no data. A published total
+        stands in only where no operation runs over its side: any operation
+        over `origin` or `destination`, `aggregate` included, opens that side and keeps its members. Search
+        lists "official donors" member by member only where the dataset holds
+        no private donors, and otherwise refuses `entity_role_not_admitted`:
+        open the donor side and keep the parties whose
+        `financingProvider_party_kind` is `party` and
+        `financingProvider_party_class` is `official`. Keep `open_roles` when the
+        user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",
         "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,

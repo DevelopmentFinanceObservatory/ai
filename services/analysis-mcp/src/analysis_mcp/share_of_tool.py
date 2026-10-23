@@ -395,9 +395,13 @@ async def share_of(
             default=None,
             description=(
                 "{role_column: value} narrowing the numerator's own rows before summing "
-                "each period. Empty sums every row on this side per period -- the usual "
-                "shape for a deliberate total, e.g. 'all DAC donors'. Role columns only -- "
-                "stat_var and time_period are not accepted selectors."
+                "each period. Empty sums every row on this side per period except group "
+                "totals, residuals included; a whole total (party_whole true) of a class no "
+                "member holds stays, and one that may hold a member refuses. A filter to member_kinds is for comparing or "
+                "ranking members; before a sum it leaves out the residuals. For a total "
+                'across a whole side, search naming the population ("all donors") with no '
+                "operation over that side. Role columns only -- stat_var and "
+                "time_period are not accepted selectors."
             ),
         ),
     ] = None,

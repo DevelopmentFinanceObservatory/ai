@@ -470,6 +470,11 @@ def test_each_role_that_lost_totals_is_named_with_at_most_ten_of_them() -> None:
     ] * 3
     # A total this call resolved is named by its label.
     assert "(G7)" in lines["financingRecipient"]
+    # Each line names only its own side's population for a search of the whole total.
+    assert '("all donors")' in lines["financingProvider"]
+    assert "all recipients" not in lines["financingProvider"]
+    assert '("all recipients")' in lines["financingRecipient"]
+    assert "all donors" not in lines["financingRecipient"]
     assert "GroupOfSeven" not in lines["financingRecipient"]
 
 
