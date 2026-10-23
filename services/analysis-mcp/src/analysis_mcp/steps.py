@@ -20,7 +20,7 @@ which the kit's operation list uses too.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from common.materialisation import FrameRef
@@ -423,6 +423,15 @@ def build_step(
                 for ref, periods, of in ranked
             ]
     return Step.model_validate(members)
+
+
+def left_out_keys(dropped: Iterable[tuple[ExclusionReason, Sized]]) -> list[LeftOut]:
+    """The numerator keys a two-sided result holds no row for, counted as
+    entities: one count for each `(reason, keys)` of `dropped` that has
+    keys, in the order given."""
+    return [
+        LeftOut(reason=reason, count=len(keys), of="entities") for reason, keys in dropped if keys
+    ]
 
 
 # The reasons that count rows a verb's inputs held and the step left out as

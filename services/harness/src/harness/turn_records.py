@@ -226,6 +226,9 @@ class PlanRecord(StrictModel):
     this record is a projection of it. `revision` is `plan_revision(plan)`
     and `approved_revision` the revision the user approved, `None` before
     approval. `decisions` are those `plan_display.shown_decisions` lists.
+    Periods, sources, warnings and steps name the requirements the model
+    wrote, with the copies the split added folded into them
+    (`plan_display.shown_plan`).
     `outputs` are the workflow's terminal step ids. `asks` are the outputs
     the user asked for, in the brief's order, each with the steps that
     answer it, its decline, or both. `declined` are the other parts of the
@@ -260,7 +263,7 @@ class PlanRecord(StrictModel):
         plan: Plan,
         *,
         searched: Collection[str] = (),
-        failed_step: str | None = None,
+        failed_steps: Collection[str] = (),
         run_id: str | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
@@ -268,21 +271,22 @@ class PlanRecord(StrictModel):
         Args:
             plan: A plan carrying a translation and a workflow.
             searched: Spec ids the turn's `search` calls returned.
-            failed_step: The id of the step the run stopped at, if any.
+            failed_steps: The ids of the steps the run's stop landed on, if any.
             run_id: The run the plan executed as, if the ledger admitted one.
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
         """
         assert plan.workflow is not None, "PlanRecord needs a compiled plan"
-        workflow = plan.workflow
+        shown = plan_display.shown_plan(plan)
+        assert shown.workflow is not None
         steps = tuple(
             PlanStep(
                 id=str(row["id"]),
                 label=str(row["label"]),
                 spec_id=_str_or_none(_args(row).get("spec_id")),
                 reading=_reading(_args(row).get("stat_vars")),
-                failed=row["id"] == failed_step,
+                failed=row["id"] in failed_steps,
             )
             for row in plan_display.step_rows(plan)
         )
@@ -291,8 +295,8 @@ class PlanRecord(StrictModel):
             status=plan.status,
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
-            periods=_periods(plan),
-            sources=_sources(plan, searched=searched),
+            periods=_periods(shown),
+            sources=_sources(shown, searched=searched),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -310,9 +314,9 @@ class PlanRecord(StrictModel):
                     requirement_id=issue.requirement_id,
                     detail=_first_line(issue.detail),
                 )
-                for issue in workflow.warnings
+                for issue in shown.workflow.warnings
             ),
-            outputs=tuple(workflow.terminal_steps),
+            outputs=tuple(shown.workflow.terminal_steps),
             steps=steps,
             run_id=run_id,
         )

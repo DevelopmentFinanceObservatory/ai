@@ -54,6 +54,7 @@
     "distinction": "quotient_of, not share_of: GDP divided by population is dollars per person, not a part of a whole"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Put Guatemala's GDP and population in the same table and divide GDP by population for Guatemala from 1960 to 2024",
     "answer_mode": "computed",

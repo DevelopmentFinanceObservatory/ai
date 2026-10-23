@@ -38,10 +38,9 @@ periods per key and proceed, recording every period they leave out: one
 output row is one key's sum over its denominator's sum for one period,
 complete from the two sums present. A period one side lacks leaves the
 other side's sums for the remaining periods unchanged, so dropping it
-changes no total that is kept. When any key shares no period with its
-denominator group, `share_of` refuses the whole call, even if every other
-key has rows; `quotient_of` leaves such a key out, records it, and refuses
-only when no key shares a period. A matched cell whose denominator sums to
+changes no total that is kept. Both leave out a key sharing no period with
+its denominator group, name it, and refuse only when no key shares a
+period. A matched cell whose denominator sums to
 exactly zero refuses the whole `share_of` call; `quotient_of` leaves it out
 and records it, and refuses only when every matched cell is one. `growth` proceeds for every entity
 holding both endpoint years. A growth row reads only `value_start` and

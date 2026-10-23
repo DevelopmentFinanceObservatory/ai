@@ -40,6 +40,7 @@
     "dataset",
     "aggregate"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What was the combined ODA of the United States and the United Kingdom to Kenya in each year from 2015 to 2022?",
     "answer_mode": "computed",

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -78,7 +78,7 @@ from translator.discovery import (
     resolved_spec,
 )
 from translator.referral import USER_DECIDES, clear_referral, load_referral
-from translator.tool import Translate
+from translator.tool import Translate, authored_answer
 
 from planner.declaration import PlanTool
 from planner.plan import (
@@ -100,11 +100,13 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
+    record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
+    split_of,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -186,8 +188,8 @@ _PLANNING = (
     "totals every party into one series per year, which a `share_of` or "
     "`quotient_of` reads as a whole side. Over a requirement that names "
     "no entity, a group by `entity` keeps nothing and is refused. Group "
-    "by period, or `rank` with a `reduction` to set each member's total "
-    "beside the others. Do not sum a rate, index or per-person figure.\n\n"
+    "by period, or `rank` to set each member beside the others. Do not "
+    "sum a rate, index or per-person figure.\n\n"
     'A party the question names no member of, such as the donors of "top '
     'donors", goes in `across` (see `across`). A region or group named '
     'alone, such as "Africa", is one entity with its own figure. "African '
@@ -230,8 +232,9 @@ _PLANNING = (
     "question names a finer one. Then add an `aggregate` with "
     "`reduction='sum'` and `group_by` period and breakdown, which totals "
     "the parties the question leaves open within each sector, and a "
-    "`rank` with `axis='sector'` and a `limit`. To set that ranking "
-    "beside another year, widen the period to cover both. State "
+    "`rank` with `axis='sector'` and a `limit`, of one year unless the "
+    "ask is marked (across years). To set that ranking beside another "
+    "year, widen the period to cover both. State "
     "`per_period` on the rank for each year's ranking side by side, or "
     "read a `growth` over the aggregate between the two years for each "
     "sector's change. A derived requirement's figures are what a question "
@@ -257,15 +260,25 @@ _PLANNING = (
     "that overlap.\n\n"
     "A sum states the same `unit` on both inputs, or on neither. To total "
     "several entities of one series, `aggregate` it.\n\n"
-    'A total over a span of years, such as "the total between 2010 and '
-    'the latest", is one figure. Do not give a figure per year. An '
+    "One figure or one ranking over several years taken together answers "
+    "only an ask marked (across years), whatever years the question "
+    "names, or the user's own words asking for it. When your message "
+    'says "The user asks for this change to the plan" and the change asks '
+    "for one figure or one ranking over the years, or no asks are listed "
+    "and the question asks for one, name the step that combines them in "
+    "`across_years`. For either, an "
     "`aggregate` with `reduction='sum'` grouped by `entity` alone sums "
     "the years, as a rank's `reduction` does for a ranking of each "
-    "entity's total. A total of two sources over a span states the "
-    "question's own period on both dataset requirements, adds the two "
-    "yearly series with a `sum_of` first, and then sums the years of that "
-    "one series with an `aggregate` grouped by `entity`. The `sum_of` "
-    "adds the years both sources report and names any year one lacks.\n\n"
+    "entity's total, and a total of two sources states the question's own "
+    "period on both dataset requirements, adds the two yearly series with "
+    "a `sum_of` first, and then sums the years of that one series with an "
+    "`aggregate` grouped by `entity`. The `sum_of` adds the years both "
+    "sources report and names any year one lacks. Otherwise every "
+    "`aggregate` keeps `period` in its `group_by`, and a rank over several "
+    "years with `per_period` unset reads one year, the newest unless the "
+    "question names another: state `window_start` and `window_end` both "
+    "that year, with `rolling` at offset 0 on both when the question "
+    "words it against the newest data.\n\n"
     "When a part of the question earns a decline (see `declined`), such "
     "as a calculation over a comparison or a join, state it in `declined` "
     "and plan what can still be answered, or propose `declined` alone "
@@ -279,10 +292,10 @@ _PLANNING = (
     "State a rank's `limit` when the question asks for a top or bottom N, "
     'or for the members that hold the most, as "top donors" or "which '
     'sectors received the most" does, with a `Decision` fixing the N when '
-    "the question names none. A top N by each entity's total is one rank "
-    "stating the `reduction` and the `limit` with `per_period` unset. No "
-    "rank reads another rank's output, so put the `limit` on the one rank "
-    "that reads the measure.\n\n"
+    "the question names none. For an ask marked (across years), a top N "
+    "by each entity's total is one rank stating the `reduction` and the "
+    "`limit` with `per_period` unset. No rank reads another rank's "
+    "output, so put the `limit` on the one rank that reads the measure.\n\n"
     "To rank entities by a growth, a per-entity `share_of` or a "
     "`quotient_of`, compute that first and rank its result. A per-period "
     "rank with a `limit` keeps an entity only in the periods it made the "
@@ -532,7 +545,7 @@ def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, objec
             "The translator referred this plan back; settle the referral with the user "
             "and propose again before executing.",
             outcome=Outcome.REFUSED,
-            detail={"referral": referral.model_dump(mode="json")},
+            detail={"referral": authored_answer(referral.model_dump(mode="json"), split_of(plan))},
             action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME)
             if asks_user
             else PROPOSE_PLAN_PROPOSER.action(),
@@ -1052,6 +1065,10 @@ class ToolContextSession:
         """Record `operation` as answered `unsupported` in this planner entry."""
         record_unsupported(self.tool_context.state, operation)
 
+    def record_reduction_refused(self, asks: Iterable[int]) -> None:
+        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
+        record_reduction_refused_asks(self.tool_context.state, asks)
+
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state."""
         state = self.tool_context.state
@@ -1130,6 +1147,16 @@ _PROPOSE_PLAN_ARGUMENTS = {
         "keyed by `ask`. Every ask is answered here or declined in `declined` "
         "with its number as `ask_ref`, exactly once, or both when the plan "
         "computes part of it."
+    ),
+    "across_years": (
+        "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
+        "leaves out `period` or a `rank` with a `reduction` and `per_period` false, because "
+        "the user's own words ask for one figure or one ranking over them: a change to the "
+        "plan the user asks for, or, when no asks are listed, the question itself. A step "
+        "named once keeps that standing in later patches while its kind and `reduction` "
+        "stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` "
+        "sets `per_period`. Leave it empty for a step that answers an ask marked "
+        "(across years)."
     ),
     "amends_version": (
         "The `version` this call patches, as the last `propose_plan` call "
@@ -1235,8 +1262,9 @@ def _first_year_unreadable(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"The first year {detail['spec_id']} holds could not be read: {exc}. The plan is "
-        "sound and nothing was recorded; propose it again, or state the start as a fixed "
-        "year and roll only the end.",
+        "sound and nothing was recorded; propose it again, or, where the window covers "
+        "several years, state the start as a fixed year and roll only the end; a window of "
+        "one year cannot, so drop `rolling` and `period_end_open` there for fixed years.",
         outcome=Outcome.REFUSED,
         detail=detail,
     )
@@ -1246,6 +1274,7 @@ def build_planner_tools(
     *,
     translate: Translate | None = None,
     question_fixed: bool = False,
+    reads_user_words: bool = True,
     surface: ToolSurface | None = None,
 ) -> list[BaseTool]:
     """Build the planner's tool set.
@@ -1267,6 +1296,11 @@ def build_planner_tools(
     to `submission.service.submit` on every call, and selects `_FIXED_ARGUMENTS`'
     descriptions of `question` and `starts_new_plan`, so those two arguments
     describe the mode this tool set actually enforces.
+
+    `reads_user_words` closes over into `propose_plan` the same way, for
+    `submission.service.admit`. It says whether the planner reads the
+    user's own words in every entry, so `propose_plan`'s `across_years` may
+    name a step in any of them.
     """
 
     # Named `ask_user` here, for readability, but renamed below (once
@@ -1340,6 +1374,7 @@ def build_planner_tools(
         removed_evidence_requirements: list[str] = [],  # noqa: B006
         declined: list[Decline] = [],  # noqa: B006
         answered: list[AskAnswer] = [],  # noqa: B006
+        across_years: list[str] = [],  # noqa: B006
         amends_version: int | None = None,
         starts_new_plan: bool = False,
     ) -> dict[str, object]:
@@ -1360,10 +1395,12 @@ def build_planner_tools(
                 removed_evidence_requirements=removed_evidence_requirements,
                 declined=declined,
                 answered=answered,
+                across_years=across_years,
                 amends_version=amends_version,
                 starts_new_plan=starts_new_plan,
             ),
             question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
             proposer=PROPOSE_PLAN_PROPOSER,
         )
 
@@ -1476,6 +1513,7 @@ def create_planner_agent(
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
+    reads_user_words: bool = True,
     prefix_cache: PrefixCache | None = None,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
@@ -1502,6 +1540,14 @@ def create_planner_agent(
             that brief (see `submission.service._resolve_intent`). False, the default, is the standalone
             planner's and `harness_pair_v1`'s own behaviour: a restart begins
             a fresh plan.
+        reads_user_words: Whether the planner reads the user's own words in
+            every entry, so `propose_plan`'s `across_years` may name a step
+            in any of them. True, the default, is the standalone planner's
+            and `harness_pair_v1`'s, which plan the user's question
+            themselves. `harness.planner_seam` sets it false, since there the
+            orchestrator reads the user's words and marks its asks, and the
+            planner reads them only in an entry the user's amendment opens
+            (`planner.plan.amendment_entry`).
         prefix_cache: The process's shared cache of static prompt prefixes.
             Given, and `model_name` naming a Gemini model, every call reads
             the instruction and tool declarations from it. Either way a
@@ -1525,6 +1571,7 @@ def create_planner_agent(
             *build_planner_tools(
                 translate=translate,
                 question_fixed=question_fixed,
+                reads_user_words=reads_user_words,
                 surface=surface,
             ),
         ],

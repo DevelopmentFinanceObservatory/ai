@@ -5,7 +5,10 @@ A scripted model proposes each task's reference plan, and each alternative, thro
 replays, the orchestrator's tools take the searches and the hand-off, and the real
 `propose_plan` accepts the plan in that state. A task with `first_proposal_refusal`
 has to be refused with that code first, ask the user, and be accepted once the user
-picks adding them. The kinds a task's plans use together have to be exactly its
+picks adding them. The reference plan, once accepted, has to do with its years what
+the task's `period_reduction` says (`none` or `across_years`; `propose_plan` accepts
+no plan that reads `unstated`), and an alternative what its own says when it states
+one. The kinds a task's plans use together have to be exactly its
 `acceptable_kinds`, and each has to use every one of its `required_kinds`.
 `unit_asked` has to agree with whether the question or brief names a currency or price
 basis (`UNIT_WORDS`).
@@ -34,10 +37,13 @@ from entry import (
     KINDS,
     TASKS_DIR,
     EntryRun,
+    PeriodReduction,
     Task,
     first_year_gaps,
     load_recording,
     load_tasks,
+    period_reductions,
+    plan_period_reduction,
     quiet_logs,
     run_entry,
     stray_recordings,
@@ -110,8 +116,14 @@ def _kinds(payload: Mapping[str, Any]) -> set[str]:
     return {requirement["kind"] for requirement in payload["evidence_requirements"]}
 
 
-async def propose(task: Task, payload: Mapping[str, Any], refusal: str | None) -> list[str]:
-    """Every fault in proposing `payload` for `task` through the eval's entry."""
+async def propose(
+    task: Task,
+    payload: Mapping[str, Any],
+    refusal: str | None,
+    years: PeriodReduction,
+) -> list[str]:
+    """Every fault in proposing `payload` for `task` through the eval's entry. `years`
+    is what the accepted plan has to do with its years."""
     propose_call = ("propose_plan", dict(payload))
     if refusal is None:
         script: list[Step] = [[propose_call]]
@@ -135,10 +147,15 @@ async def propose(task: Task, payload: Mapping[str, Any], refusal: str | None) -
         timeout_s=60.0,
         answers=answers,
     )
-    return _faults(run, payload, refusal)
+    return _faults(run, payload, refusal, years)
 
 
-def _faults(run: EntryRun, payload: Mapping[str, Any], refusal: str | None) -> list[str]:
+def _faults(
+    run: EntryRun,
+    payload: Mapping[str, Any],
+    refusal: str | None,
+    years: PeriodReduction,
+) -> list[str]:
     if run.error is not None:
         return [run.error.splitlines()[0]]
     calls = tool_calls(run.events)
@@ -162,6 +179,8 @@ def _faults(run: EntryRun, payload: Mapping[str, Any], refusal: str | None) -> l
         )
     elif {r.kind for r in plan.evidence_requirements} != _kinds(payload):
         faults.append("the recorded plan's kinds differ from the payload's")
+    elif (found := plan_period_reduction(period_reductions(plan))) != years:
+        faults.append(f"period_reduction is {years.value}, but the plan's is {found.value}")
     if run.surface_misses:
         faults.append(f"the recording lacks {run.surface_misses}")
     return faults
@@ -191,12 +210,19 @@ async def check_task(task: Task) -> list[str]:
     if not (TASKS_DIR / f"{task.id}.json").exists():
         faults.append("the task file is not named for its id")
     witnessed: set[str] = set()
-    plans = [("reference", task.reference_payload, task.first_proposal_refusal)]
+    plans = [
+        ("reference", task.reference_payload, task.first_proposal_refusal, task.period_reduction)
+    ]
     plans += [
-        (f"alternative {index}", alt.payload, alt.first_proposal_refusal)
+        (
+            f"alternative {index}",
+            alt.payload,
+            alt.first_proposal_refusal,
+            alt.period_reduction or task.period_reduction,
+        )
         for index, alt in enumerate(task.alternative_payloads)
     ]
-    for label, payload, refusal in plans:
+    for label, payload, refusal, years in plans:
         kinds = _kinds(payload)
         witnessed |= kinds
         if not required <= kinds:
@@ -204,7 +230,9 @@ async def check_task(task: Task) -> list[str]:
         if task.required_one_of and not kinds & set(task.required_one_of):
             faults.append(f"{label} uses none of {sorted(task.required_one_of)}")
         try:
-            faults += [f"{label}: {fault}" for fault in await propose(task, payload, refusal)]
+            faults += [
+                f"{label}: {fault}" for fault in await propose(task, payload, refusal, years)
+            ]
         except Exception as exc:
             faults.append(f"{label}: {type(exc).__name__}: {exc}")
     try:

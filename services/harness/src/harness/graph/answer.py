@@ -38,6 +38,7 @@ from planner.plan import (
     EvidenceRequirement,
     QuotientRequirement,
     ResolvedBy,
+    ShareOfRequirement,
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
@@ -661,11 +662,11 @@ def _dropped_key_sentences(
     result (`StepRecord.dropped_key_count`), over every answer frame
     (`answer_frames`) or only those of `terminals`.
 
-    A keyed `quotient_of` drops each numerator key it has nothing to divide
-    by, and every step reading its frame, a `rank` among them, works over
-    the keys that remain. So the walk covers every step an answer frame
-    rests on (`_upstream_steps`), in the plan's step order. Identical
-    sentences are stated once.
+    A keyed `quotient_of` or `share_of` drops each numerator key it has
+    nothing to divide by, and every step reading its frame, a `rank` among
+    them, works over the keys that remain. So the walk covers every step
+    an answer frame rests on (`_upstream_steps`), in the plan's step order.
+    Identical sentences are stated once.
     """
     workflow = plan.workflow
     if workflow is None:
@@ -708,9 +709,9 @@ def _upstream_steps(step_id: str, *, steps_by_id: dict[str, WorkflowStep]) -> fr
 
 def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str | None]:
     """The plan's own words for the keys step `step_id` divides and for what
-    it divides them by: the quotient requirement's `axis`, and the measure
-    of the dataset requirement under its denominator. `None` for either the
-    plan does not state.
+    it divides them by: the quotient or share requirement's `axis`, and the
+    measure of the dataset requirement under its denominator. `None` for
+    either the plan does not state.
 
     A step carries out the operation it is named for (`WorkflowStep.id`),
     and that operation names its requirement.
@@ -721,7 +722,7 @@ def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str
     )
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
     requirement = requirements.get(requirement_id or "")
-    if not isinstance(requirement, QuotientRequirement):
+    if not isinstance(requirement, QuotientRequirement | ShareOfRequirement):
         return None, None
     divisor = requirements.get(requirement.denominator.input_id)
     # A denominator read through a filter or an aggregate keeps its
@@ -732,13 +733,14 @@ def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str
 
 
 def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> str:
-    """The sentence for `count` keys a quotient left out: how many, of which
-    role when the plan names one (`axis`), and that each had nothing to
-    divide by, named by its measure when the plan states one (`divisor`).
+    """The sentence for `count` keys a quotient or share left out: how many,
+    of which role when the plan names one (`axis`), and that each had
+    nothing to divide by, named by its measure when the plan states one
+    (`divisor`).
 
     A key is left out when the denominator holds no entry for it, none in a
-    period the key reports, or only zeros where it does, and the one wording
-    is true of all three.
+    period the key reports, or, for a quotient, only zeros where it does,
+    and the one wording is true of all three.
 
     The role phrase is the planner's own word and is not inflected: it
     qualifies "entry" or "entries", which carries the number.

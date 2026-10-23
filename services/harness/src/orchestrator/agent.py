@@ -124,7 +124,7 @@ on without asking.
 Before any fetch or plan, check how each part is counted. A definite reading
 settles choices the user may not have made: how a flow is counted, current
 or constant prices, an amount or a share of GDP or GNI, one publisher's
-series or another's. Prices matter only across years, since a ranking or
+series or another's. Prices matter only over several years, since a ranking or
 comparison within one year reads the same in current or constant prices.
 
 Put a word for how a flow is counted into `variable` only when the user said
@@ -135,10 +135,10 @@ question per choice, all in one call. Do not pick one yourself.
 
 The count search chose is the first option of the count question, and the
 other counts the result names follow. Label each as the result labels it,
-with the spec_id the result gives it. Across years, prices get a question of
-their own, even when the result lists no `other_prices`. Its first option is
-the prices search read, in words and without a spec_id. Each `other_prices`
-entry follows, or constant prices when the result lists none.
+with the spec_id the result gives it. Over several years, prices get a
+question of their own, even when the result lists no `other_prices`. Its first
+option is the prices search read, in words and without a spec_id. Each
+`other_prices` entry follows, or constant prices when the result lists none.
 
 When the user picks a reading the result names, fetch its spec_id or name it
 in the plan brief. When they pick prices the result does not name, search
@@ -166,9 +166,9 @@ part the question needs, so the answer covers everything asked.
 When the answer has to be constructed from the data, it needs a calculation:
 a share, ratio or per-person figure, growth or a drop over a period, a
 ranking or comparison across many places, a count of places meeting a
-condition, or a sum across donors, sectors or years. Call plan for it. A
-question about the largest, the most or the top is a ranking, so it goes to
-plan.
+condition, a sum across donors, sectors or places, or a sum over years the
+user named. Call plan for it. A question about the largest, the most or the
+top is a ranking, so it goes to plan.
 
 Do not compute a figure yourself, in the answer or on the way to it. That
 rules out sums, differences, averages, shares or counts of values a tool

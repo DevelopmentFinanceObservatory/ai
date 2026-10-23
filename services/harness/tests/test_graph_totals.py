@@ -80,7 +80,14 @@ from planner.plan import (
     ShareOfRequirement,
     settle_decisions,
 )
-from planner.records import GroupBy, Period, PeriodThreshold, Reduction, StatVarReading
+from planner.records import (
+    DenominatorScope,
+    GroupBy,
+    Period,
+    PeriodThreshold,
+    Reduction,
+    StatVarReading,
+)
 from planner.workflow import (
     EvidenceBinding,
     OpenAxis,
@@ -758,10 +765,14 @@ def _east_africa(spec_char: str, stat_var: str, role: str, unit_ref: str | None)
     )
 
 
-def _aid_per_head(schemas: Mapping[str, ToolSchema], *, ranked: bool = False) -> Plan:
+def _aid_per_head(
+    schemas: Mapping[str, ToolSchema], *, ranked: bool = False, share: bool = False
+) -> Plan:
     """Aid to three recipients divided by each one's population, the
     quotient step `per_head` keyed by `recipient` against the population's
-    `country`, and read by the rank `ranked_op` when `ranked`."""
+    `country`, or, when `share`, a share step of that name keyed by
+    `recipient` over all aid each one received, and read by the rank `ranked_op`
+    when `ranked`."""
     period = Period(start=2015, end=2024)
     aid = _dataset(
         "aid",
@@ -771,15 +782,21 @@ def _aid_per_head(schemas: Mapping[str, ToolSchema], *, ranked: bool = False) ->
     )
     population = _dataset(
         "population",
-        [Entity(name=name, role="country") for name in _EAST_AFRICA],
+        [Entity(name=name, role="recipient" if share else "country") for name in _EAST_AFRICA],
         period,
-        measure="population",
+        measure="all aid" if share else "population",
     )
-    keys: dict[str, Any] = {"axis": "recipient", "denominator_axis": "country"}
+    keys: dict[str, Any] = (
+        {"axis": "recipient", "denominator_scope": DenominatorScope.PER_AXIS}
+        if share
+        else {"axis": "recipient", "denominator_axis": "country"}
+    )
+    requirement_type = ShareOfRequirement if share else QuotientRequirement
+    operation_type = ShareOfOperation if share else QuotientOfOperation
     requirements: list[EvidenceRequirement] = [
         aid,
         population,
-        QuotientRequirement(
+        requirement_type(
             id="per_head",
             decision_ids=["measure"],
             numerator=RequirementSide(input_id="aid"),
@@ -792,7 +809,7 @@ def _aid_per_head(schemas: Mapping[str, ToolSchema], *, ranked: bool = False) ->
         RetrieveOperation(
             id="population_op", requirement_id="population", spec_id="spec_" + "b" * 32
         ),
-        QuotientOfOperation(
+        operation_type(
             id="per_head",
             requirement_id="per_head",
             numerator=Side(input="aid_op"),
@@ -822,7 +839,11 @@ def _aid_per_head(schemas: Mapping[str, ToolSchema], *, ranked: bool = False) ->
         decisions=(_WHAT, _AMONG) if ranked else (_WHAT,),
         discovered={
             "aid": _east_africa("a", "Aid", "recipient", "usd"),
-            "population": _east_africa("b", "Population", "country", None),
+            "population": (
+                _east_africa("b", "AllAid", "recipient", "usd")
+                if share
+                else _east_africa("b", "Population", "country", None)
+            ),
         },
     )
 
@@ -840,21 +861,33 @@ def _with_dropped_keys(outcome: Accepted, **dropped: int) -> Accepted:
 
 
 @pytest.mark.parametrize(
-    ("step_id", "count", "stated"),
+    ("step_id", "count", "stated", "share"),
     [
-        pytest.param("per_head", 0, (), id="none"),
-        pytest.param("per_head", 1, ("1 recipient entry", "population", "was"), id="one"),
+        pytest.param("per_head", 0, (), False, id="none"),
+        pytest.param("per_head", 1, ("1 recipient entry", "population", "was"), False, id="one"),
         pytest.param(
-            "per_head", 1204, ("1,204 recipient entries", "population", "were"), id="several"
+            "per_head",
+            1204,
+            ("1,204 recipient entries", "population", "were"),
+            False,
+            id="several",
         ),
-        # A step the plan gives no quotient's words for counts plain entries.
-        pytest.param("aid_op", 2, ("2 entries", "were"), id="no-nouns"),
+        pytest.param(
+            "per_head", 2, ("2 recipient entries", "no all aid figure", "were"), True, id="share"
+        ),
+        # A step the plan gives no quotient's or share's words for counts
+        # plain entries.
+        pytest.param("aid_op", 2, ("2 entries", "were"), False, id="no-nouns"),
     ],
 )
 async def test_a_step_that_left_keys_out_states_how_many_in_the_plans_words(
-    schemas: dict[str, ToolSchema], step_id: str, count: int, stated: tuple[str, ...]
+    schemas: dict[str, ToolSchema],
+    step_id: str,
+    count: int,
+    stated: tuple[str, ...],
+    share: bool,
 ) -> None:
-    plan = _aid_per_head(schemas)
+    plan = _aid_per_head(schemas, share=share)
     _surface, outcome = _run(plan, summed={}, role_keys={})
 
     sentences = _dropped_key_sentences(_with_dropped_keys(outcome, **{step_id: count}), plan=plan)

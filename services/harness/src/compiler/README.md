@@ -17,7 +17,7 @@ Its tests live in `services/harness/tests/compiler/`.
 | `capabilities.py`  | The hand-maintained table of what each tool implements, takes and returns, pinned to a schema hash     |
 | `sources.py`       | Reads a `search` envelope into the `SelectedSource`s a retrieval may name                              |
 | `evidence.py`      | Compares a requirement with what is known about a retrieval; before approval, with the selected source |
-| `arguments.py`     | Validates a step's literal arguments against the tool's own JSON Schema, holding bound ones out        |
+| `arguments.py`     | Validates a step's literal arguments against the tool's JSON Schema and an analysis verb's op-spec     |
 | `compile.py`       | `compile_plan`: checks the translation, maps operations to tools, writes every argument, builds steps  |
 | `frame_columns.py` | Binds a step's role columns to a retrieved frame's and bounds its StatVar count, for the executor      |
 
@@ -138,6 +138,10 @@ prices only in its label, is `source_unusable`.
 validate against the live `inputSchema`, with bound arguments held out of
 `required`; a bound argument names a parameter the tool declares; the kind of
 value a binding takes is the kind its producer yields and its consumer expects.
+An analysis-mcp verb's arguments then pass the verb's own op-spec checks
+(`arguments.op_spec_errors`), which refuse what the schema admits and the tool
+refuses as `op_spec_invalid`, such as one predicate written twice. Each
+refusal is `bad_args`.
 
 **A tool the compiler builds calls for is pinned.** Each capability row carries
 the hash of the argument schema it was written against, and -- once a server

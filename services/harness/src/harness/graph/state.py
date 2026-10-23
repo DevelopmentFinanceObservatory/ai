@@ -161,13 +161,15 @@ class PendingAsk(BaseModel):
 
 class PendingPlan(BaseModel):
     """`plan` asked: the workflow runs the plan path on the brief, holding the
-    plan to `asks`, the outputs the user asked for, and to `ask_breakdowns`,
-    the parties those asks break down by."""
+    plan to `asks`, the outputs the user asked for, to `ask_breakdowns`, the
+    parties those asks break down by, and to `asks_across_years`, the numbers
+    of the asks put to one figure over several years."""
 
     kind: Literal["plan"] = "plan"
     brief: str
     asks: list[str] = []
     ask_breakdowns: list[AskBreakdown] = []
+    asks_across_years: list[int] = []
 
 
 def ask_candidates(options: list[AskOption]) -> list[dict[str, str]]:

@@ -876,37 +876,58 @@ def test_denominator_by_partial_mapping_refuses_at_the_engine() -> None:
     assert exc_info.value.column == "sector"
 
 
-def test_numerator_key_absent_from_denominator_refuses_in_per_axis_mode() -> None:
-    """A numerator key with no matching denominator group under
-    `denominator_by`'s own mapping refuses distinctly from a grain
-    mismatch -- there is no denominator series to compare periods against
-    at all."""
+def test_a_key_with_no_denominator_group_is_left_out_and_recorded() -> None:
+    """France has no denominator group under `denominator_by`'s mapping, so
+    it is left out and recorded as `unmatched_key` while the United States
+    divides, as `quotient_of` leaves such a key out."""
     numerator = _keyed_frame(
         [
-            {
-                "stat_var": "dcid:X",
-                "donor": "dcid:USA",
-                "time_period": "2020",
-                "value": 10.0,
-            },
-            {
-                "stat_var": "dcid:X",
-                "donor": "dcid:FRA",
-                "time_period": "2020",
-                "value": 5.0,
-            },
+            {"stat_var": "dcid:X", "donor": "dcid:USA", "time_period": "2020", "value": 10.0},
+            {"stat_var": "dcid:X", "donor": "dcid:FRA", "time_period": "2020", "value": 5.0},
+            {"stat_var": "dcid:X", "donor": "dcid:FRA", "time_period": "2021", "value": 6.0},
         ],
         role_keys=["donor"],
     )
     denominator = _keyed_frame(
+        [{"stat_var": "dcid:Y", "provider": "dcid:USA", "time_period": "2020", "value": 100.0}],
+        role_keys=["provider"],
+    )
+
+    result = run_share_of(
+        numerator,
+        denominator,
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=("donor",),
+        denominator_by={"donor": "provider"},
+    )
+
+    assert [(ps.key, ps.time_period, ps.percent) for ps in result.period_shares] == [
+        ((("donor", "dcid:USA"),), "2020", 10.0),
+    ]
+    assert result.unmatched_keys == ((("donor", "dcid:FRA"),),)
+    assert result.keys_without_shared_period == ()
+    assert result.dropped_key_count == 1
+    assert result.numerator_periods == ("2020",)
+    assert [
+        (record.reason, record.side, record.row_count, record.entities)
+        for record in result.exclusions.records
+    ] == [("unmatched_key", "numerator", 2, {"donor": ("dcid:FRA",)})]
+
+
+def test_no_numerator_key_with_a_denominator_group_refuses() -> None:
+    """With no numerator key matching a denominator group there is no
+    share, so the call refuses with a sample of each side's keys and how
+    many each holds, as `quotient_of` refuses."""
+    numerator = _keyed_frame(
         [
-            {
-                "stat_var": "dcid:Y",
-                "provider": "dcid:USA",
-                "time_period": "2020",
-                "value": 100.0,
-            }
+            {"stat_var": "dcid:X", "donor": donor, "time_period": "2020", "value": 10.0}
+            for donor in ("dcid:USA", "dcid:FRA")
         ],
+        role_keys=["donor"],
+    )
+    denominator = _keyed_frame(
+        [{"stat_var": "dcid:Y", "provider": "dcid:DEU", "time_period": "2020", "value": 100.0}],
         role_keys=["provider"],
     )
 
@@ -919,8 +940,13 @@ def test_numerator_key_absent_from_denominator_refuses_in_per_axis_mode() -> Non
             numerator_by=("donor",),
             denominator_by={"donor": "provider"},
         )
-    assert exc_info.value.key == (("donor", "dcid:FRA"),)
-    assert exc_info.value.available == ((("donor", "dcid:USA"),),)
+    assert exc_info.value.numerator_keys == (
+        (("donor", "dcid:FRA"),),
+        (("donor", "dcid:USA"),),
+    )
+    assert exc_info.value.denominator_keys == ((("provider", "dcid:DEU"),),)
+    assert exc_info.value.numerator_key_count == 2
+    assert exc_info.value.denominator_key_count == 1
 
 
 def test_per_key_unmatched_period_is_left_out_for_that_key_only() -> None:
@@ -995,9 +1021,10 @@ def test_per_key_unmatched_period_is_left_out_for_that_key_only() -> None:
     ]
 
 
-def test_per_key_with_no_shared_period_refuses_naming_the_key() -> None:
-    """A key sharing no period with its own denominator group refuses
-    naming that key, even when every other key divides."""
+def test_a_key_with_no_shared_period_is_left_out_and_named() -> None:
+    """France shares no period with its own denominator group, so it is
+    left out and named while the United States divides, as `quotient_of`
+    leaves such a key out."""
     numerator = _keyed_frame(
         [
             {"stat_var": "dcid:X", "donor": "dcid:USA", "time_period": "2020", "value": 10.0},
@@ -1013,6 +1040,54 @@ def test_per_key_with_no_shared_period_refuses_naming_the_key() -> None:
         role_keys=["provider"],
     )
 
+    result = run_share_of(
+        numerator,
+        denominator,
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=("donor",),
+        denominator_by={"donor": "provider"},
+    )
+
+    assert [(ps.key, ps.time_period, ps.percent) for ps in result.period_shares] == [
+        ((("donor", "dcid:USA"),), "2020", 10.0),
+    ]
+    assert result.keys_without_shared_period == ((("donor", "dcid:FRA"),),)
+    assert result.dropped_key_count == 1
+    assert result.coverage.entities == 1
+    unmatched = [
+        (record.side, record.row_count, record.entities)
+        for record in result.exclusions.records
+        if record.reason == "period_unmatched"
+    ]
+    assert unmatched == [
+        ("numerator", 1, {"donor": ("dcid:FRA",)}),
+        ("denominator", 1, {"provider": ("dcid:FRA",)}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("donors", "key", "numerator_periods"),
+    [
+        pytest.param(("dcid:FRA",), (("donor", "dcid:FRA"),), ("2021",), id="one-key-named"),
+        pytest.param(("dcid:FRA", "dcid:USA"), (), ("2021",), id="several-keys-none-named"),
+    ],
+)
+def test_no_key_sharing_a_period_refuses(
+    donors: tuple[str, ...], key: tuple[tuple[str, str], ...], numerator_periods: tuple[str, ...]
+) -> None:
+    """With no key sharing a period there is no share, so the call refuses
+    over every period each side holds, naming the key only when there is
+    one."""
+    numerator = _keyed_frame(
+        [
+            {"stat_var": "dcid:X", "donor": donor, "time_period": "2021", "value": 6.0}
+            for donor in donors
+        ],
+        role_keys=["donor"],
+    )
+    denominator = _frame([_row(year="2020", value=100.0, stat_var="dcid:Y")])
+
     with pytest.raises(ShareOfGrainMismatchError) as exc_info:
         run_share_of(
             numerator,
@@ -1020,10 +1095,9 @@ def test_per_key_with_no_shared_period_refuses_naming_the_key() -> None:
             numerator_entity={},
             denominator_entity={},
             numerator_by=("donor",),
-            denominator_by={"donor": "provider"},
         )
-    assert exc_info.value.key == (("donor", "dcid:FRA"),)
-    assert exc_info.value.numerator_periods == ("2021",)
+    assert exc_info.value.key == key
+    assert exc_info.value.numerator_periods == numerator_periods
     assert exc_info.value.denominator_periods == ("2020",)
 
 

@@ -34,16 +34,16 @@ StatVar; two different measures each keep their own facet selection.
 `cross_frame_unit_unbound` is the narrower case where one side's rows leave
 `unit` unbound entirely rather than resolving to a second, differing unit.
 
-`share_of_grain_mismatch` fires when a numerator key shares no period with
-its denominator group; `share_of` divides every other key over the periods
-both sides report and records the rest as exclusions. `fix["key"]` names
-the key (empty for an un-keyed call).
+`share_of_grain_mismatch` fires when no numerator key shares a period with
+its denominator group; `share_of` leaves out and names each key sharing
+none, and `fix["key"]` names the call's key when it has one.
 `share_of_zero_denominator` is split out from `non_finite_result` because a
 different `frame_ref` or entity binding can produce a nonzero sum, so it is
 retryable.
 
-`quotient_of` leaves out what `share_of` refuses, so its three codes name
-the calls that have nothing left to return or no unit to state.
+`quotient_of` also leaves out a matched cell whose denominator sums to zero,
+which `share_of` refuses, so its three codes name the calls that have
+nothing left to return or no unit to state.
 `quotient_of_no_key_matched` fires when no numerator key has a denominator
 group under `denominator_by`; `fix` samples each side's keys under its own
 column names. `quotient_of_zero_denominator` fires when the denominator sums
@@ -71,9 +71,10 @@ the totals with `quotient_of`. A frame holding more than one unit refuses
 out a `numerator_by` column -- a partial mapping has no defined pairing for
 the column(s) it omits (a `denominator_by` key `numerator_by` itself
 doesn't carry refuses earlier, at the op-spec, as `op_spec_invalid`).
-`share_of_key_unmatched` fires when a numerator key, realised from its own
-frame's rows, has no matching denominator group under `denominator_by`'s
-own mapping.
+`share_of_key_unmatched` fires when no numerator key has a denominator
+group under `denominator_by`'s mapping. A call where some key has one
+divides those keys and records the rest as `unmatched_key`, as
+`quotient_of` does.
 
 `filter_predicate_type_mismatch` fires when a predicate's column exists but
 its declared cell type doesn't admit that predicate kind, or an
@@ -888,11 +889,11 @@ class ToolRefusal:
         denominator_periods: list[str],
         key: dict[str, str] | None = None,
     ) -> Self:
-        """A numerator key shares no period with its denominator group.
+        """No numerator key shares a period with its denominator group.
         share_of divides each key over the periods both sides report and
-        records the rest, so this fires only when that leaves a key with
-        nothing. `key` names the key for a keyed call, `{}` (the default)
-        for an un-keyed one.
+        leaves out and names a key sharing none, so this fires only when
+        that leaves no key at all. `key` names the call's one key when it
+        has exactly one, `{}` (the default) otherwise.
         """
         key = key or {}
         # Both lists empty is a distinct fault: neither side's entity
@@ -966,20 +967,36 @@ class ToolRefusal:
 
     @classmethod
     def share_of_key_unmatched(
-        cls, *, key: dict[str, str], available: list[dict[str, str]]
+        cls,
+        *,
+        numerator_keys: list[dict[str, str]],
+        denominator_keys: list[dict[str, str]],
+        numerator_key_count: int,
+        denominator_key_count: int,
     ) -> Self:
-        """A numerator key, realised from its own frame's rows, has no
-        matching denominator group under `denominator_by`'s own mapping.
-        `available` lists every denominator key this call did realise."""
+        """No numerator key has a denominator group. `numerator_keys` and
+        `denominator_keys` are a sorted sample of each side's keys, each a
+        `{column: value}` object under that side's own column names, and the
+        two counts are how many keys each side holds in all, as
+        `quotient_of_no_key_matched` reports them."""
         return cls(
             code=ToolErrorCode.SHARE_OF_KEY_UNMATCHED,
             message=(
-                f"No denominator group matches the numerator key {key}. Available "
-                f"denominator keys: {available}. Retry with a denominator_frame_ref (or "
-                "denominator_entity) whose own rows actually carry this entity under "
-                "denominator_by's own mapping."
+                f"None of the numerator's {numerator_key_count} key(s) has a denominator group "
+                f"among the denominator's {denominator_key_count}. Numerator keys include "
+                f"{numerator_keys[:_KEY_SAMPLE_IN_MESSAGE]}; denominator keys include "
+                f"{denominator_keys[:_KEY_SAMPLE_IN_MESSAGE]}. denominator_by must map each "
+                "numerator_by column to the denominator column holding the same entities. "
+                "Retry with that mapping, with a denominator_frame_ref (or denominator_entity) "
+                "that holds the numerator's entities, or without denominator_by to divide "
+                "every key by one total."
             ),
-            fix={"key": key, "available": available},
+            fix={
+                "numerator_keys": numerator_keys,
+                "denominator_keys": denominator_keys,
+                "numerator_key_count": numerator_key_count,
+                "denominator_key_count": denominator_key_count,
+            },
         )
 
     @classmethod

@@ -58,6 +58,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -408,6 +409,11 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             question="How much bilateral ODA do Germany and France give Kenya?",
             decisions=[decision(), *decisions],
             evidence_requirements=list(requirements),
+            first_years=[
+                FirstYear(requirement_id=r.id, year=r.period.start)
+                for r in requirements
+                if isinstance(r, DatasetRequirement) and r.period_end_open
+            ],
             status=PlanStatus.DRAFT,
         )
         translation = Translation(operations=list(operations), terminal=[terminal])

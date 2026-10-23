@@ -38,6 +38,8 @@ from planner.plan import (
     search_pin_slot,
 )
 
+from .split_plan import SPEC_DEBT, stored_split_plan
+
 _FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "turn_records_recorded.json").read_text()
 )
@@ -104,7 +106,7 @@ steps:
 
 def _top_donors() -> tuple[Plan, PlanRecord]:
     plan = _plan("guatemala_top_donors").approve(at=datetime.now(UTC))
-    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_step="top_donors")
+    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_steps={"top_donors"})
     return plan, record
 
 
@@ -183,7 +185,7 @@ def test_plan_record_render_fits_its_budget_and_repeats(budget: int) -> None:
 
 def test_plan_record_folds_steps_but_keeps_outputs_and_the_failed_step() -> None:
     plan, _ = _join()
-    record = PlanRecord.from_plan(plan, failed_step="bilateral_oda")
+    record = PlanRecord.from_plan(plan, failed_steps={"bilateral_oda"})
     full = record.render(budget=10_000)
     # One character short of the whole render: only the first level applies.
     text = record.render(budget=len(full) - 1)
@@ -895,3 +897,16 @@ def test_plan_record_keeps_translator_source_account_across_turns():
     reading = record.source_readings(observed_at=datetime(2026, 10, 10, tzinfo=UTC))[0]
     assert reading.provenance_ref == "provenance/CRS"
     assert reading.provenance_account == "provider"
+
+
+def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> None:
+    """`debt_history` is code's copy of `debt` for a rolling growth. The record has
+    one step, source and period for `debt`, and one warning, which names `debt`."""
+    record = PlanRecord.from_plan(stored_split_plan(decision))
+
+    assert [step.id for step in record.steps] == ["debt", "total", "last_five"]
+    assert [source.spec_id for source in record.sources] == [SPEC_DEBT]
+    assert [period.requirement_ids for period in record.periods] == [("debt",)]
+    assert [(warning.code, warning.requirement_id) for warning in record.warnings] == [
+        ("window_short", "debt")
+    ]

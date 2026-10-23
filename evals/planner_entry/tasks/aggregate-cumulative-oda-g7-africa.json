@@ -46,7 +46,10 @@
   ],
   "brief": "Total gross disbursements of official development assistance in constant 2024 US dollars from G7 to Africa from 1965 to 2024",
   "asks": [
-    "Total cumulative gross disbursements of ODA from G7 to Africa between 1965 and 2024",
+    {
+      "text": "Total cumulative gross disbursements of ODA from G7 to Africa between 1965 and 2024",
+      "across_years": true
+    },
     "Annual gross disbursements of ODA from G7 to Africa from 1965 to 2024"
   ],
   "required_kinds": [
@@ -62,6 +65,7 @@
     "distinction": "aggregate, not sum_of: the cumulative total sums the years of one series, where a sum_of adds two sources"
   },
   "unit_asked": true,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "Total gross disbursements of official development assistance in constant 2024 US dollars from G7 to Africa from 1965 to 2024",
     "answer_mode": "computed",

@@ -39,6 +39,7 @@
     "distinction": "rank, not filter: the five lowest by order, with no threshold value given"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which five African countries received the least ODA in 2021?",
     "answer_mode": "computed",

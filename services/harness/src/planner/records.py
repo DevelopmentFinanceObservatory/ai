@@ -321,8 +321,22 @@ class RollingIssue(TitlelessEnum):
     # A period that follows the newest data reads a dataset retrieved with a
     # closed end, or one that cannot be retrieved with an open one.
     NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
-    # A relative period disagrees with the year stated beside it.
+    # Rolling years a run reads from one newest year stand for different
+    # newest years, or for one after the last year the datasets they read
+    # hold, so the years stated beside them are not the ones it reads.
     YEARS_DISAGREE = "rolling_years_disagree"
+    # A first year that follows the newest data meets a fixed last year, so
+    # newer data leaves no year (`planner.shapes.years_run_out`), or newer
+    # data takes a growth window's first or last year out of its input
+    # (`planner.shapes.growth_endpoint_leaves`).
+    YEARS_RUN_OUT = "rolling_years_run_out"
+    # A two-sided step pairs a side whose years follow the newest year with
+    # a side open to each series' newest year that the newest year is not
+    # resolved over (`planner.shapes.anchor_misses`).
+    SIDE_UNANCHORED = "rolling_side_unanchored"
+    # A filter's `ne` follows the newest data, or removes a year from years
+    # newer data moves (a dataset retrieved with `period_end_open`).
+    EXCLUSION_ROLLS = "rolling_exclusion"
     # The dataset's whole history holds more rows than one frame may.
     FRAME_TOO_LARGE = "rolling_frame_too_large"
 
@@ -416,26 +430,14 @@ def check_rolling_window(
     window_end: int | None,
     error: Callable[[str], Exception],
 ) -> None:
-    """Raise `error(fault)` when `rolling` disagrees with the years stated beside it.
+    """Raise `error(fault)` when `rolling` names a bound of a window that states no years.
 
-    A relative bound needs its year, and two relative bounds stand for one
-    newest year: `window_start - window_end` equals the difference of their
-    offsets. No `rolling` agrees with any years.
+    The newest year each relative bound stands for is checked across the
+    plan, every rolling year a run reads together against one newest year
+    (`planner.plan._check_rolling_years_agree`).
     """
-    if rolling is None:
-        return
-    if window_start is None or window_end is None:
+    if rolling is not None and (window_start is None or window_end is None):
         raise error("its `rolling` names a bound of a window it does not state")
-    if rolling.window_start is None or rolling.window_end is None:
-        return
-    stated = window_start - window_end
-    relative = rolling.window_start.offset - rolling.window_end.offset
-    if stated != relative:
-        raise error(
-            f"its window spans {-stated} years ({window_start}-{window_end}) and its "
-            f"`rolling` offsets span {-relative}; state the years the offsets give under "
-            "one newest year"
-        )
 
 
 ThresholdOp = Literal["gt", "gte", "lt", "lte", "eq", "ne"]
@@ -470,6 +472,23 @@ class PeriodThreshold(TaggedModel):
             "`period_end_open` on the dataset requirement read."
         ),
     )
+
+    @model_validator(mode="after")
+    def _keeps_the_newest_year_reachable(self) -> PeriodThreshold:
+        """Refuse `gt` at offset 0, which keeps only the years after the newest.
+
+        The run's newest year is the newest at least half the series hold
+        (`executor.run`), so the years after it belong to the fewer series
+        reporting past it, and to none when every series ends on it.
+        Offsets are 0 or less, so no other rolling bound sets a first
+        year after the newest.
+        """
+        if self.op == "gt" and self.rolling is not None and self.rolling.offset == 0:
+            raise ValueError(
+                "op `gt` with `rolling` at offset 0 keeps only the years after the newest year, "
+                "which most series do not hold; keep the newest year on with op `gte` at offset 0"
+            )
+        return self
 
 
 class EntityIn(TaggedModel):

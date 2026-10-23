@@ -1,7 +1,8 @@
 """The checks a proposed plan passes before it is recorded, over any session.
 
 `admit` runs the whole chain a `propose_plan` call runs, in order: the lists
-it states (`_Patch`), which plan it means (`_resolve_intent`), the pins it
+it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
+as the model wrote it (`planner.plan.authored`), the pins it
 moves back from their windowed copies (`_unwindowed_pins`), a referral the
 user has not answered (`_referral_unanswered`), the decisions it settles
 (`planner.plan.settle_decisions`), the measure decisions written on the
@@ -11,7 +12,9 @@ unless another requirement still rests on it), the carried planner
 decisions it leaves uncited (`_uncited_carried_decisions`), a user's
 decision it drops or changes with no word from the user since the plan was
 recorded (`_user_decision_refused`), the `Plan` it
-builds, the pins it windows
+builds under the first years on record (`_first_years_on_record`), that
+plan split so a dataset read from its first year serves only the steps
+rolling from their start (`planner.plan.split_of`), the pins it windows
 (`_window_pins`), and what a built plan may not record
 (`_unrecordable`). It answers the refusal that stops the chain first, or an
 `Admission` carrying the plan to record. `submit` records an admission and
@@ -32,7 +35,7 @@ caller's.
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, NamedTuple, Protocol
@@ -58,11 +61,13 @@ from planner.parties import (
 from planner.plan import (
     MAX_DECISION_OPTIONS,
     MAX_DECLINES,
+    MAX_GROUP_BY,
     MAX_OPTION_CHARS,
     MAX_PLAN_ASKS,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
     MAX_PLAN_ROUNDS,
+    AggregateRequirement,
     AnswerMode,
     AskAnswer,
     AskRoleDroppedError,
@@ -73,10 +78,13 @@ from planner.plan import (
     DecisionFixes,
     Decline,
     EvidenceRequirement,
+    FirstYear,
     FixDisagreement,
     FullHistory,
+    OneYearRead,
     PinSource,
     Plan,
+    RankRequirement,
     RecordedDefinition,
     ResolvedBy,
     SessionState,
@@ -84,6 +92,8 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     WindowedPin,
+    amendment_entry,
+    authored,
     bound_fixes,
     cut_user_text,
     dataset_roots,
@@ -93,41 +103,48 @@ from planner.plan import (
     full_history,
     inputs_of,
     is_search_pin,
+    licences_restated,
     load_ask_breakdowns,
     load_asks,
+    load_asks_across_years,
     load_optional_declines,
     load_plan,
     load_plan_rounds,
+    load_reduction_refused_asks,
     load_terminal_declines,
     load_unsupported,
     open_window,
+    period_licences_held,
     period_window,
     pin_sources,
     recorded_identity,
     roles_not_kept,
-    rolling_readers,
-    rolls_from_its_start,
     search_pin_slot,
     settle_decisions,
     shown_identity,
+    split_of,
+    unstated_period_reductions,
     unstated_result_scopes,
     windowed_pin,
     windowed_pins,
 )
 from planner.records import (
+    GroupBy,
     Identifier,
     OpenPeriodFault,
     ResolvedSourceMention,
     RollingIssue,
     RollingPlanError,
+    Year,
 )
 from planner.shapes import PLACE_PHRASE
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import OpenEntityAxis, ResolvedGroup, SelectedSource
-from pydantic import BaseModel, Field, JsonValue, ValidationError, model_validator
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
 from translator.discovery import load_log, requirement_open_roles, requirement_revision
 from translator.referral import USER_DECIDES, Referral, ReferralKind, load_referral
+from translator.tool import authored_answer
 
 # What a combination ask asks about: the `sum_of` requirement's id and the
 # datasets its sides read (`_sum_datasets`).
@@ -141,9 +158,10 @@ class SessionView(Protocol):
     recorded plan, its rounds, pins shown and windowed, histories read,
     asks, the pending referral, the discovery log), read through their own
     loaders. The four readers answer from what the user was asked and
-    answered in this session. The two writes are the chain's only side
-    effects: an `unsupported` answer, recorded even though the call is
-    refused, and an admitted plan.
+    answered in this session. The three writes are the chain's only side
+    effects: an `unsupported` answer and the asks a `PERIOD_REDUCTION_UNSTATED`
+    refusal names, both recorded even though the call is refused, and an
+    admitted plan.
     """
 
     @property
@@ -171,6 +189,10 @@ class SessionView(Protocol):
         """Record that a proposal in this planner entry was answered `unsupported` for `operation`."""
         ...
 
+    def record_reduction_refused(self, asks: Iterable[int]) -> None:
+        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
+        ...
+
     def record_admission(self, admission: Admission) -> None:
         """Record `admission`'s plan, its round count and its windowed pins, and clear the referral it supersedes."""
         ...
@@ -192,6 +214,7 @@ class Proposal:
     removed_evidence_requirements: Sequence[Any] = ()
     declined: Sequence[Any] = ()
     answered: Sequence[Any] = ()
+    across_years: Sequence[Any] = ()
     amends_version: int | None = None
     starts_new_plan: bool = False
 
@@ -240,7 +263,12 @@ class Admission:
 
 
 def submit(
-    view: SessionView, proposal: Proposal, *, question_fixed: bool, proposer: Proposer
+    view: SessionView,
+    proposal: Proposal,
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> dict[str, object]:
     """Check `proposal` against `view` and record it, answering as `propose_plan` does.
 
@@ -250,7 +278,13 @@ def submit(
     nothing but an `unsupported` answer. `proposer` is the tool `proposal`
     came through.
     """
-    admitted = admit(view, proposal, question_fixed=question_fixed, proposer=proposer)
+    admitted = admit(
+        view,
+        proposal,
+        question_fixed=question_fixed,
+        reads_user_words=reads_user_words,
+        proposer=proposer,
+    )
     if not isinstance(admitted, Admission):
         return admitted
     view.record_admission(admitted)
@@ -268,13 +302,26 @@ def submit(
 
 
 def admit(
-    view: SessionView, proposal: Proposal, *, question_fixed: bool, proposer: Proposer
+    view: SessionView,
+    proposal: Proposal,
+    *,
+    question_fixed: bool,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> Admission | dict[str, object]:
     """Run the chain over `proposal`, answering the plan to record or the refusal that stops it.
 
-    `question_fixed` is `_resolve_intent`'s. `proposer` is the tool every
-    refusal's `action` names. Writes nothing but an `unsupported` answer
-    (`SessionView.record_unsupported`).
+    `question_fixed` is `_resolve_intent`'s. `reads_user_words` says the
+    planner reads the user's own words in every entry, as the standalone
+    planner and `harness_pair_v1` do; under `harness.planner_seam` it reads
+    them only in an entry the user's amendment opened
+    (`planner.plan.amendment_entry`). Only where it reads them may
+    `proposal.across_years` name a step, and each step it names takes a
+    licence to combine its years (`planner.plan.period_licences_held`).
+    `proposer` is the tool every refusal's `action` names. Writes nothing
+    but an `unsupported` answer (`SessionView.record_unsupported`) and the
+    asks a `PERIOD_REDUCTION_UNSTATED` refusal names
+    (`SessionView.record_reduction_refused`).
     """
     try:
         # ADK's arg preprocessing silently falls back to raw dicts for the
@@ -291,16 +338,19 @@ def admit(
                 "removed_evidence_requirements": proposal.removed_evidence_requirements,
                 "declined": proposal.declined,
                 "answered": proposal.answered,
+                "across_years": proposal.across_years,
             }
         )
     except ValidationError as exc:
         return _invalid_data(exc, proposer)
+    reads_user_words = reads_user_words or amendment_entry(view.state)
     question = proposal.question
     answer_mode = proposal.answer_mode
     evidence_requirements = patch.evidence_requirements
     removed_decisions = patch.removed_decisions
     removed_evidence_requirements = patch.removed_evidence_requirements
     existing = load_plan(view.state)
+    referral = _authored_referral(view, existing)
     resolved = _resolve_intent(
         existing,
         amends_version=proposal.amends_version,
@@ -312,6 +362,11 @@ def admit(
     if isinstance(resolved, dict):
         return resolved
     previous, rounds = resolved
+    if previous is not None:
+        # The chain reads the plan as the model wrote it. The model is shown
+        # no copy the split added, so a patch naming a copy's id names a
+        # requirement of its own, and the split copies under the next free id.
+        previous = authored(previous)
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
     if to_origin:
@@ -332,7 +387,7 @@ def admit(
         compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
     )
     user_settled = _user_settled_measures(measures, view, pins)
-    evidence_requirements = _stated_source_given_way(evidence_requirements, view)
+    evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
     settled, evidence_requirements = _measure_decisions(
         settle_decisions(
             patch.decisions,
@@ -346,6 +401,8 @@ def admit(
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
     )
+    read = full_histories(view.state)
+    definition_lookup = load_log(view.state).recorded_alternative
     settled = [
         *settled,
         *_user_settled_rewrites(
@@ -383,7 +440,13 @@ def admit(
     # A pending referral outranks an overridden user decision: answering it
     # may change the patch.
     blocked = (
-        _referral_unanswered(existing, view)
+        _across_years_unread(
+            patch.across_years,
+            requirements=requirements_after,
+            previous=previous,
+            reads_user_words=reads_user_words,
+        )
+        or _referral_unanswered(existing, referral, view)
         or (
             None
             if user_spoke
@@ -407,7 +470,9 @@ def admit(
                 declined=patch.declined,
                 asks=load_asks(view.state),
                 ask_breakdowns=load_ask_breakdowns(view.state),
+                asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
+                first_years=_first_years_on_record(requirements_after, shown=pins, read=read),
             )
         elif question is None or answer_mode is None:
             missing = " and ".join(
@@ -432,30 +497,71 @@ def admit(
                 declined=patch.declined,
                 asks=load_asks(view.state),
                 ask_breakdowns=load_ask_breakdowns(view.state),
+                asks_across_years=load_asks_across_years(view.state),
                 answered=patch.answered,
+                first_years=_first_years_on_record(requirements_after, shown=pins, read=read),
             )
-        stated = plan
-        plan, copies = _window_pins(
-            stated,
-            shown=pins,
-            read=full_histories(view.state),
-            definition_lookup=load_log(view.state).recorded_alternative,
+        stated = plan.model_copy(
+            update={
+                "period_licences": period_licences_held(
+                    plan, named=patch.across_years, previous=previous
+                )
+            }
         )
+        split = split_of(stated)
+        # The recorded plan carries the copies, and `Plan` validation checks
+        # they are the split of `stated` before `_window_pins` gives each pin
+        # its window.
+        materialized = (
+            Plan.model_validate(
+                {
+                    **stated.model_dump(),
+                    "evidence_requirements": split.requirements,
+                    "rolling_copies": split.copies,
+                }
+            )
+            if split.copies
+            else stated
+        )
+        plan, copies = _window_pins(materialized, shown=pins, definition_lookup=definition_lookup)
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
         # a decision, every decision cited, the length and count limits on
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
         # and a first draft or restart with no `question`/`answer_mode` is
-        # one raised above. `_window_pins` raises one for a decision
-        # fixing an open-ended pin of requirements over different periods.
+        # one raised above.
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
+        unknown = _first_year_unknown_cause(exc)
+        if unknown is not None:
+            exc = _first_year_refusal(
+                unknown, shown=pins, read=read, definition_lookup=definition_lookup
+            )
         return _invalid_data(exc, proposer)
-    blocked = _unrecordable(plan, view, stated=stated, previous=previous, proposer=proposer)
+    blocked = _unrecordable(
+        plan,
+        view,
+        referral=referral,
+        stated=stated,
+        previous=previous,
+        reads_user_words=reads_user_words,
+        proposer=proposer,
+    )
     if blocked is not None:
         return blocked
+    # The plan keeps the first years its split reads. A plan reading no
+    # whole history carries no `first_years`, so they leave its
+    # `plan_revision` unchanged.
+    whole = set(split_of(plan).first_years_read)
+    plan = plan.model_copy(
+        update={
+            "first_years": tuple(
+                entry for entry in plan.first_years if entry.requirement_id in whole
+            )
+        }
+    )
     # The copies this plan pins. A copy that only a replaced plan pinned is
     # let go, so however many drafts and amendments the turn makes, the
     # state holds at most one copy per dataset requirement of the recorded
@@ -487,6 +593,7 @@ class _Patch(BaseModel):
     ]
     declined: Annotated[list[Decline], Field(max_length=MAX_DECLINES)]
     answered: Annotated[list[AskAnswer], Field(max_length=MAX_PLAN_ASKS)]
+    across_years: Annotated[list[Identifier], Field(max_length=MAX_PLAN_REQUIREMENTS)]
 
     @model_validator(mode="after")
     def _roles_are_party_words(self) -> _Patch:
@@ -750,36 +857,71 @@ def _decline_unearned(
     its translation's, or one a replan's run-time refusal stands for
     (`harness.planner_seam._earned_by_refusal`); or among its optional
     declines (`load_optional_declines`), which hold `no_operation_covers`
-    in a first-draft entry (`harness.planner_seam`). A decline carried
+    in a first-draft entry (`harness.planner_seam`), for an ask no
+    `PERIOD_REDUCTION_UNSTATED` refusal named (`_declinable`). A decline carried
     unchanged from `previous`, the plan this one amends, was earned when it
     was recorded; one restated with the same `Decline.key` in other words is
     the same decline. A `BREAKDOWN_NOT_KEPT` decline is earned by its own
     rule, which checks a carried one too (`_breakdown_decline_unearned`).
+    `detail.asks` lists the refused asks a decline named, when there are any.
     """
-    earned = load_unsupported(view.state) | load_optional_declines(view.state)
     carried = {decline.key for decline in previous.declined} if previous is not None else set()
-    unearned = sorted(
-        {
-            decline.code.value
-            for decline in plan.declined
-            if decline.key not in carried
-            and decline.code not in earned
-            and decline.code is not UnsupportedOperation.BREAKDOWN_NOT_KEPT
-        }
-    )
-    if not unearned:
+    declines = [
+        decline
+        for decline in plan.declined
+        if decline.key not in carried
+        and decline.code is not UnsupportedOperation.BREAKDOWN_NOT_KEPT
+        and not _declinable(decline, view, permitted=load_optional_declines(view.state))
+    ]
+    if not declines:
         return None
-    return problem(
-        ProblemCode.DECLINE_UNEARNED,
+    unearned = sorted({decline.code.value for decline in declines})
+    refused = sorted(
+        {decline.ask_ref for decline in declines if decline.ask_ref is not None}
+        & load_reduction_refused_asks(view.state)
+    )
+    message = (
         f"`declined` names {unearned!r}, and nothing in this planner entry earned that "
         "code. A decline is earned when a proposal or its `translation` answers `unsupported` "
         "with its code, when a `requirement_unmeetable` translation's reason says it earns "
         "that code, or when the refusal this entry replans from means no operation "
         "covers the step. To earn it, propose the computation the ask states; if nothing "
-        "carries it out, that answer names the code.",
-        outcome=Outcome.INVALID_INPUT,
-        detail={"operations": unearned},
+        "carries it out, that answer names the code."
     )
+    if refused:
+        message += (
+            f" A `period_reduction_unstated` refusal named ask {_ask_list(refused)} in this "
+            "entry, so a computation states it: make the change that refusal offers."
+        )
+    return problem(
+        ProblemCode.DECLINE_UNEARNED,
+        message,
+        outcome=Outcome.INVALID_INPUT,
+        detail={"operations": unearned} | ({"asks": refused} if refused else {}),
+    )
+
+
+def _declinable(
+    decline: Decline, view: SessionView, *, permitted: frozenset[UnsupportedOperation]
+) -> bool:
+    """Whether this planner entry earned `decline`, with `permitted` the declines it allows unasked.
+
+    A tool's `unsupported` answer with the decline's code earns it
+    (`load_unsupported`). An entry's permission (`permitted`) covers no ask
+    a `PERIOD_REDUCTION_UNSTATED` refusal named in the entry
+    (`load_reduction_refused_asks`): that refusal found a computation the
+    ask states, and offered the change that answers it.
+    """
+    if decline.code in load_unsupported(view.state):
+        return True
+    return decline.code in permitted and decline.ask_ref not in load_reduction_refused_asks(
+        view.state
+    )
+
+
+def _ask_list(asks: Sequence[int]) -> str:
+    """Name `asks` by number, joined with "and"."""
+    return " and ".join(str(ask) for ask in asks)
 
 
 def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, object] | None:
@@ -821,7 +963,7 @@ def _breakdown_decline_unearned(plan: Plan, view: SessionView) -> dict[str, obje
     ]
     if not declines:
         return None
-    dropped = roles_not_kept(plan.ask_breakdowns, plan.answered, plan.evidence_requirements)
+    dropped = roles_not_kept(plan)
     parties = {breakdown.ask: breakdown.by for breakdown in plan.ask_breakdowns}
     sources = pin_sources(view.state)
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
@@ -1023,11 +1165,13 @@ def _nothing_to_plan(plan: Plan, view: SessionView) -> dict[str, object] | None:
     """Return the answer for a plan that declines every ask and states nothing else.
 
     The entry's required declines and terminal optional declines can close
-    it. An optional decline of incompatible sources still leaves their
+    it, each as `_declinable` allows. An optional decline of incompatible sources still leaves their
     separate figures to show, so that permission alone cannot close it.
     """
-    codes = {decline.code for decline in plan.declined}
-    if not codes or not codes <= load_unsupported(view.state) | load_terminal_declines(view.state):
+    terminal = load_terminal_declines(view.state)
+    if not plan.declined or not all(
+        _declinable(decline, view, permitted=terminal) for decline in plan.declined
+    ):
         return None
     return problem(
         ProblemCode.NOTHING_TO_PLAN,
@@ -1246,7 +1390,9 @@ def _question_fixed_amendment_invalid(
     )
 
 
-def _referral_unanswered(existing: Plan | None, view: SessionView) -> dict[str, object] | None:
+def _referral_unanswered(
+    existing: Plan | None, referral: Referral | None, view: SessionView
+) -> dict[str, object] | None:
     """Return the refusal for a `propose_plan` call over a referral the user has not
     answered, or `None` to let the call through.
 
@@ -1257,9 +1403,9 @@ def _referral_unanswered(existing: Plan | None, view: SessionView) -> dict[str, 
     referral would drop what the referral names and go on to translate. Every
     other kind is the planner's to settle, so the call goes through. The
     refusal points at the tool that asks the user, since `propose_plan` is
-    what it stops.
+    what it stops. `referral` is the pending one as the planner reads it
+    (`_authored_referral`).
     """
-    referral = load_referral(view.state)
     if (
         existing is None
         or referral is None
@@ -1304,12 +1450,12 @@ def _combination_ask() -> Action:
 
 
 def _stated_source_given_way(
-    requirements: Sequence[EvidenceRequirement], view: SessionView
+    requirements: Sequence[EvidenceRequirement], referral: Referral | None, view: SessionView
 ) -> list[EvidenceRequirement]:
     """`requirements`, with the stated `source` dropped from a requirement that pins the source the user chose.
 
-    A pending `requirement_unmeetable` referral marked `source_mismatch`
-    hands a requirement back because the source it states names none of the
+    A pending `requirement_unmeetable` referral (`referral`, as
+    `_authored_referral` gives it) marked `source_mismatch` hands a requirement back because the source it states names none of the
     sources discovery found, and offers those. A pin of one of them that the
     user picked, answering an ask raised after the referral
     (`SessionView.answers_since_referral`), names the exact source they chose, so the
@@ -1320,7 +1466,6 @@ def _stated_source_given_way(
     referral, so the compiler still refuses a source the user neither named
     nor chose.
     """
-    referral = load_referral(view.state)
     if referral is None or not referral.source_mismatch:
         return list(requirements)
     offered = {candidate.spec_id for candidate in referral.candidates}
@@ -1335,10 +1480,28 @@ def _stated_source_given_way(
     ]
 
 
-def _choice_not_offered(plan: Plan, view: SessionView) -> dict[str, object] | None:
+def _authored_referral(view: SessionView, recorded: Plan | None) -> Referral | None:
+    """The session's pending referral as the planner reads it, naming each requirement by the id the model wrote.
+
+    The referral saved in session state keys on the ids of `recorded`, the
+    plan on record, where a copy the split added names its own
+    (`translator.tool.authored_answer`). `admit` reads it once and hands it
+    to each check that reads the referral.
+    """
+    referral = load_referral(view.state)
+    if referral is None or recorded is None or not recorded.rolling_copies:
+        return referral
+    return Referral.model_validate(
+        authored_answer(referral.model_dump(mode="json"), split_of(recorded))
+    )
+
+
+def _choice_not_offered(
+    plan: Plan, referral: Referral | None, view: SessionView
+) -> dict[str, object] | None:
     """Return the refusal for a pin a pending source choice did not offer, or `None`.
 
-    A `choice_required` referral names the sources each requirement it is
+    A `choice_required` `referral`, as `_authored_referral` gives it, names the sources each requirement it is
     about may pin (`Referral.offered`): its `candidates`, and each stale
     pin's, which discovery recorded and no model wrote. While it is pending,
     each such requirement as `plan` states it either pins one of them or
@@ -1351,7 +1514,6 @@ def _choice_not_offered(plan: Plan, view: SessionView) -> dict[str, object] | No
     have the translator's search find those sources again
     (`_withheld_scope_dropped`).
     """
-    referral = load_referral(view.state)
     if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
         return None
     for requirement_id, candidates in referral.offered().items():
@@ -1631,16 +1793,15 @@ def _consenting_decisions(plan: Plan, requirement: SumOfRequirement) -> dict[str
 
 
 def _source_ref_unpicked(
-    plan: Plan, view: SessionView, previous: Plan | None
+    plan: Plan, referral: Referral | None, view: SessionView, previous: Plan | None
 ) -> dict[str, object] | None:
     """A new source reference must be a source option the user actually picked.
 
     The options are the candidates the open `source_name_ambiguous` referral
-    offers for the requirement's `source` wording, or for its `source_code`
+    (`referral`, as `_authored_referral` gives it) offers for the requirement's `source` wording, or for its `source_code`
     when more than one publisher holds the code.
     """
     picked = view.answers_since_referral()[1]
-    referral = load_referral(view.state)
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_ref is None:
             continue
@@ -1681,39 +1842,58 @@ def _source_ref_unpicked(
 
 
 def _unrecordable(
-    plan: Plan, view: SessionView, *, stated: Plan, previous: Plan | None, proposer: Proposer
+    plan: Plan,
+    view: SessionView,
+    *,
+    referral: Referral | None,
+    stated: Plan,
+    previous: Plan | None,
+    reads_user_words: bool,
+    proposer: Proposer,
 ) -> dict[str, object] | None:
     """Return the refusal for a built plan `propose_plan` may not record, or `None`.
 
     A plan states at least one requirement, unless it declines every ask
-    (`_nothing_to_plan`). A patch carries forward what it
-    does not name, so the amended plan is checked whole for a pin a pending
-    source choice did not offer (`_choice_not_offered`), for a
+    (`_nothing_to_plan`); one that states none and makes a decline nothing
+    earned is refused for the decline (`_decline_unearned`). A patch carries forward what it
+    does not name, so the amended plan is checked whole for a source
+    reference the user did not pick (`_source_ref_unpicked`) and a pin a
+    pending source choice did not offer (`_choice_not_offered`), both
+    against `stated`, the plan before its split and `_window_pins`, with
+    `referral`, the pending referral naming the requirements the model wrote
+    (`_authored_referral`), for a
     sum of two datasets the user was not asked to combine
     (`_combination_unasked`, against `stated`, the plan before `_window_pins`
     moved its pins), for a
     decline no `unsupported` answer earned (`_decline_unearned`, against
     `previous`, the plan it amends), for a decline of a party a source this
     turn holds open (`_breakdown_decline_unearned`, against `stated`), for a decline every `unsupported`
-    answer this turn requires (`_decline_missing`), and for a result given
+    answer this turn requires (`_decline_missing`), for a result given
     per member of a party nobody named that no decision states
-    (`_result_scope_unstated`).
+    (`_result_scope_unstated`), and for a step reducing across years for a
+    result no ask across years asks for (`_period_reduction_unstated`,
+    against `stated`, read with `reads_user_words`).
     """
     if not plan.evidence_requirements:
-        return _nothing_to_plan(plan, view) or _invalid_plan(
-            "A plan states at least one evidence requirement: what data the answer "
-            "rests on, citing the decisions that fixed it. State the requirements this "
-            "question needs, or name the ones a patch removes in "
-            "`removed_evidence_requirements`."
+        return (
+            _nothing_to_plan(plan, view)
+            or _decline_unearned(plan, previous, view)
+            or _invalid_plan(
+                "A plan states at least one evidence requirement: what data the answer "
+                "rests on, citing the decisions that fixed it. State the requirements this "
+                "question needs, or name the ones a patch removes in "
+                "`removed_evidence_requirements`."
+            )
         )
     return (
-        _source_ref_unpicked(plan, view, previous)
-        or _choice_not_offered(plan, view)
+        _source_ref_unpicked(stated, referral, view, previous)
+        or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous)
         or _decline_unearned(plan, previous, view)
         or _breakdown_decline_unearned(stated, view)
         or _decline_missing(plan, view, proposer)
         or _result_scope_unstated(plan)
+        or _period_reduction_unstated(stated, view, reads_user_words=reads_user_words)
     )
 
 
@@ -1760,6 +1940,240 @@ def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:
                 for gap in gaps
             ]
         },
+    )
+
+
+class OneYear(StrEnum):
+    """The change a `PERIOD_REDUCTION_UNSTATED` refusal offers to have a step read one year.
+
+    Each edits the refused step alone, so no other result's years or inputs
+    move (`planner.plan.one_year_followed`), save those of the refused
+    steps it is offered together with. `WINDOW` sets a rank's own
+    window to the year. `FILTER` has an aggregate read its own input through
+    an `eq` filter on the year. The year is one every series keeps holding
+    as newer data arrives (`planner.plan.YearsHeld.one_year`): the last one
+    the step's input holds, fixed where that year is fixed or a fixed bound
+    stops it, and rolling at the offset newer data moves it by otherwise,
+    or that last year fixed where the rolling one gives a plan
+    `planner.plan._one_year_offered` does not pass. A change is offered
+    only where the plan it gives, alone or with the changes it is offered
+    together with, validates and retrieves every dataset over
+    the window the refused plan does, so it meets no rule the refused plan
+    did not and leaves every other result's years as they were.
+    """
+
+    WINDOW = "window"
+    FILTER = "filter"
+
+
+def _one_year_rolling(offset: int | None, *, rolls: str) -> str:
+    """How a one-year remedy states `rolling` at `offset`, `None` for a fixed year; `rolls` names what rolls."""
+    if offset is None:
+        return "`rolling` unset"
+    year = "the newest year" if offset == 0 else f"the year {-offset} before the newest"
+    return f"{rolls} at offset {offset}, so it keeps {year} as newer data arrives"
+
+
+def _one_year_offer(
+    change: OneYear, read: OneYearRead, together_with: Sequence[str]
+) -> dict[str, object]:
+    """The `one_year` a gap of a `PERIOD_REDUCTION_UNSTATED` refusal offers: `change` on `read`, with the steps it is made together with."""
+    return {
+        "change": change,
+        "year": read.year,
+        "offset": read.offset,
+        "together_with": list(together_with),
+    }
+
+
+def _one_year_together(together_with: Sequence[str]) -> str:
+    """The sentence saying a one-year change is admitted only together with the ones offered to `together_with`, and an empty string when it names none."""
+    if not together_with:
+        return ""
+    steps = " and ".join(repr(step) for step in together_with)
+    return (
+        f" Make this change together with the one-year change offered to {steps}: the plan "
+        "is admitted with all of them, and refused with any one alone."
+    )
+
+
+def _period_reduction_unstated(
+    plan: Plan, view: SessionView, *, reads_user_words: bool
+) -> dict[str, object] | None:
+    """Return the `PERIOD_REDUCTION_UNSTATED` refusal naming every step of `plan` that reduces across years for a result no ask across years asks for, or `None`.
+
+    The rule is `planner.plan.unstated_period_reductions`, over the
+    licences `admit` wrote on `plan`. For each such step the refusal names
+    the step, the result computed from it, the asks that result answers and
+    the years reduced, and says those asks do not ask for one figure over
+    them.
+
+    When another result computed from the step answers an ask across years,
+    the step is asked for, and the refusal points at the unmarked asks. Each
+    is answered by a result of its own that keeps the years or reads one
+    year, or, for a result answering no ask, the result is listed under an
+    ask across years or removed.
+
+    Otherwise the refusal gives two ways to settle the step: keep the years
+    (`_keep_the_years`), or read one year, the second only where the step
+    holds a year it can read alone (`planner.plan.YearsHeld.one_year`).
+    Where the planner reads the user's own words (`reads_user_words`), it
+    adds a third, naming the step in `across_years` when those words ask for
+    the figure.
+
+    `detail.gaps` holds one entry per step, in the order the rule finds
+    them. Its `one_year` is the change offered to read one year, with the
+    `OneYear` `change`, the `year`, the `offset` from the anchor it rolls at
+    (`None` for a fixed year), and `together_with`, the other steps whose
+    changes the plan has to make with it (empty where it passes alone).
+    `one_year` is `None` where the step is asked for and keeps its years,
+    and where it holds no year it can read in a plan
+    `planner.plan._one_year_offered` passes, alone or with the others.
+
+    The asks the refusal names are recorded for the rest of the planner
+    entry (`SessionView.record_reduction_refused`), where no permission to
+    decline unasked covers them (`_declinable`).
+    """
+    gaps = unstated_period_reductions(plan)
+    if not gaps:
+        return None
+    view.record_reduction_refused(ask for gap in gaps for ask in gap.asks)
+    steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    sentences = []
+    offered: list[dict[str, object] | None] = []
+    for gap in gaps:
+        held = gap.held
+        offer: dict[str, object] | None = None
+        read = held.one_year
+        years = held.phrase()
+        step = repr(gap.step_id)
+        output = repr(gap.output_id)
+        result = "which" if gap.output_id == gap.step_id else f"and {output}, computed from it,"
+        if gap.asks:
+            answers = " and ".join(f"ask {ask} ({plan.asks[ask]!r})" for ask in gap.asks)
+            unasked = (
+                "That ask is not marked (across years) and does not ask"
+                if len(gap.asks) == 1
+                else "Those asks are not marked (across years) and do not ask"
+            ) + " for one figure over those years"
+        else:
+            answers = "no ask"
+            unasked = "No ask asks for that figure"
+        reducing = steps[gap.step_id]
+        if gap.asked_across and gap.asks:
+            listed = "that ask's" if len(gap.asks) == 1 else "each of those asks'"
+            remedies = (
+                f"{step} also feeds an ask marked (across years), so keep it as it is. Answer "
+                f"{answers} with a result of its own that keeps the years or reads one year, "
+                f"and take {output} out of {listed} `answered` outputs."
+            )
+        elif gap.asked_across:
+            remedies = (
+                f"{step} also feeds an ask marked (across years), so keep it as it is and list "
+                f"{output} in `answered` under an ask marked (across years) that it answers, "
+                "or remove it."
+            )
+        elif isinstance(reducing, RankRequirement):
+            remedies = f"To keep the years, set `per_period` to true on {step}."
+            if read is not None:
+                offer = _one_year_offer(OneYear.WINDOW, read, gap.together_with)
+                remedies += (
+                    f" To read one year, set `window_start` and `window_end` on {step} to "
+                    f"{read.year}, with "
+                    f"{_one_year_rolling(read.offset, rolls='`rolling` naming both')}."
+                    f"{_one_year_together(gap.together_with)}"
+                )
+            if reads_user_words:
+                remedies += (
+                    f" If the user's own words ask for one ranking over {years}, leave "
+                    f"`per_period` false on {step} and name {step} in `across_years`."
+                )
+        else:
+            assert isinstance(reducing, AggregateRequirement)
+            remedies = f"To keep the years, {_keep_the_years(reducing)}."
+            if read is not None:
+                offer = _one_year_offer(OneYear.FILTER, read, gap.together_with)
+                remedies += (
+                    f" To read one year, have {step} read its input {reducing.input_id!r} "
+                    f"through a `filter` whose `period_threshold` keeps {read.year} alone, with "
+                    f"op `eq` and {_one_year_rolling(read.offset, rolls='`rolling`')}."
+                    f"{_one_year_together(gap.together_with)}"
+                )
+            if reads_user_words:
+                remedies += (
+                    f" If the user's own words ask for one figure over {years}, name {step} "
+                    "in `across_years`."
+                )
+        offered.append(offer)
+        sentences.append(
+            f"{step} reduces {years} to one figure, {result} answers {answers}. {unasked}. "
+            f"{remedies}"
+        )
+    return problem(
+        ProblemCode.PERIOD_REDUCTION_UNSTATED,
+        " ".join(sentences),
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "gaps": [
+                {
+                    "requirement_id": gap.step_id,
+                    "output_id": gap.output_id,
+                    "asks": list(gap.asks),
+                    "years": {"start": gap.held.years.start, "end": gap.held.years.end},
+                    "follows_newest": gap.held.follows_newest,
+                    "until": gap.held.until,
+                    "dataset_requirement_id": gap.held.dataset_id,
+                    "one_year": one_year,
+                }
+                for gap, one_year in zip(gaps, offered, strict=True)
+            ]
+        },
+    )
+
+
+def _across_years_unread(
+    across_years: Sequence[str],
+    *,
+    requirements: Sequence[EvidenceRequirement],
+    previous: Plan | None,
+    reads_user_words: bool,
+) -> dict[str, object] | None:
+    """Return the `INVALID_PLAN` refusal of an `across_years` naming steps where the planner reads none of the user's own words, or `None`.
+
+    There the orchestrator holds them, and its (across years) mark on an ask
+    is the only statement that the user asked for one figure over the years.
+    A step whose licence `previous` holds as `requirements` state it is a
+    restatement, which grants nothing (`planner.plan.licences_restated`).
+    """
+    if reads_user_words:
+        return None
+    restated = licences_restated(across_years, requirements=requirements, previous=previous)
+    unread = [name for name in across_years if name not in restated]
+    if not unread:
+        return None
+    return _invalid_plan(
+        "`across_years` names the steps whose years the user's own words ask to combine, "
+        "and in this entry you read the orchestrator's brief, not the user's words. Take "
+        f"{', '.join(map(repr, unread))} out of `across_years`. A step the plan already "
+        "licenses keeps its licence without being named, and any other figure or ranking "
+        "over several years answers only an ask the brief marks (across years)."
+    )
+
+
+def _keep_the_years(aggregate: AggregateRequirement) -> str:
+    """How `aggregate`, whose `group_by` lacks `period`, keeps the years, as its refusal says it.
+
+    It adds `period` while the group names fewer than `MAX_GROUP_BY`
+    columns. At the cap it groups by `entity` and `breakdown`, and `entity`
+    already keeps a breakdown's codes, so `period` takes `breakdown`'s place.
+    """
+    step = repr(aggregate.id)
+    if len(aggregate.group_by) < MAX_GROUP_BY:
+        return f"add `period` to the `group_by` of {step}"
+    assert set(aggregate.group_by) == {GroupBy.ENTITY, GroupBy.BREAKDOWN}
+    return (
+        f"group {step} by `entity` and `period`: `entity` keeps the breakdown's codes too, "
+        "and a group names two columns at most"
     )
 
 
@@ -1917,80 +2331,162 @@ def _first_year_on_record(
 
     Read from the Search answer the planner was shown for `pin`
     (`planner.plan.full_history`), or else from what `propose_plan` read for
-    it over no window (`read`, `planner.plan.full_histories`).
+    it over no window (`read`, `planner.plan.full_histories`). A first year
+    outside the years a plan states (`planner.records.Year`) is none.
     """
     source = shown.get(pin)
     block = source.spec_block(pin) if source is not None else None
-    if block is not None and (history := full_history(block)) is not None:
-        return history
-    return read.get(pin)
+    history = full_history(block) if block is not None else None
+    if history is None or not _is_year(history.first_year):
+        history = read.get(pin)
+    return history if history is not None and _is_year(history.first_year) else None
 
 
-def _open_window(
-    plan: Plan,
-    requirement: DatasetRequirement,
+_YEAR = TypeAdapter(Year)
+
+
+def _is_year(year: int) -> bool:
+    """Whether `year` is one a plan can state (`planner.records.Year`)."""
+    try:
+        _YEAR.validate_python(year)
+    except ValidationError:
+        return False
+    return True
+
+
+def _first_years_on_record(
+    requirements: Iterable[EvidenceRequirement],
     *,
     shown: Mapping[str, PinSource],
     read: Mapping[str, FullHistory | None],
-) -> dict[str, object]:
-    """The window with no end year a pinned `requirement` stating `period_end_open` is retrieved over.
+) -> list[FirstYear]:
+    """The first year on record for each pinned dataset requirement of `requirements` stating `period_end_open`.
 
-    It starts at the requirement's own first year when every period that
-    follows the newest data over it keeps a fixed start. When one rolls
-    from its start (`planner.plan.rolls_from_its_start`), the year it reads
-    can sit before the stated period, so the window starts at the first
-    year the dataset holds (`_first_year_on_record`) and the frame holds
-    its whole history. That frame is refused here when Search counted more
-    rows for it than one frame may hold (data-mcp's `max_frame_rows`); an
-    uncounted one is refused by `get_data` itself (`over_ceiling`) if it is
-    too large.
-
-    Raises:
-        RollingPlanError: `RollingIssue.NEEDS_OPEN_PERIOD` when no first year
-            is on record: `OpenPeriodFault.FIRST_YEAR_UNKNOWN` before the
-            dataset was read over no window, `FIRST_YEAR_READ_FAILED` when
-            that read's answer stated none (`read` holds the pin with
-            `None`). `RollingIssue.FRAME_TOO_LARGE` when the history is past
-            the ceiling.
+    A plan reads a dataset's whole history from that year
+    (`planner.plan.whole_history_split`), so a requirement gets one only
+    where the frame can hold it: Search counted no more rows for every
+    year than one frame may hold (data-mcp's `max_frame_rows`), or counted
+    none, and then `get_data` itself refuses one too large
+    (`over_ceiling`). A requirement with none that the split reads from
+    its first year is refused (`_first_year_refusal`).
     """
-    if not _rolls_from_its_start(plan, requirement):
-        return period_window(requirement.period, end_open=True)
-    pin = requirement.source_spec_id or ""
+    ceiling = DataMcpSettings().max_frame_rows
+    years = []
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or not requirement.period_end_open:
+            continue
+        pin = requirement.source_spec_id
+        history = _first_year_on_record(pin, shown=shown, read=read) if pin is not None else None
+        if history is None or (history.rows is not None and history.rows > ceiling):
+            continue
+        years.append(FirstYear(requirement_id=requirement.id, year=history.first_year))
+    return years
+
+
+def _first_year_unknown_cause(exc: ValueError) -> RollingPlanError | None:
+    """The `OpenPeriodFault.FIRST_YEAR_UNKNOWN` refusal plan validation raised under `exc`, if it did."""
+    raised: list[object] = [exc]
+    if isinstance(exc, ValidationError):
+        raised = [error.get("ctx", {}).get("error") for error in exc.errors(include_url=False)]
+    for cause in raised:
+        if (
+            isinstance(cause, RollingPlanError)
+            and cause.fault is OpenPeriodFault.FIRST_YEAR_UNKNOWN
+        ):
+            return cause
+    return None
+
+
+def _first_year_refusal(
+    refused: RollingPlanError,
+    *,
+    shown: Mapping[str, PinSource],
+    read: Mapping[str, FullHistory | None],
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None,
+) -> RollingPlanError:
+    """`refused`, a requirement read from a first year the plan holds none for, restated to match what the session read.
+
+    `refused.spec_id` is the pin, as the planner named it. With none, or
+    one with no identity on record (`identity_on_record`), the requirement
+    names no dataset whose years can be read
+    (`OpenPeriodFault.NO_SOURCE_ON_RECORD`). Otherwise the first year is
+    unknown before the dataset was read over no window (`refused` as it
+    is, which `planner.agent.propose_plan_reading` answers by reading it),
+    `FIRST_YEAR_READ_FAILED` when that read's answer stated none (`read`
+    holds the pin with `None`), and `RollingIssue.FRAME_TOO_LARGE` when the
+    history is past the rows one frame may hold
+    (`_first_years_on_record`).
+    """
+    (requirement_id,) = refused.requirement_ids
+    pin = refused.spec_id
+    if (
+        pin is None
+        or identity_on_record(pin, shown=shown, end_open=True, definition_lookup=definition_lookup)
+        is None
+    ):
+        return RollingPlanError(
+            RollingIssue.NEEDS_OPEN_PERIOD,
+            f"{requirement_id!r} states `period_end_open`, which takes a dataset on "
+            "record to retrieve with no end year: pin a search result's `spec_id` as its "
+            "`source_spec_id`, or drop `period_end_open` and every `rolling` reading it "
+            "for fixed years",
+            requirement_ids=[requirement_id],
+            fault=OpenPeriodFault.NO_SOURCE_ON_RECORD,
+        )
     history = _first_year_on_record(pin, shown=shown, read=read)
     if history is None and pin in read:
-        raise RollingPlanError(
+        return RollingPlanError(
             RollingIssue.NEEDS_OPEN_PERIOD,
-            f"{requirement.id!r} is read from a start that follows the newest data, and "
+            f"{requirement_id!r} is read from a start that follows the newest data, and "
             f"Search's answer for {pin} over all its years states no first year, so the "
             "retrieval cannot be started there. This is a limit of what was read, not a "
-            "fault in the question. State the start as a fixed year and roll only the "
-            "end, or drop `rolling` and `period_end_open` for fixed years",
-            requirement_ids=[requirement.id],
+            "fault in the question. Where the window covers several years, state the "
+            "start as a fixed year and roll only the end; a window of one year cannot, so "
+            "drop `rolling` and `period_end_open` there for fixed years",
+            requirement_ids=[requirement_id],
             fault=OpenPeriodFault.FIRST_YEAR_READ_FAILED,
             spec_id=pin,
         )
     if history is None:
-        raise RollingPlanError(
+        return RollingPlanError(
             RollingIssue.NEEDS_OPEN_PERIOD,
-            f"{requirement.id!r} is read from a start that follows the newest data, which "
+            f"{requirement_id!r} is read from a start that follows the newest data, which "
             f"needs the first year {pin} holds, and no search result over all its years "
-            "states one. State the start as a fixed year and roll only the end, or drop "
-            "`rolling` and `period_end_open` for fixed years",
-            requirement_ids=[requirement.id],
+            "states one. Where the window covers several years, state the start as a "
+            "fixed year and roll only the end; a window of one year cannot, so drop "
+            "`rolling` and `period_end_open` there for fixed years",
+            requirement_ids=[requirement_id],
             fault=OpenPeriodFault.FIRST_YEAR_UNKNOWN,
             spec_id=pin,
         )
     ceiling = DataMcpSettings().max_frame_rows
-    if history.rows is not None and history.rows > ceiling:
-        raise RollingPlanError(
-            RollingIssue.FRAME_TOO_LARGE,
-            f"{requirement.id!r} is read from a start that follows the newest data, so it "
-            f"retrieves every year {pin} holds: {history.rows:,} rows, over the {ceiling:,} "
-            "one retrieval may return. Name fewer entities, state the start as a fixed "
-            "year and roll only the end, or drop `rolling` and `period_end_open`",
-            requirement_ids=[requirement.id],
-        )
-    return open_window(history.first_year)
+    assert history.rows is not None and history.rows > ceiling, history
+    return RollingPlanError(
+        RollingIssue.FRAME_TOO_LARGE,
+        f"{requirement_id!r} is read from a start that follows the newest data, so it "
+        f"retrieves every year {pin} holds: {history.rows:,} rows, over the {ceiling:,} "
+        "one retrieval may return. Name fewer entities, or, where the window covers "
+        "several years, state the start as a fixed year and roll only the end, or "
+        "drop `rolling` and `period_end_open` for fixed years",
+        requirement_ids=[requirement_id],
+    )
+
+
+def _open_window(
+    requirement: DatasetRequirement, *, whole_history: Mapping[str, int]
+) -> dict[str, object]:
+    """The window with no end year a pinned `requirement` stating `period_end_open` is retrieved over.
+
+    It starts at the requirement's own first year, unless the plan reads the
+    dataset's whole history there (`planner.plan.HistorySplit.whole_history`,
+    each such requirement by id with its dataset's first year on record):
+    then it starts at that year, and the frame holds every year the dataset
+    holds.
+    """
+    first_year = whole_history.get(requirement.id)
+    if first_year is None:
+        return period_window(requirement.period, end_open=True)
+    return open_window(first_year)
 
 
 @dataclass(frozen=True)
@@ -2043,7 +2539,7 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
 
     `propose_plan` reads a pinned dataset's first year
     (`planner.agent.read_full_history`) when a requirement rolls from its start and
-    nothing on record states that year (`_open_window`), once per dataset. Which dataset
+    nothing on record states that year (`_first_year_refusal`), once per dataset. Which dataset
     it reads depends on the plan, so this is every dataset the planner was shown
     (`planner.plan.pin_sources`) that has an identity on record, has not been read, and
     whose block states no first year.
@@ -2060,32 +2556,10 @@ def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     return reads
 
 
-def _rolls_from_its_start(plan: Plan, requirement: DatasetRequirement) -> bool:
-    """Whether a period over `requirement` follows the newest data from its start (`planner.plan.rolls_from_its_start`)."""
-    requirements = {item.id: item for item in plan.evidence_requirements}
-    return any(
-        rolls_from_its_start(reader) for reader in rolling_readers(requirements, requirement.id)
-    )
-
-
-def _needs_a_pin(plan: Plan, requirement: DatasetRequirement) -> bool:
-    """Whether `requirement`, stating `period_end_open` with no identity on record, cannot be retrieved open.
-
-    An unpinned one whose start is fixed can: the translator searches for it
-    from its first year on (`translator.discovery`), and Search answers with
-    a definition that has no end year. One read from a start that follows
-    the newest data needs the first year its dataset holds, which only a
-    dataset on record has. A pin with nothing on record is confirmed by a
-    search over the stated years, which finds a fixed end.
-    """
-    return requirement.source_spec_id is not None or _rolls_from_its_start(plan, requirement)
-
-
 def _window_pins(
     plan: Plan,
     *,
     shown: Mapping[str, PinSource] = {},
-    read: Mapping[str, FullHistory | None] = {},
     definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
 ) -> tuple[Plan, list[WindowedPin]]:
     """`plan` with each pin whose identity is on record moved to that identity over the requirement's own period.
@@ -2108,11 +2582,12 @@ def _window_pins(
     a range with no end year (`_open_window`), which apis ends at the
     current year at every mint, so its retrieval reaches years published
     after the plan. `shown` are the datasets the planner was shown this
-    entry (`planner.plan.pin_sources`) and `read` what `propose_plan` read
-    over no window (`planner.plan.full_histories`), both read for the first
-    year one holds.
-    Such a requirement needs an identity on record (`identity_on_record`),
-    unless it is unpinned and its start is fixed (`_needs_a_pin`).
+    entry (`planner.plan.pin_sources`). A pinned one needs an identity on
+    record (`identity_on_record`). An unpinned one is searched for from its
+    first year on (`translator.discovery`), and Search answers with a
+    definition that has no end year; plan validation refuses one the plan
+    reads from its dataset's first year, since only a dataset on record
+    has one (`_first_year_refusal`).
 
     Returns the moved plan and every copy it pins, each a
     `planner.plan.WindowedPin`. A copy states nothing Search stated for the
@@ -2120,19 +2595,18 @@ def _window_pins(
     the copy when it honours the pin (`translator.discovery`).
 
     One decision fixing the pin of requirements over different periods
-    cannot name every copy with its one `source_spec_id`. Those
-    requirements keep the pin as the planner wrote it, and the translator
-    searches for each.
+    cannot name every copy with its one `source_spec_id`. That decision
+    keeps the pin it fixes, and each of those requirements its own copy,
+    since the translator reads a requirement's pin and ignores its
+    decision's (`translator.discovery`).
 
     Raises:
-        ValueError: If one decision fixes the pin of a requirement stating
-            `period_end_open` for requirements over different periods.
-        RollingPlanError: If a requirement stating `period_end_open` needs an
-            identity on record and has none, or `_open_window` refuses it.
+        RollingPlanError: If a pinned requirement stating `period_end_open`
+            has no identity on record.
     """
+    whole_history = split_of(plan).whole_history
     pinning: dict[str, str] = {}
     copies: dict[str, WindowedPin | None] = {}
-    open_ended: set[str] = set()
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement):
             continue
@@ -2147,7 +2621,7 @@ def _window_pins(
             if pin is not None
             else None
         )
-        if requirement.period_end_open and recorded is None and _needs_a_pin(plan, requirement):
+        if requirement.period_end_open and pin is not None and recorded is None:
             raise RollingPlanError(
                 RollingIssue.NEEDS_OPEN_PERIOD,
                 f"{requirement.id!r} states `period_end_open`, which takes a dataset on "
@@ -2161,8 +2635,7 @@ def _window_pins(
             continue
         pinning[requirement.id] = pin
         if requirement.period_end_open:
-            open_ended.add(requirement.id)
-            window = _open_window(plan, requirement, shown=shown, read=read)
+            window = _open_window(requirement, whole_history=whole_history)
         else:
             window = period_window(requirement.period)
         if recorded.identity.get("requested_window") == window:
@@ -2185,23 +2658,7 @@ def _window_pins(
         if pin is None or pin not in origins:
             continue
         pinned = targets.get(decision.slot, set())
-        if len(pinned) > 1:
-            citing = {
-                requirement.id
-                for requirement in plan.evidence_requirements
-                if decision.slot in requirement.decision_ids
-            }
-            if citing & open_ended:
-                raise ValueError(
-                    f"decision {decision.slot!r} fixes the pin of requirements over different "
-                    "periods, which retrieve different spec_ids; give each of those requirements "
-                    "its own decision"
-                )
-            for requirement in plan.evidence_requirements:
-                if decision.slot in requirement.decision_ids:
-                    copies.pop(requirement.id, None)
-            continue
-        if pinned and pinned != {pin}:
+        if len(pinned) == 1 and pinned != {pin}:
             decision_pins[decision.slot] = next(iter(pinned))
             if is_search_pin(decision):
                 slots[decision.slot] = search_pin_slot(decision_pins[decision.slot])

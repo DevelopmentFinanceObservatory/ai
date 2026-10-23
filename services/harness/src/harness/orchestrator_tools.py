@@ -327,6 +327,18 @@ class AskedOutput(BaseModel):
             '["donor"] for "total aid from all donors"'
         ),
     )
+    across_years: bool = Field(
+        default=False,
+        description=(
+            "true when the user asked for this output as one figure, or one ranking, taken "
+            'across several years: a total, an average, a peak or a low over them ("the '
+            'total between 2015 and 2022", "in total, over all years", "the year aid '
+            'peaked"). It permits the plan to combine the years and requires nothing. Leave '
+            "it false for a figure for each year and for one year, and for a total or a "
+            "ranking when the user named no years: the years a source holds are not a span "
+            "the user asked for"
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -912,9 +924,14 @@ def _validated_arguments(
 
 
 def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
-    """The refusal of a `plan` call whose `asks` break the planner's limits
-    (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None."""
+    """The refusal of a `plan` call whose `asks` list none or break the
+    planner's limits (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None.
+
+    A plan held to no asks has no ask to license combining a step's years
+    (`planner.plan.Plan.period_licences`), so a brief lists at least one."""
     problems = []
+    if not asks:
+        problems.append("asks lists no outputs: list each output the user asked for")
     if len(asks) > MAX_PLAN_ASKS:
         problems.append(
             f"asks lists {len(asks)} outputs, more than {MAX_PLAN_ASKS}: merge outputs the "
@@ -936,7 +953,7 @@ def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
     return {
         "refusal": f"plan recorded nothing: {'; '.join(problems)}.",
         "code": ToolErrorCode.REQUEST_INVALID.value,
-        "legal": {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]},
+        "legal": {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]},
     }
 
 
@@ -1006,6 +1023,11 @@ def _ask_breakdowns(asks: Sequence[AskedOutput]) -> list[AskBreakdown]:
         for number, ask in enumerate(asks)
         if ask.by
     ]
+
+
+def _asks_across_years(asks: Sequence[AskedOutput]) -> list[int]:
+    """The numbers of the asks that set `across_years`."""
+    return [number for number, ask in enumerate(asks) if ask.across_years]
 
 
 def _named_spec_ids(tool_context: ToolContext) -> set[str]:
@@ -1888,17 +1910,21 @@ def build_orchestrator_tools(
         constructs the answer from the data. The user approves the plan
         before it runs.
 
-        `brief` is the whole question in full: every measure, place and
-        period. `asks` lists each output the user asked for, one per entry,
-        in the user's terms: a number, a ranking, a chart, a comparison; at
-        most six, each one short line. A figure over a span is an ask of its
-        own: "the total between 2010 and the latest" is one cumulative
-        number beside the yearly figures. A view added to help read the
-        answer is not an ask. The planner answers or declines each ask, so
-        an output left off the list can drop out of the plan unnoticed.
-        Each ask is `{"text", "by", "over"}`. Every party a search this turn
-        held open goes in some ask's `by` or `over`, and the plan keeps the
-        parties each ask lists in `by` together in one output.
+        `brief` is the whole question in full: every measure and place, and
+        the period the user named. When the user named none, say so, with
+        the year you chose if you chose one. The years a source holds are
+        not the question's period. `asks` lists each output the user asked
+        for, one per entry, in the user's terms: a number, a ranking, a
+        chart, a comparison; at least one and at most six, each one short line. One figure
+        the user asked for across several years is an ask of its own that
+        sets `across_years`: "the total between 2010 and the latest" is one
+        cumulative number beside the yearly figures. A view added to help
+        read the answer is not an ask. The planner answers or declines each
+        ask, so an output left off the list can drop out of the plan
+        unnoticed.
+        Each ask is `{"text", "by", "over", "across_years"}`. Every party a
+        search this turn held open goes in some ask's `by` or `over`, and the
+        plan keeps the parties each ask lists in `by` together in one output.
         End your turn after calling it; the plan's result comes back as the
         next message.
         """
@@ -1915,6 +1941,7 @@ def build_orchestrator_tools(
                 brief=brief,
                 asks=[text.strip() for text in texts],
                 ask_breakdowns=_ask_breakdowns(asks),
+                asks_across_years=_asks_across_years(asks),
             ),
         )
 

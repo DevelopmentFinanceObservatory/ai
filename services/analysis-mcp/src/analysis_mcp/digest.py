@@ -845,11 +845,12 @@ def render_rank_digest(
     rank number say which entries the output frame holds.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
-    window_text = (
-        f"{result.window_start}..{result.window_end}"
-        if result.window_start is not None
-        else "(no window)"
-    )
+    if result.window_start is None:
+        window_text = "(no window)"
+    elif result.window_start == result.window_end:
+        window_text = result.window_start
+    else:
+        window_text = f"{result.window_start}..{result.window_end}"
     header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
     if result.per_period:
         header += ", per_period=True"
@@ -1002,6 +1003,12 @@ def render_share_of_digest(
         *lead,
         label_line,
         *_periods_left_out_lines(result),
+        *_dropped_keys_lines(
+            (
+                (_NO_DENOMINATOR_MATCH, result.unmatched_keys),
+                (_NO_SHARED_PERIOD, result.keys_without_shared_period),
+            )
+        ),
         shares_block,
         coverage_line,
     ]
@@ -1011,7 +1018,14 @@ def render_share_of_digest(
                 ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
             )
         )
-    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    sections.extend(
+        _artifact_sections(
+            exclusions=[
+                exclusion for exclusion in exclusions if not _dropped_line_covers(exclusion)
+            ],
+            time_line=_time_line(time),
+        )
+    )
     derived_note = _derived_note(derived)
     if derived_note is not None:
         sections.append(derived_note)
@@ -1030,12 +1044,13 @@ def render_share_of_digest(
 _LEFT_OUT_NAME_CAP = 5
 
 
-def _quotient_line_covers(exclusion: Exclusion) -> bool:
-    """Whether `render_quotient_of_digest`'s own left-out lines state all
-    `exclusion` holds, so its exclusions block leaves the record out. The
-    dropped-keys line names every unmatched key. The zero-denominator line
-    gives cells and periods and no key, so it covers a `zero_denominator`
-    record only when that record names no key either."""
+def _dropped_line_covers(exclusion: Exclusion) -> bool:
+    """Whether a `share_of` or `quotient_of` digest's own left-out lines
+    state all `exclusion` holds, so its exclusions block leaves the record
+    out. The dropped-keys line names every unmatched key. The
+    zero-denominator line gives cells and periods and no key, so it covers a
+    `zero_denominator` record only when that record names no key either; a
+    `share_of` call records none, since it refuses a zero denominator."""
     return exclusion.reason == "unmatched_key" or (
         exclusion.reason == "zero_denominator" and not any(exclusion.entities.values())
     )
@@ -1105,23 +1120,33 @@ def _coverage_line(result: QuotientOfResult | ShareOfResult, *, keyed: bool) -> 
     )
 
 
+def _dropped_keys_lines(dropped: Sequence[tuple[str, Sequence[KeyPairs]]]) -> list[str]:
+    """A line naming the numerator keys a two-sided result holds no row for,
+    each `(why, keys)` of `dropped` that has keys, or no line when none
+    has."""
+    named = [f"{len(keys)} {why} ({_keys_named(keys)})" for why, keys in dropped if keys]
+    return [f"numerator keys left out: {'; '.join(named)}"] if named else []
+
+
+# Why `_dropped_keys_lines` names a key with no denominator group, and one
+# sharing no period with its group.
+_NO_DENOMINATOR_MATCH = "with no denominator match"
+_NO_SHARED_PERIOD = "sharing no period with the denominator"
+
+
 def _quotient_left_out_lines(result: QuotientOfResult) -> list[str]:
     """One line for each kind of thing the quotient leaves out, when there is
     any: the periods and pairs `_periods_left_out_lines` names, the
     numerator keys the result holds no row for, by why, and cells whose
     denominator sums to zero."""
     lines = _periods_left_out_lines(result)
-    dropped = [
-        f"{len(keys)} {why} ({_keys_named(keys)})"
-        for why, keys in (
-            ("with no denominator match", result.unmatched_keys),
-            ("sharing no period with the denominator", result.keys_without_shared_period),
+    lines += _dropped_keys_lines(
+        (
+            (_NO_DENOMINATOR_MATCH, result.unmatched_keys),
+            (_NO_SHARED_PERIOD, result.keys_without_shared_period),
             ("with a zero denominator in every matched period", result.keys_with_zero_denominator),
         )
-        if keys
-    ]
-    if dropped:
-        lines.append(f"numerator keys left out: {'; '.join(dropped)}")
+    )
     zero_cells = result.zero_denominator_cells
     if zero_cells:
         periods = sorted({cell.time_period for cell in zero_cells})
@@ -1195,7 +1220,7 @@ def render_quotient_of_digest(
     sections.extend(
         _artifact_sections(
             exclusions=[
-                exclusion for exclusion in exclusions if not _quotient_line_covers(exclusion)
+                exclusion for exclusion in exclusions if not _dropped_line_covers(exclusion)
             ],
             time_line=_time_line(time),
         )

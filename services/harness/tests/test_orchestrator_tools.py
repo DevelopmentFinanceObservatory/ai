@@ -1292,7 +1292,12 @@ async def test_the_download_surface_fetches_once_and_never_plans():
 
     assert "frames" in await tools["fetch"](SPEC_LIFE, ctx)
     assert "limit" in (await tools["fetch"](SPEC_LIFE, ctx))["error"]
-    assert "limit" in tools["plan"]("Kenya's aid as a share of GDP", [], ctx)["error"]
+    assert (
+        "limit"
+        in tools["plan"]("Kenya's aid as a share of GDP", ["Kenya's aid as a share of GDP"], ctx)[
+            "error"
+        ]
+    )
     assert pending_action(ctx.state) is None
 
 
@@ -2831,7 +2836,7 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     assert not ctx.actions.skip_summarization
     asked = tools["ask_user"](questions, ctx)
     later.state.update(ctx.state)
-    second = tools["plan"]("Congo's GDP", [], later)
+    second = tools["plan"]("Congo's GDP", ["Congo's GDP"], later)
 
     assert asked[HANDED_OFF] == "ask"
     assert ctx.actions.skip_summarization is True
@@ -3243,9 +3248,9 @@ async def test_a_fetch_of_another_count_search_cannot_read_is_refused_without_ge
 def test_plan_records_the_brief_once_per_turn():
     tools, ctx = _tools()
 
-    first = tools["plan"]("Kenya's aid as a share of GDP since 2010", [], ctx)
+    first = tools["plan"]("Kenya's aid as a share of GDP since 2010", ["the share since 2010"], ctx)
     ctx.state["orchestrator:pending"] = None  # the workflow took it
-    again = tools["plan"]("Kenya's aid as a share of GDP since 2010", [], ctx)
+    again = tools["plan"]("Kenya's aid as a share of GDP since 2010", ["the share since 2010"], ctx)
 
     assert first["status"].startswith("Recorded")
     assert pending_action({"orchestrator:pending": {"kind": "plan", "brief": "b"}}) == PendingPlan(
@@ -3257,6 +3262,7 @@ def test_plan_records_the_brief_once_per_turn():
 @pytest.mark.parametrize(
     "asks",
     [
+        [],
         [f"output {number}" for number in range(MAX_PLAN_ASKS + 1)],
         ["the total since 2010", "  "],
         ["x" * (MAX_ASK_CHARS + 1)],
@@ -3269,7 +3275,7 @@ def test_plan_refuses_asks_past_the_planner_limits_without_spending_the_call(ask
     recorded = tools["plan"]("France's aid to Guatemala", [" the total since 2010 "], ctx)
 
     assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
-    assert refused["legal"] == {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]}
+    assert refused["legal"] == {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]}
     assert HANDED_OFF not in refused
     assert recorded[HANDED_OFF] == "plan"
     assert pending_action(ctx.state) == PendingPlan(
@@ -3400,6 +3406,27 @@ async def test_plan_names_the_parties_of_a_side_the_search_held_open_by_its_colu
     assert "held donor/creditor/exporter open" in refused["error"]
     assert not re.search(r'(?<!one of )"donor"', refused["error"])
     assert pending_action(ctx.state) is None
+
+
+async def test_plan_carries_the_asks_put_across_years_by_number():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    recorded = tools["plan"](
+        "Total debt service between 2015 and 2022",
+        [
+            {"text": "Debt service by creditor", "by": ["creditor"]},
+            {"text": "The total between 2015 and 2022", "over": ["creditor"], "across_years": True},
+        ],
+        ctx,
+    )
+
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="Total debt service between 2015 and 2022",
+        asks=["Debt service by creditor", "The total between 2015 and 2022"],
+        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+        asks_across_years=[1],
+    )
 
 
 async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():

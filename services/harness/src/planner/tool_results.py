@@ -88,6 +88,7 @@ class ProblemCode(StrEnum):
     ASKS_UNACCOUNTED = "asks_unaccounted"
     ASK_ROLE_DROPPED = "ask_role_dropped"
     RESULT_SCOPE_UNSTATED = "result_scope_unstated"
+    PERIOD_REDUCTION_UNSTATED = "period_reduction_unstated"
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"

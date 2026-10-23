@@ -111,10 +111,12 @@ from google.genai import types
 from planner.agent import PROPOSE_PLAN
 from planner.operations import OperationKind
 from planner.plan import (
+    AMENDMENT_ENTRY_STATE_KEY,
     MAX_QUESTION_CHARS,
     OPTIONAL_DECLINES_STATE_KEY,
     PIN_SOURCES_STATE_KEY,
     PLAN_STATE_KEY,
+    REDUCTION_REFUSED_ASKS_STATE_KEY,
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
@@ -129,11 +131,13 @@ from planner.plan import (
     discovery_time_left,
     load_ask_breakdowns,
     load_asks,
+    load_asks_across_years,
     load_plan,
     load_plan_rounds,
     pin_sources,
     record_optional_decline,
     record_unsupported,
+    save_amendment_entry,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
@@ -146,6 +150,7 @@ from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_fail
 from translator.referral import USER_DECIDES
 from translator.tool import Translate, permitted_repair
 
+from harness import plan_display
 from harness.agents import create_planner_with_translator
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -427,6 +432,12 @@ class PlannerSeam:
             # `QUESTION_FIXED` instead, handled below the same way
             # `BUDGET_EXHAUSTED` is.
             question_fixed=True,
+            # The orchestrator reads the user's words and marks its asks
+            # (across years). The planner reads them only in an entry the
+            # user's amendment opens, which `save_amendment_entry` records
+            # below, and only there may `propose_plan`'s `across_years`
+            # name a step.
+            reads_user_words=False,
             prefix_cache=prefix_cache,
             translate=translate,
         )
@@ -495,8 +506,9 @@ class PlannerSeam:
         # very end, into `ctx.state` -- so the delta this node's own event
         # eventually carries is never older than what `ctx.run_node` itself
         # already produced.
-        if prior_plan is not None:
-            save_plan(cast(SessionState, ctx.session.state), Plan.model_validate(prior_plan))
+        seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
+        if seeded is not None:
+            save_plan(cast(SessionState, ctx.session.state), seeded)
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
             # re-enters through a `RequestInput` this seam itself raised
@@ -508,6 +520,11 @@ class PlannerSeam:
             # an entry on the resume path, and the refer-and-repropose loop
             # `MAX_PLAN_ROUNDS` bounds would run unbounded for the rest of it.
             save_plan_rounds(cast(SessionState, ctx.session.state), 0)
+            # Whether the user's own words open this entry, which
+            # `propose_plan` reads to accept the steps its `across_years`
+            # names (`submission.service.admit`). `_message` renders the
+            # amendment on the same test.
+            save_amendment_entry(cast(SessionState, ctx.session.state), bool(amendment))
             clear_unsupported(cast(SessionState, ctx.session.state))
             for operation in _earned_by_refusal(refusal):
                 record_unsupported(cast(SessionState, ctx.session.state), operation)
@@ -547,7 +564,9 @@ class PlannerSeam:
                 ctx.session.state[PLAN_STATE_KEY] = None
                 ctx.session.state[_BRIEFED_STATE_KEY] = False
                 # A first draft may decline an ask no requirement kind states,
-                # which no tool's answer could ever earn. A replan or an
+                # which no tool's answer could ever earn, except one a
+                # `period_reduction_unstated` refusal named
+                # (`submission.service._declinable`). A replan or an
                 # amendment earns each decline from a tool's answer.
                 record_optional_decline(
                     cast(SessionState, ctx.session.state),
@@ -596,7 +615,7 @@ class PlannerSeam:
             message = self._message(
                 fresh=fresh,
                 question=question,
-                prior_plan=prior_plan,
+                prior_plan=_as_authored(seeded),
                 refusal=refusal,
                 amendment=amendment,
                 canvas_digest=canvas_digest,
@@ -604,6 +623,7 @@ class PlannerSeam:
                 ledger=ledger,
                 asks=load_asks(cast(SessionState, ctx.session.state)),
                 ask_breakdowns=load_ask_breakdowns(cast(SessionState, ctx.session.state)),
+                asks_across_years=load_asks_across_years(cast(SessionState, ctx.session.state)),
             )
             submitted, plan, refused = await self._propose(
                 ctx=ctx, message=message, on_progress=on_progress
@@ -695,13 +715,19 @@ class PlannerSeam:
         # guards a direct caller of this seam's pair that bypassed `__call__`.
         if PIN_SOURCES_STATE_KEY in ctx.session.state:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
-        # Decline permissions and compile failures survive an ask-the-user resume
-        # within this entry.
+        # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
+        # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
+        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
+        # The declines an ask-the-user resume still owes or may make, the
+        # failures it may repeat, and the amendment that opened it are this
+        # entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
             TERMINAL_DECLINES_STATE_KEY,
+            REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
+            AMENDMENT_ENTRY_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -1164,6 +1190,7 @@ class PlannerSeam:
         ledger: RenderedReadings = _NO_READINGS,
         asks: Sequence[str] = (),
         ask_breakdowns: Sequence[AskBreakdown] = (),
+        asks_across_years: Sequence[int] = (),
     ) -> str:
         """The message for one `_propose` call.
 
@@ -1182,7 +1209,8 @@ class PlannerSeam:
         being changed states no measure choice the ledger already names
         (`_plan_context`). `asks`, the outputs the orchestrator's brief lists
         (`planner.plan.ASKS_STATE_KEY`), render numbered after the question,
-        each with the parties `ask_breakdowns` says it breaks down by.
+        each with the parties `ask_breakdowns` says it breaks down by and
+        marked when `asks_across_years` numbers it.
 
         See the module docstring for why a continuing call needs no more
         than this: `ctx.run_node` shares the graph's own session, so the
@@ -1195,7 +1223,8 @@ class PlannerSeam:
         the wire, so each renders cut to `MAX_QUESTION_CHARS`
         (`planner.plan.cut_user_text`), the size `Plan.question` holds.
 
-        `prior_plan` renders as a digest, through `_plan_context`. The
+        `prior_plan` is the plan being changed as the model wrote it
+        (`_as_authored`), and renders as a digest, through `_plan_context`. The
         instruction above the readings keeps its own wording. It is what
         stops the model inventing a `spec_id`.
         """
@@ -1231,7 +1260,7 @@ class PlannerSeam:
                 _section("Earlier turns in this conversation", conversation_digest),
                 _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
-                _asks_section(asks, ask_breakdowns),
+                _asks_section(asks, ask_breakdowns, asks_across_years),
                 ask,
             ]
         )
@@ -1277,17 +1306,26 @@ def _failed_run_sentence(computed: Sequence[int] | None) -> str:
     )
 
 
-def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) -> str:
+def _asks_section(
+    asks: Sequence[str],
+    breakdowns: Sequence[AskBreakdown] = (),
+    across_years: Sequence[int] = (),
+) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
 
     An ask in `breakdowns` names the parties it breaks down by, and the
     section then states the rule `planner.plan.Plan` holds its answer to.
+    An ask in `across_years` is marked as one figure over its years taken
+    together, and the section then says no other ask is.
     """
     if not asks:
         return ""
     by = {breakdown.ask: breakdown.by for breakdown in breakdowns}
     lines = "".join(
-        f"{number}. {ask}" + (f" (by {', '.join(by[number])})" if number in by else "") + "\n"
+        f"{number}. {ask}"
+        + (f" (by {', '.join(by[number])})" if number in by else "")
+        + (" (across years)" if number in across_years else "")
+        + "\n"
         for number, ask in enumerate(asks)
     )
     rule = (
@@ -1306,6 +1344,12 @@ def _asks_section(asks: Sequence[str], breakdowns: Sequence[AskBreakdown] = ()) 
         if by
         else ""
     )
+    if across_years:
+        rule += (
+            "An ask marked (across years) asks for one figure, or one ranking, over its "
+            "years taken together. No other ask does: its answer keeps each year or reads "
+            "one year.\n"
+        )
     return (
         "The answer is held to these asks. Account for each exactly once: answer it in "
         "`answered`, or, when `declined` permits its decline, "
@@ -1541,6 +1585,19 @@ def _warning_codes(warnings: object) -> tuple[str, ...]:
     return tuple(str(code) for code in codes if code)
 
 
+def _as_authored(plan: Plan | None) -> dict[str, Any] | None:
+    """`plan` as the model wrote it, for `_plan_context` to render.
+
+    A stored plan holds the copies the split of whole-history reads added
+    (`Plan.rolling_copies`), which the model did not write and cannot
+    patch by name. The render shows the plan without them
+    (`plan_display.shown_plan`), and the stored plan is saved as it is.
+    """
+    if plan is None:
+        return None
+    return plan_display.shown_plan(plan).model_dump(mode="json")
+
+
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:
     """The plan being changed, rendered field by field as a digest.
 
@@ -1646,6 +1703,10 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
         "evidence_requirements",
         "translation",
         "workflow",
+        # Code writes both (`Plan.rolling_copies`, `Plan.first_years`), so the
+        # digest leaves them out.
+        "rolling_copies",
+        "first_years",
     }
     lines.extend(f"{key}: {_scalar(prior_plan[key])}" for key in sorted(set(prior_plan) - known))
     return "\n".join(lines) + "\n"

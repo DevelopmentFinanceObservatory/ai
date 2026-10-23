@@ -41,6 +41,7 @@
     "distinction": "aggregate, not sum_of: two places of one series are totalled, not two sources added"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What was the combined ODA to Kenya and Uganda in each year from 2015 to 2022?",
     "answer_mode": "computed",

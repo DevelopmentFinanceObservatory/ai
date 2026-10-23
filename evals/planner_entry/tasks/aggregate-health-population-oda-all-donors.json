@@ -86,6 +86,7 @@
     "distinction": "aggregate, not sum_of: health and population policy come in one CRS retrieval, so the total sums its donors and recipients by year, with no second source to add"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Gross ODA disbursements for health from 2015 to 2024, including the population policy and reproductive health sector, total for all donors.",
     "answer_mode": "computed",

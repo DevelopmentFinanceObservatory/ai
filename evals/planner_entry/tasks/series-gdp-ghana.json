@@ -31,6 +31,7 @@
     "dataset"
   ],
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What was Ghana's GDP, in constant 2015 US dollars, in each year from 2010 to 2022?",
     "answer_mode": "series",

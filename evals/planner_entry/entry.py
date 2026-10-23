@@ -35,6 +35,7 @@ import time
 import traceback
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol, cast
@@ -67,8 +68,9 @@ from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history
-from planner.plan import Plan, SessionState, load_plan
-from pydantic import BaseModel, ConfigDict, Field
+from planner.plan import Plan, SessionState, load_plan, unstated_period_reductions
+from planner.tool_results import ProblemCode
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
 from translator.discovery import DefinitionNotResolvedError
 
@@ -90,6 +92,10 @@ KINDS = (
     "join",
     "filter",
 )
+
+# The refusal `propose_plan` answers a plan reducing across years for an ask not marked
+# `across_years`.
+PERIOD_REFUSAL = ProblemCode.PERIOD_REDUCTION_UNSTATED.value
 
 _APP = "planner_entry_eval"
 _USER = "eval"
@@ -117,12 +123,28 @@ class Neighbour(_Strict):
     distinction: str
 
 
+class PeriodReduction(StrEnum):
+    """What a plan does with the years of its data (`plan_period_reduction`).
+
+    `NONE`: no step turns several years into one figure, so the plan keeps the years
+    or reads one. `ACROSS_YEARS`: a step does, and every ask its results answer is
+    marked `across_years`. `UNSTATED`: a step does and `propose_plan` refuses it, as
+    it does where a result answers an unmarked ask or no ask.
+    """
+
+    NONE = "none"
+    ACROSS_YEARS = "across_years"
+    UNSTATED = "unstated"
+
+
 class Alternative(_Strict):
-    """Another plan a model could correctly write for a task."""
+    """Another plan a model could correctly write for a task. `period_reduction` is set
+    when the plan does something else with its years than the task's reference."""
 
     description: str
     payload: dict[str, Any]
     first_proposal_refusal: str | None = None
+    period_reduction: PeriodReduction | None = None
 
 
 class Task(_Strict):
@@ -136,7 +158,11 @@ class Task(_Strict):
     when neither does is an unasked unit. A task with `first_proposal_refusal` ends
     correctly in that refusal followed by an ask of the user. An ask is its text
     alone, or the `plan` tool's object naming the parties it lists one by one (`by`)
-    or totals across (`over`). A task whose search holds a party open names it in one.
+    or totals across (`over`), and whether the user asked for it as one figure over
+    several years taken together (`across_years`). A task whose search holds a party
+    open names it in one. `period_reduction` is what the reference plan does with the
+    years of its data, `none` or `across_years`, and what a run's accepted plan is
+    held to.
     """
 
     id: str
@@ -152,8 +178,24 @@ class Task(_Strict):
     neighbour: Neighbour | None = None
     unit_asked: bool = False
     first_proposal_refusal: str | None = None
+    period_reduction: PeriodReduction
     reference_payload: dict[str, Any]
     alternative_payloads: list[Alternative] = []
+
+    @property
+    def across_years_numbers(self) -> tuple[int, ...]:
+        """The numbers of the asks marked `across_years`, as `Plan.asks_across_years`
+        holds them."""
+        return tuple(
+            number
+            for number, ask in enumerate(self.asks)
+            if isinstance(ask, AskedOutput) and ask.across_years
+        )
+
+    @property
+    def asks_across_years(self) -> bool:
+        """Whether any ask is marked `across_years`."""
+        return bool(self.across_years_numbers)
 
     def selects_kinds(self, kinds: Collection[str]) -> bool:
         """Whether a plan using `kinds` selects this task's kinds: every `required_kinds`
@@ -649,12 +691,19 @@ async def run_entry(
 def inputs_digest(task: Task, recording: Mapping[str, Any]) -> str:
     """A digest of what a run of `task` shows the planner: the question, the searches,
     the brief and asks, and the recorded search envelopes and tool answers. Runs pair
-    only where their digests agree."""
+    only where their digests agree. An ask not marked `across_years` digests without
+    that field, so a baseline stored before asks carried the mark still pairs on it."""
+    asks = [
+        ask
+        if isinstance(ask, str)
+        else ask.model_dump(mode="json", exclude=None if ask.across_years else {"across_years"})
+        for ask in task.asks
+    ]
     shown = {
         "question": task.question,
         "searches": [search.model_dump(mode="json") for search in task.searches],
         "brief": task.brief,
-        "asks": task.model_dump(mode="json")["asks"],
+        "asks": asks,
         "recorded_searches": recording["searches"],
         "recorded_answers": recording["tools"],
     }
@@ -766,6 +815,60 @@ def proposals(calls: Sequence[Mapping[str, Any]], *, recorded: str | None) -> li
     return found
 
 
+def period_reductions(plan: Plan) -> list[dict[str, Any]]:
+    """Each step of `plan` that turns several years into one figure, with those years
+    and whether `propose_plan` refuses it.
+
+    Both readings are `planner.plan.unstated_period_reductions`, the rule `propose_plan`
+    enforces at a first entry: once on the plan with no ask marked across years and no
+    licence, which reports every reduction, and once on the plan as it stands, which
+    reports those it refuses.
+    """
+    refused = {gap.step_id for gap in unstated_period_reductions(plan)}
+    unmarked = plan.model_copy(update={"asks_across_years": (), "period_licences": ()})
+    return [
+        {
+            "step": gap.step_id,
+            "start": gap.held.years.start,
+            "end": gap.held.years.end,
+            "refused": gap.step_id in refused,
+        }
+        for gap in unstated_period_reductions(unmarked)
+    ]
+
+
+def plan_period_reduction(reductions: Sequence[Mapping[str, Any]]) -> PeriodReduction:
+    """What a plan holding `reductions` (`period_reductions`) does with its years:
+    unstated when the rule refuses any, else across years when it holds one."""
+    if any(reduction["refused"] for reduction in reductions):
+        return PeriodReduction.UNSTATED
+    return PeriodReduction.ACROSS_YEARS if reductions else PeriodReduction.NONE
+
+
+def record_period_reduction(record: Mapping[str, Any], task: Task) -> PeriodReduction | None:
+    """What the accepted plan of `record`, a run of `task`, does with its years, or
+    `None` when it accepted none or its plan fails to validate.
+
+    A record without `period_reduction` holds a plan with no ask
+    marked across years, since the revision that wrote it had no mark. Its plan is read with the
+    asks `task` marks, the marks the orchestrator hands a run of the current revision,
+    so a baseline stored from that revision is scored on the same asks as the arm.
+    A stored plan that `Plan` refuses to validate is not read; `summarise` counts it
+    as an accepted plan that misses its task's years.
+    """
+    if (kept := record.get("period_reduction")) is not None:
+        return PeriodReduction(kept)
+    if record.get("plan") is None:
+        return None
+    try:
+        plan = Plan.model_validate(
+            {**record["plan"], "asks_across_years": task.across_years_numbers}
+        )
+    except ValidationError:
+        return None
+    return plan_period_reduction(period_reductions(plan))
+
+
 def stop_reason(run: EntryRun, calls: Sequence[Mapping[str, Any]]) -> str:
     """How the entry ended: `accepted`, `asked_user` (an ask the tool took, still awaiting
     the user's answer), `timeout` (the eval's own limit), `error`, or the seam's refusal
@@ -797,11 +900,13 @@ def entry_record(
     """One run's JSON record: what the planner did, what it cost, and how it ended.
 
     `experiment` identifies the treatment the run had (`run.experiment`), so a resumed
-    run directory never mixes two.
+    run directory never mixes two. `period_reductions` and `period_reduction` say
+    what the accepted plan does with its years.
     """
     calls = tool_calls(run.events)
     proposed = proposals(calls, recorded=run.probe.plan_call)
     plan = run.probe.plan
+    reductions = period_reductions(plan) if plan else None
     return {
         "schema": RECORD_SCHEMA,
         "arm": arm,
@@ -817,6 +922,10 @@ def entry_record(
         "accepted": plan is not None,
         "plan_kinds": sorted({r.kind for r in plan.evidence_requirements}) if plan else None,
         "plan": plan.model_dump(mode="json", exclude={"translation", "workflow"}) if plan else None,
+        "period_reductions": reductions,
+        "period_reduction": (
+            None if reductions is None else plan_period_reduction(reductions).value
+        ),
         "tool_calls": [call["name"] for call in calls],
         "proposals": proposed,
         "first_proposal": (
@@ -831,7 +940,9 @@ def entry_record(
 
 __all__ = [
     "KINDS",
+    "PERIOD_REFUSAL",
     "EntryRun",
+    "PeriodReduction",
     "Probe",
     "RecordedResolver",
     "RecordedSurface",
@@ -846,7 +957,10 @@ __all__ = [
     "load_recording",
     "load_tasks",
     "orchestrator_state",
+    "period_reductions",
+    "plan_period_reduction",
     "quiet_logs",
+    "record_period_reduction",
     "run_entry",
     "save_recording",
     "stray_recordings",

@@ -38,6 +38,8 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     Entity,
+    FirstYear,
+    GrowthRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -51,7 +53,7 @@ from planner.plan import (
     save_pin_sources,
     save_windowed_pins,
 )
-from planner.records import Period, ResolvedSourceMention
+from planner.records import Period, RelativePeriod, ResolvedSourceMention, RollingWindow
 from planner.tool_results import ProblemCode
 from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
 from translator.discovery import (
@@ -1159,7 +1161,8 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
     )
 
 
-async def test_a_copy_with_no_end_year_is_read_for_a_requirement_whose_period_end_is_open(
+@pytest.mark.parametrize("whole_history", [True, False], ids=["whole-history", "stated-period"])
+async def test_a_copy_with_no_end_year_is_read_from_the_year_the_plan_retrieves_it_from(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
     draft: DraftFactory,
@@ -1167,17 +1170,33 @@ async def test_a_copy_with_no_end_year_is_read_for_a_requirement_whose_period_en
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
+    whole_history: bool,
 ) -> None:
     # `propose_plan` pinned the dataset over a range from 2010 with no end
-    # year, for a requirement stating 2015-2023 with `period_end_open`. That
-    # copy is the requirement's source: a fresh `search` would be over the
-    # stated years and find a definition that ends in 2023.
+    # year, for a requirement stating 2015-2023 with `period_end_open`. The
+    # copy is the requirement's source when the plan reads that dataset from
+    # its first year, 2010, for a reader that rolls from its start; read from
+    # its stated 2015 instead, a fresh `search` finds the definition.
     answered = copy.deepcopy(_KENYA_OVER["2010-2023"])
     spec_id, identity = windowed_identity(
         answered["definition"]["identity"], {"kind": "range", "start_year": 2010}
     )
     answered["spec_id"] = answered["definition"]["spec_id"] = spec_id
     answered["definition"]["identity"] = identity
+    reader = (
+        GrowthRequirement(
+            id="growth",
+            decision_ids=["measure"],
+            input_id="annual_debt_service",
+            window_start=2019,
+            window_end=2023,
+            rolling=RollingWindow(
+                window_start=RelativePeriod(offset=-4), window_end=RelativePeriod(offset=0)
+            ),
+        )
+        if whole_history
+        else derived_requirement()
+    )
     context = context_holding(
         draft(
             decisions=[pinning_decision(spec_id)],
@@ -1187,8 +1206,11 @@ async def test_a_copy_with_no_end_year_is_read_for_a_requirement_whose_period_en
                     period=Period(start=2015, end=2023),
                     period_end_open=True,
                 ),
-                derived_requirement(),
+                reader,
             ],
+            first_years=(FirstYear(requirement_id="annual_debt_service", year=2010),)
+            if whole_history
+            else (),
         )
     )
     earlier = _KENYA_OVER["2015-2023"]["spec_id"]
@@ -1199,6 +1221,10 @@ async def test_a_copy_with_no_end_year_is_read_for_a_requirement_whose_period_en
 
     result = await _discover(_SearchAndResolve(surface, resolving), context)
 
+    if not whole_history:
+        assert resolving.calls == []
+        assert len(search_calls) == 1
+        return
     assert search_calls == []
     assert resolving.calls == [{"spec_id": spec_id, "identity": identity}]
     assert result["status"] == "definite"

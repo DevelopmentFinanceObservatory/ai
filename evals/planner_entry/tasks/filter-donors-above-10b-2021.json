@@ -40,6 +40,7 @@
     "distinction": "filter, not rank: a threshold keeps every donor above 10 billion US dollars; no order or top N is asked"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which donors gave more than 10 billion US dollars of ODA in 2021?",
     "answer_mode": "computed",

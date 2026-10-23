@@ -79,6 +79,7 @@ from planner.agent import _elected_spec_ids
 from planner.operations import AggregateOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     CUT_MARKER,
     MAX_PLAN_ROUNDS,
@@ -101,6 +102,7 @@ from planner.plan import (
     ResolvedBy,
     SessionState,
     Unit,
+    amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
     discovery_time_left,
@@ -124,6 +126,7 @@ from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 
 from .search_results import search_result_parts
+from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 
 SPEC = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -1790,6 +1793,61 @@ def test_the_plan_section_writes_structured_values_with_non_ascii_text_as_writte
     assert "\\u" not in rendered
 
 
+def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
+    """The stored plan holds `debt_history`, code's copy of `debt` for a rolling growth.
+
+    The model patches requirements by id and did not write the copy, so the
+    digest names `debt`, its one source and its one binding, and omits both
+    fields code writes.
+    """
+    stored = stored_split_plan(decision)
+
+    message = _seam()._message(
+        fresh=True,
+        question="QUESTION_TEXT",
+        prior_plan=planner_seam._as_authored(stored),
+        refusal=None,
+        amendment=None,
+        canvas_digest=None,
+        conversation_digest=None,
+    )
+
+    assert "debt_history" not in message
+    assert "rolling_copies" not in message
+    assert "first_years" not in message
+    assert f"- evidence: debt from {SPEC_DEBT} (step debt)" in message
+    assert message.count("- evidence:") == 1
+    assert message.count(" -- external debt service paid") == 1
+    assert SPEC_DEBT_HISTORY not in message
+
+
+async def test_the_brief_seeded_with_a_split_plan_shows_the_plan_the_model_wrote(
+    decision: Any,
+) -> None:
+    """The graph hands the seam the stored plan, copies and all. The brief the
+    planner reads names `debt` and its source, and neither the copy nor the
+    copy's pin."""
+    stored = stored_split_plan(decision)
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
+    seam._agent.model = llm
+
+    await _run_seam(
+        seam, question=stored.question, readings=[], prior_plan=stored.model_dump(mode="json")
+    )
+
+    brief = "\n".join(
+        part.text
+        for content in llm.captured_requests[0].contents
+        if content.role == "user"
+        for part in content.parts or []
+        if part.text is not None
+    )
+    assert f"- evidence: debt from {SPEC_DEBT} (step debt)" in brief
+    assert "debt_history" not in brief
+    assert SPEC_DEBT_HISTORY not in brief
+
+
 def test_the_plan_section_names_the_source_a_requirement_s_evidence_came_from(
     decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
@@ -1947,6 +2005,27 @@ async def test_a_continuing_amend_call_shows_the_other_count_and_the_plan_pins_i
     assert measure.options == ("gross disbursements", "net disbursements")
     assert measure.chosen == "net disbursements"
     assert measure.slot in pinned.decision_ids
+
+
+async def test_an_entry_records_whether_the_users_amendment_opened_it() -> None:
+    """An entry carrying the user's amendment says so in state, for `propose_plan`
+    to honour a decision they make in it. The next entry without one, a replan
+    here, clears it, and a resume inside an entry keeps what the entry recorded."""
+    harness = _SeamHarness()
+    seam = _seam()
+    seam._agent.model = ScriptedPlannerLlm(script=["Planned."] * 4)
+    recorded = []
+
+    await harness.run(seam, question="kenya debt", readings=[])
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], amendment="one total")
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], resume_inputs={"ask": {}})
+    recorded.append(amendment_entry(await harness.state()))
+    await harness.run(seam, question="kenya debt", readings=[], refusal=_rediscovery_refusal(SPEC))
+    recorded.append(amendment_entry(await harness.state()))
+
+    assert recorded == [False, True, True, False]
 
 
 async def test_an_amendment_still_works_through_the_seam(
@@ -2157,7 +2236,7 @@ _AMBIGUOUS = {
     [
         (_AMBIGUOUS, _AMBIGUOUS, True),
         (_repair("family_unsummable"), _repair("family_unsummable"), True),
-        (_repair("level_filter_on_flow_axis"), _repair("family_unsummable"), False),
+        (_repair("input_shape_unsupported"), _repair("family_unsummable"), False),
     ],
     ids=["same-choice", "same-repair", "different-repairs"],
 )
@@ -4001,7 +4080,13 @@ async def test_a_first_year_that_cannot_be_read_refuses_saying_the_read_failed(
     }
 
 
-async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by() -> None:
+_ACROSS_YEARS_RULE = "An ask marked (across years) asks for one figure, or one ranking"
+
+
+@pytest.mark.parametrize("across_years", [[], [0, 1]], ids=["none", "marked"])
+async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
+    across_years: list[int],
+) -> None:
     seam = _seam()
     llm = ScriptedPlannerLlm(script=["Planned."])
     seam._agent.model = llm
@@ -4010,13 +4095,24 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by() -> 
         state={
             ASKS_STATE_KEY: asks,
             ASK_BREAKDOWNS_STATE_KEY: [AskBreakdown(ask=1, by=("creditor",)).model_dump()],
+            ASKS_ACROSS_YEARS_STATE_KEY: across_years,
         }
     )
 
     await harness.run(seam, question="debt service by creditor", readings=[])
 
     prompt = _prompt_text(llm.captured_requests[0])
-    assert "0. the total\n1. Debt service by creditor (by creditor)\n" in prompt
+    if across_years:
+        assert (
+            "0. the total (across years)\n1. Debt service by creditor (by creditor) (across years)\n"
+            in prompt
+        )
+        assert _ACROSS_YEARS_RULE in prompt
+        assert "No other ask does: its answer keeps each year or reads one year." in prompt
+    else:
+        assert "0. the total\n1. Debt service by creditor (by creditor)\n" in prompt
+        assert "(across years)" not in prompt
+        assert _ACROSS_YEARS_RULE not in prompt
     assert (
         "'breakdown_not_kept' when the source this ask's answer pins cannot hold the party open"
         in prompt
