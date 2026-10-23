@@ -21,7 +21,10 @@
   ],
   "brief": "How much external debt service did Zambia pay in total from 2015 to 2022?",
   "asks": [
-    "Zambia's total external debt service, 2015 to 2022"
+    {
+      "text": "Zambia's total external debt service, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -36,6 +39,7 @@
     "distinction": "aggregate, not sum_of: it totals the years of one series and adds no second source"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "How much external debt service did Zambia pay in total from 2015 to 2022?",
     "answer_mode": "computed",

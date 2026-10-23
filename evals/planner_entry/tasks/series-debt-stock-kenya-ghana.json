@@ -39,6 +39,7 @@
     "distinction": "dataset, not comparison: two places of one measure are one series request; no difference is asked"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What external debt stock did Kenya and Ghana hold in each year from 2015 to 2022?",
     "answer_mode": "series",

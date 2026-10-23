@@ -46,6 +46,7 @@
     "kind": "quotient_of",
     "distinction": "share_of, not quotient_of: Nigeria is a part of the world total, both counted in people"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What share of the world's population lived in Nigeria in each year from 2000 to 2023?",
     "answer_mode": "computed",

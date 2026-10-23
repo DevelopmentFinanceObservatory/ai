@@ -165,7 +165,8 @@ async def store_result_and_render(
     `observed_shape`, so the payload matches `result.VERB_OUTPUT_SCHEMA`,
     the schema `server._register` declares at each verb's registration site.
     `dropped_key_count` is the number of keys the verb left out of `frame`,
-    which `frame` cannot state; only a keyed `quotient_of` passes one.
+    which `frame` cannot state; only a keyed `quotient_of` or `share_of`
+    passes one.
     `ranked_before_limit` is how many entries a limited `rank` ranked before
     its limit cut them, which `frame` cannot state. Only `rank` passes one.
     """

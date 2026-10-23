@@ -34,6 +34,7 @@
   "acceptable_kinds": [
     "dataset"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What external debt stock did Zambia owe to China at the end of each year from 2010 to 2022?",
     "answer_mode": "series",

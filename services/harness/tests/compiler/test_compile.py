@@ -35,6 +35,7 @@ from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
 from compiler.sources import member_digest, source_from_spec_block
 from compiler.surface import ToolSchema
+from data_mcp.definition_writes import windowed_identity
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
 from planner.operations import (
@@ -80,6 +81,7 @@ from planner.plan import (
 from planner.records import (
     DenominatorScope,
     EntityIn,
+    EvidenceIssueCode,
     GrowthChange,
     Period,
     PeriodThreshold,
@@ -2500,28 +2502,99 @@ def test_a_two_branch_graph_reports_source_width_once_not_once_per_path(
     assert width_issues[0].operation_id == "gap"
 
 
-def test_constant_prices_are_unmeetable_by_any_operation(
+def _bound_to(**unit: Any) -> dict[str, Any]:
+    """Source fields for a definition bound by request to `unit`, as `search` binds OECD
+    DAC2a for "constant prices": the frame is converted on fetch, while the source's
+    own unit ref stays `CurrencyUSD`."""
+    return {
+        "unit_ref": "CurrencyUSD",
+        "unit_label": "US Dollar",
+        "identity": {"facets": {"unit": {"state": "value", "request": unit}}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("source_fields", "refused_by"),
+    [
+        pytest.param(
+            _bound_to(currency="USD", prices="constant", base_year=2024),
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+        pytest.param(
+            {"unit_ref": "ConstantUSD_2024", "unit_label": "Constant 2024 US dollars"},
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            {
+                "unit_ref": "undata/UNIT_MEASURE-CR_USD_K",
+                "unit_label": "United States dollars at constant prices",
+            },
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            {"unit_ref": "SDG_CON_USD", "unit_label": "Constant USD"},
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="a-unit-id-in-constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            {
+                "unit_ref": "undata/UNIT_MEASURE-CR_USD_K",
+                "unit_label": "United States dollars at constant 2024 prices",
+            },
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            _bound_to(currency="USD", prices="current"),
+            EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
+            id="bound-by-request-to-current-prices",
+        ),
+        pytest.param(
+            _bound_to(currency="USD", prices="constant", base_year=2015),
+            EvidenceIssueCode.UNIT_PRICE_BASIS_MISMATCH,
+            id="bound-by-request-to-another-base-year",
+        ),
+        pytest.param(
+            {"unit_ref": "CurrencyUSD", "unit_label": "US Dollar"},
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="a-unit-stating-no-price-basis",
+        ),
+    ],
+)
+def test_a_constant_price_requirement_is_met_by_a_source_in_those_prices(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     derived_requirement: DerivedRequirementFactory,
+    source: SourceFactory,
+    source_fields: dict[str, Any],
+    refused_by: EvidenceIssueCode | None,
 ) -> None:
-    # No operation restates a series in another year's prices, so this is
-    # refused at compile time with the requirement named, rather than left
-    # for a step to claim.
+    # No operation restates a series in other prices, so a requirement in
+    # constant 2024 prices compiles over a source whose request or unit id
+    # states them. It is refused over one in current prices, in another
+    # base year, stating no basis or no base year, or stating constant
+    # prices only in its label, which a retrieved series does not carry.
     plan = _draft(
         [decision()],
         [
-            requirement(unit=Unit(currency="USD", prices="constant", base_year=2015)),
+            requirement(unit=Unit(currency="USD", prices="constant", base_year=2024)),
             derived_requirement(),
         ],
     )
 
-    result = build(plan, _translation(_retrieve(), _aggregate()))
+    result = build(
+        plan,
+        _translation(_retrieve(), _aggregate()),
+        discovered={"annual_debt_service": source(**source_fields)},
+    )
 
-    assert Code.REQUIREMENT_UNMEETABLE in _codes(result)
-    unmeetable = next(i for i in result.issues if i.code is Code.REQUIREMENT_UNMEETABLE)
-    assert unmeetable.requirement_id == "annual_debt_service"
+    assert [(i.code, i.finding) for i in result.issues] == (
+        [(Code.SOURCE_UNUSABLE, refused_by)] if refused_by is not None else []
+    )
 
 
 # --- Operations against requirements -----------------------------------------------------
@@ -2785,7 +2858,12 @@ def test_comparing_requirements_whose_periods_share_no_year_is_reported(
         minuend=RequirementSide(input_id="old_gdp"),
         subtrahend=RequirementSide(input_id="annual_debt_service"),
     )
-    plan = _draft([decision()], [requirement(), old, comparison])
+    # The plan refuses sides that share no year (`planner.shapes.rejects`), so
+    # the disjoint period is set unchecked, as on a plan the compiler is handed.
+    overlapping = old.model_copy(update={"period": Period(start=1990, end=2015)})
+    plan = _draft([decision()], [requirement(), overlapping, comparison]).model_copy(
+        update={"evidence_requirements": (requirement(), old, comparison)}
+    )
     gap = CompareOperation(
         id="gap", requirement_id="gap", left=Side(input="debt"), right=Side(input="gdp")
     )
@@ -2800,7 +2878,7 @@ def test_comparing_requirements_whose_periods_share_no_year_is_reported(
         },
     )
 
-    assert _codes(result) == [Code.PERIODS_DISJOINT]
+    assert _codes(result) == [Code.INPUT_SHAPE_UNSUPPORTED, Code.PERIODS_DISJOINT]
 
 
 @pytest.mark.parametrize(
@@ -3257,6 +3335,15 @@ _CURRENT_NO_CURRENCY = {
             id="a-pinned-source-in-constant-prices",
         ),
         pytest.param(
+            {"unit_ref": "ConstantUSD_2024"},
+            _OWN_UNIT_PINNED,
+            _BOUND_BY_REQUEST,
+            Code.FRAME_PRICE_BASES_DIFFER,
+            None,
+            [],
+            id="a-pinned-source-in-constant-prices-of-a-stated-base-year",
+        ),
+        pytest.param(
             _CONSTANT_UNSTATED_YEAR,
             _OWN_UNIT,
             _BOUND_BY_REQUEST,
@@ -3301,11 +3388,12 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
     # analysis-mcp pairs two frames only when their unit cells are equal. A
     # ref and a request denoting one currency and price basis differ in form
     # alone, and the refusal names every side to retrieve by request, so the
-    # planner repairs both in one round when both are refs. No requirement
-    # may ask for constant prices, so a pinned source in them never pairs
-    # with a side in current prices, and the refusal names the pinned side
-    # for the user to decide; an unpinned one is repaired to current prices
-    # on both sides.
+    # planner repairs both in one round when both are refs. A requirement
+    # may ask for constant prices only at a stated base year, so a pinned
+    # source in constant prices of an unstated year never pairs with a side
+    # in current prices, and the refusal names the pinned side for the user
+    # to decide. A pinned source of a stated year, or an unpinned one, is
+    # repaired by stating one unit on both sides.
     requirements, translation = _summed(requirement)
     requirements[0] = requirement(**left_requirement)
     pin = left_requirement.get("source_spec_id")
@@ -3335,6 +3423,106 @@ def test_two_sides_whose_frames_state_their_units_differently_are_refused_before
         assert [
             r for r in ("annual_debt_service", "multilateral") if repr(r) in found[0].reason
         ] == named
+
+
+# A definition bound by request to constant 2024 US dollars, as `search` binds
+# OECD DAC2a for "constant prices", and a series in current US dollars.
+_CONSTANT_2024_BY_REQUEST = {
+    "unit_ref": "CurrencyUSD",
+    "identity": {
+        "facets": {
+            "unit": {
+                "state": "value",
+                "request": {"currency": "USD", "prices": "constant", "base_year": 2024},
+            }
+        }
+    },
+}
+_CURRENT_USD = {"unit_ref": "CurrencyUSD", "identity": _NOMINAL}
+
+
+@pytest.mark.parametrize(
+    ("left_source", "right_source", "pinned", "code", "about"),
+    [
+        pytest.param(
+            _CONSTANT_2024_BY_REQUEST,
+            _CURRENT_USD,
+            ("annual_debt_service", "multilateral"),
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "annual_debt_service",
+            id="both-pinned-the-constant-side-bound-by-request",
+        ),
+        pytest.param(
+            _CURRENT_USD,
+            _CONSTANT_2024_BY_REQUEST,
+            ("annual_debt_service", "multilateral"),
+            Code.FRAME_UNITS_IRRECONCILABLE,
+            "multilateral",
+            id="both-pinned-the-current-side-first",
+        ),
+        pytest.param(
+            _CONSTANT_2024_BY_REQUEST,
+            _CURRENT_USD,
+            ("annual_debt_service",),
+            Code.FRAME_PRICE_BASES_DIFFER,
+            None,
+            id="the-other-side-unpinned",
+        ),
+    ],
+)
+def test_two_pinned_sides_in_different_prices_go_back_to_the_user(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    left_source: dict[str, Any],
+    right_source: dict[str, Any],
+    pinned: tuple[str, ...],
+    code: CompileIssueCode,
+    about: str | None,
+) -> None:
+    # A pinned side is served in its source's own unit, a request object
+    # included, and no operation restates a series in other prices. With
+    # both sides pinned no requirement change pairs them, so the issue names
+    # the side in constant prices for the user to decide. With one pinned,
+    # stating its unit on the other side repairs the pair.
+    requirements, translation = _summed(requirement)
+    spec_ids = {"annual_debt_service": SPEC_KENYA, "multilateral": SPEC_OTHER}
+    pins: list[Decision] = []
+    for index, requirement_id in enumerate(("annual_debt_service", "multilateral")):
+        if requirement_id not in pinned:
+            continue
+        slot = f"pin_{index}"
+        pins.append(pinning_decision(spec_ids[requirement_id], slot=slot))
+        requirements[index] = DatasetRequirement.model_validate(
+            requirements[index].model_dump()
+            | {
+                "unit": None,
+                "source_spec_id": spec_ids[requirement_id],
+                "decision_ids": ["measure", slot],
+            }
+        )
+
+    result = build(
+        _draft([decision(), *pins], requirements),
+        translation,
+        discovered={
+            "annual_debt_service": source(**_pinned("DebtServicePaid", left_source)),
+            "multilateral": source(
+                spec_id=SPEC_OTHER, **_pinned("MultilateralDebtService", right_source)
+            ),
+        },
+    )
+
+    unit_codes = {
+        Code.FRAME_UNITS_DIFFER,
+        Code.FRAME_PRICE_BASES_DIFFER,
+        Code.FRAME_UNITS_IRRECONCILABLE,
+    }
+    assert [
+        (issue.code, issue.requirement_id) for issue in result.issues if issue.code in unit_codes
+    ] == [(code, about)]
 
 
 def _two_sided(
@@ -4009,6 +4197,33 @@ def test_arguments_the_compiler_wrote_are_still_checked_against_the_live_schema(
     assert "'group_by' was unexpected" in result.issues[0].reason
 
 
+def test_a_filter_writing_one_predicate_twice_is_refused_as_analysis_mcp_refuses_it(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+) -> None:
+    # France named under its role and under none are two predicates to the
+    # plan, and one `category_match` once resolved, which analysis-mcp's
+    # filter refuses as a predicate stated twice (`op_spec_invalid`).
+    predicates = (EntityIn(names=("France",), role="creditor"), EntityIn(names=("France",)))
+    filter_req = FilterRequirement(
+        id="france", decision_ids=["measure"], input_id="annual_debt_service", predicates=predicates
+    )
+    plan = _draft([decision()], [_two_role_requirement(), filter_req])
+    filter_op = FilterOperation(
+        id="france", requirement_id="france", input="debt", predicates=predicates
+    )
+
+    result = build(
+        plan,
+        _translation(_retrieve(), filter_op, terminal=["france"]),
+        discovered={"annual_debt_service": _two_role_creditor_source(source)},
+    )
+
+    assert _codes(result) == [Code.BAD_ARGS]
+    assert result.issues[0].operation_id == "france"
+
+
 def test_capability_unpinned_when_a_live_schema_declares_an_output_schema(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
@@ -4372,10 +4587,15 @@ def _rank_over(
 
 
 def _countries_of(
-    input_id: str, *, reads: str = "fetch", filter_id: str = "countries"
+    input_id: str,
+    *,
+    reads: str = "fetch",
+    filter_id: str = "countries",
+    role: str | None = None,
+    strict: bool = False,
 ) -> tuple[FilterRequirement, FilterOperation]:
     """A filter keeping the countries of `input_id`, a requirement that names no place."""
-    predicates = (PlaceLevel(level=PlaceType.COUNTRY),)
+    predicates = (PlaceLevel(level=PlaceType.COUNTRY, role=role, strict=strict),)
     return (
         FilterRequirement(
             id=filter_id, decision_ids=["measure"], input_id=input_id, predicates=predicates
@@ -4458,10 +4678,25 @@ def _ids_debt_total(
     source: SourceFactory,
     *,
     level_filter: bool,
+    windowed: bool = False,
 ) -> CompileResult:
-    """A total over every IDS debtor, `across=('country',)`, with or without a level filter."""
-    ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
-    countries_req, countries = _countries_of("health")
+    """A total over every IDS debtor, `across=('country',)`, with or without a level filter.
+
+    `windowed` retrieves the copy `submission.service._window_pins` pins in
+    place of a search over 2024 alone: its identity over the requirement's
+    own years.
+    """
+    identity: dict[str, Any] = {
+        "stat_var": "DebtServicePaid",
+        "requested_window": {"kind": "range", "start_year": 2024, "end_year": 2024},
+    }
+    spec_id, identity = (
+        windowed_identity(identity, {"kind": "range", "start_year": 2015, "end_year": 2024})
+        if windowed
+        else (SPEC_KENYA, identity)
+    )
+    ids = source(spec_id=spec_id, identity=identity, entities=(), open_entity_axes=(_IDS_DEBTORS,))
+    countries_req, countries = _countries_of("health", role="country", strict=True)
     reads = "countries" if level_filter else "fetch"
     total_req = AggregateRequirement(
         id="totals",
@@ -4505,16 +4740,53 @@ def test_a_total_over_ids_debtors_by_country_needs_no_level_filter(
     assert total.args["group_by"] == ["time_period"]
 
 
-def test_a_level_filter_over_ids_debtors_is_refused_with_its_own_code(
+@pytest.mark.parametrize("windowed", [False, True], ids=["as-searched", "windowed-pin"])
+def test_a_level_filter_over_ids_debtors_reads_the_debtors_type_column(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    windowed: bool,
+) -> None:
+    result = _ids_debt_total(build, decision, source, level_filter=True, windowed=windowed)
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    retrieve, countries, _ = result.workflow.steps
+    assert (retrieve.args["spec_id"] == SPEC_KENYA) is not windowed
+    assert retrieve.args["place_types"] is True
+    assert retrieve.args["without_party_totals"] is True
+    assert countries.args == {
+        "predicates": [
+            {
+                "kind": "place_level",
+                "column": "destination_type",
+                "level": "Country",
+                "strict": True,
+            }
+        ]
+    }
+
+
+def test_a_rank_requirement_for_country_filtered_debtors_refuses_a_raw_input(
     build: Callable[..., CompileResult], decision: DecisionFactory, source: SourceFactory
 ) -> None:
-    result = _ids_debt_total(build, decision, source, level_filter=True)
-
-    assert _codes(result) == [Code.LEVEL_FILTER_ON_FLOW_AXIS]
-    assert (result.issues[0].operation_id, result.issues[0].requirement_id) == (
-        "countries",
-        "health",
+    ids = source(entities=(), open_entity_axes=(_IDS_DEBTORS,))
+    countries_req, countries = _countries_of("health", role="country", strict=True)
+    rank_req, raw_rank = _rank_over("countries", axis="country", reads="fetch")
+    plan = _draft(
+        [decision(), _population_decision(decision)],
+        [_every_country(), countries_req, rank_req],
     )
+    fetch = RetrieveOperation(id="fetch", requirement_id="health", spec_id=ids.spec_id)
+
+    result = build(
+        plan,
+        _translation(fetch, countries, raw_rank, terminal=["ranked"]),
+        discovered={"health": ids},
+    )
+
+    assert Code.OPERATION_MISMATCH in _codes(result)
+    assert result.workflow is None
 
 
 def test_a_series_of_every_place_asks_for_no_place_types_and_no_party_totals(
@@ -4750,6 +5022,10 @@ def test_top_donor_countries_are_refused_over_the_open_origin_axis(
     assert f"{party!r} narrows a party to its countries" in issue.reason
     assert f"holds every {word}, agencies included" in issue.reason
     assert f"state `across` as '{word}s'" in issue.reason
+    assert (
+        "direct `{kind:place_level, role:<party>, level:Country, strict:true}` filter bound to "
+        "that role and redirect the calculation through that filter" in issue.reason
+    )
     assert result.workflow is None
 
 

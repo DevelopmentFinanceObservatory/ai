@@ -75,7 +75,7 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import OP_SPEC_HASH_PATTERN, canonicalize_op_spec
 from analysis_mcp.op_spec import PinnedUnit, QuotientOfOpSpec
 from analysis_mcp.settings import Settings
-from analysis_mcp.steps import LeftOut, Step, build_step, left_out_from_exclusions, step_unit
+from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, left_out_keys, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -308,11 +308,6 @@ def _quotient_step(op_spec: QuotientOfOpSpec, result: QuotientOfResult, *, trace
     """The step record of `result`, stored on `trace`: the numerator keys it
     kept and left out by reason, each period's denominator coverage, and the
     composed unit."""
-    dropped = (
-        ("unmatched_key", result.unmatched_keys),
-        ("period_unmatched", result.keys_without_shared_period),
-        ("zero_denominator", result.keys_with_zero_denominator),
-    )
     coverage = result.coverage
     return build_step(
         op="quotient",
@@ -327,10 +322,12 @@ def _quotient_step(op_spec: QuotientOfOpSpec, result: QuotientOfResult, *, trace
             "entities_with_fewer_periods": coverage.entities_with_fewer_periods,
         },
         left_out=[
-            *(
-                LeftOut(reason=reason, count=len(keys), of="entities")
-                for reason, keys in dropped
-                if keys
+            *left_out_keys(
+                (
+                    ("unmatched_key", result.unmatched_keys),
+                    ("period_unmatched", result.keys_without_shared_period),
+                    ("zero_denominator", result.keys_with_zero_denominator),
+                )
             ),
             *left_out_from_exclusions(result.exclusions, row_reasons=("unit_unbound",)),
         ],

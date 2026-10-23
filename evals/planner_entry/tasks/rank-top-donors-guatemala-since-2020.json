@@ -22,7 +22,10 @@
   ],
   "brief": "top donors to guatemala since 2020",
   "asks": [
-    "The top donors to Guatemala since 2020"
+    {
+      "text": "The top donors to Guatemala since 2020",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -37,6 +40,7 @@
     "distinction": "rank, not aggregate: the donors are ordered by their totals since 2020, and an aggregate over the donors would sum them away"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "top donors to guatemala since 2020",
     "answer_mode": "computed",

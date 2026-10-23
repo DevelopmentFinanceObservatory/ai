@@ -20,7 +20,7 @@ The harness gives it nine (`harness.orchestrator_tools`):
 | `search`         | Sends the question and every part it names to Search in one call; returns each part's reading                                    |
 | `fetch`          | Retrieves one dataset, summing a family of indicators, and returns frame ids with their views                                    |
 | `make_charts`    | Draws charts from those frames on the canvas and returns what each holds and its reply figures, or why it failed                 |
-| `ask_user`       | Records a question for the user; the workflow pauses for the answer and hands it back                                            |
+| `ask_user`       | Records one to three questions for the user; the workflow pauses once for all of them and hands every answer back                |
 | `plan`           | Records a brief and the outputs asked for; the plan path runs and hands back its frames and each ask's status                    |
 | `get_skill`      | Loads a skill a search result named, through data-mcp                                                                            |
 | `get_skill_file` | Reads a file a loaded skill links, or the next page of a long one, through data-mcp                                              |

@@ -58,6 +58,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -74,6 +75,8 @@ from planner.records import (
     DenominatorScope,
     EntityIn,
     PeriodThreshold,
+    PlaceLevel,
+    PlaceType,
     RankAmong,
     RankDirection,
     RelativePeriod,
@@ -91,6 +94,7 @@ CONTENT_VERSION = "cv_" + "4" * 32
 GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
 FRANCE = ResolvedEntity(role="origin", ref="country/FRA", label="France")
 KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+UGANDA = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
 
 PROVIDER = "financingProvider"
 RECIPIENT = "financingRecipient"
@@ -178,27 +182,30 @@ def _family_frame(
     *,
     stat_vars: Sequence[str] = ("Oda",),
     providers: Sequence[ResolvedEntity] = (GERMANY, FRANCE),
+    recipients: Sequence[ResolvedEntity] = (KENYA,),
     provider_column: str = PROVIDER,
     unit: str = "usd",
     last_year: int = 2023,
     kinds: bool = False,
+    types: bool = False,
 ) -> Frame:
-    """A CRS family frame: each of `stat_vars` for each provider to Kenya, yearly from 2000
-    through `last_year`.
+    """A CRS family frame for each provider and recipient, yearly from 2000 through `last_year`.
 
     Two declared role columns and the four `stat_var_*` slot columns, whose
     purpose slot tells the family's members apart. With `kinds`, each role's kind
     column too, every party of kind `party`, as `get_data(place_types=true)` serves it.
     """
     kind_columns = [f"{provider_column}_party_kind", f"{RECIPIENT}_party_kind"] if kinds else []
+    type_columns = [f"{provider_column}_type", f"{RECIPIENT}_type"] if types else []
     return Frame.build(
-        role_keys=[provider_column, RECIPIENT, *kind_columns, *_SLOT_COLUMNS],
+        role_keys=[provider_column, RECIPIENT, *kind_columns, *type_columns, *_SLOT_COLUMNS],
         rows=[
             {
                 "stat_var": f"dcid:{stat_var}",
                 provider_column: provider.ref,
-                RECIPIENT: KENYA.ref,
+                RECIPIENT: recipient.ref,
                 **dict.fromkeys(kind_columns, "party"),
+                **dict.fromkeys(type_columns, "Country"),
                 "stat_var_crsCooperationModality": "crsCooperationModality/Project",
                 "stat_var_crsPurpose": f"crsPurpose/{stat_var}",
                 "stat_var_crsTypeOfFinance": "crsTypeOfFinance/Standard",
@@ -209,6 +216,7 @@ def _family_frame(
             }
             for member, stat_var in enumerate(stat_vars)
             for provider in providers
+            for recipient in recipients
             for year in range(2000, _LAST_YEAR.get(stat_var, last_year) + 1)
         ],
     )
@@ -293,13 +301,14 @@ def retrieved(
         *,
         frame: Frame | None = None,
         providers: Sequence[ResolvedEntity] | None = None,
+        recipients: Sequence[ResolvedEntity] = (KENYA,),
         role_keys: Sequence[str] | None = None,
         dimensions: list[dict[str, Any]] | None = None,
         frame_read: bool = True,
     ) -> dict[str, Any]:
         if providers is None:
             providers = [entity for entity in source.entities if entity.role == "origin"]
-        held = _family_frame(providers=providers) if frame is None else frame
+        held = _family_frame(providers=providers, recipients=recipients) if frame is None else frame
         ref = FrameRef(spec_id=source.spec_id, content_version=CONTENT_VERSION)
         trace = {
             "applied_window": None,
@@ -323,7 +332,7 @@ def retrieved(
                 "stat_var": f"dcid:{_pinned(source)}",
                 "entities": [
                     {"role": PROVIDER, "ref": provider.ref},
-                    {"role": RECIPIENT, "ref": KENYA.ref},
+                    {"role": RECIPIENT, "ref": recipient.ref},
                 ],
                 "facet": {"unit": "usd"},
                 "observations": 24,
@@ -333,6 +342,7 @@ def retrieved(
                 "maximum": {"value": 123.0, "period": "2023"},
             }
             for provider in providers
+            for recipient in recipients
         ]
         _stats_by_manifest[(source.spec_id, CONTENT_VERSION)] = statistics
         result: dict[str, Any] = {
@@ -399,6 +409,11 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             question="How much bilateral ODA do Germany and France give Kenya?",
             decisions=[decision(), *decisions],
             evidence_requirements=list(requirements),
+            first_years=[
+                FirstYear(requirement_id=r.id, year=r.period.start)
+                for r in requirements
+                if isinstance(r, DatasetRequirement) and r.period_end_open
+            ],
             status=PlanStatus.DRAFT,
         )
         translation = Translation(operations=list(operations), terminal=[terminal])
@@ -453,6 +468,53 @@ def _analysis_call(surface: ScriptedSurface, tool: str) -> dict[str, Any]:
     (call,) = [arguments for name, arguments in surface.calls if name == tool]
     assert not {"origin", "destination"} & _strings(call), call
     return {key: value for key, value in call.items() if not key.endswith("frame_ref")}
+
+
+def _strict_destination_country_filter_plan(
+    plan_for: PlanFactory,
+    source: SelectedSource,
+    *,
+    rolling: bool = False,
+) -> Plan:
+    """Keep country recipients on an open destination axis.
+
+    The compiled filter names ``destination_type``. The retrieved CRS frame
+    declares the same enrichment as ``financingRecipient_type``.
+    """
+    predicates = (
+        PlaceLevel(level=PlaceType.COUNTRY, role="country", strict=True),
+        *(
+            (PeriodThreshold(op="eq", year=2023, rolling=RelativePeriod(offset=0)),)
+            if rolling
+            else ()
+        ),
+    )
+    countries = FilterRequirement(
+        id="countries", decision_ids=["measure"], input_id="oda", predicates=predicates
+    )
+    requirement = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[Entity(name="Germany", role="donor")],
+        across=("country",),
+        period=Period(start=2000, end=2023),
+        period_end_open=rolling,
+    )
+    return plan_for(
+        [requirement, countries],
+        [
+            _RETRIEVE,
+            FilterOperation(
+                id="countries_op",
+                requirement_id="countries",
+                input="crs",
+                predicates=predicates,
+            ),
+        ],
+        terminal="countries_op",
+        discovered={"oda": source},
+    )
 
 
 def _since_2005_plan(plan_for: PlanFactory, source: SelectedSource) -> Plan:
@@ -674,6 +736,173 @@ async def test_a_period_filter_on_a_family_frame_declares_every_frame_column(
             {"kind": "ordered_threshold", "column": "time_period", "op": "gte", "value": "2005"}
         ]
     }
+
+
+async def test_a_strict_country_filter_binds_destination_type_to_the_frames_enrichment(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+) -> None:
+    source = _source(
+        entities=(GERMANY,),
+        open_entity_axes=(OpenEntityAxis(column="destination", member_count=193),),
+    )
+    plan = _strict_destination_country_filter_plan(plan_for, source)
+    assert plan.workflow is not None
+    assert plan.workflow.steps[-1].args == {
+        "predicates": [
+            {
+                "kind": "place_level",
+                "column": "destination_type",
+                "level": "Country",
+                "strict": True,
+            }
+        ]
+    }
+    destination_coverage = [
+        *DIMENSIONS[:1],
+        {"label": RECIPIENT, "count": 193, "axis": "destination"},
+        *DIMENSIONS[2:],
+    ]
+    surface = surface_for(
+        get_data=[
+            ok(
+                await retrieved(
+                    source,
+                    frame=_family_frame(types=True, recipients=(KENYA, UGANDA)),
+                    providers=(GERMANY,),
+                    recipients=(KENYA, UGANDA),
+                    dimensions=destination_coverage,
+                )
+            )
+        ]
+    )
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert _analysis_call(surface, "filter") == {
+        "predicates": [
+            {
+                "kind": "place_level",
+                "column": f"{RECIPIENT}_type",
+                "level": "Country",
+                "strict": True,
+            }
+        ]
+    }
+
+
+async def test_a_rolling_country_filter_rebinds_destination_type_in_its_population(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+) -> None:
+    source = _source(
+        entities=(GERMANY,),
+        open_entity_axes=(OpenEntityAxis(column="destination", member_count=193),),
+    )
+    plan = _strict_destination_country_filter_plan(plan_for, source, rolling=True)
+    assert plan.workflow is not None
+    (filter_step,) = plan.workflow.steps[-1:]
+    assert filter_step.args["rolling"] == {
+        "population": [
+            {
+                "spec_id": SPEC_CRS,
+                "bindings": {"origin": [GERMANY.ref]},
+                "levels": {"destination_type": "Country"},
+                "strict_levels": ["destination_type"],
+            }
+        ]
+    }
+    destination_coverage = [
+        *DIMENSIONS[:1],
+        {"label": RECIPIENT, "count": 193, "axis": "destination"},
+        *DIMENSIONS[2:],
+    ]
+    surface = surface_for(
+        get_data=[
+            ok(
+                await retrieved(
+                    source,
+                    frame=_family_frame(types=True, recipients=(KENYA, UGANDA)),
+                    providers=(GERMANY,),
+                    recipients=(KENYA, UGANDA),
+                    dimensions=destination_coverage,
+                )
+            )
+        ]
+    )
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor", "filter"]
+    population = [
+        {
+            "spec_id": SPEC_CRS,
+            "bindings": {PROVIDER: [GERMANY.ref]},
+            "levels": {f"{RECIPIENT}_type": "Country"},
+            "strict_levels": [f"{RECIPIENT}_type"],
+        }
+    ]
+    assert _analysis_call(surface, "resolve_anchor") == {
+        "populations": population,
+        "roots": [{"spec_id": SPEC_CRS, "content_version": CONTENT_VERSION}],
+    }
+    sent = _analysis_call(surface, "filter")
+    assert sent["predicates"][0] == {
+        "kind": "place_level",
+        "column": f"{RECIPIENT}_type",
+        "level": "Country",
+        "strict": True,
+    }
+    period_predicate = dict(sent["predicates"][1])
+    assert period_predicate.pop("rolling") == {"anchor": "latest", "offset": 0, "rule": "half1"}
+    assert period_predicate == {
+        "kind": "ordered_threshold",
+        "column": "time_period",
+        "op": "eq",
+        "value": "2023",
+    }
+    assert sent["rolling"]["population"] == population
+    assert sent["anchor_key"] == outcome.anchors[0].anchor_key
+
+
+async def test_a_strict_country_filter_without_the_destination_enrichment_refuses_before_call(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+) -> None:
+    source = _source(
+        entities=(GERMANY,),
+        open_entity_axes=(OpenEntityAxis(column="destination", member_count=193),),
+    )
+    destination_coverage = [
+        *DIMENSIONS[:1],
+        {"label": RECIPIENT, "count": 193, "axis": "destination"},
+        *DIMENSIONS[2:],
+    ]
+    surface = surface_for(
+        get_data=[
+            ok(
+                await retrieved(
+                    source,
+                    providers=(GERMANY,),
+                    recipients=(KENYA, UGANDA),
+                    dimensions=destination_coverage,
+                )
+            )
+        ]
+    )
+
+    outcome = await _run(_strict_destination_country_filter_plan(plan_for, source), surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.COLUMN_UNBOUND
+    assert outcome.step_id == "countries_op"
+    assert "destination_type" in outcome.detail
+    assert [name for name, _ in surface.calls] == ["get_data"]
 
 
 async def test_a_filter_that_drops_a_frame_column_is_still_a_shape_mismatch(

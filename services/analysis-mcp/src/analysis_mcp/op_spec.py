@@ -50,6 +50,7 @@ from common.rolling import (
     ANCHOR_KEY_PATTERN,
     canonical_bindings,
     canonical_levels,
+    canonical_strict_levels,
     population_order,
 )
 from dfo_frame_grammar import shift_period
@@ -155,6 +156,18 @@ class RootPopulation(BaseModel):
         AfterValidator(canonical_levels),
         HASHED_WHEN_SET,
     ] = Field(default_factory=dict)
+    strict_levels: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...],
+        AfterValidator(canonical_strict_levels),
+        HASHED_WHEN_SET,
+    ] = ()
+
+    @model_validator(mode="after")
+    def _strict_levels_are_held(self) -> RootPopulation:
+        unknown = sorted(set(self.strict_levels) - set(self.levels))
+        if unknown:
+            raise ValueError(f"strict_levels name columns without a level: {unknown!r}")
+        return self
 
     @model_serializer(mode="wrap")
     def _without_unset_levels(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -163,6 +176,8 @@ class RootPopulation(BaseModel):
         dumped = handler(self)
         if not dumped["levels"]:
             del dumped["levels"]
+        if not dumped["strict_levels"]:
+            del dumped["strict_levels"]
         return dumped
 
 
@@ -355,6 +370,7 @@ class PlaceLevelPredicate(BaseModel):
     kind: Literal["place_level"] = "place_level"
     column: str = Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)
     level: PlaceLevel
+    strict: Annotated[bool, HASHED_WHEN_SET] = False
 
 
 # The closed predicate vocabulary: a row-value predicate is one of these

@@ -165,17 +165,21 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The `options.columns` of a flow table's mint. apis expands each bare token to a
-# `{column}_{token}` column for every entity column the table has, the sides its identity
-# leaves unnamed among them: the party's kind, class and whole-population mark
-# (`common.place_type`).
+# The bare tokens apis expands to a `{column}_{token}` column for every party column a flow
+# table has: the party's kind, class and whole-population mark (`common.place_type`). The
+# qualified type tokens are necessary: the door does not expand a bare `type` token. Keep the
+# two kinds of enrichment together so a country filter can distinguish countries from
+# organisations without losing the party-kind proof that excludes published group totals from
+# later sums and ranks.
 KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_class", "party_whole")
+FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
+    *sorted(type_column(role) for role in PARTY_ROLES),
+    *KIND_COLUMNS,
+)
 
-# The columns a recorded selection may hold that `replayed_mint_options` replaces with
-# `KIND_COLUMNS`: a flow party's type column, `kind`, the earlier token for the party kind,
-# and `party_kind`, which recorded selections from before the class and whole tokens hold
-# alone.
-_REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind", "party_kind"))
+# The earlier token for a flow party kind that old recorded selections carry. Replays translate
+# it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
+_LEGACY_KIND_COLUMN = "kind"
 
 # The mint option that asks apis for a flow frame without the group totals of the
 # party roles its identity leaves open (apis' `MintOptions.without_party_totals`). A
@@ -187,14 +191,14 @@ WITHOUT_PARTY_TOTALS = "without_party_totals"
 def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
     """The `options.columns` `get_data(place_types=True)` asks apis for.
 
-    A spec whose identity names a flow axis, as an entity or an open role, asks for its
-    parties' kinds (`KIND_COLUMNS`); any other spec, and a call holding no identity, for
-    the places' types. A list that names only enrichment columns adds them to every
-    default column, so the decoded `stat_var_<code system>` columns stay beside them.
+    A spec whose identity names a flow axis, as an entity or an open role, asks for each
+    party's type and kind (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding
+    no identity, for the places' types. A list that names only enrichment columns adds them
+    to every default column, so the decoded `stat_var_<code system>` columns stay beside them.
     """
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
     if roles & FLOW_ROLE_COLUMNS.keys():
-        return KIND_COLUMNS
+        return FLOW_ENRICHMENT_COLUMNS
     return (type_column(PLACE_ROLE),)
 
 
@@ -203,18 +207,32 @@ def replayed_mint_options(
 ) -> Mapping[str, Any]:
     """`options` as `get_data` sends them for a root of `identity`.
 
-    A flow root (`place_type_columns_for(identity)` is `KIND_COLUMNS`) recorded with no
-    `columns`, and any root recorded with a selection holding a flow party's type column,
-    the earlier token `kind` or `party_kind`, mint with `KIND_COLUMNS`. Every other
-    selection is unchanged. A flow frame minted without kinds holds none, and a sum
-    across its parties refuses without them.
+    A flow root recorded with no `columns` gains every flow enrichment. A recorded flow
+    selection, one holding a party type or a kind token, keeps its other explicit columns
+    in order and then asks for every missing flow enrichment, the kinds as `KIND_COLUMNS`:
+    the earlier `kind` token and a `party_kind` from before the class and whole tokens are
+    read as `KIND_COLUMNS`, even when the identity is no longer available, and a recorded
+    qualified party-type selection proves that the current kind tokens are valid, without
+    guessing other role columns. A root recorded with `without_party_totals` and kinds
+    alone is the rendering `get_data(without_party_totals=True)` mints, and replays with
+    `KIND_COLUMNS`. Every other selection is unchanged. A flow frame without this metadata
+    cannot prove that a sum or rank leaves group totals out.
     """
-    columns = options.get("columns")
-    if columns:
-        upgraded = not _REPLACED_COLUMNS.isdisjoint(columns)
-    else:
-        upgraded = place_type_columns_for(identity) == KIND_COLUMNS
-    return {**options, "columns": list(KIND_COLUMNS)} if upgraded else options
+    columns = options.get("columns") or ()
+    kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
+    if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
+        return {**options, "columns": list(KIND_COLUMNS)}
+    flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    flow_selection = any(
+        column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
+    )
+    if not flow_root and not flow_selection:
+        return options
+
+    selected = [column for column in columns if column not in kind_tokens]
+    additions = FLOW_ENRICHMENT_COLUMNS if flow_root else KIND_COLUMNS
+    selected.extend(column for column in additions if column not in selected)
+    return {**options, "columns": selected}
 
 
 # Every reserved column name `build_frame_from_arrow` recognises -- everything else in a

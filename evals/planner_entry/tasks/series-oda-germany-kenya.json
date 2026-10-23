@@ -38,6 +38,7 @@
     "kind": "aggregate",
     "distinction": "one donor to one recipient is one series; nothing is totalled"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much official development assistance did Germany give Kenya in each year from 2015 to 2022?",
     "answer_mode": "series",

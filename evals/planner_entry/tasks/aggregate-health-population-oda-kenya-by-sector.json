@@ -59,6 +59,7 @@
     "distinction": "aggregate, not sum_of: both sectors come in one CRS retrieval split by sector, so their total is an aggregate, not two sources added"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Gross ODA disbursements to Kenya for health, including the population policy, programme, and reproductive health sector, from all providers between 2020 and 2024 in current US dollars from the OECD Creditor Reporting System (CRS).",
     "answer_mode": "computed",
@@ -120,15 +121,6 @@
       },
       {
         "kind": "aggregate",
-        "id": "cumulative",
-        "input_id": "combined",
-        "reduction": "sum",
-        "group_by": [
-          "entity"
-        ]
-      },
-      {
-        "kind": "aggregate",
         "id": "by_sector",
         "input_id": "split",
         "reduction": "sum",
@@ -148,7 +140,7 @@
       {
         "ask": 1,
         "outputs": [
-          "cumulative"
+          "yearly"
         ]
       },
       {

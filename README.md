@@ -1,94 +1,62 @@
-# dfo-ai
+# DFO AI services
 
-The AI layer of the Development Finance Observatory (DFO). This repository holds the agent
-harness, the MCP servers it calls, and their shared modules. It
-ships independently of the knowledge graph, data pipelines, and
-the public site.
+The AI layer of the [Development Finance Observatory](https://github.com/DevelopmentFinanceObservatory) (DFO). It holds an agent harness that answers questions about development finance, and the MCP servers the harness calls to find data, run analysis, and draw charts and tables. The DFO is an initiative of [ONE Data](https://data.one.org), built on [Google Data Commons](https://datacommons.org). The organisation profile has the full map of repositories.
 
-This repository is a [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/)
-monorepo. Each package (`harness`, `data-mcp`, `analysis-mcp`, `presentation-mcp`, and `packages/common`)
-is the unit of code ownership, with its own dependencies and tests.
-They deploy together as a single Cloud Run service.
+This repository is under active development. Interfaces, schemas, and data may change without notice.
 
-## Repo map
+## What's inside
 
-| Repo       | What it is                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `dcp`      | The knowledge graph engine (ONE's fork of Data Commons) that serves the graph over DCP mixer and SDMX APIs.                    |
-| `apis`     | The Datasets API and Search API that `data-mcp` wraps to query the `dcp` graph.                                                |
-| `ai`       | This repository, which houses the agent harness and MCP servers.                                                               |
-| `spec-kit` | Shared spec models for spec-id hashing, materialisation, manifest schemas, and component specifications.                       |
-| `website`  | The public Next.js site (chat and canvas workspace, reference pages, and the proxy for harness traffic).                       |
-| `skills`   | The open repository of domain-knowledge packages (definitions, methodology, analytical recipes) loaded dynamically at runtime. |
-| `infra`    | Infrastructure as code (Cloud Run service definitions, service accounts, scaling, and secrets).                                |
+A [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/) monorepo. Each member has its own dependencies and tests, and all of them deploy together as one Cloud Run service.
 
-## Layout
-
-```
-ai/
-  packages/
-    common/                 # Shared logging, telemetry, settings base, and materialisation store
-  services/
-    harness/
-      src/harness/            # Agentic loop on Google ADK and FastAPI with SSE event streaming
-      src/orchestrator/       # The agent that answers a studio turn by calling its tools
-      src/planner/            # Methodological planning engine gated behind user approval
-      src/compiler/           # Builds and checks the workflow an approved plan runs
-      src/translator/         # Finds each requirement's data and proposes the operations the compiler builds
-      src/executor/           # Runs an approved workflow and checks each result against the plan
-    data-mcp/                # Data discovery, minting, materialisation, and graph entity description
-    analysis-mcp/            # Deterministic computation across seven op-spec analytical verbs
-    presentation-mcp/        # Canvas component authoring and frame view tools for the web workspace
-  evals/                    # ADK eval sets run manually against a live model
-  docs/
-    architecture.md
+```text
+packages/common/            Shared logging, telemetry, settings base, and materialisation store
+services/harness/           Agent loop on Google ADK and FastAPI, streamed over SSE
+services/data-mcp/          Data discovery, minting, materialisation, and graph entity description
+services/analysis-mcp/      Deterministic computation across seven analytical verbs
+services/presentation-mcp/  Canvas component authoring and frame view tools
+evals/                      ADK eval sets, run by hand against a live model
+docs/                       Architecture notes, the studio interface, and the MCP user guide
+deploy/                     Dockerfile and deploy notes
 ```
 
-Each service follows a src layout, `services/<name>/src/<pkg>/`, with tests
-under `services/<name>/tests/`. Package names are `harness`, `data_mcp`,
-`analysis_mcp`, `presentation_mcp`, and `common`. `orchestrator`, `planner`,
-`compiler`, `translator` and `executor` live inside `services/harness/src/` as
-further top-level modules so they share harness dependencies, tests, and CI
-pipelines during development. Their tests live under
-`services/harness/tests/orchestrator/`, `services/harness/tests/planner/`,
-`services/harness/tests/compiler/`, `services/harness/tests/translator/` and
-`services/harness/tests/executor/`.
+The harness also holds the `orchestrator`, `planner`, `compiler`, `translator`, and `executor` modules under `services/harness/src/`. Each service uses a src layout, `services/<name>/src/<package>/`, with tests in `services/<name>/tests/`.
 
-Detailed package documentation lives in each component directory:
+The servers query the knowledge graph through the Datasets and Search APIs in [`apis`](https://github.com/DevelopmentFinanceObservatory/apis), and the public site in [`website`](https://github.com/DevelopmentFinanceObservatory/website) talks to the harness.
 
-- [`packages/common`](packages/common/README.md) covers shared configuration, telemetry, and materialisation storage.
-- [`services/harness`](services/harness/README.md) covers the studio surface, the agent's workflow, sub-app mounting, and SSE transport. Frontend developers start at [`docs/frontend-interface.md`](docs/frontend-interface.md); the contract's design history is [`docs/studio-contract-v1.md`](docs/studio-contract-v1.md).
-- [`services/data-mcp`](services/data-mcp/README.md) covers search discovery, dataset retrieval, and parquet minting.
-- [`services/analysis-mcp`](services/analysis-mcp/README.md) covers analytical operations, op-spec hashing, and lineage.
-- [`services/presentation-mcp`](services/presentation-mcp/README.md) covers canvas component generation and UI contracts.
+## Getting started
 
-## Quickstart
+Running the whole stack needs access to ONE's Google Cloud project (`dev-fin-observatory`) for the Gemini and Langfuse keys, and a reachable `apis` deployment for data. Without that access you can read the code, run the lint, type checks, and tests, and read the docs.
 
-You need [`just`](https://github.com/casey/just), [`uv`](https://docs.astral.sh/uv/),
-and access to the `dev-fin-observatory` GCP project.
+Without cloud access you need [`just`](https://github.com/casey/just) and [`uv`](https://docs.astral.sh/uv/):
 
+```bash
+uv sync --all-packages
+just check        # lint, type check, and the full test suite
 ```
+
+With access, authenticate and start the harness on `localhost:8080`, with the three MCP servers mounted in-process:
+
+```bash
 gcloud auth login
 gcloud auth application-default login
-just setup
+just setup        # generates .env, syncs dependencies, installs pre-commit hooks
 just dev
 ```
 
-`just setup` checks prerequisites, pulls API keys from Secret Manager to generate `.env`,
-syncs workspace members into the shared `.venv`, and installs pre-commit hooks.
-`just dev` starts the harness on `localhost:8080` with `data-mcp`, `analysis-mcp`,
-and `presentation-mcp` mounted in-process.
+`just` lists every recipe, and `just doctor` checks the local environment.
 
-`just` lists all recipes, and `just doctor` checks the local environment.
+## Documentation
 
-`dev` is the trunk branch. Create feature branches from `dev` and open pull requests against it.
-[CONTRIBUTING.md](./CONTRIBUTING.md) covers configuration, secrets management,
-and developer commands.
+- [Architecture](docs/architecture.md) explains how the services fit together.
+- [Studio interface](docs/frontend-interface.md) is the integration guide for frontend developers, and [the wire contract](docs/studio-contract-v1.md) records the protocol decisions behind it.
+- [MCP user guide](docs/guide/connect.md) shows how to connect an AI assistant to the DFO server.
+- [Maintainer notes](docs/development.md) cover configuration, secrets, and upgrade hazards, and [deploy/README.md](deploy/README.md) covers deploys.
+- Each component has its own README: [common](packages/common/README.md), [harness](services/harness/README.md), [data-mcp](services/data-mcp/README.md), [analysis-mcp](services/analysis-mcp/README.md), and [presentation-mcp](services/presentation-mcp/README.md).
 
-## Deploys
+## Contributing
 
-GitHub Actions builds one container image (`ai`) containing the harness and
-all three mounted MCP servers. Merges to `dev` deploy automatically to the Cloud Run
-development environment. Production deploys on every push to `main`.
-`infra` defines the Cloud Run service configuration (service accounts, scaling limits,
-secrets). Repository CI only updates the container image deployed to that service.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

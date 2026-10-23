@@ -1,0 +1,143 @@
+{
+  "id": "rank-top-donors-malawi",
+  "kind": "rank",
+  "origin": "authored",
+  "question": "Which donors give the most to Malawi?",
+  "searches": [
+    {
+      "query": "Which donors give the most to Malawi?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Malawi",
+              "role": "to"
+            }
+          ],
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Which donors give the most official development assistance to Malawi? The user named no period.",
+  "asks": [
+    {
+      "text": "The donors that give the most ODA to Malawi",
+      "by": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "rank"
+  ],
+  "neighbour": {
+    "kind": "aggregate",
+    "distinction": "rank, not aggregate: the donors are ordered by what each gave in the newest year, and an aggregate over the years would rank a total nobody asked for"
+  },
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "Which donors give the most official development assistance to Malawi? The user named no period.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "top_n",
+        "description": "How many donors the ranking keeps.",
+        "options": [
+          "5",
+          "10"
+        ],
+        "chosen": "10",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no number; ten is the usual list of top donors.",
+        "fixes": [
+          "limit"
+        ]
+      },
+      {
+        "slot": "every_donor",
+        "description": "Which donors the ranking compares.",
+        "options": [
+          "every donor",
+          "a named list of donors"
+        ],
+        "chosen": "every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question names no list, so every donor is ranked.",
+        "fixes": [
+          "among"
+        ]
+      },
+      {
+        "slot": "ranked_year",
+        "description": "Which year the ranking reads.",
+        "options": [
+          "2024, the newest year most donors have reported",
+          "2025, which 9 donors have reported so far"
+        ],
+        "chosen": "2024, the newest year most donors have reported",
+        "resolved_by": "planner_default",
+        "rationale": "The ranking reads the newest year, and 2025 holds 9 donors against 85 in 2024.",
+        "fixes": [
+          "window_start",
+          "window_end"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Malawi",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_5620a71d7e0ecac900dda6ef6fb85124"
+      },
+      {
+        "kind": "rank",
+        "id": "top_donors",
+        "input_id": "oda",
+        "direction": "highest_first",
+        "among": "population",
+        "axis": "donor",
+        "reduction": "sum",
+        "limit": 10,
+        "window_start": 2024,
+        "window_end": 2024,
+        "decision_ids": [
+          "top_n",
+          "every_donor",
+          "ranked_year"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "top_donors"
+        ]
+      }
+    ]
+  }
+}

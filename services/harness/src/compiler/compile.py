@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
 
-from common.place_type import FLOW_ROLE_COLUMNS, PLACE_ROLE, type_column
+from common.place_type import FLOW_ROLE_COLUMNS, type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
@@ -51,7 +51,7 @@ from planner.operations import (
     Translation,
 )
 from planner.parties import across_party
-from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level
+from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level, split_of
 from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
@@ -67,7 +67,14 @@ from planner.records import (
     StrictModel,
     ValueThreshold,
 )
-from planner.shapes import PLACE_PHRASE, ValueKind, place_role, role_named, roles_named
+from planner.shapes import (
+    PLACE_PHRASE,
+    ValueKind,
+    level_roles,
+    place_role,
+    role_named,
+    roles_named,
+)
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -83,6 +90,7 @@ from pydantic import JsonValue, ValidationError, model_validator
 
 from compiler.arguments import (
     literal_argument_errors,
+    op_spec_errors,
     undeclared_parameters,
     unusable_schema_reason,
 )
@@ -101,8 +109,6 @@ from compiler.evidence import (
     evidence_from_source,
     named_members,
     named_refs,
-    open_axes_for,
-    opens_place_axis,
     read_source_unit,
     read_unit_dcid,
 )
@@ -119,6 +125,8 @@ from compiler.shapes import (
     BREAKDOWN_CODE_SYSTEMS,
     ResolvedRole,
     ResolvedShape,
+    operation_inputs,
+    rolls,
     shapes_for,
     unsummable_axes,
 )
@@ -144,7 +152,6 @@ class CompileIssueCode(StrEnum):
     DANGLING_INPUT = "dangling_input"
     INPUT_IS_TERMINAL = "input_is_terminal"
     INPUT_SHAPE_UNSUPPORTED = "input_shape_unsupported"
-    LEVEL_FILTER_ON_FLOW_AXIS = "level_filter_on_flow_axis"
     RANK_AXIS_REQUIRED = "rank_axis_required"
     SHARE_AXIS_REQUIRED = "share_axis_required"
     SHARE_KEY_UNKNOWN = "share_key_unknown"
@@ -159,7 +166,6 @@ class CompileIssueCode(StrEnum):
     SOURCE_PIN_VIOLATED = "source_pin_violated"
     SOURCE_UNUSABLE = "source_unusable"
     SOURCE_WIDER_THAN_REQUIREMENT = "source_wider_than_requirement"
-    REQUIREMENT_UNMEETABLE = "requirement_unmeetable"
     WINDOW_OUTSIDE_PERIOD = "window_outside_period"
     ROLLING_NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
     ROLLING_POPULATION_UNUSABLE = "rolling_population_unusable"
@@ -335,6 +341,7 @@ class _Build:
         self.discovered = discovered
         self.capabilities = capabilities
         self.requirements = {r.id: r for r in plan.evidence_requirements}
+        self.whole_history = split_of(plan).whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []
         self.operations: dict[str, Operation] = {}
@@ -351,9 +358,7 @@ class _Build:
         self._check_requirements_satisfied()
         self._check_graph()
         self._check_sources()
-        self._check_requirements_meetable()
         self._build_shapes()
-        self._check_level_filters()
         self._check_operations()
         self._check_source_width()
         self._check_capabilities()
@@ -471,7 +476,7 @@ class _Build:
 
     def _check_graph(self) -> None:
         for operation in self.operations.values():
-            for input_id in _inputs_of(operation):
+            for input_id in operation_inputs(operation):
                 if input_id not in self.operations:
                     self._issue(
                         CompileIssueCode.DANGLING_INPUT,
@@ -637,67 +642,11 @@ class _Build:
             requirements=self.requirements,
             sources=self.sources,
             order=self.order,
+            whole_history=self.whole_history,
         )
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
             self._issue(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, detail, operation_id=operation_id)
-
-    def _check_level_filters(self) -> None:
-        """Report `LEVEL_FILTER_ON_FLOW_AXIS` for a place-level filter whose places sit on a flow axis.
-
-        A requirement whose `across` names the place may keep one level with a
-        `PlaceLevel` filter, which reads `observationAbout_type`. Only a
-        source that leaves `observationAbout` open over several places mixes
-        levels (`compiler.evidence.opens_place_axis`). Where the place word
-        covers a flow axis instead (`compiler.evidence.open_axes_for`), as
-        IDS holds its debtors on `destination`, the axis holds parties, and a
-        flow retrieval serves them without their group totals
-        (`_retrieve_arguments`), so the filter has no level to keep and the
-        planner drops it.
-        """
-        for operation in self.operations.values():
-            if not isinstance(operation, FilterOperation) or not keeps_one_level(
-                operation.predicates
-            ):
-                continue
-            retrieve = self.operations.get(self._through_filters(operation.input))
-            source = self.sources.get(retrieve.id) if retrieve is not None else None
-            requirement = (
-                self.requirements.get(retrieve.requirement_id) if retrieve is not None else None
-            )
-            if (
-                source is None
-                or not isinstance(requirement, DatasetRequirement)
-                or opens_place_axis(source.open_entity_axes)
-            ):
-                continue
-            axes = open_axes_for(requirement.across, source.open_entity_axes)
-            if isinstance(axes, str):
-                continue
-            for word, axis in zip(requirement.across, axes, strict=True):
-                if across_party(word) != "place" or axis.column == PLACE_ROLE:
-                    continue
-                self._issue(
-                    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS,
-                    f"source {source.spec_id} holds every {word!r} on its flow axis "
-                    f"{axis.column!r}, whose parties have no place level to keep, and the "
-                    "retrieval already leaves the parties' group totals out; drop the "
-                    "place_level predicate",
-                    operation_id=operation.id,
-                    requirement_id=requirement.id,
-                )
-
-    def _check_requirements_meetable(self) -> None:
-        for requirement in self.requirements.values():
-            if not isinstance(requirement, DatasetRequirement):
-                continue
-            if requirement.unit is not None and requirement.unit.prices == "constant":
-                self._issue(
-                    CompileIssueCode.REQUIREMENT_UNMEETABLE,
-                    f"requirement {requirement.id!r} asks for constant {requirement.unit.base_year} "
-                    f"prices, and no operation restates a series in another year's prices",
-                    requirement_id=requirement.id,
-                )
 
     def _check_operations(self) -> None:
         for operation in self.operations.values():
@@ -749,7 +698,7 @@ class _Build:
         year, as Search may answer "since 2015" with one. A window of kind
         `all`, or a range with no end year, reaches every later year.
         """
-        if not _rolls(operation):
+        if not rolls(operation):
             return
         for requirement_id in sorted(self._root_requirement_ids(operation.id)):
             requirement = self.requirements.get(requirement_id)
@@ -1331,14 +1280,17 @@ class _Build:
         apis writes a natively satisfied request as the request object and
         an unbound definition as its ref.
 
-        No requirement may ask for constant prices (`_check_requirements_meetable`),
-        so the one unit two sides can both be stated in is a current-price
-        one. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins its
-        source and that source cannot serve current prices, as `check_evidence`
-        reads its unit: no requirement change pairs the two, and the issue
-        names the pinned side's requirement. `FRAME_PRICE_BASES_DIFFER` when
-        either side states constant prices otherwise, whose repair is current
-        prices on both sides. `FRAME_UNITS_DIFFER` for any other pair.
+        A requirement may ask for current prices or for constant prices of
+        one base year, and a pinned side is always served in its source's own
+        unit. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins a
+        source in constant prices and no requirement change states the other
+        side in that unit, because the pinned unit states no base year by
+        request or unit id or the other side is pinned too
+        (`_report_irreconcilable_units`); the issue names the pinned side's
+        requirement. `FRAME_PRICE_BASES_DIFFER` when either side states
+        constant prices otherwise, whose repair is one unit on both sides,
+        in current prices or in constant prices of one base year.
+        `FRAME_UNITS_DIFFER` for any other pair.
 
         A `share_of` reports `SHARE_UNITS_DIFFER` in place of
         `FRAME_UNIT_UNBOUND` and `FRAME_UNITS_DIFFER`: `quotient_of` divides
@@ -1551,34 +1503,42 @@ class _Build:
         )
 
     def _report_irreconcilable_units(self, op_id: str, left: _SideUnit, right: _SideUnit) -> bool:
-        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side whose source cannot serve current prices.
+        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side in constant prices no other side can match.
 
-        A current-price unit is the one unit two sides can both be stated
-        in, and a pinned requirement is always served by its own source.
-        Each pinned side's source unit is read as `check_evidence` reads it
-        (`read_source_unit`). A source unit that reads as constant prices
-        cannot be stated at current prices in any currency, so no
-        requirement change pairs the two. A pinned side bound to a unit by
-        request is skipped, because its frame is converted on fetch and its
-        own reading already states the basis it serves. Returns whether it
-        reported.
+        A pinned requirement is always served in its source's own unit: the
+        request object when its definition binds one by request, else its
+        unit ref. A side in constant prices (`_SideUnit.reading`) cannot be
+        restated in current prices, so the other side has to be retrieved in
+        that same unit. A requirement may ask for constant prices only of a
+        base year the source's unit id or request states (`check_evidence`),
+        which `_SideUnit.denoted` reads. So the pair is irreconcilable when
+        the pinned side denotes no such unit, or when the other side is
+        pinned too and keeps a unit of its own. Returns whether it reported.
         """
         for pinned, other in ((left, right), (right, left)):
             requirement = pinned.requirement
             if (
                 requirement is None
                 or requirement.source_spec_id is None
-                or isinstance(pinned.unit, dict)
-                or read_source_unit(pinned.source).prices != "constant"
+                or pinned.reading.prices != "constant"
             ):
+                continue
+            other_pin = other.requirement
+            if other_pin is not None and other_pin.source_spec_id is not None:
+                why = f"requirement {other_pin.id!r} pins its source too"
+            elif pinned.denoted is None:
+                why = (
+                    "its unit states no base year by unit id or by request, so no "
+                    "requirement can ask for those prices"
+                )
+            else:
                 continue
             self._issue(
                 CompileIssueCode.FRAME_UNITS_IRRECONCILABLE,
                 f"operation {op_id!r} pairs requirement {requirement.id!r}, whose pinned source "
                 f"{pinned.source.spec_id} serves {pinned.words()}, with a side in "
-                f"{other.words()}. No operation restates a series in other prices and no "
-                "requirement may ask for constant prices, so the two sides can never be "
-                "stated in one unit",
+                f"{other.words()}. No operation restates a series in other prices and "
+                f"{why}, so the two sides can never be stated in one unit",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )
@@ -2033,7 +1993,7 @@ class _Build:
         columns = {entity.role for entity in source.entities}
         columns.update(self._columns_of(operation.id) or ())
         if self._read_by_level_filter(operation.id):
-            columns.add(type_column(PLACE_ROLE))
+            columns.update(type_column(column) for column in self._columns_of(operation.id) or ())
         named: dict[str, tuple[str, ...]] = {}
         if isinstance(requirement, DatasetRequirement):
             for entity in requirement.entities:
@@ -2086,9 +2046,10 @@ class _Build:
         carries one series per code under the family's own ref.
 
         `place_types` is written for a retrieval a place-level filter reads
-        (`_read_by_level_filter`): it adds the `observationAbout_type`
-        column that filter keeps one level by. Rendering only, so it
-        re-mints nothing either.
+        (`_read_by_level_filter`): it adds the type column for the role that
+        filter keeps at one level. A flow rendering includes both parties'
+        type columns and their kinds. Rendering only, so it re-mints nothing
+        either.
 
         `without_party_totals` is written for every flow retrieval (a source
         with a flow role column among its stated or open entity axes). A flow
@@ -2387,11 +2348,15 @@ class _Build:
                     threshold[ROLLING_PARAMETER] = rolling_ref(predicate.rolling)
                 predicates.append(threshold)
             elif isinstance(predicate, PlaceLevel):
+                column = self._place_level_column(operation, predicate)
+                if column is None:
+                    return None
                 predicates.append(
                     {
                         "kind": "place_level",
-                        "column": type_column(PLACE_ROLE),
+                        "column": type_column(column),
                         "level": predicate.level.value,
+                        **({"strict": True} if predicate.strict else {}),
                     }
                 )
             else:
@@ -2400,10 +2365,27 @@ class _Build:
                     return None
                 predicates.append(written)
         args: dict[str, JsonValue] = {"predicates": predicates}
-        if _rolls(operation):
+        if rolls(operation):
             # The population every rolling step carries is written in `_build_steps`.
             args[ROLLING_PARAMETER] = {}
         return args, {"frame_ref": _frame_from(operation.input)}
+
+    def _place_level_column(self, operation: FilterOperation, predicate: PlaceLevel) -> str | None:
+        """The input role whose type column a place-level predicate reads (`level_roles`)."""
+        resolved = self.shapes.get(operation.input)
+        if resolved is None:
+            return None
+        candidates = level_roles(predicate, resolved.columns)
+        if len(candidates) != 1:
+            named = predicate.role or "an omitted role"
+            self._issue(
+                CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
+                f"operation {operation.id!r} has a place_level filter for {named!r}, which "
+                f"resolves to {len(candidates)} role columns; state one role",
+                operation_id=operation.id,
+            )
+            return None
+        return candidates[0].column
 
     def _entity_in_argument(
         self, operation: FilterOperation, predicate: EntityIn
@@ -2546,16 +2528,33 @@ class _Build:
         args: Mapping[str, JsonValue],
         bindings: Mapping[str, Binding],
     ) -> None:
-        for name in undeclared_parameters(bindings, schema.parameters):
+        """Report `BAD_ARGS` for arguments the tool refuses.
+
+        The arguments are checked against the tool's JSON Schema first and,
+        once they fit it, for an analysis-mcp verb, against the verb's own
+        op-spec checks (`compiler.arguments.op_spec_errors`). Two entity
+        filters naming one entity, one under its role and one under none,
+        both write the same `category_match`, which analysis-mcp refuses as
+        a predicate stated twice.
+        """
+        undeclared = undeclared_parameters(bindings, schema.parameters)
+        for name in undeclared:
             self._issue(
                 CompileIssueCode.BAD_ARGS,
                 f"{capability.tool.name!r} takes no argument named {name!r}",
                 operation_id=operation.id,
                 tool=capability.tool,
             )
-        for message in literal_argument_errors(
-            arguments=args, schema=schema.parameters, bound=bindings
-        ):
+        messages = literal_argument_errors(arguments=args, schema=schema.parameters, bound=bindings)
+        if not (undeclared or messages) and capability.tool.server == "analysis-mcp":
+            messages = [
+                f"operation {operation.id!r} writes arguments {capability.tool.name!r} refuses: "
+                f"{message}"
+                for message in op_spec_errors(
+                    tool=capability.tool.name, arguments=args, bound=bindings
+                )
+            ]
+        for message in messages:
             self._issue(
                 CompileIssueCode.BAD_ARGS, message, operation_id=operation.id, tool=capability.tool
             )
@@ -2692,7 +2691,7 @@ class _Build:
                 )
                 return
             state[op_id] = 1
-            inputs = [i for i in _inputs_of(self.operations[op_id]) if i in self.operations]
+            inputs = [i for i in operation_inputs(self.operations[op_id]) if i in self.operations]
             for input_id in sorted(inputs, key=lambda i: _canonical_key(self.operations[i])):
                 visit(input_id, [*path, op_id])
             state[op_id] = 2
@@ -2710,7 +2709,9 @@ class _Build:
             if op_id in reachable:
                 continue
             reachable.add(op_id)
-            pending.extend(i for i in _inputs_of(self.operations[op_id]) if i in self.operations)
+            pending.extend(
+                i for i in operation_inputs(self.operations[op_id]) if i in self.operations
+            )
         return reachable
 
 
@@ -2723,18 +2724,6 @@ def _entity_candidates(
         for entity in requirement.entities
         if entity.name == name and _stated_under(entity, role)
     ]
-
-
-def _rolls(operation: Operation) -> bool:
-    """Whether a period `operation` states follows the newest data."""
-    if isinstance(operation, GrowthOperation | RankOperation):
-        return operation.rolling is not None
-    if isinstance(operation, FilterOperation):
-        return any(
-            isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
-            for predicate in operation.predicates
-        )
-    return False
 
 
 def _stated_under(entity: Entity, role: str | None) -> bool:
@@ -2770,18 +2759,6 @@ def _part_words(part: JsonValue | _StatVarPart) -> str:
     if isinstance(part, _StatVarPart):
         return f"StatVar {part.stat_var!r}"
     return f"unit {part!r}"
-
-
-def _inputs_of(operation: Operation) -> tuple[str, ...]:
-    if isinstance(operation, RetrieveOperation):
-        return ()
-    if isinstance(operation, CompareOperation | SumOfOperation):
-        return (operation.left.input, operation.right.input)
-    if isinstance(operation, ShareOfOperation | QuotientOfOperation):
-        return (operation.numerator.input, operation.denominator.input)
-    if isinstance(operation, JoinOperation):
-        return (operation.left, operation.right)
-    return (operation.input,)
 
 
 def _keyed_axes(

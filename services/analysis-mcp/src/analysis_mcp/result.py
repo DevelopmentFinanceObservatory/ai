@@ -53,9 +53,10 @@ class VerbResult(BaseModel):
     - `stat_var_count`: distinct `stat_var`s the frame carries; 0 when
       `rows` is 0.
     - `dropped_key_count`: how many of the numerator's keys a keyed
-      `quotient_of` holds no row for: those with no denominator group, those
-      sharing no period with it, and those whose every matched cell has a
-      zero denominator. 0 for an un-keyed call and for every other verb.
+      `quotient_of` or `share_of` holds no row for: those with no
+      denominator group, those sharing no period with their group, and for
+      `quotient_of` also those whose every matched cell has a zero
+      denominator. 0 for an un-keyed call and for every other verb.
     - `ranked_before_limit`: how many entries a `rank` call with a `limit`
       ranked before the limit cut them to `rows`: entities, or entity
       periods with `per_period`. `None` for a call with no `limit` and for

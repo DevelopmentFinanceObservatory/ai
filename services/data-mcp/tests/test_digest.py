@@ -68,10 +68,11 @@ def _envelope(
     variable_text: str | None = "malaria grants",
     warnings: list[dict[str, Any]] | None = None,
     parts: list[dict[str, Any]] | None = None,
+    sentence_plan: list[dict[str, Any]] | None = None,
     **status_payload: Any,
 ) -> dict[str, Any]:
     """A single-part envelope, unless `parts` supplies the parts list directly."""
-    return {
+    envelope = {
         "schema_version": 1,
         "query_echo": {"entry_path": "parsed", "extract_skipped": True},
         "diagnostics": {
@@ -84,6 +85,9 @@ def _envelope(
         if parts is not None
         else [_part(status, variable_text=variable_text, **status_payload)],
     }
+    if sentence_plan is not None:
+        envelope["sentence_plan"] = sentence_plan
+    return envelope
 
 
 # Digest rendering, definite status
@@ -353,9 +357,32 @@ def test_single_part_envelope_renders_with_no_part_label() -> None:
     assert "Part 1" not in digest
 
 
-def test_mixed_status_envelope_states_it_is_mixed() -> None:
+_COVERAGE = [
+    {"kind": "text", "segment": "coverage", "text": "Answered 1 of 2 parts."},
+    {"kind": "text", "segment": "coverage", "text": " "},
+    {"kind": "text", "segment": "heading", "text": "Health spending", "part_index": 0},
+]
+
+# An unowned heading token first, as a refusal frame two parts share puts it.
+_SHARED_HEADING = [
+    {"kind": "text", "segment": "heading", "text": "No match for "},
+    {"kind": "text", "segment": "heading", "text": "health spending", "part_index": 0},
+]
+
+
+@pytest.mark.parametrize(
+    ("sentence_plan", "leading_line"),
+    [(_COVERAGE, "Answered 1 of 2 parts."), (None, None), (_SHARED_HEADING, None)],
+    ids=["coverage", "no_plan", "unowned_heading"],
+)
+def test_leading_line_is_the_answered_line(
+    sentence_plan: list[dict[str, Any]] | None, leading_line: str | None
+) -> None:
+    """A mixed envelope leads with Search's coverage tokens. Without them, whatever its
+    plan opens with, the digest opens with the first part's block."""
     envelope = _envelope(
         "mixed",
+        sentence_plan=sentence_plan,
         parts=[
             _part("definite", variable_text="health spending", spec=_spec(spec_id="spec_1")),
             _part(
@@ -366,9 +393,12 @@ def test_mixed_status_envelope_states_it_is_mixed() -> None:
         ],
     )
 
-    digest = render_digest(envelope)
+    first_block = render_digest(envelope).split("\n\n")[0]
 
-    assert digest.startswith("Mixed outcome")
+    if leading_line is None:
+        assert first_block.startswith('Part 1: "health spending"')
+    else:
+        assert first_block == leading_line
 
 
 def test_part_own_warning_renders_inside_its_block() -> None:

@@ -12,7 +12,13 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from harness.plan_display import _label, operation_rows, requirement_rows, step_rows
+from harness.plan_display import (
+    _label,
+    operation_rows,
+    requirement_rows,
+    shown_plan,
+    step_rows,
+)
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -37,6 +43,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -46,13 +53,14 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     SumOfRequirement,
-    names_no_place,
 )
 from planner.records import (
     Breakdown,
     BreakdownDimension,
     DenominatorScope,
     EntityIn,
+    EvidenceIssue,
+    EvidenceIssueCode,
     GroupBy,
     GrowthChange,
     PeriodThreshold,
@@ -64,6 +72,7 @@ from planner.records import (
     Reduction,
     RelativePeriod,
     RollingWindow,
+    Severity,
     StatVarReading,
     ValueThreshold,
 )
@@ -79,6 +88,8 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+
+from .split_plan import SPEC_DEBT, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -940,6 +951,13 @@ def test_a_rank_sentence_states_its_population_and_whether_it_is_per_period(
     assert "ranks exactly the entities named" in sentence
     assert "the window is collapsed into one ranking" in sentence
 
+    one_year = named_rank.model_copy(update={"window_start": 2020, "window_end": 2020})
+    one_year_plan = plan.model_copy(update={"evidence_requirements": [dataset, narrowed, one_year]})
+    one_year_sentence = next(
+        row for row in requirement_rows(one_year_plan) if row["id"] == "rank_named"
+    )["sentence"]
+    assert one_year_sentence.endswith("; ranks 2020.")
+
     bottom_two = named_rank.model_copy(update={"direction": RankDirection.LOWEST_FIRST, "limit": 2})
     limited = Plan(
         question="q",
@@ -1562,7 +1580,7 @@ def _open_axis_rank_plan(
     keeping `level` between the retrieval and the rank. A `dataset` that
     names its places, or covers a flow party, is ranked directly.
     """
-    levelled = names_no_place(dataset)
+    levelled = "country" in dataset.across
     ranks = "kept" if levelled else "health_spending"
     predicates = (PlaceLevel(level=level),)
     rank = RankRequirement(
@@ -2153,6 +2171,8 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
                 predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
             ),
         ],
+        # The dataset starts where the plan does, so reading it whole splits nothing.
+        first_years=[FirstYear(requirement_id="debt", year=2015)],
     )
 
     sentences = {str(row["id"]): row["sentence"] for row in requirement_rows(plan)}
@@ -2175,3 +2195,101 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
         _label(plan.requirement("last_five"), plan)
         == f"Growth in {measure}, 2019-2024, following the newest year"
     )
+
+
+# --- A plan whose dataset is read from its first year -------------------------------
+
+
+def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFactory) -> None:
+    """`debt_history` is code's copy of `debt` for the rolling growth. The card names
+    `debt` once, and the growth reads `debt`'s source."""
+    plan = stored_split_plan(decision)
+
+    steps = step_rows(plan)
+
+    assert [row["id"] for row in steps] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
+    assert "debt_history" not in repr([steps, requirement_rows(plan), operation_rows(plan)])
+
+
+def test_the_card_states_a_series_answer_over_the_years_the_plan_states(
+    decision: DecisionFactory,
+) -> None:
+    """The copy reads from 2000. The total beside it keeps 2015-2024."""
+    plan = stored_split_plan(decision)
+
+    total = next(row for row in step_rows(plan) if row["id"] == "total")
+
+    assert str(total["description"]).endswith("Result: one figure per year, 2015-2024.")
+
+
+def test_the_shown_plan_is_the_authored_plan_with_the_compiled_parts_folded(
+    decision: DecisionFactory,
+) -> None:
+    """Sources and bindings of the copy go together, and a warning on the copy names its origin once."""
+    plan = stored_split_plan(decision)
+
+    shown = shown_plan(plan)
+
+    assert shown == shown_plan(shown)
+    assert (shown.rolling_copies, shown.first_years) == ((), ())
+    growth = shown.requirement("last_five")
+    assert isinstance(growth, GrowthRequirement)
+    assert growth.input_id == "debt"
+    assert shown.workflow is not None
+    assert [(b.requirement_id, b.spec_id) for b in shown.workflow.evidence_bindings] == [
+        ("debt", SPEC_DEBT)
+    ]
+    assert [source.spec_id for source in shown.workflow.sources] == [SPEC_DEBT]
+    assert [issue.requirement_id for issue in shown.workflow.warnings] == ["debt"]
+
+
+def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and its copy both read short of 2015-2024, and the copy says its
+    retrieval asks for every year from 2000. The card shows one gap for
+    `debt`, the copy's, in the words of the plan the model wrote, beside the
+    origin's own warning of another code."""
+    plan = stored_split_plan(decision)
+    assert plan.workflow is not None
+
+    def issue(code: EvidenceIssueCode, requirement_id: str, detail: str) -> EvidenceIssue:
+        return EvidenceIssue(
+            code=code, severity=Severity.WARNING, requirement_id=requirement_id, detail=detail
+        )
+
+    copy_gap = (
+        "requirement 'debt_history': the source covers 2000-2023, the requirement asks for "
+        "2015-2024, and its retrieval requests every year from 2000"
+    )
+    warned = plan.model_copy(
+        update={
+            "workflow": plan.workflow.model_copy(
+                update={
+                    "warnings": (
+                        issue(
+                            EvidenceIssueCode.WINDOW_SHORT,
+                            "debt",
+                            "the source covers 2016-2023, the requirement asks for 2015-2024",
+                        ),
+                        issue(EvidenceIssueCode.UNIT_UNVERIFIED, "debt", "no unit stated"),
+                        issue(EvidenceIssueCode.WINDOW_SHORT, "debt_history", copy_gap),
+                    )
+                }
+            )
+        }
+    )
+
+    shown = shown_plan(warned).workflow
+
+    assert shown is not None
+    assert [(w.requirement_id, w.code, w.detail) for w in shown.warnings] == [
+        ("debt", EvidenceIssueCode.UNIT_UNVERIFIED, "no unit stated"),
+        (
+            "debt",
+            EvidenceIssueCode.WINDOW_SHORT,
+            copy_gap.replace("'debt_history'", "'debt'"),
+        ),
+    ]

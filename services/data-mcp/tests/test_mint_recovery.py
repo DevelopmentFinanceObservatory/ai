@@ -167,6 +167,16 @@ async def _holding(
             _DEFAULT_OPTIONS | {"columns": ["kind"]},
         ),
         (
+            _typed(_OLDER, (*_FLOW_TYPES, *KIND_COLUMNS)),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": [*_FLOW_TYPES, *KIND_COLUMNS]},
+        ),
+        (
+            _typed(_OLDER, ("financingProvider_type", "party_kind")),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": ["financingProvider_type", "party_kind"]},
+        ),
+        (
             frame_ref_for(spec_id=_SPEC_ID, content_version=_CUT, columns=("party_kind",)),
             _CUT,
             _DEFAULT_OPTIONS | {"columns": ["party_kind"], "without_party_totals": True},
@@ -196,6 +206,8 @@ async def _holding(
         "flow-party-kinds",
         "flow-party-kind-without-class-and-whole",
         "flow-party-kinds-under-the-earlier-token",
+        "flow-party-types-and-kinds",
+        "the-one-flow-party-type-a-table-serves-and-the-kind-without-class-and-whole",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",
     ],

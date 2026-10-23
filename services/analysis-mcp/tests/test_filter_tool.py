@@ -112,6 +112,51 @@ async def test_predicate_type_mismatch_refuses_rather_than_dropping_every_row(se
     assert result.structured_content["fix"]["column"] == "reporter"
 
 
+async def test_strict_place_level_with_an_untyped_entity_refuses_with_its_column(seeded) -> None:
+    store, _handles = seeded
+    frame_ref = await _seed_custom_frame(
+        store,
+        Frame.build(
+            role_keys=["observationAbout", "observationAbout_type"],
+            rows=[
+                {
+                    "stat_var": "dcid:Test",
+                    "observationAbout": "country/KEN",
+                    "observationAbout_type": "untyped",
+                    "time_period": "2023",
+                    "value": 1.0,
+                }
+            ],
+        ),
+    )
+
+    result = await filter_verb(
+        frame_ref=frame_ref,
+        predicates=(
+            {
+                "kind": "place_level",
+                "column": "observationAbout_type",
+                "level": "Country",
+                "strict": True,
+            },
+        ),
+    )
+
+    assert result.is_error is True
+    assert result.structured_content == {
+        "code": "filter_predicate_type_mismatch",
+        "message": "A 'place_level' predicate on column 'observationAbout_type' doesn't "
+        "match that column's own declared cell type (untyped place entity). Retry with the "
+        "correct predicate kind for this column, or a different column.",
+        "retry_mode": "correct_and_retry",
+        "fix": {
+            "column": "observationAbout_type",
+            "predicate_kind": "place_level",
+            "actual_type": "untyped place entity",
+        },
+    }
+
+
 async def test_predicate_operand_type_mismatch_refuses_as_a_typed_refusal(seeded) -> None:
     """An `ordered_threshold` predicate targeting `time_period` with a
     numeric operand -- the column is legal for this predicate kind, only

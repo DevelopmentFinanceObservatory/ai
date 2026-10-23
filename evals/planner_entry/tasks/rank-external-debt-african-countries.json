@@ -39,6 +39,7 @@
     "distinction": "rank, not comparison: 'compare' sets the countries' debt side by side and orders them, with no difference between two series asked for"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Compare external debt across every African country, all at once, 2020 to 2024",
     "answer_mode": "computed",

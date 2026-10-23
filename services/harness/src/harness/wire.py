@@ -845,9 +845,37 @@ class InterruptDecision(StrEnum):
     AMEND = "amend"
     REJECT = "reject"
     ANSWER = "answer"
-    # Elicitation only: decline to answer; the run proceeds on its default
-    # (the top-ranked candidate).
+    # Elicitation only, and only when the frame set `skippable`. The user
+    # dismisses the whole pause and no question is answered. The orchestrator's
+    # ask closes the turn. The planner's ask counts it as the user declining
+    # to choose, and the planner plans on without a pick of theirs.
     SKIP = "skip"
+
+
+class OptionAnswer(_WireModel):
+    """The user picked one of the question's offered options."""
+
+    kind: Literal["option"]
+    option_id: str
+
+
+class TextAnswer(_WireModel):
+    """The user answered in their own words (`allow_free_text`)."""
+
+    kind: Literal["text"]
+    text: str = Field(min_length=1)
+
+
+class SkippedAnswer(_WireModel):
+    """The user left this one question to the agent (`skippable` on the
+    question). The pause still resumes as answered."""
+
+    kind: Literal["skipped"]
+
+
+ElicitationAnswer = Annotated[
+    OptionAnswer | TextAnswer | SkippedAnswer, Field(discriminator="kind")
+]
 
 
 class InterruptResponse(_WireModel):
@@ -855,10 +883,11 @@ class InterruptResponse(_WireModel):
 
     `interrupt_id` is echoed verbatim from the frame that paused the run; it
     is opaque (delta 7 -- the fixtures' literal `"approve"` is a sample
-    value). `payload` carries the amendment text for
-    `amend` and the selected option id for `answer`; absent for a plain
-    approve or reject. The response to this POST is a NEW SSE stream
-    continuing the same turn (delta 1).
+    value). An elicitation's `answer` carries `answers`, one entry per
+    question id of the frame, exactly. `payload` carries the amendment text
+    for a plan's `amend`. Both are absent for approve, reject and skip. The
+    response to this POST is a NEW SSE stream continuing the same turn
+    (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -866,10 +895,12 @@ class InterruptResponse(_WireModel):
     conversation_id: str = _CONVERSATION_ID
     interrupt_id: str
     decision: InterruptDecision
-    # Text only: the amendment (amend) or the answer (answer -- an option id,
-    # or free text when the elicitation set allow_free_text). Absent for
-    # approve / reject / skip.
+    # The amendment text of a plan's `amend`. An elicitation opened before
+    # the frame carried `questions` also takes its one answer here: an
+    # offered option id, or free text.
     payload: str | None = None
+    # An elicitation's `answer`: each question id of the frame to its answer.
+    answers: dict[str, ElicitationAnswer] | None = None
 
 
 class MutationOp(StrEnum):
@@ -1235,31 +1266,49 @@ class ElicitationOption(_WireModel):
     id: str
     label: str
     description: str | None = None
-    # Set on at most one option: the candidate the planner's ask favours,
-    # when it favours one. `rationale`, on the frame rather than repeated per
-    # option, is the planner's reason.
+    # Set on at most one option of a question: the candidate the planner's
+    # ask favours, when it favours one. The question's `rationale` is the
+    # planner's reason.
     recommended: bool = False
 
 
-class ElicitationRequest(_WireModel):
-    """A clarifying question. Pauses the run exactly as plan.proposed does
-    (terminal frame, delta 1); answer with `decision: "answer"` and the
-    chosen option id as `payload`."""
+class ElicitationQuestion(_WireModel):
+    """One question of an elicitation. `id` is the key its answer comes back
+    under; option ids are scoped to their question."""
 
-    event: Literal["elicitation.request"]
-    seq: int = Field(ge=0)
-    interrupt_id: str
+    id: str
     question: str
     input: ElicitationInput
     options: list[ElicitationOption] | None = None
-    # The "More Details Question" affordances: an open-ended answer
-    # alongside options, and a Skip button.
+    # An open-ended answer alongside the options.
     allow_free_text: bool = False
+    # A per-question "you choose". The answer is `{"kind": "skipped"}` and
+    # the pause still resumes as answered.
     skippable: bool = False
     # Why the `recommended` option (if any) is recommended, as the planner
     # wrote it for the person settling the choice. `None` when no option is
     # recommended.
     rationale: str | None = None
+
+
+class ElicitationRequest(_WireModel):
+    """One to three clarifying questions in one pause. Pauses the run
+    exactly as plan.proposed does (terminal frame, delta 1); answer with
+    `decision: "answer"` and `answers` keyed by question id."""
+
+    event: Literal["elicitation.request"]
+    seq: int = Field(ge=0)
+    interrupt_id: str
+    questions: list[ElicitationQuestion] = Field(min_length=1, max_length=3)
+    # The whole pause may be dismissed with `decision: "skip"`.
+    skippable: bool = False
+
+    @model_validator(mode="after")
+    def _question_ids_are_unique(self) -> ElicitationRequest:
+        ids = [question.id for question in self.questions]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"question ids repeat: {ids}")
+        return self
 
 
 class SuggestionItem(_WireModel):

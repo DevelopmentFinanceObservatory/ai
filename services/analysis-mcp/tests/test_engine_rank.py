@@ -245,6 +245,31 @@ def test_no_aggregation_requires_exactly_one_row_per_entity() -> None:
     assert result.entity_ranks[0].value == 42.0
 
 
+def test_a_one_year_window_ranks_that_years_rows_without_an_aggregation() -> None:
+    frame = _frame(
+        [
+            _row(reporter="dcid:USA", year="2019", value=9.0),
+            _row(reporter="dcid:USA", year="2020", value=1.0),
+            _row(reporter="dcid:GBR", year="2019", value=1.0),
+            _row(reporter="dcid:GBR", year="2020", value=2.0),
+        ]
+    )
+    result = run_rank(
+        frame,
+        rank_by=("reporter",),
+        aggregation=None,
+        window_start="2020",
+        window_end="2020",
+        ascending=False,
+    )
+    assert [(rank.entity_key, rank.value) for rank in result.entity_ranks] == [
+        ((("reporter", "dcid:GBR"),), 2.0),
+        ((("reporter", "dcid:USA"),), 1.0),
+    ]
+    (outside,) = [r for r in result.exclusions.records if r.reason == "outside_window"]
+    assert outside.row_count == 2
+
+
 def test_entity_value_normalises_negative_zero() -> None:
     """A raw single-row value of IEEE-754 negative zero reaches `run_rank`
     unnormalised (`aggregation=None` takes it as-is) -- `value = entity_

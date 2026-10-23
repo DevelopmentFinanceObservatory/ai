@@ -58,7 +58,7 @@ from harness.graph.answer import (
     presentable_steps,
     store_run_plan,
 )
-from harness.graph.plan_done import StepSummary
+from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     STEP_PROGRESS_KEY,
@@ -83,6 +83,15 @@ def _replan_refusal(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -
         **_refusal_shape(outcome),
         "also_stopped": [_refusal_shape(sibling) for sibling in outcome.also_stopped],
     }
+
+
+def _planner_refusal(
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused, *, plan: PlannerPlan
+) -> dict[str, Any]:
+    """`_replan_refusal` as the planner reads it, naming the step and
+    requirement the model wrote in place of each copy `plan`'s split added
+    (`plan_done.authored_report`)."""
+    return authored_report(_replan_refusal(outcome), plan)
 
 
 def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> bool:
@@ -480,7 +489,10 @@ def execute_node(
         on, and the plan is left as approved.
         `MethodChoiceNeeded` and `RediscoveryNeeded` route "replan" while the budget allows and "ok"
         with `failed_step` once it is spent, the same as any other
-        `Refused`. A stopped run hands back only its presentable steps'
+        `Refused`. The "replan" refusal names the model's own steps and
+        requirements in place of the copies the plan's split added
+        (`_planner_refusal`); `failed_step` keeps the copies' ids, and
+        `plan_done` maps them where it hands them on. A stopped run hands back only its presentable steps'
         frames and summaries (`presentable_steps`: its retrieved ones, since
         its derived ones are never published, so a finished derived terminal
         is withheld and `plan_done` reports it `not_run`); its answer frames
@@ -636,7 +648,7 @@ def execute_node(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            refusal = _replan_refusal(outcome)
+            refusal = _planner_refusal(outcome, plan=finished)
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}

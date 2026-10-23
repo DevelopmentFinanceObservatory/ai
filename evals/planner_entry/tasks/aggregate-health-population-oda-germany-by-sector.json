@@ -85,7 +85,10 @@
     "Germany gross ODA disbursements for health by year, 2018 to 2023",
     "Germany gross ODA disbursements for population policy, programme, and reproductive health by year, 2018 to 2023",
     "Combined total gross ODA disbursements for health and population policy/programmes/reproductive health by year, 2018 to 2023",
-    "Overall total combined gross ODA disbursements across 2018 to 2023"
+    {
+      "text": "Overall total combined gross ODA disbursements across 2018 to 2023",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -101,6 +104,7 @@
     "distinction": "aggregate, not sum_of: both sectors come in one CRS retrieval split by sector, so their total is an aggregate, not two sources added"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "Germany's total gross ODA disbursements across all recipients for health and population policy, programme, and reproductive health from 2018 to 2023, using the OECD Creditor Reporting System breakdown level 1.",
     "answer_mode": "computed",

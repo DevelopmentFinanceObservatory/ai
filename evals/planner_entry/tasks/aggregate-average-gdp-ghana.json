@@ -21,7 +21,10 @@
   ],
   "brief": "What was Ghana's average GDP between 2015 and 2022?",
   "asks": [
-    "Ghana's average GDP, 2015 to 2022"
+    {
+      "text": "Ghana's average GDP, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -36,6 +39,7 @@
     "distinction": "aggregate, not growth: an average over the years of the window, not the change across it"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "What was Ghana's average GDP between 2015 and 2022?",
     "answer_mode": "computed",

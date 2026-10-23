@@ -298,6 +298,7 @@ async def resolve_operation_response(
     poll_interval_s: float,
     sleep: SleepFn = _default_sleep,
     on_poll: OnPoll | None = None,
+    raise_upstream_error: bool = False,
 ) -> ResolvedOperation | ToolResult:
     """Resolve a mint POST's own 202 body to a manifest, polling as needed.
 
@@ -322,6 +323,8 @@ async def resolve_operation_response(
         on_poll: Awaited once the submit response is parsed, then again on a
             status change or every `_POLL_REPORT_INTERVAL_S` of waiting -- see
             `PollUpdate`'s own docstring. `None` skips reporting entirely.
+        raise_upstream_error: Raise a non-retryable poll `UpstreamError` for a
+            caller that can correct and retry the mint; defaults to a refusal.
 
     A poll that fails with an `UpstreamError` the client itself would retry
     (`data_mcp.client.is_retryable`: a transport failure, or the poll door's
@@ -441,6 +444,8 @@ async def resolve_operation_response(
             )
         except UpstreamError as exc:
             if not is_retryable(exc):
+                if raise_upstream_error:
+                    raise
                 return to_tool_result(from_upstream_error(exc))
             if bound.remaining() > 0:
                 logger.info(
@@ -469,6 +474,7 @@ async def operation_without_waiting(
     submit_payload: Mapping[str, Any],
     deadline: CallDeadline,
     poll_interval_s: float,
+    raise_upstream_error: bool = False,
 ) -> ResolvedOperation | QueuedOperation | ToolResult:
     """Read a mint POST's 202 body without waiting for the operation to finish.
 
@@ -502,7 +508,13 @@ async def operation_without_waiting(
     )
     if submitted.status not in _TERMINAL_STATUSES:
         return queued
-    return await _fetch_finished(client, submitted, queued=queued, deadline=deadline)
+    return await _fetch_finished(
+        client,
+        submitted,
+        queued=queued,
+        deadline=deadline,
+        raise_upstream_error=raise_upstream_error,
+    )
 
 
 async def _fetch_finished(
@@ -511,6 +523,7 @@ async def _fetch_finished(
     *,
     queued: QueuedOperation,
     deadline: CallDeadline,
+    raise_upstream_error: bool,
 ) -> ResolvedOperation | QueuedOperation | ToolResult:
     """`operation_without_waiting`'s one poll of an operation whose submit response
     reported it `done` or `failed`. `queued` is what a poll that settles nothing
@@ -521,6 +534,8 @@ async def _fetch_finished(
             client, submitted, deadline=deadline, operation_id=submitted.operation_id
         )
     except UpstreamError as exc:
+        if raise_upstream_error and not is_retryable(exc):
+            raise
         return queued if is_retryable(exc) else to_tool_result(from_upstream_error(exc))
     if isinstance(polled, ToolResult):
         return polled
