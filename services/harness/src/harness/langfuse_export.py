@@ -3,7 +3,7 @@
 Each run reads `GET /api/public/v2/observations` for one Langfuse environment,
 one UTC day at a time, and replaces that day's partition of the BigQuery table
 `observations`, which is day-partitioned on `start_time`. The days are the latest
-loaded day minus one through today, plus every day Langfuse still holds whole
+loaded day minus one through today, plus every day Langfuse still shows whole
 (`retained_from` on) whose observation count, from one `GET /api/public/v2/metrics`
 query grouped by day, differs from its partition's row count. An empty table is
 backfilled from `BACKFILL_FLOOR`, the first day the prod project holds data. A
@@ -12,8 +12,9 @@ other day as it was, and the next run's count comparison picks up the gap.
 
 A replace never shrinks a partition: a day that reads fewer rows than its
 partition holds, none included, keeps the partition and prints both counts.
-Langfuse deletes data by age, so a day before `retained_from` can come back
-partial, and a deleted row could not be reloaded; such a day is kept and logged.
+Hobby's data access window hides observations older than `ACCESS_DAYS` from the
+API, so a day before `retained_from` reads partial or empty; such a day is kept
+and logged.
 A day from `retained_from` on that reads fewer rows than its partition holds or
 than Langfuse counts is a fault. The run processes the other days and then
 raises `IncompleteDaysError` naming every such day with its counts, and the day
@@ -44,8 +45,7 @@ a load also `EXPORT_BQ_PROJECT` and `EXPORT_BQ_DATASET`.
 
 Exit status: 0 when every day loaded or kept or the check matched, 1 when the
 check found a difference, a request failed, a retained day read short or the
-whole run read no rows, 2
-when a setting is missing.
+whole run read no rows, and 2 when a setting is missing.
 """
 
 from __future__ import annotations
@@ -64,10 +64,11 @@ from google.cloud import bigquery
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKFILL_FLOOR = date(2026, 10, 5)
-# Langfuse Cloud's Hobby plan holds 30 days of data
-# (https://langfuse.com/docs/administration/data-retention), deleting
-# observations by `start_time` age.
-RETENTION_DAYS = 30
+# Langfuse Cloud's Hobby plan has a 30-day data access window
+# (https://langfuse.com/docs/administration/data-retention): the API shows
+# observations from the last 30 days by `start_time` and hides older ones, which
+# stay stored.
+ACCESS_DAYS = 30
 TABLE = "observations"
 
 # Every group except `io` and `metadata` (free text) and `time` and `prompt`,
@@ -134,8 +135,10 @@ class EmptyWindowError(RuntimeError):
 
 
 class IncompleteDaysError(RuntimeError):
-    """A day Langfuse still holds whole read fewer rows than its partition or
-    Langfuse's own count."""
+    """A day Langfuse still shows whole read fewer rows than its partition or
+    Langfuse's own count. A partition holding rows Langfuse no longer counts, such
+    as an observation deleted in Langfuse, fails every run until that day's rows
+    are deleted from the table, after which the next run reloads the day."""
 
 
 def _text(value: object) -> str | None:
@@ -171,10 +174,10 @@ def observation_row(observation: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def retained_from(today: date) -> date:
-    """The oldest day Langfuse still holds whole. Its age at the end of `today` is
-    `RETENTION_DAYS`, so the day before it is the oldest Langfuse may have partly
-    deleted."""
-    return max(today - timedelta(days=RETENTION_DAYS - 1), BACKFILL_FLOOR)
+    """The oldest day Langfuse still shows whole. Its age at the end of `today` is
+    `ACCESS_DAYS`, so the day before it is the newest the access window may have
+    partly hidden."""
+    return max(today - timedelta(days=ACCESS_DAYS - 1), BACKFILL_FLOOR)
 
 
 def _catch_up_from(latest_loaded: date | None) -> date:
@@ -396,7 +399,7 @@ def run_export(
         else:
             counts = (
                 f"read {len(rows)} rows, the partition holds {held.get(day, 0)}, "
-                "past Langfuse's retention edge"
+                "older than Langfuse's access window"
             )
         if replaced:
             print(f"{day}: replaced; {counts}", flush=True)

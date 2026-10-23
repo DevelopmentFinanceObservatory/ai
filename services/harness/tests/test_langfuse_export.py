@@ -20,9 +20,9 @@ import pytest
 from google.cloud import bigquery
 from harness import langfuse_export
 from harness.langfuse_export import (
+    ACCESS_DAYS,
     BACKFILL_FLOOR,
     REQUEST_INTERVAL_S,
-    RETENTION_DAYS,
     SCHEMA,
     EmptyWindowError,
     IncompleteDaysError,
@@ -225,19 +225,22 @@ def test_export_days_replace_from_latest_minus_one(latest, today, first, last):
     ("langfuse", "held", "added"),
     [
         # A day a run read short stays in every later window until its counts match.
-        ({date(2026, 10, 15): 4}, {date(2026, 10, 15): 3}, [date(2026, 10, 15)]),
+        ({date(2026, 10, 25): 4}, {date(2026, 10, 25): 3}, [date(2026, 10, 25)]),
         # A day Langfuse holds and BigQuery lacks.
-        ({date(2026, 10, 12): 4}, {}, [date(2026, 10, 12)]),
+        ({date(2026, 10, 24): 4}, {}, [date(2026, 10, 24)]),
         # A partition Langfuse no longer counts.
-        ({}, {date(2026, 10, 12): 4}, [date(2026, 10, 12)]),
-        ({date(2026, 10, 15): 4}, {date(2026, 10, 15): 4}, []),
-        # Days before the retention window are left to the age rule.
-        ({date(2026, 9, 23): 4}, {date(2026, 9, 23): 3}, []),
+        ({}, {date(2026, 10, 24): 4}, [date(2026, 10, 24)]),
+        ({date(2026, 10, 25): 4}, {date(2026, 10, 25): 4}, []),
+        # The oldest day the access window shows whole is compared, the day before
+        # it is not.
+        ({date(2026, 10, 22): 4}, {date(2026, 10, 22): 3}, [date(2026, 10, 22)]),
+        ({date(2026, 10, 21): 4}, {date(2026, 10, 21): 3}, []),
     ],
 )
 def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added):
-    today = date(2026, 11, 1)
-    latest = date(2026, 10, 30)
+    today = date(2026, 11, 20)
+    assert retained_from(today) == date(2026, 10, 22)
+    latest = date(2026, 11, 18)
 
     days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held)
 
@@ -254,7 +257,7 @@ def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added
 )
 def test_retained_from_is_the_oldest_whole_day(today, first):
     assert retained_from(today) == first
-    assert (today - first).days <= RETENTION_DAYS - 1
+    assert (today - first).days <= ACCESS_DAYS - 1
 
 
 def logged_days(output: str) -> list[str]:
@@ -306,8 +309,8 @@ def test_an_empty_window_fails_and_touches_no_partition():
     assert bq.deleted == []
 
 
-@pytest.mark.parametrize(("held", "replaced"), [(4, True), (3, True)])
-def test_a_replace_grows_or_keeps_a_partition(capsys, held, replaced):
+@pytest.mark.parametrize("held", [4, 3])
+def test_a_read_holding_the_partition_replaces_it(capsys, held):
     bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: held})
 
     loaded = run_export(
@@ -378,24 +381,23 @@ def test_a_day_missing_from_bigquery_is_loaded():
     assert query["filters"][0]["value"] == ["dfo-prod-ai"]
 
 
-def test_a_short_day_past_the_retention_edge_is_kept_without_failing(capsys):
-    """Langfuse deletes data by age, so a day older than the window comes back partial."""
-    today = RECORDED_DAY + timedelta(days=RETENTION_DAYS)
-    assert retained_from(today) == RECORDED_DAY + timedelta(days=1)
+@pytest.mark.parametrize(("age", "fails"), [(ACCESS_DAYS - 1, True), (ACCESS_DAYS, False)])
+def test_a_short_day_fails_inside_the_access_window_and_is_kept_past_it(capsys, age, fails):
+    """Hobby's access window hides older observations, so a day past it reads partial."""
+    today = RECORDED_DAY + timedelta(days=age)
     bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: 5})
+    reader = reader_for(recorded_langfuse([], {}))
 
-    loaded = run_export(
-        reader=reader_for(recorded_langfuse([], {})),
-        bq=bq,
-        table_id=TABLE_ID,
-        today=today,
-    )
+    if fails:
+        with pytest.raises(IncompleteDaysError, match="2026-10-20 read 4 rows"):
+            run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today)
+    else:
+        assert run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today) == []
 
-    assert loaded == []
     assert bq.loads == []
     first_line = capsys.readouterr().out.splitlines()[0]
     assert first_line.startswith("2026-10-20: partition kept")
-    assert "retention edge" in first_line
+    assert ("access window" in first_line) is not fails
 
 
 def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
