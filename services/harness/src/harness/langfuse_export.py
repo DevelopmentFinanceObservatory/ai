@@ -7,19 +7,19 @@ loaded day minus one through today. An empty table is backfilled from
 `BACKFILL_FLOOR`, the first day the prod project holds data. A run that fails
 part-way leaves every day it reached replaced whole and every other day as it
 was, so the next run heals the gap. A day Langfuse answers with no rows keeps
-its partition: a wrong environment or project key reads as empty, and Langfuse
+its partition. A wrong environment or project key reads as empty, and Langfuse
 keeps less history than the table, so a deleted day could not be reloaded.
 Each day prints a line as it is replaced or kept, and a failure prints the day
 it stopped on before the error.
 
-The rows carry ids, names, the model, times, tokens and cost. The `io` and
-`metadata` field groups are never requested, so prompts and answers stay in
+The rows carry ids, names, the model, times, tokens and cost. Requests omit the
+`io` and `metadata` field groups, so prompts and answers stay in
 Langfuse, and `observation_row` copies named fields only, which keeps
 `statusMessage` (it can echo user input) and `userId` out of BigQuery.
 
 Langfuse Cloud counts every page against the organisation's General API bucket
 (30 requests a minute on Hobby), so pages go out at most one per
-`REQUEST_INTERVAL_S`. A 429 waits for its `Retry-After`; a 5xx or a transport
+`REQUEST_INTERVAL_S`. A 429 waits for its `Retry-After`. A 5xx or a transport
 error is retried with backoff.
 
 `--check-day DAY` reads one day and compares the row count and summed cost the
@@ -112,7 +112,7 @@ class LangfuseError(RuntimeError):
 
 
 def _text(value: object) -> str | None:
-    """Langfuse sends an unset string field as `""`; BigQuery holds it as NULL."""
+    """Langfuse sends an unset string field as `""`, and BigQuery holds it as NULL."""
     return value if isinstance(value, str) and value else None
 
 

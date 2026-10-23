@@ -254,7 +254,7 @@ def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
     recorded = recorded_langfuse([])
 
     def handle(request: httpx2.Request) -> httpx2.Response:
-        # 10-21's first page answers; its second page keeps failing.
+        # 10-21's first page answers and its second page keeps failing.
         if request.url.params["fromStartTime"].startswith("2026-10-21"):
             if "cursor" in request.url.params:
                 return httpx2.Response(502)

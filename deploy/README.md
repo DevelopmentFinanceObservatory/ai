@@ -258,7 +258,7 @@ The first number is the frames whose cards can be refreshed after the bucket's o
 
 Each run replaces every day from the latest loaded day minus one through today (UTC), one load job per day writing that day's partition with `WRITE_TRUNCATE`. A day Langfuse answers with no rows keeps its partition, since a wrong environment or project key reads as empty and Langfuse keeps less history than the table. Each day prints a line as it is replaced or kept, and a failure prints the day it stopped on. An empty table is backfilled from 2026-10-05. The job creates the table when it is absent. Its identity needs `roles/bigquery.jobUser` on the project and `roles/bigquery.dataEditor` on the dataset.
 
-The rows hold ids, trace and session ids, names, type, level, environment, model, start and end time, latency, time to first token, tokens and cost. The job never requests the `io` or `metadata` field groups and leaves out `statusMessage` and `userId`. Langfuse pages go out at most one every two seconds, under Hobby's 30 requests a minute; a 429 waits for its `Retry-After`.
+The rows hold ids, trace and session ids, names, type, level, environment, model, start and end time, latency, time to first token, tokens and cost. The job never requests the `io` or `metadata` field groups and leaves out `statusMessage` and `userId`. Langfuse pages go out at most one every two seconds, under Hobby's 30 requests a minute. A 429 waits for its `Retry-After`.
 
 `--check-day DAY` reads one day and compares its row count and summed cost with `GET /api/public/v2/metrics` for the same day and environment. It needs only the Langfuse settings, writes nothing, and exits 1 on a difference.
 
