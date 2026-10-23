@@ -136,9 +136,22 @@ class FakeApis:
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
+        path = request.url.path
+        # The versions route is open to every caller and answers in one page here.
+        if path.endswith("/versions"):
+            spec_id = path.split("/")[-2]
+            return httpx2.Response(
+                200,
+                json={
+                    "schema_version": 1,
+                    "spec_id": spec_id,
+                    "versions": self.versions.get(spec_id, []),
+                    "next_cursor": None,
+                    "complete": True,
+                },
+            )
         if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
             return problem(403, "publish_not_permitted")
-        path = request.url.path
         if path == "/api/datasets/frames/publish":
             return self.publish_answer or self._publish(
                 json.loads(gzip.decompress(request.content))
@@ -152,16 +165,6 @@ class FakeApis:
         if path.startswith("/api/datasets/frames/") and path.endswith("/recipe"):
             spec_id, content_version = path.split("/")[-3:-1]
             return self._recipe((spec_id, content_version))
-        if path.endswith("/versions"):
-            spec_id = path.split("/")[-2]
-            return httpx2.Response(
-                200,
-                json={
-                    "schema_version": 1,
-                    "spec_id": spec_id,
-                    "versions": self.versions.get(spec_id, []),
-                },
-            )
         raise AssertionError(f"unexpected call to {path}")
 
     def _recipe(self, key: Pair) -> httpx2.Response:
