@@ -5779,6 +5779,104 @@ def test_the_drc_drafts_compile_and_total_every_donor(
     assert total.expected_role_keys == _frame_role_columns(total_group_by[1:])
 
 
+_KENYA_RECIPIENT = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+UNITED_KINGDOM = ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom")
+
+
+@pytest.mark.parametrize(
+    ("group_by", "refused"),
+    [
+        pytest.param((), (), id="one-figure"),
+        pytest.param(
+            (GroupBy.ENTITY,),
+            (Code.ENTITY_REQUIRED, Code.SHARE_AXIS_REQUIRED),
+            id="by-entity",
+        ),
+    ],
+)
+def test_a_share_two_donors_hold_of_every_donors_total_compiles_from_one_figure_totals(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    group_by: tuple[GroupBy, ...],
+    refused: tuple[Code, ...],
+) -> None:
+    # "What share of the ODA Kenya received in 2015-2022 came from the
+    # United States and the United Kingdom together?" A total grouped by
+    # entity keeps the two donors apart, so the unkeyed share takes a whole
+    # side naming two donors and pools them, and is refused. A total over every row is one figure on each side, and the
+    # share divides one by the other.
+    years = Period(start=2015, end=2022)
+    kenya = Entity(name="Kenya", role="recipient")
+    named = DatasetRequirement(
+        id="named",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="United Kingdom", role="donor"),
+            kenya,
+        ],
+        period=years,
+    )
+    every = DatasetRequirement(
+        id="every",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[kenya],
+        across=("donor",),
+        period=years,
+    )
+    totals = [
+        AggregateRequirement(
+            id=f"{side.id}_total",
+            decision_ids=["measure"],
+            input_id=side.id,
+            reduction=Reduction.SUM,
+            group_by=group_by,
+        )
+        for side in (named, every)
+    ]
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="named_total"),
+        denominator=RequirementSide(input_id="every_total"),
+    )
+    plan = _draft([decision()], [named, every, *totals, share])
+    sources = {
+        "named": source(
+            spec_id=SPEC_KENYA,
+            entities=(UNITED_STATES, UNITED_KINGDOM, _KENYA_RECIPIENT),
+            **_pinned("Oda"),
+        ),
+        "every": source(
+            spec_id=SPEC_OTHER,
+            entities=(_KENYA_RECIPIENT,),
+            open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
+            **_pinned("Oda"),
+        ),
+    }
+    translation = build_translation(
+        plan, {requirement_id: s.spec_id for requirement_id, s in sources.items()}
+    )
+
+    result = build(plan, translation, discovered=sources)
+
+    if refused:
+        assert _codes(result) == list(refused)
+        assert result.workflow is None
+        return
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    steps = {step.id: step for step in result.workflow.steps}
+    for total in totals:
+        assert steps[total.id].args == {"aggregation": "sum", "group_by": []}
+    (share_op,) = [op for op in translation.operations if isinstance(op, ShareOfOperation)]
+    assert share_op.axis is None
+    assert steps["share"].args == {}
+
+
 @pytest.mark.parametrize(
     ("named", "across", "open_column", "kept"),
     [
