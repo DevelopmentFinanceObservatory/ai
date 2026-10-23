@@ -118,6 +118,56 @@ async def test_grain_mismatch_refuses_when_no_period_is_shared(seeded) -> None:
     }
 
 
+async def test_a_key_lagging_a_pooled_denominator_is_left_out_and_declared(seeded) -> None:
+    """Each donor's share of a 2027 total: France reports to 2026 only, so
+    it is left out and declared as `quotient_of` declares such a key, and
+    the United States and Germany keep their shares."""
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["donor"],
+        rows=[
+            {"stat_var": "dcid:X", "donor": donor, "time_period": period, "value": 10.0}
+            for donor, periods in (
+                ("dcid:USA", ("2026", "2027")),
+                ("dcid:DEU", ("2027",)),
+                ("dcid:FRA", ("2025", "2026")),
+            )
+            for period in periods
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["donor"],
+        rows=[{"stat_var": "dcid:Y", "donor": "dcid:ALL", "time_period": "2027", "value": 100.0}],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(
+        frame_ref=numerator_ref, denominator_frame_ref=denominator_ref, numerator_by=["donor"]
+    )
+
+    assert result.is_error is False
+    assert result.structured_content["dropped_key_count"] == 1
+    assert result.structured_content["rows"] == 2
+    _frame, trace = await store.get(
+        FrameRef(
+            spec_id=result.structured_content["spec_id"],
+            content_version=result.structured_content["content_version"],
+        )
+    )
+    assert trace.applied_policy.detail["keys_without_shared_period_count"] == 1
+    (step,) = trace.steps
+    assert step.left_out[0].model_dump() == {
+        "reason": "period_unmatched",
+        "count": 1,
+        "of": "entities",
+    }
+    assert (
+        "numerator keys left out: 1 sharing no period with the denominator (donor=dcid:FRA)"
+        in result.content[0].text
+    )
+
+
 async def test_both_sides_empty_names_the_real_fault_not_two_matching_empty_lists(seeded) -> None:
     """A typo'd role value on *both* `numerator_entity` and
     `denominator_entity` makes both sides' own period sets the empty tuple.
@@ -477,7 +527,10 @@ async def test_denominator_by_partial_mapping_refuses_share_of_key_unknown(seede
     assert result.structured_content["fix"]["column"] == "sector"
 
 
-async def test_numerator_key_absent_from_denominator_refuses_share_of_key_unmatched(seeded) -> None:
+async def test_a_key_with_no_denominator_group_is_left_out_and_declared(seeded) -> None:
+    """France has no denominator group, so it is left out and declared as
+    `quotient_of` declares such a key, and the United States keeps its
+    share."""
     store, _handles = seeded
     numerator = Frame.build(
         role_keys=["donor"],
@@ -501,8 +554,57 @@ async def test_numerator_key_absent_from_denominator_refuses_share_of_key_unmatc
         numerator_by=["donor"],
         denominator_by={"donor": "provider"},
     )
+
+    assert result.is_error is False
+    assert result.structured_content["dropped_key_count"] == 1
+    assert result.structured_content["rows"] == 1
+    _frame, trace = await store.get(
+        FrameRef(
+            spec_id=result.structured_content["spec_id"],
+            content_version=result.structured_content["content_version"],
+        )
+    )
+    assert trace.applied_policy.detail["unmatched_key_count"] == 1
+    assert [exclusion.reason for exclusion in trace.exclusions] == ["unmatched_key"]
+    (step,) = trace.steps
+    assert [entry.model_dump() for entry in step.left_out] == [
+        {"reason": "unmatched_key", "count": 1, "of": "entities"}
+    ]
+    text = result.content[0].text
+    assert "numerator keys left out: 1 with no denominator match (donor=dcid:FRA)" in text
+    assert "exclusions:" not in text
+
+
+async def test_no_key_with_a_denominator_group_refuses_share_of_key_unmatched(seeded) -> None:
+    store, _handles = seeded
+    numerator = Frame.build(
+        role_keys=["donor"],
+        rows=[
+            {"stat_var": "dcid:X", "donor": "dcid:FRA", "time_period": "2020", "value": 5.0},
+        ],
+    )
+    denominator = Frame.build(
+        role_keys=["provider"],
+        rows=[
+            {"stat_var": "dcid:Y", "provider": "dcid:USA", "time_period": "2020", "value": 100.0}
+        ],
+    )
+    numerator_ref = await _seed_custom_frame(store, numerator)
+    denominator_ref = await _seed_custom_frame(store, denominator)
+
+    result = await share_of(
+        frame_ref=numerator_ref,
+        denominator_frame_ref=denominator_ref,
+        numerator_by=["donor"],
+        denominator_by={"donor": "provider"},
+    )
     assert result.structured_content["code"] == "share_of_key_unmatched"
-    assert result.structured_content["fix"]["key"] == {"donor": "dcid:FRA"}
+    assert result.structured_content["fix"] == {
+        "numerator_keys": [{"donor": "dcid:FRA"}],
+        "denominator_keys": [{"provider": "dcid:USA"}],
+        "numerator_key_count": 1,
+        "denominator_key_count": 1,
+    }
 
 
 async def test_cross_frame_unit_unbound_refuses_and_is_retryable(seeded) -> None:

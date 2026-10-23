@@ -17,6 +17,7 @@ from analysis_mcp.op_spec import (
     JoinOpSpec,
     OpSpecAdapter,
     OrderedThresholdPredicate,
+    PlaceLevelPredicate,
     QuotientOfOpSpec,
     RankOpSpec,
     RollingRef,
@@ -245,6 +246,30 @@ def test_filter_accepts_the_closed_predicate_vocabulary() -> None:
         ),
     )
     assert len(op_spec.predicates) == 2
+
+
+def test_a_strict_country_predicate_changes_the_approved_operation_identity() -> None:
+    legacy = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(PlaceLevelPredicate(column="financingRecipient_type", level="Country"),),
+    )
+    explicit_legacy = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(
+            PlaceLevelPredicate(column="financingRecipient_type", level="Country", strict=False),
+        ),
+    )
+    strict = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(
+            PlaceLevelPredicate(column="financingRecipient_type", level="Country", strict=True),
+        ),
+    )
+
+    assert op_spec_hash_for(legacy) == op_spec_hash_for(explicit_legacy)
+    assert op_spec_hash_for(strict) != op_spec_hash_for(legacy)
+    assert "strict" not in build_op_spec_preimage(legacy)["parameters"]["predicates"][0]
+    assert build_op_spec_preimage(strict)["parameters"]["predicates"][0]["strict"] is True
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])

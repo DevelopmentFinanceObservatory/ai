@@ -46,6 +46,7 @@
     "distinction": "filter, not rank: a threshold keeps every donor above 200 million US dollars; no order or top N is asked"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which donors gave Kenya more than 200 million US dollars of ODA in 2022?",
     "answer_mode": "computed",

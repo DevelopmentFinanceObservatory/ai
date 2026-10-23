@@ -12,7 +12,7 @@ explains the protocol around them, and `services/harness/tests/test_wire.py`
 pins the two together against the fixtures in
 `services/harness/tests/wire_fixtures/studio/`.
 
-v1 records its design decisions as numbered deltas (1–19; 16 is folded
+v1 records its design decisions as numbered deltas (1–21; 16 is folded
 into 11). The deltas are marked where they apply and listed in the delta
 index at the end.
 
@@ -110,11 +110,13 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
   toggle and the "✓ Added" chip).
 - **`interrupt.response`** resumes a paused turn: `interrupt_id` echoed
   verbatim from the pausing frame, `decision` ∈
-  `approve | amend | reject | answer | skip`, `payload` carrying the
-  amendment text (`amend`) or the answer (`answer`, an option id, or free
-  text when the elicitation set `allow_free_text`). `skip` (delta 12)
-  applies to elicitations that set `skippable`: the run proceeds on its
-  default reading (the top-ranked candidate).
+  `approve | amend | reject | answer | skip`. `payload` carries the
+  amendment text of `amend`. An elicitation's `answer` carries `answers`,
+  one per question id of the frame (delta 21). `skip` (delta 12) applies
+  to an elicitation whose frame sets `skippable`: it dismisses the whole
+  pause and answers no question. When the orchestrator asked, the turn
+  closes. When the planner asked, the skip counts as the user declining to
+  choose, and the planner plans on without a pick of theirs.
 - **`turn.cancel`** → `POST /api/studio/cancel` (delta 14) aborts the
   conversation's in-flight segment (the Stop button), whichever instance
   owns it: the request sets the segment's durable cancel flag in the
@@ -143,8 +145,9 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
 
 Frames are SSE `data:` lines, one JSON object per frame, discriminated on
 `event` (`STUDIO_FRAME_ADAPTER`). Twelve frame types; at least one fixture
-each in `wire_fixtures/studio/` (elicitation has two: the plain and the
-skippable/free-text shapes).
+each in `wire_fixtures/studio/` (elicitation has three: the plain
+question, the skippable free-text question, and two questions in one
+pause).
 
 | `event`               | What it is                                                                                                                                  |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -156,7 +159,7 @@ skippable/free-text shapes).
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
 | `composition.updated` | the authoritative canvas manifest                                                                                                           |
-| `elicitation.request` | a clarifying question; **pauses and ends the stream** (delta 1)                                                                             |
+| `elicitation.request` | one to three clarifying questions; **pauses and ends the stream** (delta 1)                                                                 |
 | `suggestions`         | follow-up chips (may be empty in v1; delta 8)                                                                                               |
 | `error`               | stream-fatal tool error (delta 4)                                                                                                           |
 | `done`                | turn complete: `trace_id` + final composition or null                                                                                       |
@@ -194,8 +197,8 @@ segment is still live answers 409 `transient_unavailable` with
 `retry_after_seconds` set to the lease's remaining time; retrying after
 that segment's lease has expired resumes the turn again, on a fresh
 stream whose `seq` jumps 1000 past the saved value so it never repeats a
-`seq` the dead stream already sent. Retrying with a DIFFERENT decision
-or payload than the one that actually resumed answers 409
+`seq` the dead stream already sent. Retrying with a DIFFERENT decision,
+payload or answers than the one that actually resumed answers 409
 `edit_conflict`. The approval record for a plan interrupt is appended
 once per `interrupt_id`, on its first answer, however many times the
 resume itself retries.
@@ -440,6 +443,51 @@ user's words. `not_computed` is optional and appears only on an ask
 answered in part. Every ask is answered, declined, or answered in part
 exactly once. A plan given no asks omits the field. `schema_version` stays 1.
 
+## Several questions in one pause (delta 21, v1.6)
+
+`elicitation.request` carries `questions`, one to three, in place of the
+top-level `question`, `input`, `options`, `allow_free_text` and
+`rationale`. Each question is `{id, question, input, options?, allow_free_text, skippable, rationale?}`. Question ids (`q1`, `q2`, …)
+are minted by the harness; option ids are scoped to their question, so
+two questions may both offer `o1`. The frame keeps a top-level
+`skippable`: the whole pause may be dismissed with `decision: "skip"`.
+
+| Ask                                | Frame `skippable` | Question `skippable` | Question `allow_free_text`  |
+| ---------------------------------- | ----------------- | -------------------- | --------------------------- |
+| The agent's ask, one question      | `true`            | `false`              | `true`                      |
+| The agent's ask, several questions | `false`           | `true`               | `true`                      |
+| The planner's ask (always one)     | `true`            | `false`              | `true` unless fixed choices |
+
+The planner's recommended option keeps `recommended: true`, and its
+`rationale` sits on the question.
+
+The reply is one `interrupt.response` with `decision: "answer"` and
+`answers`, keyed by question id, naming every question of the frame
+exactly once:
+
+```json
+{
+  "q1": { "kind": "option", "option_id": "spec_4d5e6f7a33333333" },
+  "q2": { "kind": "skipped" }
+}
+```
+
+An answer is `{"kind": "option", "option_id"}`, one of that question's
+offered ids; `{"kind": "text", "text"}`, non-empty; or
+`{"kind": "skipped"}`, only on a question marked `skippable`, which
+leaves that choice to the agent and still resumes the turn. The route
+answers 422 `binding_invalid` for a missing or extra question id, an
+option id the question did not offer, a `skipped` answer on a question
+that is not skippable, `payload` on an elicitation answer, `answers` on
+a plan interrupt, an `answer` with neither `answers` nor `payload`
+("decision 'answer' requires answers, one per question id"), a `skip`
+that carries `payload` or `answers`, and `skip` on a frame that is not
+skippable.
+
+An elicitation opened before this delta and still paused takes its one
+answer as `payload` (an offered option id, or free text). Any other
+elicitation refuses `payload`. `schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -499,11 +547,10 @@ Fixture values that are samples:
    current composition, and an all-`add` mutate on an empty canvas
    bootstraps one.
 1. Elicitations may set `allow_free_text` and `skippable`;
-   `decision: "skip"` declines to choose;
-   an `answer` payload may be free text when `allow_free_text`. v1 sets
-   `allow_free_text` on every elicitation that offers no fixed choice, so
-   a payload outside the option ids is taken as free text and reaches the
-   agent or the planner in the user's words.
+   `decision: "skip"` dismisses the whole pause; an answer may be free
+   text when `allow_free_text`, and reaches the agent or the planner in
+   the user's words. Delta 21 moves both flags onto each question and
+   keeps a whole-pause `skippable` on the frame.
 1. `CompositionBlock.meta` (`set_card_meta` op) carries presentation-only
    card fields (subtitle/description/axis labels/style) the platform
    intent cannot hold; harness-owned, never sent to the platform.
@@ -528,3 +575,7 @@ Fixture values that are samples:
 1. `plan.proposed` gains `asks`, each `{ask, answered_by, declined?, not_computed?}`: the outputs the user asked for, each with the steps
    that answer it, the reason it is declined, or both with the part not
    computed; optional.
+1. `elicitation.request` carries one to three `questions`, each with its
+   own options, free-text and skip flags; the frame keeps a whole-pause
+   `skippable`. `interrupt.response` answers them with `answers` keyed by
+   question id.

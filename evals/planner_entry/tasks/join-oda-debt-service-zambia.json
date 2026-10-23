@@ -48,6 +48,7 @@
     "distinction": "join, not comparison: two different measures in one table, with no difference asked for"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
     "answer_mode": "computed",

@@ -76,6 +76,7 @@ from planner.plan import (
     DecisionFixes,
     Entity,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     Plan,
     PlanStatus,
@@ -1273,6 +1274,7 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
                 id="recent_growth", decision_ids=["measure"], input_id="recent_years", **window
             ),
         ],
+        first_years=[FirstYear(requirement_id="oda_disbursed", year=2015)],
         status=PlanStatus.DRAFT,
     )
     translation = Translation(
@@ -2729,7 +2731,20 @@ def _serve_whole_totals(
             body = json.loads(request.content)
             minted.append(body["options"])
             spec_id = body["input"]["spec_id"]
-            return httpx2.Response(200, json=renderings[spec_id, "columns" in body["options"]])
+            columns = body["options"].get("columns")
+            answer = renderings[spec_id, columns is not None]
+            if columns is not None:
+                # apis records the columns the mint asked for as the artifact's rendering.
+                answer = {
+                    **answer,
+                    "artifacts": [
+                        {**artifact, "rendering": {**artifact["rendering"], "columns": columns}}
+                        if "columns" in artifact.get("rendering", {})
+                        else artifact
+                        for artifact in answer["artifacts"]
+                    ],
+                }
+            return httpx2.Response(200, json=answer)
         if request.url.path.endswith("/options"):
             # The spec is not in the definition store, so `get_data` reads its identity here.
             spec_id = request.url.path.split("/")[-2]
@@ -2821,13 +2836,14 @@ async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_pl
     assert sum(plain_held[0].table.column("value").to_pylist()) == pytest.approx(4_578_400_000.0)
     assert refused.is_error
     assert (refused.structured_content or {})["code"] == "place_levels_mixed"
-    assert [options.get("columns") for options in minted] == [None, list(KIND_COLUMNS)]
+    flow_columns = ("financingProvider_type", "financingRecipient_type", *KIND_COLUMNS)
+    assert [options.get("columns") for options in minted] == [None, list(flow_columns)]
     # The frame holding the kinds is named apart from the plain one, under its file's stamp.
     assert typed_content["frame_ref"] != plain_content["frame_ref"]
     assert typed_content["frame_ref"] == frame_ref_for(
         spec_id=BOTH_TOTALS_SPEC,
         content_version=typed_content["content_version"],
-        columns=KIND_COLUMNS,
+        columns=flow_columns,
         enrichment_stamp=_WHOLE_TOTALS_STAMP,
     ).model_dump(mode="json")
     assert summed_held is not None

@@ -74,7 +74,7 @@ Not recoverable:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping, Sequence
-from itertools import product
+from itertools import combinations, product
 from typing import Any, Protocol
 
 from common.materialisation import (
@@ -89,6 +89,7 @@ from dfo_frame_grammar import Frame
 
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
+    FLOW_ENRICHMENT_COLUMNS,
     KIND_COLUMNS,
     TYPE_COLUMN_SELECTIONS,
     WITHOUT_PARTY_TOTALS,
@@ -138,18 +139,34 @@ class DatasetVersions(Protocol):
     def __call__(self, *, spec_id: str) -> Awaitable[Sequence[DatasetVersion]]: ...
 
 
-# The `options.columns` of a flow table's mint before `KIND_COLUMNS`: the token `kind`, and
-# `party_kind` before the class and whole tokens joined it. A root minted with either stays
-# in the frame store with no age rule, and `replayed_mint_options` upgrades the recovered
-# selection on replay.
-_EARLIER_KIND_COLUMNS: tuple[tuple[str, ...], ...] = (("kind",), ("party_kind",))
+# The kind tokens of a flow table's mint before `KIND_COLUMNS`: `party_kind` before the
+# class and whole tokens joined it. A root minted with it stays in the frame store with no
+# age rule, and `replayed_mint_options` upgrades the recovered selection on replay.
+_EARLIER_KIND_SELECTIONS: tuple[tuple[str, ...], ...] = (("party_kind",),)
 
-# Every `options.columns` a recorded mint may hold: none, some of the type columns, or a
-# flow table's kinds under any of its tokens.
+# The party type columns a flow mint may send beside its kinds: none, both, or the one left
+# after a column refusal drops a role the table does not have, in `FLOW_ENRICHMENT_COLUMNS`
+# order.
+_PARTY_TYPE_COLUMNS = tuple(
+    column for column in FLOW_ENRICHMENT_COLUMNS if column not in KIND_COLUMNS
+)
+_PARTY_TYPE_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
+    selection
+    for size in range(len(_PARTY_TYPE_COLUMNS) + 1)
+    for selection in combinations(_PARTY_TYPE_COLUMNS, size)
+)
+
+# Every `options.columns` a recorded mint may hold: none, some of the type columns, a flow
+# table's kinds under the current or the earlier tokens with any of its party types before
+# them, or the earliest token `kind` alone.
 RECOVERABLE_COLUMNS: tuple[tuple[str, ...], ...] = (
     *TYPE_COLUMN_SELECTIONS,
-    KIND_COLUMNS,
-    *_EARLIER_KIND_COLUMNS,
+    *(
+        (*types, *kinds)
+        for kinds in (KIND_COLUMNS, *_EARLIER_KIND_SELECTIONS)
+        for types in _PARTY_TYPE_SELECTIONS
+    ),
+    ("kind",),
 )
 
 

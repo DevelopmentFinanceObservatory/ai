@@ -1,5 +1,5 @@
 {
-  "about": "Request and response pairs of the apis live-refresh routes, recorded from the composed test app by tests/live_refresh/wire_pairs.py. Ids are numbered stand-ins in their own grammar, the same id by the same stand-in in every pair. <timestamp>, <date>, <trace_id>, <capability_version>, and the two principal names stand for values that differ between runs or deployments.",
+  "about": "Request and response pairs of the dfo-apis live-refresh routes, recorded from the composed test app by tests/live_refresh/wire_pairs.py. Ids are numbered stand-ins in their own grammar, the same id by the same stand-in in every pair. <timestamp>, <date>, a citation's <year>, <trace_id>, <capability_version>, and the two principal names stand for values that differ between runs or deployments.",
   "pairs": {
     "component_read.at_revision": {
       "request": {
@@ -1137,9 +1137,7 @@
       "request": {
         "method": "GET",
         "path": "/api/datasets/spec_176b1b132147fff98b37810b759f6f90/versions",
-        "headers": {
-          "x-dfo-principal": "<DATASETS_FIRST_PARTY_PRINCIPAL>"
-        }
+        "headers": {}
       },
       "response": {
         "status": 200,
@@ -1185,7 +1183,9 @@
               "groupby": null,
               "enrichment_stamp": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
             }
-          ]
+          ],
+          "next_cursor": null,
+          "complete": true
         }
       }
     }

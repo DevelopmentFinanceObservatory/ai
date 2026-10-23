@@ -991,7 +991,9 @@ def test_a_hand_off_to_the_planner_is_one_line_until_the_planner_drafts():
     the user sees one "Working on a plan" from the hand-off on; the agent's
     run winds down after it, and that thinking or text must not close it."""
     translator = _translator()
-    call = types.FunctionCall(id="call_1", name="plan", args={"brief": "growth", "asks": []})
+    call = types.FunctionCall(
+        id="call_1", name="plan", args={"brief": "growth", "asks": ["growth"]}
+    )
     taken = types.FunctionResponse(
         id="call_1", name="plan", response={"status": "Recorded.", HANDED_OFF: "plan"}
     )

@@ -34,7 +34,10 @@
   ],
   "brief": "What share of Kenya's ODA went to health between 2015 and 2022?",
   "asks": [
-    "Share of Kenya's ODA that went to health, 2015 to 2022"
+    {
+      "text": "Share of Kenya's ODA that went to health, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -50,6 +53,7 @@
     "kind": "quotient_of",
     "distinction": "share_of, not quotient_of: health ODA is a part of Kenya's total ODA, both in one unit"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
     "answer_mode": "computed",

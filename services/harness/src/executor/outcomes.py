@@ -84,9 +84,9 @@ class StepRecord(StrictModel):
     `rows`, and declares `role_keys` and `stat_var_count` whenever it read
     the frame. `dropped_key_count` is how many keys the call declared it left
     out of its result (`executor.artifacts.declared_dropped_key_count`), 0
-    for every call but a keyed `quotient_of` that found some numerator keys
-    no denominator. `ranked_before_limit` is how many entries a `rank` call
-    ranked before its `limit` cut them
+    for every call but a keyed `quotient_of` or `share_of` that found some
+    numerator keys nothing to divide by. `ranked_before_limit` is how many
+    entries a `rank` call ranked before its `limit` cut them
     (`executor.artifacts.declared_ranked_before_limit`), `None` when the call
     set no limit.
 

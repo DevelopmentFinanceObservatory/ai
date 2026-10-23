@@ -18,8 +18,14 @@ registration-site wrapper is the backstop that turns it into an
 this backstop complements the typed handling below rather than replacing it.
 
 The stored step (`_share_step`) counts the numerator keys and periods the
-share keeps, the entities each period's denominator sums, and the values one
-side alone reports, which it leaves out.
+share keeps, the entities each period's denominator sums, and what it leaves
+out: the numerator keys with no denominator group (`unmatched_key`) and
+those sharing no period with their group (`period_unmatched`), counted as
+entities as `quotient_of_tool` counts them, and the values one side alone reports.
+
+`applied_policy.detail` carries `unmatched_key_count` and
+`keys_without_shared_period_count`, and the result's `dropped_key_count`
+counts both kinds of key, as `quotient_of`'s does.
 """
 
 from __future__ import annotations
@@ -72,7 +78,7 @@ from analysis_mcp.frame_ref_resolution import (
 from analysis_mcp.identity import canonicalize_op_spec
 from analysis_mcp.op_spec import PinnedUnit, ShareOfOpSpec
 from analysis_mcp.settings import Settings
-from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, step_unit
+from analysis_mcp.steps import Step, build_step, left_out_from_exclusions, left_out_keys, step_unit
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 from analysis_mcp.tool_pipeline import (
     build_op_spec_or_refusal,
@@ -141,8 +147,10 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
         )
     elif isinstance(exc, ShareOfKeyUnmatchedError):
         refusal = ToolRefusal.share_of_key_unmatched(
-            key=dict(exc.key),
-            available=[dict(candidate) for candidate in exc.available],
+            numerator_keys=[dict(key) for key in exc.numerator_keys],
+            denominator_keys=[dict(key) for key in exc.denominator_keys],
+            numerator_key_count=exc.numerator_key_count,
+            denominator_key_count=exc.denominator_key_count,
         )
     elif isinstance(exc, ShareOfNonFiniteResultError):
         # `reason == "zero denominator"` is retryable (a different
@@ -276,8 +284,8 @@ async def _resolve_sides(
 
 def _share_step(op_spec: ShareOfOpSpec, result: ShareOfResult, *, trace: Trace) -> Step:
     """The step record of `result`, stored on `trace`: the numerator keys and
-    periods it kept, each period's denominator coverage, the values it left
-    out, and per cent."""
+    periods it kept, each period's denominator coverage, the keys and values
+    it left out, and per cent."""
     coverage = result.coverage
     return build_step(
         op="share",
@@ -291,7 +299,15 @@ def _share_step(op_spec: ShareOfOpSpec, result: ShareOfResult, *, trace: Trace) 
             "periods": coverage.periods,
             "entities_with_fewer_periods": coverage.entities_with_fewer_periods,
         },
-        left_out=left_out_from_exclusions(result.exclusions),
+        left_out=[
+            *left_out_keys(
+                (
+                    ("unmatched_key", result.unmatched_keys),
+                    ("period_unmatched", result.keys_without_shared_period),
+                )
+            ),
+            *left_out_from_exclusions(result.exclusions),
+        ],
         unit=step_unit(PERCENT_UNIT),
         period_entities=coverage.period_entities,
     )
@@ -456,13 +472,16 @@ async def share_of(
     denominator is pooled (one total per period, shared by every numerator
     key). A `denominator_by` key outside `numerator_by` refuses
     (`op_spec_invalid`); a non-empty `denominator_by` that leaves a
-    `numerator_by` column out refuses (`share_of_key_unknown`); a numerator
-    key with no matching denominator group under that mapping refuses
-    (`share_of_key_unmatched`). Each key divides over the periods both
+    `numerator_by` column out refuses (`share_of_key_unknown`). A numerator
+    key with no matching denominator group under that mapping is left out
+    and recorded, as `quotient_of` records it, and only a call where no key
+    has a group refuses (`share_of_key_unmatched`). Each key divides over
+    the periods both
     sides report for it, and every period one side holds alone is left out
-    and recorded as an exclusion on that side, as `quotient_of` records it;
-    a key sharing no period refuses (`share_of_grain_mismatch`), naming
-    both sides' periods and the key. A period whose denominator sums to zero
+    and recorded as an exclusion on that side, as `quotient_of` records it.
+    A key sharing no period is left out the same way, and the result counts
+    both kinds of key in `dropped_key_count`; only a call where no key shares a period
+    refuses (`share_of_grain_mismatch`), naming both sides' periods. A period whose denominator sums to zero
     refuses (`share_of_zero_denominator`) before any division is attempted,
     and is retryable, since a different denominator source can sum to
     nonzero; a genuine overflow (`non_finite_result`) is not. One measure
@@ -573,6 +592,8 @@ async def share_of(
                 "matched_periods": list(result.matched_periods),
                 "numerator_coverage_fraction": result.numerator_coverage_fraction,
                 "denominator_coverage_fraction": result.denominator_coverage_fraction,
+                "unmatched_key_count": len(result.unmatched_keys),
+                "keys_without_shared_period_count": len(result.keys_without_shared_period),
                 "denominator_resolved_unit": unit_json(result.denominator_resolved_unit),
                 "denominator_resolved_facets": {
                     selection.axis: selection.ref
@@ -601,4 +622,5 @@ async def share_of(
             exclusions=output_trace.exclusions,
             time=output_trace.time,
         ),
+        dropped_key_count=result.dropped_key_count,
     )

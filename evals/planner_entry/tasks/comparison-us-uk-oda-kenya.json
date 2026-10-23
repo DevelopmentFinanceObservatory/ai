@@ -45,6 +45,7 @@
     "kind": "join",
     "distinction": "comparison, not join: the question asks for the difference between two series"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much more ODA did the United States give Kenya than the United Kingdom did in each year from 2015 to 2022?",
     "answer_mode": "computed",

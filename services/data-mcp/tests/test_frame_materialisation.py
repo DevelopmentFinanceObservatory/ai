@@ -2387,15 +2387,22 @@ def test_a_replayed_selection_asks_a_flow_root_for_kinds(
 
     replayed = frame_materialisation.replayed_mint_options(options, identity=identity)
 
-    party_typed = {
-        "financingProvider_type",
-        "financingRecipient_type",
-        "kind",
-        "party_kind",
-    } & set(recorded)
-    flow_unselected = not recorded and identity is not None and "origin" in identity["entities"]
-    if party_typed or flow_unselected:
-        assert replayed == options | {"columns": list(KIND_COLUMNS)}
+    flow_root = identity is not None and "origin" in identity["entities"]
+    expected = [column for column in recorded if column not in {"kind", *KIND_COLUMNS}]
+    if flow_root:
+        expected.extend(
+            column
+            for column in frame_materialisation.FLOW_ENRICHMENT_COLUMNS
+            if column not in expected
+        )
+        assert replayed == options | {"columns": expected}
+    elif recorded:
+        if any(
+            column in {"kind", *frame_materialisation.FLOW_ENRICHMENT_COLUMNS}
+            for column in recorded
+        ):
+            expected.extend(KIND_COLUMNS)
+        assert replayed == options | {"columns": expected}
     else:
         assert replayed == options
 

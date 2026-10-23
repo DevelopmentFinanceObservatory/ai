@@ -41,6 +41,8 @@ from planner.records import (
     PlaceType,
     RankAmong,
     RankDirection,
+    RelativePeriod,
+    RollingWindow,
 )
 from planner.workflow import OpenEntityAxis, Period, ResolvedEntity, SelectedSource
 
@@ -64,6 +66,7 @@ def _resolve(
     *operations: Operation,
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
+    whole_history: Mapping[str, int] | None = None,
 ) -> tuple[dict[str, ResolvedShape], list[str]]:
     """`shapes_for` over `operations`, in the order given -- every fixture here already lists them upstream-first."""
     return shapes_for(
@@ -71,6 +74,7 @@ def _resolve(
         requirements=requirements,
         sources=sources,
         order=[op.id for op in operations],
+        whole_history=whole_history or {},
     )
 
 
@@ -100,6 +104,28 @@ def test_retrieve_wraps_the_requirement_entities_role_with_its_column_and_narrow
     assert resolved.shape.roles == (resolved.shape.roles[0],)  # one role dimension
     assert resolved.shape.roles[0].role == "debtor"
     assert resolved.shape.roles[0].requirement_id == "annual_debt_service"
+
+
+@pytest.mark.parametrize(
+    ("whole_history", "start"),
+    [({}, 2015), ({"annual_debt_service": 1990}, 1990)],
+    ids=["stated-period", "whole-history"],
+)
+def test_a_retrieval_starts_at_the_first_year_the_plan_reads_its_dataset_from(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    whole_history: dict[str, int],
+    start: int,
+) -> None:
+    shapes, issues = _resolve(
+        _retrieve(),
+        requirements={"annual_debt_service": requirement(period_end_open=True)},
+        sources={"debt": source()},
+        whole_history=whole_history,
+    )
+
+    assert issues == []
+    assert shapes["debt"].shape.period == Period(start=start, end=2024)
 
 
 def test_retrieve_marks_a_column_surplus_when_the_source_resolves_an_unnamed_label(
@@ -718,25 +744,30 @@ def test_a_per_axis_share_of_over_a_limited_denominator_is_refused(
 
 
 @pytest.mark.parametrize(
-    ("predicates", "refused"),
+    ("predicates", "end_open", "refused"),
     [
-        ((PeriodThreshold(op="gt", year=2023),), False),
-        ((PeriodThreshold(op="lt", year=2016),), False),
-        ((PeriodThreshold(op="gt", year=2017), PeriodThreshold(op="lt", year=2019)), False),
-        ((PeriodThreshold(op="gt", year=2022),), True),
-        ((PeriodThreshold(op="gt", year=2022), PeriodThreshold(op="ne", year=2024)), False),
-        ((PeriodThreshold(op="ne", year=2024),), True),
+        ((PeriodThreshold(op="gt", year=2023),), False, False),
+        ((PeriodThreshold(op="lt", year=2016),), False, False),
+        ((PeriodThreshold(op="gt", year=2017), PeriodThreshold(op="lt", year=2019)), False, False),
+        ((PeriodThreshold(op="gt", year=2022),), False, True),
+        ((PeriodThreshold(op="gt", year=2022), PeriodThreshold(op="ne", year=2024)), False, False),
+        ((PeriodThreshold(op="ne", year=2024),), False, True),
+        ((PeriodThreshold(op="gte", year=2024),), True, True),
+        ((PeriodThreshold(op="lt", year=2016),), True, False),
+        ((PeriodThreshold(op="eq", year=2024),), True, False),
     ],
 )
 def test_a_year_filter_that_leaves_one_year_of_a_limited_rank_clears_its_cut(
     requirement: RequirementFactory,
     source: SourceFactory,
     predicates: tuple[PeriodThreshold, ...],
+    end_open: bool,
     refused: bool,
 ) -> None:
     # Over 2015-2024, `year > 2023`, `year < 2016` and `2017 < year < 2019`
     # each leave one year, as does `year > 2022` without 2024; `year > 2022`
-    # leaves two, and `year != 2024` leaves nine.
+    # leaves two, and `year != 2024` leaves nine. Over 2015-2024 with no end
+    # year, `year >= 2024` leaves 2024 and every later year as it arrives.
     recent = FilterOperation(
         id="recent", requirement_id="recent", input="top_five", predicates=predicates
     )
@@ -753,7 +784,7 @@ def test_a_year_filter_that_leaves_one_year_of_a_limited_rank_clears_its_cut(
         _top_five_each_year(),
         recent,
         totals,
-        requirements={"annual_debt_service": requirement()},
+        requirements={"annual_debt_service": requirement(period_end_open=end_open)},
         sources={"debt": source()},
     )
 
@@ -821,6 +852,179 @@ def test_a_year_filter_excluding_the_one_year_an_earlier_filter_kept_is_refused_
 
     assert "others" not in shapes
     assert issues == ["others: the year filter leaves no year of 2020-2020"]
+
+
+@pytest.mark.parametrize(
+    ("end_open", "compared", "refused"),
+    [
+        pytest.param(True, False, "newest", id="open"),
+        pytest.param(False, False, None, id="closed"),
+        pytest.param(True, True, "gap", id="compared-with-a-closed-dataset"),
+    ],
+)
+def test_the_newest_year_over_a_fixed_cap_is_refused_naming_the_step_reading_it(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    end_open: bool,
+    compared: bool,
+    refused: str | None,
+) -> None:
+    """Over a dataset retrieved with no end year the newest year passes 2024
+    and the filter keeps none. A dataset with a fixed end holds no later year,
+    and where a rolling step reads it `compiler.compile` reports
+    `ROLLING_NEEDS_OPEN_PERIOD`. Compared with a closed dataset no rolling
+    step reads, the newest year passes that dataset's 2024 the same way."""
+    cap = FilterOperation(
+        id="cap",
+        requirement_id="cap",
+        input="debt",
+        predicates=(PeriodThreshold(op="lte", year=2024),),
+    )
+    newest = FilterOperation(
+        id="newest",
+        requirement_id="newest",
+        input="debt" if compared else "cap",
+        predicates=(PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),),
+    )
+    gdp_req, gdp_src, retrieve_gdp = _gdp()
+    gap = CompareOperation(
+        id="gap", requirement_id="gap", left=Side(input="newest"), right=Side(input="gdp")
+    )
+    steps = (retrieve_gdp, newest, gap) if compared else (cap, newest)
+
+    shapes, issues = _resolve(
+        _retrieve(),
+        *steps,
+        requirements={
+            "annual_debt_service": requirement(period_end_open=end_open),
+            "annual_gdp": gdp_req,
+        },
+        sources={"debt": source(), "gdp": gdp_src},
+    )
+
+    assert [issue.partition(": ")[0] for issue in issues] == ([refused] if refused else [])
+    assert [step.id for step in steps if step.id not in shapes] == ([refused] if refused else [])
+
+
+_ON_THE_NEWEST = RelativePeriod(offset=0)
+
+
+@pytest.mark.parametrize(
+    ("bound", "window_start", "rolling", "end_open", "refused"),
+    [
+        pytest.param(
+            PeriodThreshold(op="lte", year=2024),
+            2020,
+            RollingWindow(window_end=_ON_THE_NEWEST),
+            True,
+            True,
+            id="an-end-on-the-newest-year-over-a-fixed-cap",
+        ),
+        pytest.param(
+            PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5)),
+            2020,
+            RollingWindow(window_end=_ON_THE_NEWEST),
+            True,
+            True,
+            id="a-fixed-start-over-a-first-year-on-the-newest",
+        ),
+        pytest.param(
+            PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5)),
+            2020,
+            RollingWindow(window_start=RelativePeriod(offset=-4), window_end=_ON_THE_NEWEST),
+            True,
+            False,
+            id="both-ends-on-the-newest-over-a-first-year-on-the-newest",
+        ),
+        pytest.param(
+            PeriodThreshold(op="lte", year=2024),
+            2020,
+            RollingWindow(window_end=_ON_THE_NEWEST),
+            False,
+            False,
+            id="a-closed-dataset",
+        ),
+    ],
+)
+def test_a_growth_whose_window_year_newer_data_takes_out_of_its_input_is_refused(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    bound: PeriodThreshold,
+    window_start: int,
+    rolling: RollingWindow,
+    end_open: bool,
+    refused: bool,
+) -> None:
+    """A growth reads each entity's values in its window's two years. The
+    newest year passes a fixed cap, and a first year on the newest passes a
+    fixed window start, so either year leaves the input. A dataset with a
+    fixed end holds no later year, and `compiler.compile` reports
+    `ROLLING_NEEDS_OPEN_PERIOD` for it."""
+    kept = FilterOperation(id="kept", requirement_id="kept", input="debt", predicates=(bound,))
+    growth = GrowthOperation(
+        id="growth",
+        requirement_id="growth",
+        input="kept",
+        window_start=window_start,
+        window_end=2024,
+        rolling=rolling,
+    )
+
+    shapes, issues = _resolve(
+        _retrieve(),
+        kept,
+        growth,
+        requirements={"annual_debt_service": requirement(period_end_open=end_open)},
+        sources={"debt": source()},
+    )
+
+    assert [issue.partition(": ")[0] for issue in issues] == (["growth"] if refused else [])
+    assert ("growth" in shapes) is not refused
+
+
+@pytest.mark.parametrize(
+    ("gdp_rolls", "refused"),
+    [
+        pytest.param(False, "gap", id="an-open-side-the-newest-year-is-not-read-over"),
+        pytest.param(True, None, id="a-newest-year-on-each-side"),
+    ],
+)
+def test_a_newest_year_compared_with_an_open_dataset_it_is_not_read_over_is_refused(
+    requirement: RequirementFactory, source: SourceFactory, gdp_rolls: bool, refused: str | None
+) -> None:
+    """The run reads the newest year over the debt alone, and GDP, open to
+    its own newest year, can lag it, so the comparison keeps no year once
+    the debt reports one GDP lacks."""
+    on_the_newest = (PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),)
+    newest = FilterOperation(
+        id="newest", requirement_id="newest", input="debt", predicates=on_the_newest
+    )
+    newest_gdp = FilterOperation(
+        id="newest_gdp", requirement_id="newest_gdp", input="gdp", predicates=on_the_newest
+    )
+    gdp_req, gdp_src, retrieve_gdp = _gdp()
+    gap = CompareOperation(
+        id="gap",
+        requirement_id="gap",
+        left=Side(input="newest"),
+        right=Side(input="newest_gdp" if gdp_rolls else "gdp"),
+    )
+
+    shapes, issues = _resolve(
+        _retrieve(),
+        retrieve_gdp,
+        newest,
+        *((newest_gdp,) if gdp_rolls else ()),
+        gap,
+        requirements={
+            "annual_debt_service": requirement(period_end_open=True),
+            "annual_gdp": gdp_req.model_copy(update={"period_end_open": True}),
+        },
+        sources={"debt": source(), "gdp": gdp_src},
+    )
+
+    assert [issue.partition(": ")[0] for issue in issues] == ([refused] if refused else [])
+    assert ("gap" in shapes) is (refused is None)
 
 
 @pytest.mark.parametrize(
@@ -1022,6 +1226,53 @@ def test_a_compare_matches_collapsed_sides_on_the_years_they_hold(
 
 
 @pytest.mark.parametrize(
+    ("right", "admitted"),
+    [
+        pytest.param(
+            AggregateOperation(
+                id="overall",
+                requirement_id="overall",
+                input="debt_total",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            True,
+            id="the-total-of-the-total",
+        ),
+        pytest.param(_peak(Reduction.SUM, name="overall"), False, id="a-second-total"),
+    ],
+)
+def test_a_compare_of_totals_of_open_years_matches_only_the_span_one_step_wrote(
+    requirement: RequirementFactory, source: SourceFactory, right: Operation, admitted: bool
+) -> None:
+    """A total of years open to the data ends at each series' newest year.
+    A total of that total keeps its label in every future. A second total
+    labels its rows with the years it summed, which newer data can move
+    apart from the first's."""
+    gap = CompareOperation(
+        id="gap", requirement_id="gap", left=Side(input="debt_total"), right=Side(input="overall")
+    )
+
+    shapes, issues = _resolve(
+        _retrieve(),
+        _peak(Reduction.SUM, name="debt_total"),
+        right,
+        gap,
+        requirements={"annual_debt_service": requirement(period_end_open=True)},
+        sources={"debt": source()},
+    )
+
+    assert ("gap" in shapes) is admitted
+    assert [issue.partition(": ")[0] for issue in issues] == ([] if admitted else ["gap"])
+
+
+def _peak_year_filter(threshold: PeriodThreshold) -> FilterOperation:
+    return FilterOperation(
+        id="reader", requirement_id="reader", input="peak", predicates=(threshold,)
+    )
+
+
+@pytest.mark.parametrize(
     ("reader", "refused"),
     [
         pytest.param(
@@ -1048,6 +1299,16 @@ def test_a_compare_matches_collapsed_sides_on_the_years_they_hold(
             "rank counts every year",
             id="collapsing-rank-after-max",
         ),
+        pytest.param(
+            _peak_year_filter(PeriodThreshold(op="gte", year=2020)),
+            None,
+            id="first-year-filter-after-max-of-open-years",
+        ),
+        pytest.param(
+            _peak_year_filter(PeriodThreshold(op="lte", year=2021)),
+            "can move past the last year the filter keeps",
+            id="last-year-filter-after-max-of-open-years",
+        ),
     ],
 )
 def test_a_reader_of_an_extreme_by_entity_follows_its_picked_years(
@@ -1059,8 +1320,9 @@ def test_a_reader_of_an_extreme_by_entity_follows_its_picked_years(
     # A max by entity holds one row per entity at the year its peak fell in:
     # no series to grow, no year whose entities a per-period rank could set
     # side by side, and one year of each entity's window for a collapsing
-    # rank's coverage to count.
-    req = requirement(period=Period(start=2018, end=2022))
+    # rank's coverage to count. Over years open to the data a later peak can
+    # leave a fixed last year a filter keeps.
+    req = requirement(period=Period(start=2018, end=2022), period_end_open=True)
 
     shapes, issues = _resolve(
         _retrieve(),

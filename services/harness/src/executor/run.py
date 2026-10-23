@@ -122,10 +122,10 @@ code and a message for the user. A `rolling_anchor_unresolved` of any other
 detail says the run's own populations, roots, key or periods do not fit
 (`executor.classify.is_anchor_fault`) and stops it as an `internal_error`.
 
-A keyed `quotient_of` leaves out each numerator key it finds no denominator
-for, and its result declares how many (`dropped_key_count`). The step's
-`StepRecord` carries that count, so an answer resting on the step can say
-its population lost members.
+A keyed `quotient_of` or `share_of` leaves out each numerator key it finds
+nothing to divide by, and its result declares how many
+(`dropped_key_count`). The step's `StepRecord` carries that count, so an
+answer resting on the step can say its population lost members.
 
 Three checks run on what a step's own result declares, in `structured_content`
 rather than the digest prose, which the executor never reads for anything
@@ -1859,7 +1859,19 @@ class _Run:
                 self.columns.get(binding.from_step) if binding is not None else None
             )
             return
-        compiled = {*step.expected_role_keys, *(entity.role for entity in source.entities)}
+        base_columns = {
+            *step.expected_role_keys,
+            *(entity.role for entity in source.entities),
+            *(axis.column for axis in source.open_entity_axes or ()),
+        }
+        compiled = {
+            *base_columns,
+            *(
+                f"{column}{suffix}"
+                for column in base_columns
+                for suffix in ("_type", "_party_kind")
+            ),
+        }
         try:
             self.columns[step.id] = retrieved_frame_columns(
                 result.structured_content or {}, compiled=compiled

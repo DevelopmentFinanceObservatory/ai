@@ -403,7 +403,7 @@ async def test_a_judge_that_stays_unavailable_marks_the_case_and_the_run_goes_on
 
 
 class _ScriptedStudio:
-    """A client whose turn request pauses on one question and whose resume ends the turn."""
+    """A client whose turn request pauses on two questions and whose resume ends the turn."""
 
     def __init__(self) -> None:
         self.frames = {
@@ -411,17 +411,36 @@ class _ScriptedStudio:
                 {
                     "event": "elicitation.request",
                     "interrupt_id": "int_1",
-                    "question": "How should aid and debt be combined?",
-                    "options": [
-                        {"id": "opt_net", "label": "Net ODA plus total debt", "description": "d"},
-                        {"id": "opt_ppg", "label": "Net ODA plus PPG debt"},
+                    "questions": [
+                        {
+                            "id": "q1",
+                            "question": "How should the aid be counted?",
+                            "options": [
+                                {
+                                    "id": "spec_net",
+                                    "label": "Net disbursements",
+                                    "description": "d",
+                                },
+                                {"id": "spec_gross", "label": "Gross disbursements"},
+                            ],
+                        },
+                        {
+                            "id": "q2",
+                            "question": "Current or constant prices?",
+                            "options": [
+                                {"id": "o1", "label": "Constant 2023 US dollars"},
+                                {"id": "o2", "label": "Current US dollars"},
+                            ],
+                        },
                     ],
                 }
             ],
             "/api/studio/interrupt": [{"event": "done"}],
         }
+        self.sent: list[dict[str, Any]] = []
 
     def stream(self, method: str, path: str, **request: Any) -> Any:
+        self.sent.append(request["json"])
         lines = [f"data: {json.dumps(frame)}" for frame in self.frames[path]]
 
         class Response:
@@ -439,28 +458,55 @@ class _ScriptedStudio:
 
 
 @pytest.mark.parametrize(
-    ("turn_answer", "shown"),
+    ("scripted", "sent", "shown"),
     [
-        ({}, "Net ODA plus total debt"),
-        ({"elicitation_text": "Keep them separate"}, "Keep them separate"),
+        (
+            [],
+            {
+                "q1": {"kind": "option", "option_id": "spec_net"},
+                "q2": {"kind": "option", "option_id": "o1"},
+            },
+            ["Net disbursements", "Constant 2023 US dollars"],
+        ),
+        (
+            [{"option": 2}, {"skipped": True}],
+            {"q1": {"kind": "option", "option_id": "spec_gross"}, "q2": {"kind": "skipped"}},
+            ["Gross disbursements", "left to the agent"],
+        ),
+        (
+            [{"text": "Count commitments"}],
+            {
+                "q1": {"kind": "text", "text": "Count commitments"},
+                "q2": {"kind": "option", "option_id": "o1"},
+            },
+            ["Count commitments", "Constant 2023 US dollars"],
+        ),
     ],
 )
-async def test_the_judge_digest_carries_the_question_asked_and_the_answer_sent(
-    turn_answer: dict[str, str], shown: str
+async def test_every_question_of_a_pause_is_answered_and_shown_to_the_judge(
+    scripted: list[dict[str, Any]], sent: dict[str, Any], shown: list[str]
 ) -> None:
     run = _load("run")
-    turn = {"message": "Help me combine aid and debt", **turn_answer}
+    studio = _ScriptedStudio()
+    turn = {"message": "How much aid did France give?", "elicitation_answers": scripted}
 
-    frames, _, _, answers = await run._run_message_turn(_ScriptedStudio(), "conv", turn, [])
+    frames, _, missed, answers = await run._run_message_turn(studio, "conv", turn, [])
 
+    assert missed == []
+    assert studio.sent[-1]["answers"] == sent
+    assert "payload" not in studio.sent[-1]
     (asked,) = run._turn_digest(frames, answers)["elicitations"]
-    assert asked["question"] == "How should aid and debt be combined?"
-    assert [o["label"] for o in asked["options"]] == [
-        "Net ODA plus total debt",
-        "Net ODA plus PPG debt",
+    assert [q["question"] for q in asked["questions"]] == [
+        "How should the aid be counted?",
+        "Current or constant prices?",
     ]
-    assert asked["answer"] == shown
-    assert run._turn_digest(frames)["elicitations"][0]["answer"] is None
+    assert [o["label"] for o in asked["questions"][0]["options"]] == [
+        "Net disbursements",
+        "Gross disbursements",
+    ]
+    assert [q["answer"] for q in asked["questions"]] == shown
+    unanswered = run._turn_digest(frames)["elicitations"][0]["questions"]
+    assert [q["answer"] for q in unanswered] == [None, None]
 
 
 def test_the_judge_digest_orders_entries_across_lists() -> None:
@@ -469,7 +515,11 @@ def test_the_judge_digest_orders_entries_across_lists() -> None:
     run = _load("run")
     frames = [
         {"event": "component.created", "type": "line_chart", "fact_summary": {}},
-        {"event": "elicitation.request", "interrupt_id": "int_1", "question": "Combine how?"},
+        {
+            "event": "elicitation.request",
+            "interrupt_id": "int_1",
+            "questions": [{"id": "q1", "question": "Combine how?"}],
+        },
         {"event": "message.complete", "text": "Done."},
     ]
 
@@ -856,7 +906,12 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = _load("run")
-    question = {"event": "elicitation.request", "seq": 0, "interrupt_id": "int_1", "options": []}
+    question = {
+        "event": "elicitation.request",
+        "seq": 0,
+        "interrupt_id": "int_1",
+        "questions": [{"id": "q1", "question": "Which?", "options": []}],
+    }
     calls: list[str] = []
 
     async def fake_stream(client: object, path: str, body: dict) -> list[dict]:
@@ -868,9 +923,61 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
 
     assert calls == ["/api/studio/turn"]  # no resume was sent
     assert missed == [
-        "elicitation.request offered no options and the turn names no "
-        "elicitation_text to answer it with"
+        "elicitation.request question 1 offers 0 option(s) and the turn answers it with "
+        "{'option': 1}"
     ]
+
+
+@pytest.mark.parametrize(
+    ("rules", "violations"),
+    [
+        ({"min_questions": 2, "min_options": 2}, []),
+        ({"min_questions": 3}, ["t: elicitation asks 2 question(s), expected >= 3"]),
+        (
+            {"min_options": 3},
+            ["t: elicitation question 2 has 2 options, expected >= 3"],
+        ),
+        (
+            {"allow_free_text": True},
+            ["t: elicitation question 1 allow_free_text=False, expected True"],
+        ),
+        ({"skippable": True}, ["t: elicitation skippable=False, expected True"]),
+    ],
+)
+def test_an_elicitation_expectation_reads_every_question(
+    rules: dict[str, Any], violations: list[str]
+) -> None:
+    run = _load("run")
+    option = {"id": "o", "label": "x"}
+    pause = {
+        "event": "elicitation.request",
+        "interrupt_id": "int_1",
+        "skippable": False,
+        "questions": [
+            {"id": "q1", "question": "a", "options": [option] * 3, "allow_free_text": False},
+            {"id": "q2", "question": "b", "options": [option] * 2, "allow_free_text": True},
+        ],
+    }
+    turn = {"message": "q", "expect": {"elicitation": rules}}
+
+    assert run._check_turn_expectations(turn, [pause], label="t") == violations
+
+
+def test_a_figure_in_a_later_question_grounds_the_answer() -> None:
+    pause = {
+        "event": "elicitation.request",
+        "questions": [
+            {"id": "q1", "question": "Which count?", "options": [{"id": "o1", "label": "Net"}]},
+            {
+                "id": "q2",
+                "question": "Which prices?",
+                "options": [{"id": "o1", "label": "Constant 2023 US dollars, 12,345 a year"}],
+            },
+        ],
+    }
+
+    assert _ungrounded([pause], "It came to 12,345.") == []
+    assert _ungrounded([pause], "It came to 12,346.") != []
 
 
 def test_message_expectations_match_the_closing_text_case_insensitively() -> None:

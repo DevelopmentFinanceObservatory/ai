@@ -96,6 +96,7 @@ from harness.studio_state import (
     ConversationState,
     StudioStore,
     _PendingInterrupt,
+    _PendingQuestion,
     _wire_id,
 )
 from harness.studio_state import (
@@ -110,6 +111,7 @@ from harness.wire import (
     Done,
     ElicitationInput,
     ElicitationOption,
+    ElicitationQuestion,
     ElicitationRequest,
     ErrorCode,
     ErrorFrame,
@@ -994,6 +996,39 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan.model_validate(fields)
 
 
+def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
+    """The planner's ask as the frame's one question, `q1`. Its
+    `adk_request_input` call args are the question directly: `message`,
+    `candidates`, `options`, `recommended_spec_id` and `rationale`.
+    `options` are fixed choices that are no source, such as whether to add
+    two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
+    only a pick of one, so they take no free text."""
+    candidates = args.get("candidates") or []
+    fixed = args.get("options") or []
+    recommended_spec_id = args.get("recommended_spec_id")
+    options = [
+        ElicitationOption(
+            id=str(candidate.get("spec_id", "")),
+            label=str(candidate.get("label", candidate.get("spec_id", ""))),
+            recommended=bool(recommended_spec_id)
+            and str(candidate.get("spec_id", "")) == recommended_spec_id,
+        )
+        for candidate in candidates
+    ] + [ElicitationOption(id=str(option["id"]), label=str(option["label"])) for option in fixed]
+    return ElicitationQuestion(
+        id="q1",
+        question=str(args.get("message", "Which reading did you mean?")),
+        input=ElicitationInput.SINGLE_SELECT,
+        options=options,
+        allow_free_text=not fixed,
+        rationale=(
+            str(args["rationale"])
+            if args.get("rationale") and any(option.recommended for option in options)
+            else None
+        ),
+    )
+
+
 class _Translator:
     """One turn segment's ADK-event-to-wire-frame translation.
 
@@ -1552,48 +1587,54 @@ class _Translator:
                 step_labels=step_labels,
             )
             return frames
-        # The workflow's own `ask` node raises a `RequestInput` whose
-        # `payload` carries `candidates`. The planner's `adk_request_input`
-        # tool call (`planner.agent`'s `ask_user`) has no `payload` wrapper:
-        # `candidates`, `options`, `recommended_spec_id` and `rationale` are
-        # its own call args directly. Either shape lands here. `options` are
-        # fixed choices that are no source, such as whether to add two
-        # datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
-        # only a pick of one, so they take no free text.
-        candidates = payload.get("candidates") or args.get("candidates") or []
-        fixed = args.get("options") or []
-        recommended_spec_id = args.get("recommended_spec_id")
-        options = [
-            ElicitationOption(
-                id=str(candidate.get("spec_id", "")),
-                label=str(candidate.get("label", candidate.get("spec_id", ""))),
-                recommended=bool(recommended_spec_id)
-                and str(candidate.get("spec_id", "")) == recommended_spec_id,
-            )
-            for candidate in candidates
-        ] + [
-            ElicitationOption(id=str(option["id"]), label=str(option["label"])) for option in fixed
-        ]
-        question = str(args.get("message", "Which reading did you mean?"))
+        # The workflow's own `ask` node raises a `RequestInput` whose `payload`
+        # carries one to three `questions`, each with its `candidates`. A
+        # lone question is dismissed with the whole pause. Each of several
+        # may be left to the agent instead. The planner's `adk_request_input`
+        # call asks one question (`_planner_question`).
+        asked = payload.get("questions")
+        if asked:
+            several = len(asked) > 1
+            questions = [
+                ElicitationQuestion(
+                    id=str(question["id"]),
+                    question=str(question["question"]),
+                    input=ElicitationInput.SINGLE_SELECT,
+                    options=[
+                        ElicitationOption(
+                            id=str(candidate["spec_id"]), label=str(candidate["label"])
+                        )
+                        for candidate in question["candidates"]
+                    ],
+                    allow_free_text=True,
+                    skippable=several,
+                )
+                for question in asked
+            ]
+            skippable = not several
+        else:
+            questions = [_planner_question(args)]
+            skippable = True
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
             interrupt_id=wire_id,
-            question=question,
-            input=ElicitationInput.SINGLE_SELECT,
-            options=options,
-            allow_free_text=not fixed,
-            skippable=True,
-            rationale=(
-                str(args["rationale"])
-                if args.get("rationale") and any(option.recommended for option in options)
-                else None
-            ),
+            questions=questions,
+            skippable=skippable,
         )
         conversation.pending[wire_id] = _PendingInterrupt(
             adk_id=adk_id,
             kind="elicitation",
-            option_ids=frozenset(option.id for option in options),
+            questions=tuple(
+                _PendingQuestion(
+                    id=question.id,
+                    question=question.question,
+                    options={option.id: option.label for option in question.options or ()},
+                    skippable=question.skippable,
+                )
+                for question in questions
+            ),
+            skippable=skippable,
         )
         return [frame]
 

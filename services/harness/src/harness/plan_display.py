@@ -3,10 +3,11 @@
 `step_rows`, `requirement_rows`, `operation_rows` and `ask_rows` are pure
 functions from `planner.plan.Plan` to plain dicts, `shown_decisions` the
 decisions the card and the plan record list, `with_source_names` a
-decision's text with each spec_id in it named in words, and `answer_scopes`
-how many figures each answering requirement's result gives, read off its
-shape. A step
-whose result answers ends its description with that count. This module
+decision's text with each spec_id in it named in words, `shown_plan` the plan
+as the model wrote it with the compiled parts folded to match, and
+`answer_scopes` how many figures each answering requirement's result gives,
+read off its shape. A step whose result answers ends its description with
+that count. This module
 reads `planner.plan`, `planner.operations`, `planner.records`,
 `planner.shapes`, `planner.workflow` and `harness.sentences` only, so it can
 be written and tested before `harness.wire` carries the fields these rows
@@ -39,7 +40,7 @@ from __future__ import annotations
 
 import re
 import typing
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
 from compiler.sources import stat_var_count
@@ -72,12 +73,16 @@ from planner.plan import (
     ShareOfRequirement,
     SumOfRequirement,
     answering_results,
+    authored,
+    authored_text,
+    copy_origins,
     frame_shapes,
     is_search_pin,
 )
 from planner.records import (
     Breakdown,
     EntityIn,
+    EvidenceIssue,
     GroupBy,
     GrowthChange,
     PeriodThreshold,
@@ -89,7 +94,7 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.shapes import FrameShape, RoleDimension, TimeLabel
-from planner.workflow import ReadingSetBy, SelectedSource
+from planner.workflow import ReadingSetBy, SelectedSource, Workflow
 
 from harness.sentences import DECLINE_REASONS
 
@@ -110,9 +115,107 @@ _THRESHOLD_WORDS: dict[str, str] = {
 }
 
 
+def shown_plan(plan: Plan) -> Plan:
+    """`plan` as the model wrote it, its compiled parts folded to match.
+
+    The plan as stored runs a dataset read from its first year beside a copy
+    of each step between it and its rolling-start readers
+    (`Plan.rolling_copies`). The card, the plan record and the planner's
+    digest name the model's steps only. This is `planner.plan.authored`
+    without the copies' operations, workflow steps, evidence bindings and
+    the sources compiled for those bindings, and with a warning that names
+    a copy naming its origin, once.
+
+    The result is a view for reading and is not validated. Shapes, which
+    need the first years, are read off `plan` itself (`answer_scopes`).
+    """
+    origins = copy_origins(plan.rolling_copies)
+    shown = authored(plan)
+    if not origins:
+        return shown
+    update: dict[str, object] = {}
+    copied_operations: set[str] = set()
+    if plan.translation is not None:
+        copied_operations = {
+            operation.id
+            for operation in plan.translation.operations
+            if operation.requirement_id in origins
+        }
+        update["translation"] = plan.translation.model_copy(
+            update={
+                "operations": tuple(
+                    operation
+                    for operation in plan.translation.operations
+                    if operation.id not in copied_operations
+                )
+            }
+        )
+    if plan.workflow is not None:
+        update["workflow"] = _without_copies(plan.workflow, origins, copied_operations)
+    return shown.model_copy(update=update)
+
+
+def _without_copies(
+    workflow: Workflow, origins: Mapping[str, str], copied_operations: Collection[str]
+) -> Workflow:
+    """`workflow` without the steps carrying out `copied_operations` and the evidence bound to a copy.
+
+    A binding's source is the one at its own position in `sources`
+    (`Workflow.source_of`), so a copy's binding takes that source with it.
+
+    A warning names the requirement the model wrote, and its prose names no
+    copy (`planner.plan.authored_text`). Where a copy holds warnings of a
+    code, they stand in for its origin's of that code: the copy reads the
+    origin's stated years over a retrieval from the dataset's first year,
+    and its finding says both (`compiler.evidence._asked_for`).
+    """
+    copied = {
+        index
+        for index, binding in enumerate(workflow.evidence_bindings)
+        if binding.requirement_id in origins
+    }
+    sources = tuple(
+        source
+        for index, source in enumerate(workflow.sources)
+        if not (index in copied and workflow.evidence_bindings[index].spec_id == source.spec_id)
+    )
+    on_copies = {
+        (origins[issue.requirement_id], issue.code)
+        for issue in workflow.warnings
+        if issue.requirement_id in origins
+    }
+    warnings: list[EvidenceIssue] = []
+    for issue in workflow.warnings:
+        if (issue.requirement_id, issue.code) in on_copies:
+            continue
+        named = issue.model_copy(
+            update={
+                "requirement_id": origins.get(issue.requirement_id, issue.requirement_id),
+                "detail": authored_text(issue.detail, origins),
+            }
+        )
+        if named not in warnings:
+            warnings.append(named)
+    return workflow.model_copy(
+        update={
+            "steps": tuple(
+                step for step in workflow.steps if step.operation_id not in copied_operations
+            ),
+            "sources": sources,
+            "evidence_bindings": tuple(
+                binding
+                for index, binding in enumerate(workflow.evidence_bindings)
+                if index not in copied
+            ),
+            "warnings": tuple(warnings),
+        }
+    )
+
+
 def step_rows(plan: Plan) -> list[dict[str, object]]:
     """One row per compiled workflow step, in the order the workflow runs them.
 
+    A step carrying out a copy the split added (`shown_plan`) has no row.
     Each row is the step's `id`, a composed `label` and `description`
     (`_label` and `_sentence`, read off the requirement the step's
     operation carries out), and `args`, the step's own literal arguments,
@@ -125,19 +228,22 @@ def step_rows(plan: Plan) -> list[dict[str, object]]:
     """
     assert plan.translation is not None, "step_rows needs a plan carrying a translation"
     assert plan.workflow is not None, "step_rows needs a plan carrying a workflow"
-    operations_by_id = {operation.id: operation for operation in plan.translation.operations}
     scopes = answer_scopes(plan)
+    shown = shown_plan(plan)
+    assert shown.translation is not None
+    assert shown.workflow is not None
+    operations_by_id = {operation.id: operation for operation in shown.translation.operations}
     rows: list[dict[str, object]] = []
-    for step in plan.workflow.steps:
+    for step in shown.workflow.steps:
         operation = operations_by_id[step.operation_id]
-        requirement = plan.requirement(operation.requirement_id)
-        description = _sentence(requirement, plan)
+        requirement = shown.requirement(operation.requirement_id)
+        description = _sentence(requirement, shown)
         if requirement.id in scopes:
             description = f"{description} Result: {scopes[requirement.id]}."
         rows.append(
             {
                 "id": step.id,
-                "label": _label(requirement, plan),
+                "label": _label(requirement, shown),
                 "description": description,
                 "args": dict(step.args),
             }
@@ -183,15 +289,16 @@ def requirement_rows(plan: Plan) -> list[dict[str, object]]:
 
     A requirement's decisions are those `shown_decisions` lists.
     """
-    shown = {decision.slot for decision in shown_decisions(plan)}
+    slots = {decision.slot for decision in shown_decisions(plan)}
+    shown = shown_plan(plan)
     return [
         {
             "id": requirement.id,
             "kind": requirement.kind,
-            "decision_ids": [slot for slot in requirement.decision_ids if slot in shown],
-            "sentence": _sentence(requirement, plan),
+            "decision_ids": [slot for slot in requirement.decision_ids if slot in slots],
+            "sentence": _sentence(requirement, shown),
         }
-        for requirement in plan.evidence_requirements
+        for requirement in shown.evidence_requirements
     ]
 
 
@@ -206,15 +313,17 @@ def operation_rows(plan: Plan) -> list[dict[str, object]]:
     Requires a plan carrying a `translation`.
     """
     assert plan.translation is not None, "operation_rows needs a plan carrying a translation"
+    shown = shown_plan(plan)
+    assert shown.translation is not None
     rows: list[dict[str, object]] = []
-    for operation in plan.translation.operations:
-        requirement = plan.requirement(operation.requirement_id)
+    for operation in shown.translation.operations:
+        requirement = shown.requirement(operation.requirement_id)
         rows.append(
             {
                 "id": operation.id,
                 "kind": operation.kind,
                 "requirement_id": operation.requirement_id,
-                "sentence": _sentence(requirement, plan),
+                "sentence": _sentence(requirement, shown),
             }
         )
     return rows
@@ -260,7 +369,7 @@ def answer_scopes(plan: Plan) -> dict[str, str]:
     Those are the requirements `planner.plan.answering_results` names, the
     set the result-scope rule checks.
     """
-    shapes = frame_shapes(plan.evidence_requirements)
+    shapes = frame_shapes(plan)
     return {output: _scope_phrase(shapes[output], plan) for output in answering_results(plan)}
 
 
@@ -365,7 +474,8 @@ def _predicate_phrase(predicate: Predicate) -> str:
     if isinstance(predicate, ValueThreshold):
         return f"the value is {_THRESHOLD_WORDS[predicate.op]} {predicate.value}"
     if isinstance(predicate, PlaceLevel):
-        return f"the place is a {level_noun(predicate.level)}"
+        subject = predicate.role or "place"
+        return f"the {subject} is a {level_noun(predicate.level)}"
     raise AssertionError(f"unhandled predicate kind: {predicate!r}")
 
 
@@ -811,8 +921,14 @@ def _sentence_rank(requirement: RankRequirement, plan: Plan) -> str:
             else None
         ),
     )
-    per_period_text = per_period_phrase(
-        requirement.per_period, limited=requirement.limit is not None
+    # A one-year window holds one row per entity, so it has nothing to collapse.
+    one_year = requirement.window_start is not None and (
+        requirement.window_start == requirement.window_end
+    )
+    per_period_text = (
+        f"ranks {requirement.window_start}{_following(requirement.rolling)}"
+        if one_year and not requirement.per_period
+        else per_period_phrase(requirement.per_period, limited=requirement.limit is not None)
     )
     sentence = f"Ranks by {_ranked_value(requirement, plan)}: {among_text}; {per_period_text}"
     if requirement.limit is None:

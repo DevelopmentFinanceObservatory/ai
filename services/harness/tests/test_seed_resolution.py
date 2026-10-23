@@ -759,7 +759,7 @@ class _Describes(_Steps):
 
 
 def _ask_user_answer(pause: types.FunctionCall) -> dict[str, Any]:
-    return {"result": {"spec_id": "o1"}}
+    return {"result": {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}}}
 
 
 def _approval(pause: types.FunctionCall) -> dict[str, Any]:
@@ -771,13 +771,21 @@ _PAUSES = {
     "ask_user": (
         lambda: call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         _ask_user_answer,
     ),
     "plan": (
-        lambda: call("plan", brief="rank donors of education aid to Kenya", asks=[]),
+        lambda: call(
+            "plan",
+            brief="rank donors of education aid to Kenya",
+            asks=["rank donors of education aid to Kenya"],
+        ),
         _approval,
     ),
 }
@@ -827,8 +835,12 @@ async def test_a_turn_paused_without_a_seed_node_run_resumes_without_taking_its_
     runner, model = orchestrator_runner(
         call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         types.Part.from_text(text="Here are the donors."),
         executor=steps,

@@ -36,6 +36,7 @@
     "distinction": "growth, not comparison: the absolute change in one series between two years, not a difference between two series"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How many people did Nigeria's population grow by between 2000 and 2023?",
     "answer_mode": "computed",

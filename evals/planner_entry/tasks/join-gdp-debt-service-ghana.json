@@ -44,6 +44,7 @@
     "kind": "comparison",
     "distinction": "join, not comparison: two different measures are set in one table, with no difference asked for"
   },
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Give me one table with Ghana's GDP and its external debt service for each year from 2015 to 2022.",
     "answer_mode": "computed",

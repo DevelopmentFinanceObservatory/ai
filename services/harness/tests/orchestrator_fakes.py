@@ -53,7 +53,7 @@ from harness.tool_contracts import ResolverError, resolver_digest
 from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import create_orchestrator_agent
-from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks
+from planner.plan import AskBreakdown, load_ask_breakdowns, load_asks, load_asks_across_years
 from pydantic import Field
 
 from .data_mcp_definitions import DataMcpDefinitions
@@ -101,6 +101,7 @@ class RefusingPlanner:
         self.readings: list[Any] = []
         self.asks: list[tuple[str, ...]] = []
         self.breakdowns: list[tuple[AskBreakdown, ...]] = []
+        self.across_years: list[tuple[int, ...]] = []
         self.final = final
 
     async def __call__(self, **kwargs: Any) -> dict[str, Any]:
@@ -108,6 +109,7 @@ class RefusingPlanner:
         self.readings.append(kwargs.get("readings"))
         self.asks.append(load_asks(kwargs["ctx"].state))
         self.breakdowns.append(load_ask_breakdowns(kwargs["ctx"].state))
+        self.across_years.append(load_asks_across_years(kwargs["ctx"].state))
         return {"refused": {"text": "the planner ran out of rounds", "final": self.final}}
 
 
@@ -211,8 +213,10 @@ def make_charts_call(*charts: Mapping[str, Any]) -> types.Part:
 
 
 def plan_call(brief: str, *asks: str) -> types.Part:
-    """A `plan` call handing `brief` and its `asks` to the planner."""
-    return call("plan", brief=brief, asks=list(asks))
+    """A `plan` call handing `brief` and its `asks` to the planner. Given no
+    asks, it lists `brief` as the one output asked for, since the `plan` tool
+    refuses a call that lists none."""
+    return call("plan", brief=brief, asks=list(asks or (brief,)))
 
 
 def approve_answer(revision: object, *, at: datetime | None = None) -> dict[str, Any]:

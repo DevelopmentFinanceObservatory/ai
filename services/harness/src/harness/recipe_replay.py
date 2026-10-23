@@ -838,8 +838,8 @@ async def replay_recipe(
         call_tool: Calls an analysis-mcp tool by name: the eight verbs and
             `resolve_anchor`.
         store: The process's materialisation store, `common.materialisation.get_store()`.
-        apis: The apis client. `list_versions`, `find_replay` and
-            `read_recipe` are called, all under the datasets principal.
+        apis: The apis client. `find_replay` and `read_recipe` are called under
+            the datasets principal, and `list_versions`, which needs none.
         publish: Publishes the final frame with its recipe.
         row_budget: The rows replays may hold at once. Each verb call claims its
             inputs' rows, `resolve_anchor` the roots', and the publish the final

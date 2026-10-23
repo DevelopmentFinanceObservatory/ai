@@ -66,6 +66,7 @@ def create_planner_with_translator(
     agent_settings: AgentSettings | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
+    reads_user_words: bool = True,
     prefix_cache: PrefixCache | None = None,
     translate: Translate | None = None,
 ) -> LlmAgent:
@@ -87,6 +88,10 @@ def create_planner_with_translator(
             own planner through `create_planner_agent` directly, not through this
             function, so the default here only has to keep this function's
             other callers byte-identical.
+        reads_user_words: Passed straight through to
+            `create_planner_agent`. `harness.planner_seam.PlannerSeam` builds
+            its planner with this unset, since the orchestrator reads the
+            user's words there.
         prefix_cache: Passed straight through to `create_planner_agent`.
         translate: The translation `propose_plan` runs on each plan it
             records. Defaults to `translator.tool.build_translate` over
@@ -103,5 +108,6 @@ def create_planner_with_translator(
         translate=translate if translate is not None else build_translate(surface=resolved_surface),
         surface=resolved_surface,
         question_fixed=question_fixed,
+        reads_user_words=reads_user_words,
         prefix_cache=prefix_cache,
     )

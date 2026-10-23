@@ -27,6 +27,7 @@
     "aggregate"
   ],
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Total gross ODA disbursements for malaria control from all providers to all recipients from 2000 to 2024 in current US dollars.",
     "answer_mode": "computed",
