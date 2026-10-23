@@ -95,6 +95,7 @@ GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
 FRANCE = ResolvedEntity(role="origin", ref="country/FRA", label="France")
 KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
 UGANDA = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
+UNITED_STATES = ResolvedEntity(role="origin", ref="country/USA", label="United States")
 
 PROVIDER = "financingProvider"
 RECIPIENT = "financingRecipient"
@@ -1360,6 +1361,88 @@ async def test_a_sum_of_two_sources_pins_each_sides_unit_and_yields_one_series(
         "left_unit": "usd",
         "right_unit": "usd",
     }
+
+
+async def test_a_share_of_two_one_figure_totals_is_one_row(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # "What share of the ODA Kenya received came from Germany and France
+    # together?": each side totals every row it reads, donors and years
+    # alike, and the share divides one figure by the other.
+    named = _source()
+    every_donor = _source(
+        spec_id=SPEC_CRS_HEALTH,
+        entities=(KENYA,),
+        open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
+    )
+    every_donor_requirement = DatasetRequirement(
+        id="oda_health",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[Entity(name="Kenya", role="recipient")],
+        across=("donor",),
+        period=Period(start=2000, end=2023),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="named_total"),
+        denominator=RequirementSide(input_id="every_total"),
+    )
+    totals = [
+        AggregateRequirement(
+            id=total, decision_ids=["measure"], input_id=read, reduction=Reduction.SUM, group_by=()
+        )
+        for total, read in (("named_total", "oda"), ("every_total", "oda_health"))
+    ]
+    plan = plan_for(
+        [_requirement(), every_donor_requirement, *totals, share],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            *(
+                AggregateOperation(
+                    id=f"{total}_op",
+                    requirement_id=total,
+                    input=read,
+                    reduction=Reduction.SUM,
+                    group_by=(),
+                )
+                for total, read in (("named_total", "crs"), ("every_total", "crs_health"))
+            ),
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input="named_total_op"),
+                denominator=Side(input="every_total_op"),
+            ),
+        ],
+        terminal="share_op",
+        discovered={"oda": named, "oda_health": every_donor},
+    )
+    results = {
+        SPEC_CRS: await retrieved(named, frame=_family_frame(kinds=True)),
+        SPEC_CRS_HEALTH: await retrieved(
+            every_donor,
+            providers=(GERMANY, FRANCE, UNITED_STATES),
+            frame=_family_frame(providers=(GERMANY, FRANCE, UNITED_STATES), kinds=True),
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    aggregates = [arguments for name, arguments in surface.calls if name == "aggregate"]
+    assert [call["group_by"] for call in aggregates] == [[], []]
+    assert _analysis_call(surface, "share_of") == {}
+    assert outcome.steps[-1].role_keys == ()
+    # Every donor gives alike each year, so two of the three hold two thirds.
+    held, _trace = await frame_store.get(outcome.results["share_op"])
+    assert held.table.column("value").to_pylist() == [pytest.approx(200 / 3)]
 
 
 async def test_a_join_keys_both_frames_by_their_shared_role_columns(

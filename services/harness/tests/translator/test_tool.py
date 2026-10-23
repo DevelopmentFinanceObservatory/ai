@@ -73,6 +73,7 @@ from planner.records import (
     RollingWindow,
     SourceNameCandidate,
 )
+from planner.shapes import pooling_remedy
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
 from translator.discovery import (
@@ -936,6 +937,21 @@ def test_a_quotients_key_repair_names_both_of_its_axes(code: CompileIssueCode) -
     assert "`denominator_axis`" in repair
 
 
+@pytest.mark.parametrize(
+    ("code", "one_figure"),
+    [(CompileIssueCode.SHARE_AXIS_REQUIRED, True), (CompileIssueCode.ENTITY_REQUIRED, False)],
+)
+def test_a_side_pooling_members_is_repaired_as_its_reader_takes_them(
+    code: CompileIssueCode, one_figure: bool
+) -> None:
+    """An un-keyed share pools each side per year or into one figure. A whole
+    side of any other calculation pools per year: the repair cannot see the
+    calculation, so it leaves one figure to the issue's reason."""
+    repair = permitted_repair(code)
+
+    assert repair.endswith(pooling_remedy(one_figure=one_figure, each_side=True))
+
+
 @pytest.mark.parametrize("code", list(CompileIssueCode))
 def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
     code: CompileIssueCode,
@@ -1064,8 +1080,9 @@ _GROUP_CLOSED = {"destination": {"label": "Africa", "ref": "africa"}}
         (_GROUP_CLOSED, (GroupBy.PERIOD,), True),
         ({}, (GroupBy.PERIOD,), False),
         (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False),
+        (_GROUP_CLOSED, (), True),
     ],
-    ids=["group-closed", "member-closed", "summed-per-entity"],
+    ids=["group-closed", "member-closed", "summed-per-entity", "summed-to-one-figure"],
 )
 async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin(
     real_schemas: list[ToolSchema],

@@ -182,6 +182,7 @@ from translator.tool import Translate, build_translate
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
+from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
 
@@ -285,23 +286,9 @@ def _answer_event(spec_id: str, *, call_id: str = "call-1") -> Any:
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
 
-def _response_event(name: str, response: dict[str, Any]) -> Any:
-    """A fake session event for the `FunctionResponse` a tool `name` answered with.
-
-    The shape `planner.agent._answered_since_referral` reads: the planner's own
-    tool responses (`propose_plan`, whose `translation` carries a referral) and the user's answers
-    (`adk_request_input`) are all `FunctionResponse` parts on session events.
-    """
-    part = SimpleNamespace(
-        function_call=None,
-        function_response=SimpleNamespace(id=f"{name}-1", name=name, response=response),
-    )
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
-
-
 def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
     """The `propose_plan` event carrying the answer whose translation hands the plan back."""
-    return _response_event(
+    return response_event(
         "propose_plan",
         {
             "outcome": Outcome.OK.value,
@@ -1833,7 +1820,7 @@ def _combination_asked(
         []
         if about is None
         else [
-            _response_event(
+            response_event(
                 "propose_plan",
                 {
                     "outcome": Outcome.REFUSED.value,
@@ -2877,7 +2864,7 @@ def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
     )
     ctx.session.events.extend(_ask_answered_events())
     ctx.session.events.append(
-        _response_event("propose_plan", {"outcome": "invalid_input", "code": "invalid_plan"})
+        response_event("propose_plan", {"outcome": "invalid_input", "code": "invalid_plan"})
     )
 
     amended = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
@@ -2893,7 +2880,7 @@ def test_a_second_referral_after_a_recorded_proposal_needs_its_own_answer(
     )
     ctx.session.events.extend(_ask_answered_events())
     settled = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
-    ctx.session.events.append(_response_event("propose_plan", settled))
+    ctx.session.events.append(response_event("propose_plan", settled))
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, requirement_id)
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered again."), ())
@@ -4809,7 +4796,7 @@ def _period_moved(
 
 def _recorded(ctx: _FakeToolContext, answer: dict[str, object]) -> None:
     """Append the response that recorded a plan, as the session holds it."""
-    ctx.session.events = [*ctx.session.events, _response_event("propose_plan", answer)]
+    ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
 
 
 @pytest.mark.parametrize(
@@ -4931,6 +4918,56 @@ def _typed(text: str, *, branch: str | None = None) -> Event:
     )
 
 
+def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose one total over every row of the year read. The decision
+    records the empty group, so a patch grouping the total by entity
+    contradicts it while the user has said nothing since."""
+    dataset, derived = requirements
+    one_year = dataset.model_copy(update={"period": Period(start=2024, end=2024)})
+    one_figure = derived.model_copy(
+        update={"decision_ids": ("measure", "grouping"), "group_by": ()}
+    )
+    grouping = {
+        "slot": "grouping",
+        "description": "Whether the total is one figure or one per year.",
+        "options": ["one figure", "one per year"],
+        "chosen": "one figure",
+        "resolved_by": "user",
+        "rationale": "The user asked for one figure.",
+        "fixes": ["group_by"],
+    }
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[*drafts([decision()]), grouping],
+        evidence_requirements=[one_year, one_figure],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    (made,) = [d for d in recorded.decisions if d.slot == "grouping"]
+    assert made.fixes == DecisionFixes(group_by=())
+    _recorded(ctx, first)
+
+    regrouped = tools["propose_plan"].func(
+        evidence_requirements=[one_figure.model_copy(update={"group_by": (GroupBy.ENTITY,)})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert regrouped["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, regrouped
+    assert {key: regrouped["detail"][key] for key in ("field", "decided", "stated")} == {
+        "field": "group_by",
+        "decided": [],
+        "stated": ["entity"],
+    }
+
+
 @pytest.mark.parametrize(
     ("recorded", "after", "lands"),
     [
@@ -4940,7 +4977,7 @@ def _typed(text: str, *, branch: str | None = None) -> Event:
             True,
             lambda version: [
                 *_amendment_events("cover 2010 to 2024"),
-                _response_event("propose_plan", {"outcome": "ok", "version": version}),
+                response_event("propose_plan", {"outcome": "ok", "version": version}),
             ],
             True,
         ),

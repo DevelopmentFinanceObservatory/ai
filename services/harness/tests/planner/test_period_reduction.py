@@ -15,6 +15,7 @@ states no other reduction (`planner.plan.period_licences_held`).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -284,7 +285,7 @@ def _refused(result: dict[str, Any], *gaps: dict[str, Any]) -> None:
     assert result["outcome"] == Outcome.INVALID_INPUT.value, result
     assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
     found = [
-        {key: value for key, value in gap.items() if key != "one_year"}
+        {key: value for key, value in gap.items() if key not in ("keep_years", "one_year")}
         for gap in result["detail"]["gaps"]
     ]
     assert found == list(gaps)
@@ -301,11 +302,28 @@ _STEPS = {
 }
 
 
-@pytest.mark.parametrize("step", sorted(_STEPS))
+# Each step reducing the years, with the decisions it cites: `_STEPS`'
+# two kinds, and an aggregate grouped by nothing, which reduces every
+# donor and year to one figure.
+_REDUCING = {
+    **{step: (build, cited) for step, (build, cited, _, _) in _STEPS.items()},
+    "one_figure": (partial(_total, group_by=()), []),
+}
+
+
+# The change keeping the years each of `_REDUCING`'s steps is offered.
+_KEEPS_YEARS = {
+    "aggregate": {"group_by": ["entity", "period"]},
+    "one_figure": {"group_by": ["period"]},
+    "rank": {"per_period": True},
+}
+
+
+@pytest.mark.parametrize("step", sorted(_REDUCING))
 def test_one_figure_over_years_answers_an_ask_across_years(
     decision: Callable[..., Decision], step: str
 ) -> None:
-    build, cited, _, _ = _STEPS[step]
+    build, cited = _REDUCING[step]
     requirements = [_aid(), build()]
 
     unmarked = _context()
@@ -314,11 +332,40 @@ def test_one_figure_over_years_answers_an_ask_across_years(
     admitted = _propose(marked, requirements, [decision(), *cited])
 
     _refused(refused, _gap(years=EVERY_YEAR))
+    assert refused["detail"]["gaps"][0]["keep_years"] == _KEEPS_YEARS[step]
     assert "1990-2024" in refused["message"]
     assert load_plan(unmarked.state) is None
     assert admitted["outcome"] == Outcome.OK.value, admitted
     recorded = load_plan(marked.state)
     assert recorded is not None and recorded.asks_across_years == (0,)
+
+
+@pytest.mark.parametrize(
+    ("step", "cited"),
+    [
+        pytest.param(
+            _total(group_by=(), decision_ids=("one_total",)),
+            [ONE_TOTAL.model_copy(update={"fixes": DecisionFixes(group_by=())})],
+            id="a-total-whose-group-a-decision-fixes",
+        ),
+        pytest.param(
+            _ranked(decision_ids=("population", "one_ranking")),
+            [POPULATION, ONE_RANKING],
+            id="a-rank-a-decision-fixes-per-period-false",
+        ),
+    ],
+)
+def test_a_refusal_offers_no_keeping_of_the_years_a_cited_decision_forbids(
+    decision: Callable[..., Decision], step: EvidenceRequirement, cited: list[Decision]
+) -> None:
+    """Keeping the years changes the field the decision fixes, so the plan it
+    gives is refused and the refusal offers only the one year."""
+    refused = _propose(_context(), [_aid(), step], [decision(), *cited])
+
+    _refused(refused, _gap(years=EVERY_YEAR))
+    (gap,) = refused["detail"]["gaps"]
+    assert gap["keep_years"] is None
+    assert gap["one_year"] is not None
 
 
 def _declined(ask: int) -> Decline:
@@ -363,9 +410,9 @@ def test_a_first_draft_declines_no_ask_a_reduction_refusal_named(
         assert result["detail"]["asks"] == [0]
 
 
-@pytest.mark.parametrize("step", sorted(_STEPS))
+@pytest.mark.parametrize("step", sorted(_REDUCING))
 def test_a_plan_with_no_asks_reduces_no_years(decision: Callable[..., Decision], step: str) -> None:
-    build, cited, _, _ = _STEPS[step]
+    build, cited = _REDUCING[step]
 
     result = _propose(_context(asks=()), [_aid(), build()], [decision(), *cited], answered=())
 
@@ -1491,7 +1538,7 @@ def test_a_result_no_ask_asks_for_is_listed_or_removed_and_the_asked_total_kept(
 
     _refused(refused, _gap(output="top", asks=(), years=EVERY_YEAR))
     assert "list 'top' in `answered` under an ask marked (across years)" in refused["message"]
-    assert "add `period`" not in refused["message"]
+    assert refused["detail"]["gaps"][0]["keep_years"] is None
     assert listed["outcome"] == Outcome.OK.value, listed
 
 
@@ -1501,6 +1548,7 @@ _SECTORS = Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
 @pytest.mark.parametrize(
     ("group_by", "kept"),
     [
+        pytest.param((), (GroupBy.PERIOD,), id="nothing"),
         pytest.param((GroupBy.ENTITY,), (GroupBy.ENTITY, GroupBy.PERIOD), id="entity"),
         pytest.param((GroupBy.BREAKDOWN,), (GroupBy.BREAKDOWN, GroupBy.PERIOD), id="breakdown"),
         pytest.param(
@@ -1514,14 +1562,13 @@ def test_the_aggregate_keeping_the_years_the_refusal_names_is_admitted(
     decision: Callable[..., Decision], group_by: tuple[GroupBy, ...], kept: tuple[GroupBy, ...]
 ) -> None:
     by_sector = _aid().model_copy(update={"breakdown": _SECTORS})
-    words = " and ".join(f"`{column.value}`" for column in kept)
 
     refused = _propose(_context(), [by_sector, _total(group_by=group_by)], [decision()])
     admitted = _propose(_context(), [by_sector, _total(group_by=kept)], [decision()])
 
     assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
-    named = "add `period` to the `group_by` of 'result'" if len(group_by) == 1 else f"by {words}"
-    assert named in refused["message"]
+    (gap,) = refused["detail"]["gaps"]
+    assert gap["keep_years"] == {"group_by": [column.value for column in kept]}
     assert admitted["outcome"] == Outcome.OK.value, admitted
 
 
@@ -2360,6 +2407,20 @@ _ONE_YEAR_OFFERS = [
         id="a-rank-of-years-before-the-newest",
     ),
     _offered([_aid(), _total()], [], OneYear.FILTER, None, id="a-total-of-fixed-years"),
+    _offered(
+        [_aid(), _total(group_by=())],
+        [],
+        OneYear.FILTER,
+        None,
+        id="one-figure-of-fixed-years",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _total(group_by=())],
+        [],
+        OneYear.FILTER,
+        0,
+        id="one-figure-of-an-open-end",
+    ),
     _offered(
         [_unpinned_open(), _total()],
         [],

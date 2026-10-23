@@ -471,9 +471,11 @@ class DecisionFixes(StrictModel):
     )
     group_by: tuple[GroupBy, ...] | None = Field(
         default=None,
-        min_length=1,
         max_length=MAX_GROUP_BY,
-        description="The group_by columns this decision fixes, when it fixes them.",
+        description=(
+            "The group_by columns this decision fixes, when it fixes them; empty for one "
+            "figure over every row."
+        ),
     )
     window_start: Year | None = Field(
         default=None, description="The window's start year this decision fixes, when it fixes one."
@@ -960,13 +962,13 @@ class AggregateRequirement(TaggedModel):
         description="How to collapse each group's rows into one figure: sum, mean, max or min."
     )
     group_by: tuple[GroupBy, ...] = Field(
-        min_length=1,
         max_length=MAX_GROUP_BY,
         description=(
             "Which columns to group by before reducing: period, entity (the roles of the "
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
-            "the years reduce to one figure per group."
+            "the years reduce to one figure per group. Empty reduces every row to one figure, "
+            "over every year, party and code."
         ),
     )
 
@@ -3093,10 +3095,16 @@ def _check_population_claims_are_cited(
             )
 
 
+# The fields whose empty value is a value stated: an empty `group_by` is one
+# figure over every row. Every other empty tuple states nothing, as `entities`
+# and `across` leave it.
+_EMPTY_STATED = frozenset({"group_by"})
+
+
 def _stated(requirement: EvidenceRequirement, field: str) -> Any:
-    """The value `requirement` states for `field`, a field its kind declares; `None` when empty."""
+    """The value `requirement` states for `field`, a field its kind declares, or `None`."""
     value = getattr(requirement, field)
-    return None if value == () else value
+    return None if value == () and field not in _EMPTY_STATED else value
 
 
 def _same(first: Any, second: Any) -> bool:
@@ -4297,15 +4305,39 @@ def _one_year_admits(plan: Plan, reads: Mapping[str, OneYearRead]) -> bool:
     dataset whose first year `plan` does not hold cannot be read so, and
     the change fails there.
     """
-    written = authored(plan)
-    followed = list(written.evidence_requirements)
+    followed = list(authored(plan).evidence_requirements)
     for step_id, read in reads.items():
         followed = one_year_followed(followed, step_id, read)
+    return _admits(plan, followed)
+
+
+def keep_years_admits(plan: Plan, step_id: str, change: Mapping[str, object]) -> bool:
+    """Whether `plan` passes once the step `step_id` takes the fields `change` states.
+
+    `change` is how a `period_reduction_unstated` refusal has the step keep
+    its years (`submission.service._keep_years`): a `group_by` keeping
+    `period`, or `per_period` true. It is made and checked as
+    `_one_year_admits` makes and checks a one-year change, so a decision
+    the step cites that fixes the field otherwise refuses it. A step the
+    model did not write is no change it can make.
+    """
+    written = authored(plan).evidence_requirements
+    if all(step.id != step_id for step in written):
+        return False
+    followed = [
+        type(step).model_validate({**step.model_dump(), **change}) if step.id == step_id else step
+        for step in written
+    ]
+    return _admits(plan, followed)
+
+
+def _admits(plan: Plan, requirements: Sequence[EvidenceRequirement]) -> bool:
+    """Whether the plan `plan`'s author wrote validates with `requirements`, under `plan`'s `first_years`."""
     try:
         Plan.model_validate(
             {
-                **written.model_dump(),
-                "evidence_requirements": followed,
+                **authored(plan).model_dump(),
+                "evidence_requirements": requirements,
                 "first_years": plan.first_years,
                 "translation": None,
                 "workflow": None,

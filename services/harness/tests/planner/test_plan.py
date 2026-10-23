@@ -1069,14 +1069,19 @@ def test_settling_a_draft_reads_a_named_field_off_the_requirements_citing_it(
     assert (settled.fixes.period if settled.fixes else None) == fixed
 
 
+@pytest.mark.parametrize("group_by", [(GroupBy.ENTITY,), ()], ids=["by-entity", "one-figure"])
 @pytest.mark.parametrize("multilateral_start", [2010, 2011])
 def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_first(
-    decision: DecisionFactory, requirement: RequirementFactory, multilateral_start: int
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    multilateral_start: int,
+    group_by: tuple[GroupBy, ...],
 ) -> None:
     # Both sides over the question's own period, added year by year, then
-    # the sum's one series totalled by an aggregate grouped by entity. The
-    # sum_of keeps the years both report, so the plan holds whatever year
-    # one source lacks without moving either period.
+    # the sum's one series totalled by an aggregate grouped by entity or by
+    # nothing, alike over one series. The sum_of keeps the years both
+    # report, so the plan holds whatever year one source lacks without
+    # moving either period.
     bilateral = requirement(id="bilateral", period=Period(start=2010, end=2024))
     multilateral = requirement(
         id="multilateral",
@@ -1090,7 +1095,7 @@ def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_first(
         right=RequirementSide(input_id=multilateral.id),
     )
     span = AggregateRequirement(
-        id="span", input_id=total.id, reduction=Reduction.SUM, group_by=(GroupBy.ENTITY,)
+        id="span", input_id=total.id, reduction=Reduction.SUM, group_by=group_by
     )
 
     plan = _plan(
@@ -1103,6 +1108,50 @@ def test_a_total_of_two_sources_over_a_span_sums_the_yearly_series_first(
     assert shape.time is TimeLabel.SPAN
     assert shape.roles == ()
     assert shape.period == Period(start=multilateral_start, end=2024)
+
+
+def test_a_share_of_two_totals_over_every_row_is_one_figure(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # "What share of the ODA Kenya received in 2015-2024 came from the
+    # United States and the United Kingdom together?": each total sums every
+    # donor and year it reads, so the share divides one figure by another
+    # and keys by nothing.
+    kenya = Entity(name="Kenya", role="recipient")
+    named = requirement(
+        id="named",
+        measure="ODA",
+        entities=[
+            Entity(name="United States", role="donor"),
+            Entity(name="United Kingdom", role="donor"),
+            kenya,
+        ],
+    )
+    every = requirement(id="every", measure="ODA", entities=[kenya], across=("donor",))
+    totals = [
+        AggregateRequirement(
+            id=f"{side.id}_total", input_id=side.id, reduction=Reduction.SUM, group_by=()
+        )
+        for side in (named, every)
+    ]
+    share = ShareOfRequirement(
+        id="share",
+        numerator=RequirementSide(input_id="named_total"),
+        denominator=RequirementSide(input_id="every_total"),
+    )
+
+    plan = _plan(
+        decision(),
+        answer_mode=AnswerMode.COMPUTED,
+        evidence_requirements=[named, every, *totals, share],
+    )
+
+    shapes = frame_shapes(plan)
+    for total in totals:
+        shape = shapes[total.id]
+        assert (shape.roles, shape.time, shape.one_row_per_entity) == ((), TimeLabel.SPAN, True)
+        assert shape.period == Period(start=2015, end=2024)
+    assert shapes["share"].roles == ()
 
 
 @pytest.mark.parametrize(
@@ -2594,7 +2643,9 @@ def test_a_place_word_naming_two_dimensions_of_a_side_is_refused(
         (Reduction.SUM, (GroupBy.PERIOD,), True),
         (Reduction.SUM, (GroupBy.ENTITY,), True),
         (Reduction.SUM, (GroupBy.ENTITY, GroupBy.PERIOD), True),
+        (Reduction.SUM, (), True),
         (Reduction.MEAN, (GroupBy.PERIOD,), False),
+        (Reduction.MEAN, (), False),
         (Reduction.MEAN, (GroupBy.ENTITY,), False),
         (Reduction.MAX, (GroupBy.ENTITY,), False),
         (Reduction.MIN, (GroupBy.PERIOD,), False),
@@ -3185,18 +3236,20 @@ _RANK_THE_SOURCE_ONCE = "rank the source once with the limit and per_period=fals
     ("group_by", "refused"),
     [
         ((GroupBy.ENTITY,), True),
+        ((), True),
         ((GroupBy.PERIOD,), False),
         ((GroupBy.ENTITY, GroupBy.PERIOD), False),
     ],
 )
-def test_an_aggregate_over_a_limited_per_period_rank_fails_only_by_entity_alone(
+def test_an_aggregate_over_a_limited_per_period_rank_fails_without_period(
     decision: DecisionFactory,
     requirement: RequirementFactory,
     group_by: tuple[GroupBy, ...],
     refused: bool,
 ) -> None:
     # By entity alone, each debtor's total covers only the years it made the
-    # cut; by period, each year totals the five it kept.
+    # cut, and one figure over every row adds a different five each year; by
+    # period, each year totals the five it kept.
     dataset = requirement()
     rank = _top_five_each_year(dataset.id)
     totals = AggregateRequirement(
