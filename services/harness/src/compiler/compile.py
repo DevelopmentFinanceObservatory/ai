@@ -2655,13 +2655,13 @@ class _Build:
         return None if resolved is None else [role.column for role in resolved.columns]
 
     def _side_identity(self, side: Side) -> tuple[str, SideNames]:
-        """What a side is really of: the retrieval its chain rests on, and the names it keeps per role.
+        """What a side is really of: the retrieval its chain rests on, and the names it keeps per column.
 
         Two sides with the same identity set a series against itself however
         their inputs are named -- `retrieve_a` against `filter(retrieve_a)`.
-        Each role the requirement names entities under starts with those
+        Each column the requirement's entities resolve on starts with their
         names, and every `EntityIn` on the side's single-input chain, then
-        the side's own entity, narrows the roles its names sit under
+        the side's own entity, narrows the columns its names resolve on
         (`_kept_names`). So two filters of one retrieval keeping Kenya and
         Uganda are two series, as are France to Kenya and Germany to Uganda.
         A chain resting on no single retrieval identifies by its input alone.
@@ -2674,22 +2674,26 @@ class _Build:
         )
         requirement = self.requirements.get(requirement_id) if requirement_id else None
         if retrieve_id is None or not isinstance(requirement, DatasetRequirement):
-            return side.input, ((None, (side.entity,)),) if side.entity is not None else ()
-        return retrieve_id, self._kept_names(side, requirement)
+            return side.input, (("", (side.entity,)),) if side.entity is not None else ()
+        return retrieve_id, self._kept_names(side, requirement, self.sources.get(retrieve_id))
 
-    def _kept_names(self, side: Side, requirement: DatasetRequirement) -> SideNames:
-        """The entity names `side` keeps of `requirement`, per role, sorted by role.
+    def _kept_names(
+        self, side: Side, requirement: DatasetRequirement, source: SelectedSource | None
+    ) -> SideNames:
+        """The entity names `side` keeps of `requirement`, per column, sorted by column.
 
         Walks from the side's input back through filters, aggregates,
         growths and ranks to the retrieval. Each `EntityIn`, and the side's
-        own entity last, narrows only the roles its names are stated under
-        (`entities_named`): France as donor narrows the donors and leaves the
-        recipients. A name the requirement does not state narrows nothing;
-        `unknown_entity` reports it.
+        own entity last, narrows only the columns its names resolve on
+        (`_entity_columns`): France as donor narrows the donors and leaves
+        the recipients, and Kenya as `country` narrows the column Ghana as
+        `economy` sits on too. A name the requirement does not state
+        narrows nothing; `unknown_entity` reports it.
         """
-        kept: dict[str | None, set[str]] = {}
+        kept: dict[str, set[str]] = {}
         for entity in requirement.entities:
-            kept.setdefault(entity.role, set()).add(entity.name)
+            for column in _entity_columns(entity, source):
+                kept.setdefault(column, set()).add(entity.name)
         narrowings: list[tuple[Sequence[str], str | None]] = []
         operation = self.operations.get(side.input)
         while isinstance(
@@ -2705,18 +2709,14 @@ class _Build:
         if side.entity is not None:
             narrowings.append(((side.entity,), None))
         for names, role in narrowings:
-            by_role: dict[str | None, set[str]] = {}
+            by_column: dict[str, set[str]] = {}
             for name in names:
                 for entity in entities_named(requirement, name, role):
-                    by_role.setdefault(entity.role, set()).add(name)
-            for entity_role, named in by_role.items():
-                kept[entity_role] &= named
-        return tuple(
-            sorted(
-                ((role, tuple(sorted(names))) for role, names in kept.items()),
-                key=lambda pair: pair[0] or "",
-            )
-        )
+                    for column in _entity_columns(entity, source):
+                        by_column.setdefault(column, set()).add(name)
+            for column, named in by_column.items():
+                kept[column] &= named
+        return tuple(sorted((column, tuple(sorted(names))) for column, names in kept.items()))
 
     def _topological_order(self) -> list[str]:
         """Order operations so every input precedes its reader, reporting any cycle once.
@@ -2786,9 +2786,20 @@ def _part_words(part: JsonValue | _StatVarPart) -> str:
     return f"unit {part!r}"
 
 
-# The entity names a two-sided step's side keeps, per role the requirement
-# names entities under, sorted by role (`_Build._kept_names`).
-type SideNames = tuple[tuple[str | None, tuple[str, ...]], ...]
+# The entity names a two-sided step's side keeps, per column the
+# requirement's entities resolve on, sorted by column (`_Build._kept_names`).
+type SideNames = tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _entity_columns(entity: Entity, source: SelectedSource | None) -> tuple[str, ...]:
+    """The columns `entity` resolves on in `source`, as `compiler.shapes` reads a requirement's columns.
+
+    A name resolving on nothing, or a source not yet selected, keeps its
+    role phrase, so it narrows only names stated under that phrase; the
+    compile reports it apart (`entity_unresolved`, `source_unusable`).
+    """
+    columns = sorted({member.role for member in named_members(entity, source)}) if source else []
+    return tuple(columns) or (f"role:{entity.role or ''}",)
 
 
 def _keyed_axes(

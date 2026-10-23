@@ -2873,6 +2873,10 @@ _FLOWS = (
     Entity(name="Kenya", role="recipient"),
     Entity(name="Uganda", role="recipient"),
 )
+# Two places stated under different place words, or one under none: the
+# source resolves both on `observationAbout`, one column.
+_PLACES_BY_WORD = (Entity(name="Kenya", role="country"), Entity(name="Ghana", role="economy"))
+_PLACES_ROLE_AND_NONE = (Entity(name="Kenya"), Entity(name="Ghana", role="country"))
 _FLOW_SOURCE = (
     ResolvedEntity(role="origin", ref="country/FRA", label="France"),
     ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
@@ -2881,7 +2885,7 @@ _FLOW_SOURCE = (
 )
 
 
-def _keeps(*names: str, role: str) -> EntityIn:
+def _keeps(*names: str, role: str | None) -> EntityIn:
     return EntityIn(names=names, role=role)
 
 
@@ -2908,6 +2912,20 @@ def _keeps(*names: str, role: str) -> EntityIn:
             ((_keeps("Ghana", "Kenya", role="debtor"),), None),
             True,
             id="both-in-either-order",
+        ),
+        pytest.param(
+            _PLACES_BY_WORD,
+            ((_keeps("Kenya", role=None),), None),
+            ((_keeps("Ghana", role=None),), None),
+            False,
+            id="kenya-as-country-against-ghana-as-economy",
+        ),
+        pytest.param(
+            _PLACES_ROLE_AND_NONE,
+            ((_keeps("Kenya", role=None),), None),
+            ((_keeps("Ghana", role=None),), None),
+            False,
+            id="kenya-with-no-role-against-ghana-as-country",
         ),
         pytest.param(
             _FLOWS,
@@ -2975,7 +2993,9 @@ def test_two_filters_of_one_retrieval_are_degenerate_only_when_they_keep_the_sam
         _FLOW_SOURCE
         if entities[0].role == "donor"
         else tuple(
-            ResolvedEntity(role="debtor", ref=f"country/{one.name[:3].upper()}", label=one.name)
+            ResolvedEntity(
+                role="observationAbout", ref=f"country/{one.name[:3].upper()}", label=one.name
+            )
             for one in entities
         )
     )
