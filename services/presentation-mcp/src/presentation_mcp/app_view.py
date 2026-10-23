@@ -36,8 +36,9 @@ the CSS itself stays out of it), and the series colours are hex values in the
 chart and legend props.
 
 Each catalogue member maps to one Prefab component: line_chart to
-`LineChart` without dots, bar_chart to `BarChart`, table to `DataTable`,
-stat_card to a headline amount with its unit in a lighter weight,
+`LineChart` without Prefab dots (a value with no value on either side shows
+as a round-capped dot from the theme CSS), bar_chart to `BarChart`, table to
+`DataTable`, stat_card to a headline amount with its unit in a lighter weight,
 note_narration and source_card to text. Chart ticks use Prefab's `compact`
 format. A period-axis chart draws its own legend above the plot, a swatch
 and label per series, as the website does. An entity-axis bar chart has
