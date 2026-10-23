@@ -58,8 +58,9 @@ from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
     TYPED_ROLES,
-    enrichment_columns,
     enrichment_role,
+    kind_column,
+    type_column,
 )
 from common.row_budget import row_budget
 from compiler.sources import (
@@ -470,12 +471,13 @@ def _covering_selects(
 
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Each `dimension` member's kind or type cell among `rows`; empty when
-    the rows carry neither of its enrichment columns."""
+    """Each `dimension` member's kind or type cell among `rows`, the kind where
+    both are held; empty when the rows carry neither column. A party's class
+    and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
         for row in rows
-        for column in enrichment_columns(dimension)
+        for column in (type_column(dimension), kind_column(dimension))
         if row.get(column) is not None and row.get(dimension) is not None
     }
 
@@ -674,8 +676,8 @@ def _cut_note(cut: TopMembers) -> str:
     kind and the members with no value at the cut's period counted apart."""
     return (
         f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
-        f"value in {cut.period}, highest first. Left out as group totals or members of "
-        f"another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
+        f"value in {cut.period}, highest first. Left out as group totals, unallocated amounts "
+        f"or members of another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
         f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
         f"{cut.period}."
     )

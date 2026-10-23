@@ -29,6 +29,11 @@ A record holds:
   written before the count was kept, and on one rebuilt (`data_mcp.mint_recovery`)
   for a `groupby` sum with a version of its own whose frame the store no longer
   holds.
+- `enrichment_stamp`: the `enrichment_stamp` of the artifact the frame was read from
+  (`data_mcp.manifest.ArtifactEntry.enrichment_stamp`) when `options.columns` asks for
+  a `{role}_party_kind` column, else `None`. It is also `None` on a record written
+  before apis sent one and on a frame read from an artifact without one.
+  `frame_ref_for` takes it back to reproduce `frame`.
 
 `encode_mint_record` is the RFC 8785 form of the record, so two writers
 recording the same request write the same bytes. `frame`, `dataset`,
@@ -91,6 +96,7 @@ class MintRecord(BaseModel):
     options: dict[str, Any]
     scope: dict[str, Any] = Field(default_factory=dict)
     stat_var_count: int | None = Field(default=None, ge=0)
+    enrichment_stamp: str | None = Field(default=None, exclude_if=lambda stamp: stamp is None)
 
 
 class _LenientMintRecord(MintRecord):

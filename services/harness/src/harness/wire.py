@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast, get_args
 
+from common.place_type import PartyClass
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -624,11 +625,22 @@ class SpecBlock(BaseModel):
 MAX_SEED_GROUP_LABEL_CHARS = 120
 
 
+# The most classes a whole total's `whole_of` or its side's `side_classes` names: every
+# `common.place_type.PartyClass`.
+MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
+
+
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
     `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`). The
+    when it bound the members (`planner.workflow.ResolvedGroup.total`).
+    `whole_of` names the classes of party that total, or the set of totals the
+    role bound, holds in full, absent for any other set
+    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
+    of party, totals aside, the dataset publishes on that set's side, absent for
+    any other set and from a Search that predates it
+    (`planner.workflow.ResolvedGroup.side_classes`). The
     members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     """
@@ -644,6 +656,12 @@ class SeedEntityGroup(BaseModel):
     )
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
+    )
+    whole_of: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+    side_classes: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
 
 

@@ -156,11 +156,16 @@ that type are refused, and one place alone passes whatever its type. It is
 retryable over a `filter` result that keeps one level (`place_level` on the
 type column). On a flow party role (`financingProvider`,
 `financingRecipient`) the verbs leave out the parties whose
-`{role}_party_kind` cell is `total` and record them as `party_total` exclusions;
-the refusal fires there only when several parties include one with no
-kind, are all totals on a role the verb pools, or sit in a frame that
-carries no kind column for their role. `rank` ranks a role holding only
-totals.
+`{role}_party_kind` cell is `total` and record them as `party_total`
+exclusions; the refusal fires there only when several parties include one
+with no kind or a cell no kind names, are all totals on a role the verb pools
+(a role of totals alone, each `true` in `{role}_party_whole` on every row, is
+summed), hold a whole total beside members it may hold (one of its
+`{role}_party_class`, or of none, or any member when the total has no class;
+a whole total of a class no member has is summed beside them), or sit in a
+frame that carries no kind column for their role. `rank`
+ranks a role holding only totals, and leaves the residuals of a ranked role
+holding parties out as `party_residual` exclusions.
 
 `service_unavailable` fires when the process's frame row budget
 (`common.row_budget`) has no room for a verb's input rows
@@ -194,7 +199,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from common.place_type import PARTY_ROLES, PLACE_LEVELS, enrichment_role
+from common.place_type import (
+    PARTY_ROLES,
+    PLACE_LEVELS,
+    WHOLE_CELL,
+    PartyKind,
+    class_column,
+    enrichment_role,
+    whole_column,
+)
 from common.refusal import internal_error_message, refusal_meta, refusal_text
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S
 from dfo_frame_grammar.grammar import ComposedUnit, UnitCell, UnitRequest
@@ -330,6 +343,13 @@ _DISAMBIGUATION_CANDIDATE_CAP = 10
 # How many of each side's sampled keys a `quotient_of_no_key_matched` message
 # lists; `fix` carries the whole sample.
 _KEY_SAMPLE_IN_MESSAGE = 5
+
+# The party kinds a filter keeps to compare or rank a flow side's members: private parties
+# are of kind `party` too, told apart by their class.
+_MEMBER_KINDS: tuple[PartyKind, ...] = ("party",)
+# The kinds a filter keeps to sum the members of a role alone: its parties and the
+# unallocated residuals, which add to a sum though no ranking compares them.
+_POOLED_MEMBER_KINDS: tuple[PartyKind, ...] = ("party", "residual")
 
 
 # How the `filter` refusal over a converted unit tells a caller to get a
@@ -1297,13 +1317,60 @@ class ToolRefusal:
         )
 
     @classmethod
-    def place_levels_mixed(cls, *, column: str, types: Sequence[str]) -> Self:
+    def place_levels_mixed(
+        cls,
+        *,
+        column: str,
+        types: Sequence[str],
+        whole_total: str | None = None,
+        whole_class: str | None = None,
+        member_count: int = 0,
+        members: Sequence[str] = (),
+    ) -> Self:
         """`types` are the distinct cells of `column`, sorted and capped by
         the engine that found them, and empty when the frame carries no such
         column. A flow party role's type or kind column (`PARTY_ROLES`) gets a
         message naming the role and the group-total exclusion, since a
-        `place_level` filter is not what its refusal asks for."""
+        `place_level` filter is not what its refusal asks for, and a kind
+        column's `fix.member_kinds` lists the kinds a filter keeps to compare
+        or rank members. `whole_total` names a whole total of `whole_class`, or
+        of no class when None, pooled beside `member_count` members it may
+        hold, of which `members` are examples. The message asks to keep the
+        whole totals alone, by a filter on the role's whole column, or the members
+        alone, by a filter on `column`, and `fix.filters` holds both."""
         role = enrichment_role(column, roles=PARTY_ROLES)
+        if role is not None and whole_total is not None:
+            counted = f"{member_count} member{'' if member_count == 1 else 's'}"
+            held = (
+                f"a whole total of the {whole_class} {role} parties, and {counted} beside "
+                "it are of that class or of none"
+                if whole_class is not None
+                else f"a whole total of no one class, and it may hold the {counted} beside it"
+            )
+            whole = whole_column(role)
+            return cls(
+                code=ToolErrorCode.PLACE_LEVELS_MIXED,
+                message=(
+                    f"The {role} parties in this frame cannot be pooled: {whole_total} is "
+                    f"{held}, such as {', '.join(members)}. A sum across them would count "
+                    "those members twice. Filter the frame with a category_match on "
+                    f"{whole!r} keeping {WHOLE_CELL}, to sum the whole totals alone, or a "
+                    f"category_match on {column!r} keeping {' and '.join(_POOLED_MEMBER_KINDS)}, "
+                    "to sum the members alone, then retry with that result's frame_ref."
+                ),
+                fix={
+                    "column": column,
+                    "types": list(types),
+                    "whole_total": whole_total,
+                    "whole_class": whole_class,
+                    "member_count": member_count,
+                    "example_members": list(members),
+                    "filters": [
+                        {"column": whole, "values": [WHOLE_CELL]},
+                        {"column": column, "values": list(_POOLED_MEMBER_KINDS)},
+                    ],
+                },
+            )
         if role is not None and not types:
             return cls(
                 code=ToolErrorCode.PLACE_LEVELS_MIXED,
@@ -1322,13 +1389,18 @@ class ToolRefusal:
                 message=(
                     f"The {role} parties in this frame cannot be pooled: {column!r} holds "
                     f"{', '.join(types)}. Parties of kind total, such as a DAC regional total "
-                    "or the G7, are excluded from sums and ranks automatically, so this "
-                    "refusal means a party has no kind this server declares, or that every "
-                    f"party is a group total. Filter the frame with a category_match on {role!r} "
-                    f"naming the parties to keep, or a category_match on {column!r} keeping "
-                    "party and residual, then retry with that result's frame_ref."
+                    "or the G7, are left out of sums and ranks beside their members "
+                    "automatically, and totals alone are summed when every one holds a whole "
+                    f"population, such as Official Donors, Total ({whole_column(role)!r} true "
+                    "on every row). So this refusal means a party has no kind this server "
+                    "declares, or that every party is a group total and not every one is "
+                    f"whole. Filter the frame with a category_match on {role!r} naming the "
+                    f"parties to keep, or a category_match on {column!r} keeping party and "
+                    "residual, then retry with that result's frame_ref. To compare or rank "
+                    f"members, keep {', '.join(_MEMBER_KINDS)} alone; private parties are of "
+                    f"kind party, and {class_column(role)!r} tells them apart."
                 ),
-                fix={"column": column, "types": list(types)},
+                fix={"column": column, "types": list(types), "member_kinds": list(_MEMBER_KINDS)},
             )
         return cls(
             code=ToolErrorCode.PLACE_LEVELS_MIXED,

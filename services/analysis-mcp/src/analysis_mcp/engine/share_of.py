@@ -100,6 +100,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     combine_exclusions,
     cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
@@ -314,6 +315,8 @@ class ShareOfResult:
 
     `stat_var` labels every output row; `numerator_stat_var` and
     `denominator_stat_var` are the StatVars each side resolved to.
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
     """
 
     frame: Frame
@@ -337,6 +340,8 @@ class ShareOfResult:
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
 
     @property
     def dropped_key_count(self) -> int:
@@ -449,6 +454,7 @@ def run_share_of(
             entity=denominator_entity,
             by=denominator_columns,
             pinned_unit=denominator_pinned_unit,
+            numerator_by=numerator_by,
         )
     numerator_grouped, denominator_grouped = numerator.by_key, denominator.by_key
     numerator_unit, denominator_unit = numerator.unit, denominator.unit
@@ -666,4 +672,6 @@ def run_share_of(
             numerator_by=numerator_by,
             denominator_columns=denominator_columns,
         ),
+        numerator_pooled=numerator.pooled_parties,
+        denominator_pooled=denominator.pooled_parties,
     )

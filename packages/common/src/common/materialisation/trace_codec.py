@@ -103,12 +103,13 @@ class _MaterialisationTraceRecord(BaseModel):
     spec_id: str
     content_version: str
     options: dict[str, Any] | None = None
+    enrichment_stamp: str | None = None
 
 
 def _encode_materialisation_trace(trace: MaterialisationTrace) -> dict[str, Any]:
-    """The trace's members, with `options` only when it is set, so a trace without
-    them encodes as one did before the member existed. A reader that predates the
-    member ignores it (`_MaterialisationTraceRecord`)."""
+    """The trace's members. `options` and `enrichment_stamp` are written only when set,
+    so a trace without them encodes with the members of an older trace, and a reader
+    without a member ignores it (`_MaterialisationTraceRecord`)."""
     encoded: dict[str, Any] = {
         "upstream_trace": trace.upstream_trace,
         "spec_id": trace.spec_id,
@@ -116,6 +117,8 @@ def _encode_materialisation_trace(trace: MaterialisationTrace) -> dict[str, Any]
     }
     if trace.options is not None:
         encoded["options"] = trace.options
+    if trace.enrichment_stamp is not None:
+        encoded["enrichment_stamp"] = trace.enrichment_stamp
     return encoded
 
 
@@ -126,6 +129,7 @@ def _decode_materialisation_trace(record: dict[str, Any]) -> MaterialisationTrac
         spec_id=parsed.spec_id,
         content_version=parsed.content_version,
         options=parsed.options,
+        enrichment_stamp=parsed.enrichment_stamp,
     )
 
 

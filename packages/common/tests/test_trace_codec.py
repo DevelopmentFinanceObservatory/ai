@@ -20,25 +20,32 @@ from pydantic import BaseModel, ConfigDict
 
 
 @pytest.mark.parametrize(
-    ("options", "members"),
+    ("options", "stamp", "members"),
     [
-        (None, ["content_version", "spec_id", "upstream_trace"]),
+        (None, None, ["content_version", "spec_id", "upstream_trace"]),
         (
             {"format": "parquet", "groupby": {"by": ["time_period"], "op": "sum"}},
+            None,
             ["content_version", "options", "spec_id", "upstream_trace"],
         ),
+        (
+            {"format": "parquet", "columns": ["party_kind"]},
+            "stamp-1",
+            ["content_version", "enrichment_stamp", "options", "spec_id", "upstream_trace"],
+        ),
     ],
-    ids=["without-options", "with-options"],
+    ids=["without-options", "with-options", "with-a-stamp"],
 )
 def test_materialisation_trace_round_trips_through_the_registry(
-    options: dict[str, Any] | None, members: list[str]
+    options: dict[str, Any] | None, stamp: str | None, members: list[str]
 ) -> None:
-    """A trace without options encodes the members a trace had before it kept them."""
+    """Options and a stamp each encode as a member only when set."""
     trace = MaterialisationTrace(
         upstream_trace={"graph_revision": "rev1"},
         spec_id="spec_" + "a" * 32,
         content_version="cv_" + "b" * 32,
         options=options,
+        enrichment_stamp=stamp,
     )
 
     record = encode_trace(trace)

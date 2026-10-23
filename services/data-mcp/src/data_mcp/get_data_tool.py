@@ -1539,6 +1539,27 @@ async def mint_recorded_root(
     )
 
 
+async def recorded_mint_request(
+    record: MintRecord, *, deadline: CallDeadline
+) -> tuple[dict[str, Any] | None, Mapping[str, Any]] | ToolResult:
+    """The stored definition identity of `record`'s dataset, `None` when the definition
+    store holds none, and the options a mint of `record` again sends: the recorded ones
+    mapped for that identity (`replayed_mint_options`). A recorded
+    `options.without_party_totals` is sent as recorded.
+
+    `mint_recorded_root` sends these options, and `harness.live_refresh` reads them to
+    decide whether a root is named under an enrichment stamp, so the two cannot differ.
+
+    Returns:
+        The identity and the options, or the refusal `ToolResult` of a definition read
+        that failed (`_load_identity_or_refuse`).
+    """
+    identity = await _load_identity_or_refuse(record.dataset.spec_id, deadline=deadline)
+    if isinstance(identity, ToolResult):
+        return identity
+    return identity, replayed_mint_options(record.options, identity=identity)
+
+
 async def _mint_recorded_response(
     client: UpstreamClient,
     record: MintRecord,
@@ -1546,20 +1567,18 @@ async def _mint_recorded_response(
     settings: Settings,
     deadline: CallDeadline,
 ) -> tuple[dict[str, Any] | QueuedOperation, Mapping[str, Any]] | ToolResult:
-    """Mint `record` and resolve one already-terminal queued response without waiting.
+    """Mint `record` with the request `recorded_mint_request` builds and resolve one
+    already-terminal queued response without waiting.
 
     As `_attempt_mint` does, a single column correction can span the POST and an
-    immediately terminal operation poll.
-
-    The mint carries the stored definition beside the `spec_id` when the definition
-    store holds one. Its options are the recorded ones mapped for that definition's
-    identity (`replayed_mint_options`). A recorded `options.without_party_totals` is
-    sent as recorded."""
+    immediately terminal operation poll. The mint carries the stored definition beside
+    the `spec_id` when the definition store holds one."""
     spec_id = record.dataset.spec_id
-    identity = await _load_identity_or_refuse(spec_id, deadline=deadline)
-    if isinstance(identity, ToolResult):
-        return identity
-    options = dict(replayed_mint_options(record.options, identity=identity))
+    request = await recorded_mint_request(record, deadline=deadline)
+    if isinstance(request, ToolResult):
+        return request
+    identity, replayed = request
+    options = dict(replayed)
     recorded_columns = {str(column) for column in record.options.get("columns") or ()}
     if "kind" in recorded_columns:
         recorded_columns.remove("kind")
@@ -1715,12 +1734,16 @@ async def get_data(
                 "Add the Data Commons types of each place the frame names as an "
                 'observationAbout_type column. Values are comma-joined ("Country", '
                 '"AdministrativeArea1,State", "Place" for Earth), and "untyped" for a place '
-                "with none. On a flow frame it adds each party's type and kind: "
-                "financingProvider_type, financingRecipient_type, financingProvider_party_kind "
-                "and financingRecipient_party_kind. Kinds are party, residual or total for a group "
-                'total such as "Africa, Total", which sums and ranks leave out, and "untyped" for '
-                "a party with none. Set it for a spec that names no place: its "
-                "frame holds every place with data, at every level, so a filter "
+                "with none. On a flow frame it adds each party side's type and three cells "
+                "named for the side instead: financingProvider_type, financingRecipient_type, "
+                "financingProvider_party_kind, financingRecipient_party_kind and so on. "
+                "party_kind is party, residual, or total for a group total such as "
+                '"Africa, Total", which sums and ranks leave out; party_class is official, '
+                'private or residual; party_whole is "true" on the published total of a whole population '
+                'such as "Official Donors, Total", which adds up with the other whole totals '
+                'when they are the only rows, and "false" elsewhere. A cell reads "untyped" '
+                "where the party has no value. Set it for a spec that "
+                "names no place: its frame holds every place with data, at every level, so a filter "
                 "(a place_level predicate on observationAbout_type, such as Country) can keep one "
                 "level before a rank or a total."
             )
@@ -1798,9 +1821,10 @@ async def get_data(
     level: the world, regions, World Bank groups, countries and their
     subdivisions. `place_types=true` adds the `observationAbout_type` column,
     so a `filter` can keep one level before a rank or a total sets a place
-    beside the places inside it. On a flow frame it adds each party's type and
-    kind (`financingProvider_type`, `financingRecipient_type`,
-    `financingProvider_party_kind`, `financingRecipient_party_kind`).
+    beside the places inside it. On a flow frame it adds each party's type,
+    kind, class and whole-population mark (`financingProvider_type`,
+    `financingProvider_party_kind`, `financingProvider_party_class`,
+    `financingProvider_party_whole` and the recipient's four) instead.
 
     `breakdown` sums the family within each code of one hierarchical code
     system rolled up to one level, so a question such as "which sectors got

@@ -38,11 +38,13 @@ form of `{"identity_version": "rnf1", "recipe": <normal form>}`.
 
 `replay_key` is `rpk_` and 32 hex digits of the SHA-256 of the RFC 8785 form of
 `{"identity_version": "rpk1", "normal_form_hash", "roots", "execution_identities"}`.
-`roots` holds each root's apis pair in `roots` order, and
-`execution_identities` every distinct `ExecutionIdentity.canonical_string()` in
-the tree, sorted. A replay computes the key before it runs: the hash from the
-stored recipe, the roots' current pairs, and the one identity of the engine
-replaying. A frame whose ancestors were computed by different engine builds lists
+`roots` holds each root's identity (`root_identity`) in `roots` order: its apis
+pair, and the enrichment stamp its frame was named under when it has one. A root
+with no stamp is identified by its pair alone. `execution_identities` holds every
+distinct `ExecutionIdentity.canonical_string()` in the tree, sorted. A replay
+computes the key before it runs: the hash from the stored recipe, the roots'
+current identities, and the one identity of the engine replaying. A frame whose
+ancestors were computed by different engine builds lists
 each of them, so its key is not the key of a replay under any single build.
 
 `execution_identity` is the identity of the frame the recipe is for.
@@ -105,6 +107,7 @@ __all__ = [
     "reached_roots",
     "recipe_anchor",
     "replay_key",
+    "root_identity",
     "root_mint_record",
     "stored_trace",
 ]
@@ -280,6 +283,19 @@ def normal_form_hash(normal: Mapping[str, Any]) -> str:
     )
 
 
+def root_identity(dataset: Mapping[str, str], *, enrichment_stamp: str | None) -> dict[str, str]:
+    """A root's identity: the apis `{spec_id, content_version}` its frame was
+    minted from, and the enrichment stamp the frame was named under
+    (`MintRecord.enrichment_stamp`) when it has one. apis keeps a version's
+    `content_version` across a change of party kinds, so the stamp is what tells two
+    frames of one version apart (`data_mcp.frame_materialisation.frame_ref_for`).
+    Without a stamp the identity is the pair alone."""
+    identity = {"spec_id": dataset["spec_id"], "content_version": dataset["content_version"]}
+    if enrichment_stamp is not None:
+        identity["enrichment_stamp"] = enrichment_stamp
+    return identity
+
+
 def replay_key(
     *,
     normal_form_hash: str,
@@ -290,8 +306,8 @@ def replay_key(
 
     Args:
         normal_form_hash: The recipe's `normal_form_hash`.
-        root_datasets: Each root's apis `{spec_id, content_version}`, in the
-            recipe's `roots` order.
+        root_datasets: Each root's identity (`root_identity`), in the recipe's
+            `roots` order. A bare `{spec_id, content_version}` is a root with no stamp.
         execution_identities: The `ExecutionIdentity.canonical_string()` of every
             frame in the tree. Order and repeats do not matter.
     """
@@ -300,7 +316,7 @@ def replay_key(
             "identity_version": REPLAY_KEY_IDENTITY_VERSION,
             "normal_form_hash": normal_form_hash,
             "roots": [
-                {"spec_id": root["spec_id"], "content_version": root["content_version"]}
+                root_identity(root, enrichment_stamp=root.get("enrichment_stamp"))
                 for root in root_datasets
             ],
             "execution_identities": sorted(set(execution_identities)),
@@ -627,7 +643,10 @@ async def build_recipe(
         "normal_form_hash": hashed,
         "replay_key": replay_key(
             normal_form_hash=hashed,
-            root_datasets=[root["dataset"] for root in roots],
+            root_datasets=[
+                root_identity(record.dataset.model_dump(), enrichment_stamp=record.enrichment_stamp)
+                for record in walk.roots
+            ],
             execution_identities=walk.execution_identities.values(),
         ),
         "execution_identity": walk.execution_identities[(ref.spec_id, ref.content_version)],

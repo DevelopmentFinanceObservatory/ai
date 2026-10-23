@@ -25,6 +25,7 @@ from common.materialisation import (
     frame_to_parquet_bytes,
 )
 from common.materialisation import set_store as set_frame_store
+from common.place_type import PARTY_KINDS
 from data_mcp import client_holder, get_data_tool
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
@@ -37,6 +38,7 @@ from data_mcp.definition_store import (
 )
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
+    KIND_COLUMNS,
     MaterialisationOutcome,
     frame_ref_for,
 )
@@ -3922,6 +3924,15 @@ async def test_place_types_asks_for_the_type_column_alone(
     ]
 
 
+async def test_place_types_names_every_party_kind_a_flow_frame_can_hold() -> None:
+    """A kind the description leaves out is one an outside model meets as a bare token."""
+    async with Client(mcp) as client:
+        (tool,) = [tool for tool in await client.list_tools() if tool.name == "get_data"]
+
+    description = tool.input_schema["properties"]["place_types"]["description"]
+    assert {kind for kind in PARTY_KINDS if kind not in description} == set()
+
+
 async def test_a_call_without_place_types_sends_no_columns() -> None:
     stored = _stored_definition()
     options: list[dict[str, Any]] = []
@@ -4098,8 +4109,8 @@ async def test_a_polled_column_refusal_retries_with_the_flow_metadata_the_table_
 
     assert result.is_error is False, result.structured_content
     assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", "party_kind"],
-        ["financingProvider_type", "party_kind"],
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        ["financingProvider_type", *KIND_COLUMNS],
     ]
 
 
@@ -4271,7 +4282,7 @@ async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
 
     assert result.is_error is False, result.structured_content
     assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", "party_kind"]
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]
     ]
 
 
@@ -4281,12 +4292,12 @@ async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
         (
             {"origin": ["country/FRA"]},
             ["financingProvider_type", "financingProvider_party_kind"],
-            ["financingProvider_type", "party_kind"],
+            ["financingProvider_type", *KIND_COLUMNS],
         ),
         (
             {"destination": ["country/KEN"]},
             ["financingRecipient_type", "financingRecipient_party_kind"],
-            ["financingRecipient_type", "party_kind"],
+            ["financingRecipient_type", *KIND_COLUMNS],
         ),
     ],
     ids=["provider-only", "destination-only"],
@@ -4311,7 +4322,7 @@ async def test_place_types_retries_with_the_flow_metadata_the_table_serves(
 
     assert result.is_error is False, result.structured_content
     assert [sent["columns"] for sent in options] == [
-        ["financingProvider_type", "financingRecipient_type", "party_kind"],
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
         expected,
     ]
 
@@ -4584,7 +4595,7 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
             {"format": "parquet", "columns": ["financingProvider_type", "financingRecipient_type"]},
             {
                 "format": "parquet",
-                "columns": ["financingProvider_type", "financingRecipient_type", "party_kind"],
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
             },
         ),
         (
@@ -4592,7 +4603,15 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
             {"format": "parquet", "columns": ["kind"]},
             {
                 "format": "parquet",
-                "columns": ["financingProvider_type", "financingRecipient_type", "party_kind"],
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            },
+        ),
+        (
+            {"origin": ["country/FRA"]},
+            {"format": "parquet", "columns": ["party_kind"]},
+            {
+                "format": "parquet",
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
             },
         ),
         (
@@ -4600,12 +4619,18 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
             {"format": "parquet"},
             {
                 "format": "parquet",
-                "columns": ["financingProvider_type", "financingRecipient_type", "party_kind"],
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
             },
         ),
         ({"recipient": ["country/KEN"]}, {"format": "parquet"}, {"format": "parquet"}),
     ],
-    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns", "place-no-columns"],
+    ids=[
+        "flow-party-types",
+        "flow-retired-kind",
+        "flow-kind-without-class-and-whole",
+        "flow-no-columns",
+        "place-no-columns",
+    ],
 )
 async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_them(
     monkeypatch: pytest.MonkeyPatch,
@@ -4614,7 +4639,7 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     minted: dict[str, Any],
 ) -> None:
     # A flow root recorded before kinds were served holds no kinds, and a sum across its
-    # parties would refuse; the replay mints and registers it with `["party_kind"]`.
+    # parties would refuse; the replay mints and registers it with `KIND_COLUMNS`.
     stored = _stored_definition(entities=entities)
     registered: list[Mapping[str, Any]] = []
 
@@ -4641,11 +4666,14 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     assert registered == [minted]
 
 
+@pytest.mark.parametrize(
+    "recorded_columns", [list(KIND_COLUMNS), ["party_kind"]], ids=["kinds", "kind-alone"]
+)
 async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_option(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, recorded_columns: list[str]
 ) -> None:
-    # The option is apis': the replay sends it as recorded, and the record of the new
-    # pair keeps it.
+    # The option is apis': the replay sends it as recorded, with the kinds alone it asks
+    # for now, and the record of the new pair keeps it.
     stored = _stored_definition(**_FLOW_OPEN_PROVIDER)
     registered: list[Mapping[str, Any]] = []
 
@@ -4669,17 +4697,18 @@ async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_opt
             200, json=_manifest_response(spec_id=stored.spec_id, content_version="cv_" + "2" * 32)
         )
 
-    recorded = {"format": "parquet", "columns": ["party_kind"], "without_party_totals": True}
+    recorded = {"format": "parquet", "columns": recorded_columns, "without_party_totals": True}
+    expected = recorded | {"columns": list(KIND_COLUMNS)}
     root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
 
     minted = await _mint_recorded_root(
         handler, stored, MintRecord(frame=root, dataset=root, options=recorded)
     )
 
-    assert sent == [recorded]
-    assert registered == [recorded]
+    assert sent == [expected]
+    assert registered == [expected]
     assert isinstance(minted, RootMint)
-    assert minted.options == recorded
+    assert minted.options == expected
 
 
 @pytest.mark.parametrize(
@@ -4688,12 +4717,12 @@ async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_opt
         (
             {"origin": ["country/FRA"]},
             ["financingProvider_type", "financingProvider_party_kind"],
-            ["financingProvider_type", "party_kind"],
+            ["financingProvider_type", *KIND_COLUMNS],
         ),
         (
             {"destination": ["country/KEN"]},
             ["financingRecipient_type", "financingRecipient_party_kind"],
-            ["financingRecipient_type", "party_kind"],
+            ["financingRecipient_type", *KIND_COLUMNS],
         ),
     ],
     ids=["provider-only", "destination-only"],
@@ -4740,7 +4769,7 @@ async def test_a_replayed_flow_root_records_the_metadata_options_that_succeeded(
     assert isinstance(minted, RootMint)
     assert minted.options == {"format": "parquet", "columns": expected}
     assert [options["columns"] for options in sent] == [
-        ["financingProvider_type", "financingRecipient_type", "party_kind"],
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
         expected,
     ]
 
@@ -4794,8 +4823,8 @@ async def test_a_replayed_terminal_column_refusal_retries_without_waiting(
         operation_id=_OPERATION_ID, status="pending", retry_after_s=2.0
     )
     assert [options["columns"] for options in posts] == [
-        ["financingProvider_type", "financingRecipient_type", "party_kind"],
-        ["financingProvider_type", "party_kind"],
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        ["financingProvider_type", *KIND_COLUMNS],
     ]
 
 
@@ -4845,7 +4874,7 @@ async def test_a_replayed_terminal_column_refusal_records_the_corrected_options(
     assert isinstance(result, RootMint)
     assert result.options == {
         "format": "parquet",
-        "columns": ["financingProvider_type", "party_kind"],
+        "columns": ["financingProvider_type", *KIND_COLUMNS],
     }
 
 
@@ -4923,7 +4952,7 @@ async def test_a_replayed_explicit_flow_type_is_not_removed_by_negotiation(
         "financingRecipient_type",
         "custom",
         "financingProvider_type",
-        "party_kind",
+        *KIND_COLUMNS,
     ]
 
 
@@ -5035,17 +5064,17 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
 @pytest.mark.parametrize(
     ("identity", "arguments", "columns", "cut"),
     [
-        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, ["party_kind"], True),
+        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, list(KIND_COLUMNS), True),
         (
             _FLOW_OPEN_PROVIDER,
             {"place_types": True},
-            ["financingProvider_type", "financingRecipient_type", "party_kind"],
+            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
             False,
         ),
         (
             _FLOW_OPEN_PROVIDER,
             {"without_party_totals": True, "place_types": True},
-            ["financingProvider_type", "financingRecipient_type", "party_kind"],
+            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
             True,
         ),
         (_FLOW_OPEN_PROVIDER, {}, None, False),
@@ -5212,7 +5241,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     # kinds derive from that version.
     assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
     assert cut_ref == frame_ref_for(
-        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=("party_kind",)
+        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=KIND_COLUMNS
     )
     assert cut_ref != kept_ref
     # The repeat is a store hit: it fetches nothing and names the same frame.
@@ -5241,7 +5270,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         "format": "parquet",
         "bundle": False,
         "layout": "frame",
-        "columns": ["party_kind"],
+        "columns": list(KIND_COLUMNS),
         "without_party_totals": True,
     }
     # The digest names the totals the manifest's trace lists, on the fresh mint and the hit.
@@ -5352,8 +5381,8 @@ class _RegistryFlowMint:
 @pytest.mark.parametrize(
     ("argument", "columns", "totals_served"),
     [
-        ("place_types", ["financingProvider_type", "financingRecipient_type", "party_kind"], True),
-        ("without_party_totals", ["party_kind"], False),
+        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS], True),
+        ("without_party_totals", list(KIND_COLUMNS), False),
     ],
 )
 async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
@@ -5397,8 +5426,8 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
 @pytest.mark.parametrize(
     ("argument", "columns"),
     [
-        ("place_types", ["financingProvider_type", "financingRecipient_type", "party_kind"]),
-        ("without_party_totals", ["party_kind"]),
+        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]),
+        ("without_party_totals", list(KIND_COLUMNS)),
     ],
 )
 async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_and_no_sidecar(

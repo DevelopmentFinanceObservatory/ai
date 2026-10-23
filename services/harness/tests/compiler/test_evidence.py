@@ -2910,6 +2910,28 @@ def test_a_retrieval_of_a_set_bound_as_its_total_holds_the_total_party(
     assert _entity_codes(issues) == codes
 
 
+@pytest.mark.parametrize(("members", "codes"), [(False, []), (True, ["group_read_as_total"])])
+def test_a_union_of_whole_totals_meets_a_bare_name_and_refuses_members(
+    requirement: RequirementFactory, source: SourceFactory, members: bool, codes: list[str]
+) -> None:
+    label = "all donors including private"
+    union = source(
+        entities=(
+            ResolvedEntity(role="origin", ref="DACOfficialDonors", label="Official Donors, Total"),
+            ResolvedEntity(role="origin", ref="DACPrivateDonors", label="Private Donors, Total"),
+        ),
+        groups=(ResolvedGroup(role="origin", label=label, whole_of=("official", "private")),),
+        identity=None,
+    )
+
+    issues = check_evidence(
+        requirement(entities=[Entity(name=label, role="donor", members=members)]),
+        evidence_from_source(union),
+    )
+
+    assert _entity_codes(issues) == codes
+
+
 def test_a_set_read_as_its_members_meets_an_entity_asking_for_them(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:

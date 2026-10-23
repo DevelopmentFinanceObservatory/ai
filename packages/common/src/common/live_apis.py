@@ -146,13 +146,18 @@ class DatasetVersion:
     made the collapse, set exactly when `rendering` is `groupby`.
     `without_party_totals` is true when the version's frame leaves out the group totals
     of its open party roles: on every `without_party_totals` rendering, and on a
-    `groupby` one that summed such a frame."""
+    `groupby` one that summed such a frame.
+
+    `enrichment_stamp` is the stamp a file of this version holding party-kind cells
+    carries: the answering code index's digest when the version's frame holds a party
+    role, and `None` when it holds none, or when apis lists no stamp on its versions."""
 
     content_version: str
     base_content_version: str | None
     rendering: VersionRendering
     groupby: Mapping[str, Any] | None
     without_party_totals: bool = False
+    enrichment_stamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -277,26 +282,38 @@ def _dataset_version(item: dict[str, Any]) -> DatasetVersion | None:
     no `content_version`, a `rendering` that is none of the four, a `groupby` present on
     anything but a `groupby` rendering, or a `without_party_totals` that is not a
     boolean. apis leaves a false `without_party_totals` out, and a
-    `without_party_totals` rendering implies it."""
+    `without_party_totals` rendering implies it. apis also leaves out the
+    `enrichment_stamp` of a version that has none."""
     content_version = _text(item.get("content_version"))
     base_content_version = _text(item.get("base_content_version"))
     groupby = item.get("groupby")
     without_party_totals = item.get("without_party_totals", False)
+    stamp = _text(item.get("enrichment_stamp"))
     if content_version is None or not isinstance(without_party_totals, bool):
         return None
     match item.get("rendering"):
         case "groupby" if isinstance(groupby, dict):
             return DatasetVersion(
-                content_version, base_content_version, "groupby", groupby, without_party_totals
+                content_version,
+                base_content_version,
+                "groupby",
+                groupby,
+                without_party_totals,
+                enrichment_stamp=stamp,
             )
         case "without_party_totals" if groupby is None:
             return DatasetVersion(
-                content_version, base_content_version, "without_party_totals", None, True
+                content_version,
+                base_content_version,
+                "without_party_totals",
+                None,
+                True,
+                enrichment_stamp=stamp,
             )
-        case "plain" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "plain", None)
-        case "not_recorded" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "not_recorded", None)
+        case ("plain" | "not_recorded") as rendering if groupby is None:
+            return DatasetVersion(
+                content_version, base_content_version, rendering, None, enrichment_stamp=stamp
+            )
     return None
 
 
@@ -531,7 +548,8 @@ class LiveApisClient:
     # No credential.
 
     async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
-        """Every stored version of the dataset, newest first, read page by page.
+        """Every stored version of the dataset, newest first, each with its own
+        `enrichment_stamp`, read page by page.
 
         A dataset id apis registers no dataset under (`spec_not_found` on the
         first page) has no versions, so it returns `()`.

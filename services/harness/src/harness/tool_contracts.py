@@ -643,17 +643,21 @@ def _total_readings(spec: Mapping[str, Any]) -> list[str]:
 
     Search states no departure for a set read whole, so this is where the
     reading is said. A set read as its members has search's own
-    `group_read_as_members` departure.
+    `group_read_as_members` departure. A block whose sets are not readable
+    has none.
     """
+    try:
+        groups = block_groups(spec)
+    except ValueError:
+        logger.warning("search: named sets of %s are not readable", spec.get("spec_id"))
+        return []
     entities = (spec.get("resolved") or {}).get("entities") or ()
     labels = {
         str(entity["ref"]): str(entity["label"])
         for entity in entities
         if isinstance(entity, Mapping) and entity.get("ref") and entity.get("label")
     }
-    return [
-        text for group in block_groups(spec) if (text := total_reading(group, labels)) is not None
-    ]
+    return [text for group in groups if (text := total_reading(group, labels)) is not None]
 
 
 def _unapplied_phrases(no_data: Mapping[str, Any]) -> dict[str, Any]:

@@ -70,6 +70,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     agreed_facets,
     combine_exclusions,
     facet_columns,
@@ -220,6 +221,9 @@ class QuotientOfResult:
     and not on the other, sorted by key under `numerator_by`'s names. A key
     holding none is absent, and a pooled denominator has no periods of one
     key's own, so `denominator_only_periods` is empty for it.
+
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
     """
 
     frame: Frame
@@ -247,6 +251,8 @@ class QuotientOfResult:
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
 
     @property
     def dropped_key_count(self) -> int:
@@ -275,12 +281,20 @@ def _sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """`sum_side` for `side`. A composed side refuses as `_unit_part`
     refuses it (`QuotientOfSideUnitUnsupportedError`) whether its cells hold
     one row or several."""
     try:
-        return sum_side(frame, side=side, entity=entity, by=by, pinned_unit=pinned_unit)
+        return sum_side(
+            frame,
+            side=side,
+            entity=entity,
+            by=by,
+            pinned_unit=pinned_unit,
+            numerator_by=numerator_by,
+        )
     except ComposedUnitSumError as exc:
         raise QuotientOfSideUnitUnsupportedError(
             side=side, reason="composed", unit=exc.unit
@@ -332,6 +346,7 @@ def run_quotient_of(
         entity=denominator_entity,
         by=denominator_columns,
         pinned_unit=denominator_pinned_unit,
+        numerator_by=numerator_by,
     )
     numerator_stat_var = require_single_stat_var(numerator_frame)
     denominator_stat_var = require_single_stat_var(denominator_frame)
@@ -519,4 +534,6 @@ def run_quotient_of(
             kept_cells, keyed=bool(numerator_by), denominator=denominator, pooled=pooled
         ),
         exclusions=exclusions,
+        numerator_pooled=numerator.pooled_parties,
+        denominator_pooled=denominator.pooled_parties,
     )

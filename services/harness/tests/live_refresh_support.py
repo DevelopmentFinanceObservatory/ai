@@ -75,7 +75,8 @@ class RecordedApis(FakeApis):
     """apis for a live refresh. `cards` maps a component id to the frame its
     revision 1 is stored on, `heads` a dataset to its current version, and
     `rebuilding` a dataset whose rebuild is queued to the wait its answer names.
-    `render_answer` replaces the render's answer, or is raised in its place."""
+    `render_answer` replaces the render's answer, or is raised in its place, and
+    `versions_answer` the versions route's."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -83,6 +84,7 @@ class RecordedApis(FakeApis):
         self.heads: dict[str, str] = {}
         self.rebuilding: dict[str, float] = {}
         self.render_answer: httpx2.Response | Exception | None = None
+        self.versions_answer: httpx2.Response | None = None
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         answer = self._recorded_answer(request)
@@ -98,6 +100,8 @@ class RecordedApis(FakeApis):
             return self._live(path, request, admitted=principal == LIVE_PRINCIPAL)
         if path.startswith(_COMPONENT_PREFIX):
             return self._component(request)
+        if path.endswith("/versions") and self.versions_answer is not None:
+            return self.versions_answer
         if principal == PRINCIPAL and path.endswith(_RECIPE_SUFFIX):
             return self._recipe(path)
         if (

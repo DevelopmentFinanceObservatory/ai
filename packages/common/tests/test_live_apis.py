@@ -307,6 +307,39 @@ async def test_list_versions_parses_newest_first_with_base_versions_and_no_crede
 
 
 @pytest.mark.parametrize(
+    "listed",
+    [{"enrichment_stamp": "ens_1"}, {}, {"enrichment_stamp": 7}],
+    ids=["stamp-listed", "no-stamp-listed", "stamp-not-text"],
+)
+async def test_list_versions_carries_each_versions_own_stamp(listed: dict[str, Any]) -> None:
+    calls = Calls(
+        ok(
+            {
+                "schema_version": 1,
+                "spec_id": SPEC,
+                "versions": [
+                    {
+                        "content_version": "cv_2",
+                        "base_content_version": None,
+                        "rendering": "plain",
+                        "enrichment_stamp": "ens_2",
+                    },
+                    {"content_version": "cv_1", "base_content_version": None, "rendering": "plain"},
+                ],
+                "next_cursor": None,
+                "complete": True,
+                **listed,
+            }
+        )
+    )
+
+    async with make_client(calls) as client:
+        versions = await client.list_versions(spec_id=SPEC)
+
+    assert [version.enrichment_stamp for version in versions] == ["ens_2", None]
+
+
+@pytest.mark.parametrize(
     "version",
     [
         {"content_version": "cv_1", "base_content_version": None},

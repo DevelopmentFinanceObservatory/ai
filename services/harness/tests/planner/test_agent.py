@@ -8599,6 +8599,19 @@ def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None
     assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]
 
 
+def test_a_shown_block_with_a_set_of_an_unknown_class_puts_no_pin_on_record() -> None:
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
+    spec_id = block["spec_id"]
+
+    recorded = identity_on_record(
+        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
+    )
+
+    assert recorded is None
+
+
 def test_amendment_keeps_measure_choice_from_the_compiled_family(
     decision: DecisionFactory, requirements: RequirementPair
 ):

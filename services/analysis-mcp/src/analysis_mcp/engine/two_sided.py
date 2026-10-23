@@ -30,9 +30,11 @@ from analysis_mcp.engine.common import (
     ExclusionReason,
     Exclusions,
     FacetSelection,
+    PooledParties,
     combine_exclusions,
     entity_roles,
     narrow_and_resolve,
+    pooled_parties,
     record_counted_exclusion,
     require_one_place_level,
     require_single_stat_var,
@@ -97,7 +99,8 @@ class SideSums:
     shape and holds how many rows each sum read, and `entity_counts` how
     many entities those rows hold: distinct value combinations across the
     entity roles (`common.entity_roles`) outside `by`. `stat_var` is the whole frame's sole
-    `stat_var`.
+    `stat_var`. `pooled_parties` holds what the side's sums pooled in each flow
+    party role outside `by` (`common.PooledParties`).
     """
 
     stat_var: str
@@ -108,6 +111,7 @@ class SideSums:
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     exclusions: Exclusions
+    pooled_parties: tuple[PooledParties, ...] = ()
 
 
 def sum_side(
@@ -117,6 +121,7 @@ def sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """Narrow `frame` to `entity`'s own rows, resolve unit/facets over
     exactly that slice, then sum (`math.fsum`) every remaining row sharing
@@ -133,13 +138,21 @@ def sum_side(
     as the harness's `planner.shapes` refuses either side of a share over such a frame.
     A flow party that totals other parties is left out of the side, whether
     the side sums across its role or keys by it, unless `entity` binds that
-    role (`without_party_totals`).
+    role (`without_party_totals`). A whole total beside members of other
+    classes stays, summed across or its own key. A whole total that may hold
+    a member is left out of a role in `by` or `numerator_by` and refused on
+    any other. A denominator passes its numerator's `numerator_by`, so a role
+    the numerator keys by keeps the same rows on both sides even where the
+    denominator sums across it.
     """
     stat_var = require_single_stat_var(frame)
     validate_entity_columns(frame, (*entity, *by))
     require_one_place_level(frame, role_columns(frame))
     frame, party_exclusions = without_party_totals(
-        frame, (column for column in role_columns(frame) if column not in entity), side=side
+        frame,
+        (column for column in role_columns(frame) if column not in entity),
+        keyed=(*by, *numerator_by),
+        side=side,
     )
     # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from
     # this side's sum, consistent with the policy `aggregate` applies.
@@ -184,6 +197,10 @@ def sum_side(
                 raise NonFiniteCellError(time_period=period, reason="overflow") from exc
         summed[key] = summed_periods
 
+    pooled = pooled_parties(
+        table, (column for column in role_columns(frame) if column not in (*entity, *by))
+    )
+
     entities: dict[tuple[str, ...], dict[str, int]] = {}
     for (*key, period), count in entity_counts(
         table, keys=(*by, TIME_PERIOD_COLUMN), entity_columns=entity_roles(frame)
@@ -199,6 +216,7 @@ def sum_side(
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
         exclusions=exclusions,
+        pooled_parties=pooled,
     )
 
 

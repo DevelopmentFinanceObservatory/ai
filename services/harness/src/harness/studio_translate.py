@@ -2088,15 +2088,15 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
 
 
 def _cut_sentence(cut: Mapping[str, Any]) -> str:
-    """What a cut card draws and leaves out, from the counts its result
+    """What a cut card draws and omits, from the counts its result
     states in `holds.cut` (`harness.reply_figures.card_holds`): how many
     members it draws of how many with a value at its period, then how many
-    were left out as group totals or members of another level and how many
+    were left out as totals, unallocated amounts or other levels and how many
     for having no value there, each named only when it is more than none."""
     left_out = [
         f"{count:,} {what}"
         for count, what in (
-            (cut.get("other_kinds"), "group totals or members of another level"),
+            (cut.get("other_kinds"), "totals, unallocated amounts or other levels"),
             (cut.get("unvalued"), "with no value"),
         )
         if count
@@ -2105,7 +2105,7 @@ def _cut_sentence(cut: Mapping[str, Any]) -> str:
         f"The chart shows the {cut['drawn']:,} largest of {cut['with_a_value']:,} "
         f"with a value in {cut['period']}"
     )
-    return f"{drawn} and leaves out {' and '.join(left_out)}." if left_out else f"{drawn}."
+    return f"{drawn} and omits {' and '.join(left_out)}." if left_out else f"{drawn}."
 
 
 def _charts_outcome(args: dict[str, Any], answer: dict[str, Any]) -> tuple[StepStatus, str | None]:

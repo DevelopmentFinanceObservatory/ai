@@ -15,11 +15,21 @@ Recoverable:
   `get_data` can send (`RECOVERABLE_COLUMNS`), and no groupby or the one apis
   recorded for the version, and takes the one that matches.
 - `options.columns`, by the same match.
+- `enrichment_stamp` of a frame minted with `KIND_COLUMNS`: the stamp its pair is named
+  under. Each candidate above is tried under the stamp the versions answer lists on its
+  version and under none, the pair of a frame minted before apis sent a stamp or of one
+  whose frame holds no party role, which recovers with none. A frame named under
+  another stamp is matched from its held trace, which keeps the stamp
+  (`MaterialisationTrace.enrichment_stamp`), as in the next entry. A record under a
+  stamp other than the one its version lists marks the
+  root as moved to `harness.live_refresh`, which replays it with the kinds served now.
 - A sum that kept its version, held under the pair that names its groupby. apis
   records no groupby on an unsummed version, so no candidate above reproduces the
   pair. The frame's own trace keeps the options it was minted with
-  (`MaterialisationTrace.options`), and the pair `frame_ref_for` derives from them
-  and a listed version is the match. The record holds those options.
+  (`MaterialisationTrace.options`) and the stamp its pair is named under, and the
+  pair `frame_ref_for` derives from them and a listed version is the match. The
+  record holds those options and that stamp. A trace that keeps no stamp is tried under
+  the stamp each version lists and under none.
 - `options.groupby` of a summed frame with a `content_version` of its own. apis
   records the version it was summed from as `base_content_version`, and its
   versions route returns the `groupby` the mint sent whenever a file stored under
@@ -54,6 +64,8 @@ Not recoverable:
 - A sum that kept its version whose frame the store no longer holds, or holds with a
   trace written before it kept the mint's options. It fails with
   `no_version_matches`.
+- A frame named under another stamp whose frame the store no longer holds, or holds
+  with a trace that keeps no stamp. It fails with `no_version_matches`.
 - A frame whose dataset version apis no longer lists, or one minted with a
   column selection outside `RECOVERABLE_COLUMNS`. Both fail with
   `no_version_matches`.
@@ -62,7 +74,7 @@ Not recoverable:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Mapping, Sequence
-from itertools import product
+from itertools import combinations, product
 from typing import Any, Protocol
 
 from common.materialisation import (
@@ -77,11 +89,13 @@ from dfo_frame_grammar import Frame
 
 from data_mcp.frame_materialisation import (
     DEFAULT_MINT_OPTIONS,
+    FLOW_ENRICHMENT_COLUMNS,
     KIND_COLUMNS,
     TYPE_COLUMN_SELECTIONS,
     WITHOUT_PARTY_TOTALS,
     frame_ref_for,
     observed_shape,
+    recorded_stamp,
 )
 
 __all__ = [
@@ -98,7 +112,9 @@ class DatasetVersion(Protocol):
     a version summed from another by a `groupby` or cut from it by
     `without_party_totals`. `groupby` is that mint's `options.groupby` when apis
     recorded it, and `without_party_totals` is true when apis recorded the cut.
-    `common.live_apis.DatasetVersion` is one."""
+    `enrichment_stamp` is the stamp a party-kind file of the version carries, the
+    answering code index's digest, or `None` when its frame holds no party role or apis
+    lists none. `common.live_apis.DatasetVersion` is one."""
 
     @property
     def content_version(self) -> str: ...
@@ -112,6 +128,9 @@ class DatasetVersion(Protocol):
     @property
     def without_party_totals(self) -> bool: ...
 
+    @property
+    def enrichment_stamp(self) -> str | None: ...
+
 
 class DatasetVersions(Protocol):
     """Reads the stored versions of the dataset `spec_id` names, newest first.
@@ -120,22 +139,42 @@ class DatasetVersions(Protocol):
     def __call__(self, *, spec_id: str) -> Awaitable[Sequence[DatasetVersion]]: ...
 
 
-# The `options.columns` of a flow table's mint before the token was renamed to
-# `KIND_COLUMNS`. A root minted with it stays in the frame store with no age rule, and
-# `replayed_mint_options` upgrades the recovered selection on replay.
-_EARLIER_KIND_COLUMNS: tuple[str, ...] = ("kind",)
+# The kind tokens of a flow table's mint before `KIND_COLUMNS`: `party_kind` before the
+# class and whole tokens joined it. A root minted with it stays in the frame store with no
+# age rule, and `replayed_mint_options` upgrades the recovered selection on replay.
+_EARLIER_KIND_SELECTIONS: tuple[tuple[str, ...], ...] = (("party_kind",),)
 
-# Every `options.columns` a recorded mint may hold: none, some of the type columns, or a
-# flow table's kinds under either token.
+# The party type columns a flow mint may send beside its kinds: none, both, or the one left
+# after a column refusal drops a role the table does not have, in `FLOW_ENRICHMENT_COLUMNS`
+# order.
+_PARTY_TYPE_COLUMNS = tuple(
+    column for column in FLOW_ENRICHMENT_COLUMNS if column not in KIND_COLUMNS
+)
+_PARTY_TYPE_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
+    selection
+    for size in range(len(_PARTY_TYPE_COLUMNS) + 1)
+    for selection in combinations(_PARTY_TYPE_COLUMNS, size)
+)
+
+# Every `options.columns` a recorded mint may hold: none, some of the type columns, a flow
+# table's kinds under the current or the earlier tokens with any of its party types before
+# them, or the earliest token `kind` alone.
 RECOVERABLE_COLUMNS: tuple[tuple[str, ...], ...] = (
     *TYPE_COLUMN_SELECTIONS,
-    KIND_COLUMNS,
-    _EARLIER_KIND_COLUMNS,
+    *(
+        (*types, *kinds)
+        for kinds in (KIND_COLUMNS, *_EARLIER_KIND_SELECTIONS)
+        for types in _PARTY_TYPE_SELECTIONS
+    ),
+    ("kind",),
 )
 
 
 async def recover_mint_record(
-    ref: FrameRef, *, dataset_versions: DatasetVersions, store: MaterialisationStore
+    ref: FrameRef,
+    *,
+    dataset_versions: DatasetVersions,
+    store: MaterialisationStore,
 ) -> MintRecord:
     """The mint record of the root frame held under `ref`, rebuilt from the dataset's
     stored versions and the frame `store` holds. See the module docstring for what can
@@ -160,12 +199,15 @@ async def recover_mint_record(
     versions = await dataset_versions(spec_id=ref.spec_id)
     for version in versions:
         groupbys = (None,) if version.groupby is None else (None, version.groupby)
-        for groupby, columns in product(groupbys, RECOVERABLE_COLUMNS):
+        for groupby, columns, stamp in product(
+            groupbys, RECOVERABLE_COLUMNS, _listed_or_none(version)
+        ):
             candidate = frame_ref_for(
                 spec_id=ref.spec_id,
                 content_version=version.content_version,
                 columns=columns,
                 groupby=groupby,
+                enrichment_stamp=stamp,
             )
             if candidate != ref:
                 continue
@@ -187,34 +229,50 @@ async def recover_mint_record(
                 dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
                 options=options,
                 stat_var_count=stat_var_count,
+                enrichment_stamp=recorded_stamp(columns, stamp),
             )
     return await _recover_from_trace(ref, versions=versions, store=store)
+
+
+def _listed_or_none(version: DatasetVersion) -> tuple[str | None, ...]:
+    """The stamps a frame of `version` may be named under when nothing records its own:
+    the one the version lists, and none, for a frame minted before apis sent one."""
+    return tuple(dict.fromkeys((version.enrichment_stamp, None)))
 
 
 async def _recover_from_trace(
     ref: FrameRef, *, versions: Sequence[DatasetVersion], store: MaterialisationStore
 ) -> MintRecord:
-    """The mint record of `ref` rebuilt from the options its held frame's trace keeps,
-    matched against `versions` by `frame_ref_for`."""
+    """The mint record of `ref` rebuilt from the options and stamp its held frame's
+    trace keeps, matched against `versions` by `frame_ref_for`. A trace that keeps no
+    stamp is tried under each version's `_listed_or_none`."""
     held = await _held(store, ref)
     trace = None if held is None else held[1]
-    options = trace.options if isinstance(trace, MaterialisationTrace) else None
-    if held is None or options is None:
+    if held is None or not isinstance(trace, MaterialisationTrace) or trace.options is None:
         raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
+    options = trace.options
     for version in versions:
-        candidate = frame_ref_for(
-            spec_id=ref.spec_id,
-            content_version=version.content_version,
-            columns=tuple(options.get("columns") or ()),
-            groupby=options.get("groupby"),
+        stamps = (
+            (trace.enrichment_stamp,)
+            if trace.enrichment_stamp is not None
+            else _listed_or_none(version)
         )
-        if candidate == ref:
-            return MintRecord(
-                frame=ref,
-                dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
-                options=dict(options),
-                stat_var_count=observed_shape(held[0])[1],
+        for stamp in stamps:
+            candidate = frame_ref_for(
+                spec_id=ref.spec_id,
+                content_version=version.content_version,
+                columns=tuple(options.get("columns") or ()),
+                groupby=options.get("groupby"),
+                enrichment_stamp=stamp,
             )
+            if candidate == ref:
+                return MintRecord(
+                    frame=ref,
+                    dataset=FrameRef(spec_id=ref.spec_id, content_version=version.content_version),
+                    options=dict(options),
+                    stat_var_count=observed_shape(held[0])[1],
+                    enrichment_stamp=recorded_stamp(options.get("columns") or (), stamp),
+                )
     raise MintRecordUnrecoverableError(ref, reason="no_version_matches")
 
 

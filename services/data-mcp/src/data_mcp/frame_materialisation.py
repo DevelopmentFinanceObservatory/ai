@@ -29,7 +29,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import combinations
@@ -104,6 +104,7 @@ __all__ = [
     "MaterialisationOutcome",
     "frame_ref_for",
     "materialise_and_register",
+    "recorded_stamp",
 ]
 
 logger = logging.getLogger(__name__)
@@ -164,19 +165,20 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The bare `party_kind` token apis expands to a `{column}_party_kind` column for every
-# party column a flow table has. Its qualified type tokens are necessary: the door does not
-# expand a bare `type` token. Keep the two kinds of enrichment together so a country filter can
-# distinguish countries from organisations without losing the party-kind proof that excludes
-# published group totals from later sums and ranks.
-KIND_COLUMNS: tuple[str, ...] = ("party_kind",)
+# The bare tokens apis expands to a `{column}_{token}` column for every party column a flow
+# table has: the party's kind, class and whole-population mark (`common.place_type`). The
+# qualified type tokens are necessary: the door does not expand a bare `type` token. Keep the
+# two kinds of enrichment together so a country filter can distinguish countries from
+# organisations without losing the party-kind proof that excludes published group totals from
+# later sums and ranks.
+KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_class", "party_whole")
 FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
     *sorted(type_column(role) for role in PARTY_ROLES),
     *KIND_COLUMNS,
 )
 
 # The earlier token for a flow party kind that old recorded selections carry. Replays translate
-# it to the door's current `party_kind` spelling while preserving the rest of the selection.
+# it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
 _LEGACY_KIND_COLUMN = "kind"
 
 # The mint option that asks apis for a flow frame without the group totals of the
@@ -206,29 +208,29 @@ def replayed_mint_options(
     """`options` as `get_data` sends them for a root of `identity`.
 
     A flow root recorded with no `columns` gains every flow enrichment. A recorded flow
-    selection keeps its explicit columns and gains any missing flow enrichment. The earlier
-    `kind` token is translated to `party_kind` even when its identity is no longer available;
-    a recorded qualified party-type selection also proves that the current `party_kind` token
-    is valid, without guessing other role columns. A root recorded with `without_party_totals`
-    and the kinds alone is the rendering `get_data(without_party_totals=True)` mints, and
-    replays unchanged. Every other selection is unchanged. A flow frame without this metadata
+    selection, one holding a party type or a kind token, keeps its other explicit columns
+    in order and then asks for every missing flow enrichment, the kinds as `KIND_COLUMNS`:
+    the earlier `kind` token and a `party_kind` from before the class and whole tokens are
+    read as `KIND_COLUMNS`, even when the identity is no longer available, and a recorded
+    qualified party-type selection proves that the current kind tokens are valid, without
+    guessing other role columns. A root recorded with `without_party_totals` and kinds
+    alone is the rendering `get_data(without_party_totals=True)` mints, and replays with
+    `KIND_COLUMNS`. Every other selection is unchanged. A flow frame without this metadata
     cannot prove that a sum or rank leaves group totals out.
     """
-    columns = options.get("columns")
-    if options.get(WITHOUT_PARTY_TOTALS) and tuple(columns or ()) == KIND_COLUMNS:
-        return options
-    selected = [column for column in columns or () if column != _LEGACY_KIND_COLUMN]
-    legacy_kind = _LEGACY_KIND_COLUMN in (columns or ())
+    columns = options.get("columns") or ()
+    kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
+    if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
+        return {**options, "columns": list(KIND_COLUMNS)}
     flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
-    recorded_flow_types = any(column in FLOW_ENRICHMENT_COLUMNS for column in selected)
-    if not flow_root and not legacy_kind and not recorded_flow_types:
+    flow_selection = any(
+        column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
+    )
+    if not flow_root and not flow_selection:
         return options
 
-    additions = (
-        FLOW_ENRICHMENT_COLUMNS
-        if flow_root
-        else tuple(column for column in KIND_COLUMNS if column not in selected)
-    )
+    selected = [column for column in columns if column not in kind_tokens]
+    additions = FLOW_ENRICHMENT_COLUMNS if flow_root else KIND_COLUMNS
     selected.extend(column for column in additions if column not in selected)
     return {**options, "columns": selected}
 
@@ -337,13 +339,15 @@ async def materialise_and_register(
     The store write must end with `_AFTER_WRITE_RESERVE_S` left, and one that runs out
     degrades with `degraded_reason="store_write"`.
     """
-    ref = _ref_or_refusal(manifest, options=options)
+    stamp = _named_stamp(manifest, options=options)
+    ref = _ref_or_refusal(manifest, options=options, stamp=stamp)
     if isinstance(ref, MaterialisationOutcome):
         return ref
     outcome = await _register(
         ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         transport=transport,
@@ -362,6 +366,7 @@ async def materialise_and_register(
                 options=dict(options),
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
+                enrichment_stamp=stamp,
             ),
             deadline=deadline,
         )
@@ -393,12 +398,14 @@ async def _register(
     *,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
     deadline: CallDeadline | None,
 ) -> MaterialisationOutcome:
-    """`materialise_and_register` for the frame held under `ref`."""
+    """`materialise_and_register` for the frame held under `ref`, named under `stamp`
+    (`_named_stamp`)."""
     store = get_store()
     checked = await _check_store(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
@@ -467,6 +474,7 @@ async def _register(
         ref=ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         store=store,
@@ -635,6 +643,7 @@ async def _verify_parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     store: MaterialisationStore,
@@ -700,6 +709,7 @@ async def _verify_parse_and_register(
             ref=ref,
             manifest=manifest,
             options=options,
+            stamp=stamp,
             writer=writer,
             store=store,
             claim=claim,
@@ -725,6 +735,7 @@ async def _parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     writer: str,
     store: MaterialisationStore,
     claim: RowClaim,
@@ -743,8 +754,9 @@ async def _parse_and_register(
     is a rendering, validated cell by cell (`_frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
-    The frame's trace keeps the mint's `options`, so `data_mcp.mint_recovery` can
-    rebuild a derived pair from the held frame when its mint record is missing.
+    The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
+    under, so `data_mcp.mint_recovery` can rebuild a derived pair from the held frame
+    when its mint record is missing.
     """
     # `pyarrow.ArrowException` (a 2xx response whose body isn't a valid/complete Parquet
     # file) and `KeyError` (a Parquet file missing its `time_period` or `value` column,
@@ -782,6 +794,7 @@ async def _parse_and_register(
         spec_id=ref.spec_id,
         content_version=ref.content_version,
         options=dict(options),
+        enrichment_stamp=stamp,
     )
     try:
         async with asyncio.timeout(_seconds_left(write_deadline)):
@@ -828,12 +841,24 @@ def _read_outcome(
     )
 
 
+def requests_kinds(columns: Iterable[str]) -> bool:
+    """Whether `columns` asks apis for any of a flow party's kind, class or whole cells."""
+    return not set(KIND_COLUMNS).isdisjoint(columns)
+
+
+def recorded_stamp(columns: Iterable[str], stamp: str | None) -> str | None:
+    """`stamp` as a frame minted with `columns` is named under (`frame_ref_for`) and its
+    mint record keeps it: only a frame that asks for kinds is named by one."""
+    return stamp if requests_kinds(columns) else None
+
+
 def frame_ref_for(
     *,
     spec_id: str,
     content_version: str,
     columns: tuple[str, ...] = (),
     groupby: Mapping[str, Any] | None = None,
+    enrichment_stamp: str | None = None,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
     minted with `options.columns` set to `columns` and `options.groupby` to `groupby`.
@@ -852,6 +877,14 @@ def frame_ref_for(
     keeps the version: the versions route that says so needs a first-party
     principal this service does not hold.
 
+    A `columns` that asks for `KIND_COLUMNS` also names `enrichment_stamp`, the digest
+    of the code-index facts behind the kind cells of the artifact the frame is read
+    from (`ArtifactEntry.enrichment_stamp`, `_named_stamp`), in the preimage as an
+    `"enrichment_stamp"` member. apis keeps one
+    `content_version` across a change to a party's kind, so without it the store
+    would serve the frame holding the old kinds for as long as it keeps the entry.
+    With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
+
     `options.without_party_totals` takes no part: apis mints a frame without
     party totals a version of its own, so `content_version` already names it, and a
     cut that leaves nothing out serves its base's frame under its base's version.
@@ -866,6 +899,8 @@ def frame_ref_for(
     preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
     if groupby is not None:
         preimage["groupby"] = dict(groupby)
+    if enrichment_stamp is not None and requests_kinds(columns):
+        preimage["enrichment_stamp"] = enrichment_stamp
     rendering = rfc8785.dumps(preimage)
     return FrameRef(
         spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"
@@ -873,11 +908,11 @@ def frame_ref_for(
 
 
 def _ref_or_refusal(
-    manifest: Manifest, *, options: Mapping[str, Any]
+    manifest: Manifest, *, options: Mapping[str, Any], stamp: str | None
 ) -> FrameRef | MaterialisationOutcome:
-    """The reference this frame registers under (`frame_ref_for`), or the refused
-    outcome for a manifest whose `spec_id`/`content_version` combination doesn't match
-    `FrameRef`'s own pair shape.
+    """The reference this frame registers under (`frame_ref_for`, named under `stamp`),
+    or the refused outcome for a manifest whose `spec_id`/`content_version` combination
+    doesn't match `FrameRef`'s own pair shape.
     """
     try:
         return frame_ref_for(
@@ -885,6 +920,7 @@ def _ref_or_refusal(
             content_version=manifest.content_version,
             columns=tuple(options.get("columns") or ()),
             groupby=options.get("groupby"),
+            enrichment_stamp=stamp,
         )
     except ValidationError as exc:
         return MaterialisationOutcome(
@@ -895,6 +931,17 @@ def _ref_or_refusal(
                 f"this service expects: {exc}"
             ),
         )
+
+
+def _named_stamp(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
+    """The stamp a frame minted with `options` is named under (`frame_ref_for`): the
+    `enrichment_stamp` of the artifact it is read from (`_select_requested_artifact`),
+    for a frame that asks for kinds (`recorded_stamp`). An artifact without one, such
+    as a pinned file rendered under an earlier code index, names the frame unsalted.
+    The canonical frame asks for no kinds."""
+    artifact = _select_requested_artifact(manifest, options=options)
+    stamp = None if artifact is None else artifact.enrichment_stamp
+    return recorded_stamp(options.get("columns") or (), stamp)
 
 
 def _select_requested_artifact(
@@ -1259,8 +1306,10 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`).
 
-    A `{role}_type` or `{role}_party_kind` column, which `get_data(place_types=True)` asks for,
-    is a role key too, with each empty cell written `UNTYPED` (`_with_untyped_places`).
+    A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or
+    `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
+    `get_data(place_types=True)` asks for, is a role key too, with each empty cell
+    written `UNTYPED` (`_with_untyped_places`).
     """
     table = _with_untyped_places(pq.read_table(io.BytesIO(data)))
     role_keys = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]
@@ -1279,12 +1328,12 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
 
 
 def _with_untyped_places(table: pa.Table) -> pa.Table:
-    """`table` with each empty or null cell of every type or kind column of a role it
+    """`table` with each empty or null cell of every enrichment column of a role it
     carries (`common.place_type.enrichment_role`) written as `common.place_type.UNTYPED`.
 
-    apis leaves the cell empty for a place its graph holds no type for and for a
-    party it declares no kind for, and `build_frame_from_arrow` refuses an empty role
-    cell. A column typed null holds no value at all. A column of another type is left
+    apis leaves the cell empty for a place its graph holds no type for, for a party it
+    declares no kind for, and in the class column of a total holding parties of more than
+    one class, and `build_frame_from_arrow` refuses an empty role cell. A column typed null holds no value at all. A column of another type is left
     unchanged, for `build_frame_from_arrow` to refuse.
     """
     roles = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]

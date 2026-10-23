@@ -890,12 +890,81 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
 
 
 @pytest.mark.parametrize(
+    ("group", "kept"),
+    [
+        (
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ["official"]},
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ("official",)},
+        ),
+        (
+            {
+                "label": "all donors including private",
+                "total": None,
+                "whole_of": ["official", "private"],
+            },
+            {"label": "all donors including private", "whole_of": ("official", "private")},
+        ),
+        ({"label": "Africa", "ref": "africa"}, {"label": "Africa", "ref": "africa"}),
+        ({"label": "Africa", "whole_of": []}, {"label": "Africa"}),
+        (
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ["official"],
+                "side_classes": ["official", "private", "residual"],
+            },
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ("official",),
+                "side_classes": ("official", "private", "residual"),
+            },
+        ),
+    ],
+    ids=[
+        "single-total",
+        "set-of-totals",
+        "without-the-field",
+        "empty-field-is-absent",
+        "with-the-sides-classes",
+    ],
+)
+def test_a_seed_carries_the_classes_a_whole_total_holds(
+    group: object, kept: dict[str, Any]
+) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
+
+
+@pytest.mark.parametrize(
+    "whole_of",
+    ["official", [""], list(range(2)), ["party"]],
+    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
+)
+def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+    }
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is None
+
+
+@pytest.mark.parametrize(
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
         {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"label": "all donors", "side_kinds": ["official"]},
     ],
-    ids=["dcid-before-ref", "unknown-member"],
+    ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],
 )
 def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: object) -> None:
     # A block from the Search wire that named a set's node `dcid` would otherwise

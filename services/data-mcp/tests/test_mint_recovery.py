@@ -3,7 +3,9 @@ its pair, the frame the store holds, and the dataset's stored versions."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import replace
+from typing import Any
 
 import pytest
 from common.live_apis import DatasetVersion
@@ -14,7 +16,7 @@ from common.materialisation import (
     MintRecord,
     MintRecordUnrecoverableError,
 )
-from data_mcp.frame_materialisation import frame_ref_for
+from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
 from data_mcp.mint_recovery import recover_mint_record
 from dfo_frame_grammar import Frame
 
@@ -38,10 +40,24 @@ _VERSIONS = (
 
 
 class _Versions:
-    """A fake of `LiveApisClient.list_versions`, recording the datasets asked for."""
+    """A fake of `LiveApisClient.list_versions`, recording the datasets asked for. Each
+    version lists `stamp`, as apis lists its digest on every version whose frame holds a
+    party role, or only the versions in `stamped` when that is given."""
 
-    def __init__(self, versions: Sequence[DatasetVersion] = _VERSIONS) -> None:
-        self._versions = versions
+    def __init__(
+        self,
+        versions: Sequence[DatasetVersion] = _VERSIONS,
+        *,
+        stamp: str | None = None,
+        stamped: Collection[str] | None = None,
+    ) -> None:
+        self._versions = tuple(
+            replace(
+                v,
+                enrichment_stamp=stamp if stamped is None or v.content_version in stamped else None,
+            )
+            for v in versions
+        )
         self.asked: list[str] = []
 
     async def __call__(self, *, spec_id: str) -> Sequence[DatasetVersion]:
@@ -59,10 +75,13 @@ def _typed(content_version: str, columns: tuple[str, ...] = ("observationAbout_t
 
 
 async def _holding(
-    ref: FrameRef, *stat_vars: str, options: dict[str, object] | None = None
+    ref: FrameRef,
+    *stat_vars: str,
+    options: dict[str, object] | None = None,
+    stamp: str | None = None,
 ) -> InMemoryMaterialisationStore:
     """A store holding, under `ref`, a frame with one row for each of `stat_vars`,
-    whose trace keeps `options`."""
+    whose trace keeps `options` and `stamp`."""
     store = InMemoryMaterialisationStore()
     if stat_vars:
         frame = Frame.build(
@@ -77,6 +96,7 @@ async def _holding(
             spec_id=ref.spec_id,
             content_version=ref.content_version,
             options=options,
+            enrichment_stamp=stamp,
         )
         await store.put(ref, frame=frame, trace=trace, writer="test")
     return store
@@ -132,6 +152,11 @@ async def _holding(
             _DEFAULT_OPTIONS | {"columns": ["financingProvider_type"]},
         ),
         (
+            _typed(_OLDER, KIND_COLUMNS),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": list(KIND_COLUMNS)},
+        ),
+        (
             _typed(_OLDER, ("party_kind",)),
             _OLDER,
             _DEFAULT_OPTIONS | {"columns": ["party_kind"]},
@@ -140,6 +165,16 @@ async def _holding(
             _typed(_OLDER, ("kind",)),
             _OLDER,
             _DEFAULT_OPTIONS | {"columns": ["kind"]},
+        ),
+        (
+            _typed(_OLDER, (*_FLOW_TYPES, *KIND_COLUMNS)),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": [*_FLOW_TYPES, *KIND_COLUMNS]},
+        ),
+        (
+            _typed(_OLDER, ("financingProvider_type", "party_kind")),
+            _OLDER,
+            _DEFAULT_OPTIONS | {"columns": ["financingProvider_type", "party_kind"]},
         ),
         (
             frame_ref_for(spec_id=_SPEC_ID, content_version=_CUT, columns=("party_kind",)),
@@ -169,7 +204,10 @@ async def _holding(
         "both-flow-party-types",
         "the-one-flow-party-type-a-table-serves",
         "flow-party-kinds",
+        "flow-party-kind-without-class-and-whole",
         "flow-party-kinds-under-the-earlier-token",
+        "flow-party-types-and-kinds",
+        "the-one-flow-party-type-a-table-serves-and-the-kind-without-class-and-whole",
         "flow-party-kinds-of-a-cut-version",
         "flow-party-kinds-of-a-sum-of-a-cut-version",
     ],
@@ -298,3 +336,111 @@ async def test_a_sum_that_kept_its_version_is_unrecoverable_without_its_options(
         await recover_mint_record(ref, dataset_versions=_Versions(), store=store)
 
     assert raised.value.reason == "no_version_matches"
+
+
+_KINDS = ("party_kind",)
+_KIND_OPTIONS: dict[str, object] = _DEFAULT_OPTIONS | {"columns": list(_KINDS)}
+_KIND_SUM: dict[str, object] = _KIND_OPTIONS | {"groupby": _GROUPBY}
+
+
+def _salted(stamp: str, *, groupby: Mapping[str, Any] | None = None) -> FrameRef:
+    return frame_ref_for(
+        spec_id=_SPEC_ID,
+        content_version=_OLDER,
+        columns=_KINDS,
+        groupby=groupby,
+        enrichment_stamp=stamp,
+    )
+
+
+@pytest.mark.parametrize("kept_sum", [False, True], ids=["from-a-version", "from-the-trace"])
+@pytest.mark.parametrize(
+    "stamped",
+    [None, {_OLDER}],
+    ids=["every-version-lists-it", "only-the-roots-version-lists-it"],
+)
+async def test_a_kind_root_named_under_the_current_stamp_is_recovered_with_it(
+    kept_sum: bool, stamped: set[str] | None
+) -> None:
+    """A held frame's pair is reproduced from the stamp its own version lists, whatever
+    the other versions list, and the record keeps it, so a replay names the same pair."""
+    ref = _salted("stamp-now", groupby=_GROUPBY if kept_sum else None)
+    options = _KIND_SUM if kept_sum else _KIND_OPTIONS
+    # A version reproduces the pair of an unsummed root without the trace's options.
+    store = await _holding(ref, "dcid:A", options=options if kept_sum else None)
+
+    record = await recover_mint_record(
+        ref, dataset_versions=_Versions(stamp="stamp-now", stamped=stamped), store=store
+    )
+
+    assert record == MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=_SPEC_ID, content_version=_OLDER),
+        options=options,
+        stat_var_count=1,
+        enrichment_stamp="stamp-now",
+    )
+
+
+@pytest.mark.parametrize("kept_sum", [False, True], ids=["from-a-version", "from-the-trace"])
+@pytest.mark.parametrize("current", [None, "stamp-now"], ids=["no-current-stamp", "a-newer-stamp"])
+async def test_a_kind_root_named_under_an_older_stamp_its_trace_does_not_keep_is_not_recoverable(
+    kept_sum: bool, current: str | None
+) -> None:
+    """The held trace keeps no stamp, so nothing names the stamp its pair was derived
+    from."""
+    ref = _salted("stamp-before", groupby=_GROUPBY if kept_sum else None)
+    store = await _holding(ref, "dcid:A", options=_KIND_SUM if kept_sum else _KIND_OPTIONS)
+
+    with pytest.raises(MintRecordUnrecoverableError) as raised:
+        await recover_mint_record(ref, dataset_versions=_Versions(stamp=current), store=store)
+
+    assert raised.value.reason == "no_version_matches"
+
+
+@pytest.mark.parametrize("kept_sum", [False, True], ids=["from-a-version", "from-the-trace"])
+async def test_a_kind_root_named_under_an_older_stamp_is_recovered_with_its_traces_stamp(
+    kept_sum: bool,
+) -> None:
+    """The record keeps the stamp the pair was named under, so a refresh sees it differ
+    from the one its version lists and mints the root again."""
+    ref = _salted("stamp-before", groupby=_GROUPBY if kept_sum else None)
+    options = _KIND_SUM if kept_sum else _KIND_OPTIONS
+    store = await _holding(ref, "dcid:A", options=options, stamp="stamp-before")
+
+    record = await recover_mint_record(
+        ref, dataset_versions=_Versions(stamp="stamp-now"), store=store
+    )
+
+    assert record == MintRecord(
+        frame=ref,
+        dataset=FrameRef(spec_id=_SPEC_ID, content_version=_OLDER),
+        options=options,
+        stat_var_count=1,
+        enrichment_stamp="stamp-before",
+    )
+
+
+@pytest.mark.parametrize("current", [None, "stamp-now"], ids=["no-stamp-served", "a-stamp-served"])
+async def test_an_unsalted_kind_root_is_recovered_without_a_stamp(current: str | None) -> None:
+    """Named before apis sent a stamp. The record keeps none, so a refresh sees it
+    differ from a stamp its version lists and mints the root again."""
+    ref = _typed(_OLDER, _KINDS)
+    store = await _holding(ref, "dcid:A")
+
+    record = await recover_mint_record(ref, dataset_versions=_Versions(stamp=current), store=store)
+
+    assert record.options == _KIND_OPTIONS
+    assert record.enrichment_stamp is None
+
+
+async def test_a_root_without_kind_columns_is_recovered_whatever_stamp_is_served() -> None:
+    """Types come from the graph, so the stamp names no such frame and its record keeps none."""
+    ref = _typed(_OLDER)
+    store = await _holding(ref, "dcid:A")
+
+    record = await recover_mint_record(
+        ref, dataset_versions=_Versions(stamp="stamp-now"), store=store
+    )
+
+    assert record.enrichment_stamp is None
