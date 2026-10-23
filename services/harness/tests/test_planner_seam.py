@@ -1805,7 +1805,7 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
     message = _seam()._message(
         fresh=True,
         question="QUESTION_TEXT",
-        prior_plan=stored.model_dump(mode="json"),
+        prior_plan=planner_seam._as_authored(stored),
         refusal=None,
         amendment=None,
         canvas_digest=None,
@@ -1819,6 +1819,33 @@ def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:
     assert message.count("- evidence:") == 1
     assert message.count(" -- external debt service paid") == 1
     assert SPEC_DEBT_HISTORY not in message
+
+
+async def test_the_brief_seeded_with_a_split_plan_shows_the_plan_the_model_wrote(
+    decision: Any,
+) -> None:
+    """The graph hands the seam the stored plan, copies and all. The brief the
+    planner reads names `debt` and its source, and neither the copy nor the
+    copy's pin."""
+    stored = stored_split_plan(decision)
+    seam = _seam()
+    llm = ScriptedPlannerLlm(script=["still nothing"] * 4)
+    seam._agent.model = llm
+
+    await _run_seam(
+        seam, question=stored.question, readings=[], prior_plan=stored.model_dump(mode="json")
+    )
+
+    brief = "\n".join(
+        part.text
+        for content in llm.captured_requests[0].contents
+        if content.role == "user"
+        for part in content.parts or []
+        if part.text is not None
+    )
+    assert f"- evidence: debt from {SPEC_DEBT} (step debt)" in brief
+    assert "debt_history" not in brief
+    assert SPEC_DEBT_HISTORY not in brief
 
 
 def test_the_plan_section_names_the_source_a_requirement_s_evidence_came_from(

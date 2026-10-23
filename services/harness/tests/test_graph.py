@@ -73,6 +73,7 @@ from harness.graph.state import (
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_UNAVAILABLE_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -98,11 +99,21 @@ from planner.plan import (
     Period,
     PlanStatus,
     ResolvedBy,
+    authored,
     open_window,
     plan_revision,
+    with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import EvidenceIssue, EvidenceIssueCode, GroupBy, Reduction, Severity
+from planner.records import (
+    EvidenceIssue,
+    EvidenceIssueCode,
+    GroupBy,
+    Reduction,
+    RelativePeriod,
+    RollingWindow,
+    Severity,
+)
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import ValidationError
 from translator.discovery import PartFault, PartNotResolvedError
@@ -119,7 +130,7 @@ from .orchestrator_fakes import (
     run_turn,
     visited_nodes,
 )
-from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, stored_split_plan
+from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -2580,54 +2591,165 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
 _GET_DATA = ToolId(server="data-mcp", name="get_data")
 
 
+def _with_a_second_rolling_reader(decision: Callable[..., Decision]) -> PlannerPlan:
+    """`stored_split_plan` with `last_three`, a growth over the newest three
+    years, reading `debt` too, so the split has it read `debt_history`."""
+    plan = stored_split_plan(decision)
+    window = RollingWindow(
+        window_start=RelativePeriod(offset=-3), window_end=RelativePeriod(offset=0)
+    )
+    last_three = GrowthRequirement(
+        id="last_three", input_id="debt", window_start=2021, window_end=2024, rolling=window
+    )
+    draft = split_draft(decision)
+    split = with_authored_requirements(draft, [*authored(draft).evidence_requirements, last_three])
+    assert split.requirement("last_three").input_id == "debt_history"  # type: ignore[union-attr]
+    assert plan.translation is not None and plan.workflow is not None
+    (growth,) = [step for step in plan.workflow.steps if step.id == "last_five"]
+    return split.with_translation(
+        translation=plan.translation.model_copy(
+            update={
+                "operations": (
+                    *plan.translation.operations,
+                    GrowthOperation(
+                        id="last_three",
+                        requirement_id="last_three",
+                        input="debt_history",
+                        window_start=2021,
+                        window_end=2024,
+                        rolling=window,
+                    ),
+                ),
+                "terminal": (*plan.translation.terminal, "last_three"),
+            }
+        ),
+        workflow=plan.workflow.model_copy(
+            update={
+                "steps": (
+                    *plan.workflow.steps,
+                    growth.model_copy(update={"id": "last_three", "operation_id": "last_three"}),
+                ),
+                "terminal_steps": (*plan.workflow.terminal_steps, "last_three"),
+            }
+        ),
+    )
+
+
+_ROLLED_START = Refused(
+    revision="rev1",
+    refusal=RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET,
+    detail=(
+        "step 'last_five' would start in 1995, counted from 2023, before 2000, "
+        f"the first year {SPEC_DEBT_HISTORY} holds"
+    ),
+    step_id="last_five",
+    requirement_id="debt_history",
+    payload=ToolFailure(
+        code="rolling_window_outside_dataset",
+        message="The data for external debt service paid starts in 2000.",
+        retry_mode="do_not_retry",
+    ),
+)
+_REDISCOVERY = RediscoveryNeeded(
+    revision="rev1",
+    step_id="debt_history",
+    tool=_GET_DATA,
+    requirement_id="debt_history",
+    spec_id=SPEC_DEBT_HISTORY,
+    refusal=ToolFailure(
+        code="upstream_version_changed", message="", retry_mode="refresh_then_retry"
+    ),
+    completed=(),
+)
+_CAPABILITY = Refused(
+    revision="rev1",
+    refusal=RefusalKind.STEP_REFUSED,
+    detail="'get_data' refused: capability_unavailable",
+    step_id="debt_history",
+    requirement_id="debt_history",
+    payload=ToolFailure(
+        code="capability_unavailable",
+        message="this deployment cannot read debt_history's window",
+        retry_mode="do_not_retry",
+    ),
+)
+
+
 @pytest.mark.parametrize(
-    ("stop", "ids"),
+    ("stop", "second_reader", "ids", "failed", "unavailable"),
     [
         pytest.param(
-            Refused(
-                revision="rev1",
-                refusal=RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET,
-                detail=(
-                    "step 'last_five' would start in 1995, counted from 2023, before 2000, "
-                    f"the first year {SPEC_DEBT_HISTORY} holds"
-                ),
-                step_id="last_five",
-                requirement_id="debt_history",
-                payload=ToolFailure(
-                    code="rolling_window_outside_dataset",
-                    message="The data for external debt service paid starts in 2000.",
-                    retry_mode="do_not_retry",
-                ),
-            ),
+            _ROLLED_START,
+            False,
             ("last_five", "debt"),
+            {"last_five": "last_five"},
+            {},
             id="rolled-start-before-the-copy",
         ),
         pytest.param(
-            RediscoveryNeeded(
-                revision="rev1",
-                step_id="debt_history",
-                tool=_GET_DATA,
-                requirement_id="debt_history",
-                spec_id=SPEC_DEBT_HISTORY,
-                refusal=ToolFailure(
-                    code="upstream_version_changed", message="", retry_mode="refresh_then_retry"
-                ),
-                completed=(),
-            ),
+            _ROLLED_START,
+            True,
+            ("last_five", "debt"),
+            {"last_five": "last_five"},
+            {},
+            id="rolled-start-beside-a-second-reader",
+        ),
+        pytest.param(
+            _REDISCOVERY,
+            False,
             ("debt", "debt"),
+            {"last_five": "last_five"},
+            {},
             id="copy-retrieval-needs-rediscovery",
+        ),
+        pytest.param(
+            _REDISCOVERY,
+            True,
+            ("debt", "debt"),
+            {"last_five": "last_five", "last_three": "last_three"},
+            {},
+            id="copy-retrieval-read-by-two-rolling-steps",
+        ),
+        pytest.param(
+            _CAPABILITY,
+            False,
+            ("debt", "debt"),
+            {"last_five": "last_five"},
+            {SPEC_DEBT_HISTORY: "this deployment cannot read debt's window"},
+            id="copy-retrieval-capability-unavailable",
         ),
     ],
 )
 async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
     decision: Callable[..., Decision],
     stop: Refused | RediscoveryNeeded,
+    second_reader: bool,
     ids: tuple[str, str],
+    failed: dict[str, str],
+    unavailable: dict[str, str],
 ) -> None:
-    """A run stopped on a copy the split added (`debt_history`) tells the planner,
-    the agent and the plan record of the step and requirement the model wrote
-    (`debt`), and names no copy."""
+    """A run stopped on a copy the split added (`debt_history`) names no copy.
+    The planner reads the step and requirement the model wrote (`debt`). The
+    agent and the plan record read the stop as landing on each step the model
+    wrote that reads the copy, `last_five` and, where it is there, `last_three`:
+    `debt` ran on its own pin and feeds `total`. A stop on `last_five` itself
+    lands on it alone. A capability the copy's retrieval lacks marks the
+    copy's own pin unavailable, and leaves `debt`'s."""
     plan = stored_split_plan(decision)
+    readers = ["last_five"]
+    if second_reader:
+        plan = _with_a_second_rolling_reader(decision)
+        readers.append("last_three")
+    plan = PlannerPlan.model_validate(
+        {
+            **plan.model_dump(),
+            "asks": ["debt service each year", *(f"its change, {step}" for step in readers)],
+            "answered": [
+                {"ask": 0, "outputs": ["total"]},
+                *({"ask": n, "outputs": [step]} for n, step in enumerate(readers, start=1)),
+            ],
+        }
+    )
 
     refusal = _planner_refusal(stop, plan=plan)
     ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
@@ -2639,7 +2761,52 @@ async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
     assert "debt_history" not in json.dumps(refusal)
     assert "debt_history" not in json.dumps(handed)
     (record,) = ctx.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
-    assert [step["id"] for step in record["steps"] if step["failed"]] == [ids[0]]
+    assert [step["id"] for step in record["steps"] if step["failed"]] == list(
+        dict.fromkeys(failed.values())
+    )
+    result = json.loads(handed["text"].split("\n")[1])
+    assert result["failed_step"]["step_id"] == "last_five"
+    assert [
+        (entry["step"], entry["status"], entry.get("failed_at"))
+        for ask in result["asks"]
+        for entry in ask["answered_by"]
+    ] == [
+        ("total", "not_run", None),
+        *(
+            (step, "failed", failed[step]) if step in failed else (step, "not_run", None)
+            for step in readers
+        ),
+    ]
+    assert ctx.state[ORCHESTRATOR_UNAVAILABLE_KEY] == unavailable
+
+
+def test_a_stop_on_a_copy_renames_it_only_where_a_field_names_a_step(
+    decision: Callable[..., Decision],
+) -> None:
+    """The planner reads `debt` for the copy in the step, the requirement and
+    the tool's message. A ref the tool's `fix` holds keeps the text it has,
+    though it ends in the copy's id."""
+    plan = stored_split_plan(decision)
+    stop = RediscoveryNeeded(
+        revision="rev1",
+        step_id="debt_history",
+        tool=_GET_DATA,
+        requirement_id="debt_history",
+        spec_id=SPEC_DEBT_HISTORY,
+        refusal=ToolFailure(
+            code="upstream_version_changed",
+            message="debt_history needs its source found again",
+            retry_mode="refresh_then_retry",
+            fix={"topic": "debt_history", "path": "dc/topic/debt_history"},
+        ),
+        completed=(),
+    )
+
+    refusal = _planner_refusal(stop, plan=plan)
+
+    assert (refusal["step_id"], refusal["requirement_id"]) == ("debt", "debt")
+    assert refusal["refusal"]["message"] == "debt needs its source found again"
+    assert refusal["refusal"]["fix"] == {"topic": "debt_history", "path": "dc/topic/debt_history"}
 
 
 def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retrieval_requested(

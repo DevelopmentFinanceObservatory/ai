@@ -263,7 +263,7 @@ class PlanRecord(StrictModel):
         plan: Plan,
         *,
         searched: Collection[str] = (),
-        failed_step: str | None = None,
+        failed_steps: Collection[str] = (),
         run_id: str | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
@@ -271,7 +271,7 @@ class PlanRecord(StrictModel):
         Args:
             plan: A plan carrying a translation and a workflow.
             searched: Spec ids the turn's `search` calls returned.
-            failed_step: The id of the step the run stopped at, if any.
+            failed_steps: The ids of the steps the run's stop landed on, if any.
             run_id: The run the plan executed as, if the ledger admitted one.
 
         A source's origin is `search` when `searched` names it, else
@@ -286,7 +286,7 @@ class PlanRecord(StrictModel):
                 label=str(row["label"]),
                 spec_id=_str_or_none(_args(row).get("spec_id")),
                 reading=_reading(_args(row).get("stat_vars")),
-                failed=row["id"] == failed_step,
+                failed=row["id"] in failed_steps,
             )
             for row in plan_display.step_rows(plan)
         )

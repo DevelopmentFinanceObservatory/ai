@@ -797,16 +797,23 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     named group's, and in the
     prose of `reason` and each `repair`. Discovery and the compiler build
     that prose with ids interpolated at dozens of sites, so it is rewritten
-    here (`planner.plan.authored_text`). A stale pin naming the
-    referral's own requirement once mapped, or one listed before it, is
-    dropped, as is a named group repeating one before it.
+    here (`planner.plan.authored_text`).
+
+    The model pins one source on the origin, and the split gives the copy
+    its own window of it, so what the referral offers or withholds for the
+    copy it offers or withholds for the origin
+    (`translator.referral.Referral.offered`). The referral and its stale
+    pins name each origin once: entries naming the same origin once mapped
+    join, the origin's own entry first, each candidate and withheld source
+    listed once, and the first `repair` stated kept. A named group
+    repeating one before it is dropped.
     """
     if not split.copies:
         return answer
 
     def prose(entry: dict[str, object]) -> dict[str, object]:
         return entry | {
-            field: authored_text(text, split)
+            field: authored_text(text, split.origins())
             for field in ("reason", "repair")
             if isinstance(text := entry.get(field), str)
         }
@@ -817,16 +824,44 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
             for entry in cast("list[dict[str, object]]", entries)
         ]
 
+    def own_first(entries: list[tuple[str, dict[str, object]]]) -> list[dict[str, object]]:
+        """`entries`, each keyed by the id it named, the origin's own before its copies'."""
+        copies = split.origins()
+        return [entry for _, entry in sorted(entries, key=lambda pair: pair[0] in copies)]
+
+    def joined(entries: list[dict[str, object]]) -> dict[str, object]:
+        """The candidates and withheld sources of `entries`, each listed once, and the first repair."""
+        fields: dict[str, object] = {}
+        for field in ("candidates", "withheld"):
+            listed: list[object] = []
+            for entry in entries:
+                listed += [
+                    item
+                    for item in cast("list[object]", entry.get(field) or [])
+                    if item not in listed
+                ]
+            if listed:
+                fields[field] = listed
+        if repairs := [entry["repair"] for entry in entries if entry.get("repair")]:
+            fields["repair"] = repairs[0]
+        return fields
+
     mapped = prose(answer)
     if isinstance(requirement_id := answer.get("requirement_id"), str):
         mapped["requirement_id"] = origin_of(split, requirement_id)
     if "stale_pins" in answer:
-        listed = {mapped.get("requirement_id")}
+        by_origin: dict[str, list[tuple[str, dict[str, object]]]] = {}
+        for pin in cast("list[dict[str, object]]", answer["stale_pins"]):
+            step_id = str(pin["requirement_id"])
+            by_origin.setdefault(origin_of(split, step_id), []).append((step_id, prose(pin)))
+        if isinstance(requirement_id, str) and (
+            shared := by_origin.pop(origin_of(split, requirement_id), None)
+        ):
+            mapped |= joined(own_first([(requirement_id, mapped), *shared]))
         stale_pins: list[dict[str, object]] = []
-        for pin in named(answer["stale_pins"]):
-            if pin["requirement_id"] not in listed:
-                listed.add(pin["requirement_id"])
-                stale_pins.append(pin)
+        for origin, entries in by_origin.items():
+            ordered = own_first(entries)
+            stale_pins.append(ordered[0] | joined(ordered) | {"requirement_id": origin})
         mapped["stale_pins"] = stale_pins
     if "named_in_place_of_across" in answer:
         groups: list[dict[str, object]] = []

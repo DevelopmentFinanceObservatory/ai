@@ -506,8 +506,9 @@ class PlannerSeam:
         # very end, into `ctx.state` -- so the delta this node's own event
         # eventually carries is never older than what `ctx.run_node` itself
         # already produced.
-        if prior_plan is not None:
-            save_plan(cast(SessionState, ctx.session.state), Plan.model_validate(prior_plan))
+        seeded = Plan.model_validate(prior_plan) if prior_plan is not None else None
+        if seeded is not None:
+            save_plan(cast(SessionState, ctx.session.state), seeded)
         if not ctx.resume_inputs:
             # One `__call__` is one entry into the planner, EXCEPT when it
             # re-enters through a `RequestInput` this seam itself raised
@@ -614,7 +615,7 @@ class PlannerSeam:
             message = self._message(
                 fresh=fresh,
                 question=question,
-                prior_plan=prior_plan,
+                prior_plan=_as_authored(seeded),
                 refusal=refusal,
                 amendment=amendment,
                 canvas_digest=canvas_digest,
@@ -1222,7 +1223,8 @@ class PlannerSeam:
         the wire, so each renders cut to `MAX_QUESTION_CHARS`
         (`planner.plan.cut_user_text`), the size `Plan.question` holds.
 
-        `prior_plan` renders as a digest, through `_plan_context`. The
+        `prior_plan` is the plan being changed as the model wrote it
+        (`_as_authored`), and renders as a digest, through `_plan_context`. The
         instruction above the readings keeps its own wording. It is what
         stops the model inventing a `spec_id`.
         """
@@ -1256,7 +1258,7 @@ class PlannerSeam:
                 _READINGS_CONTEXT.format(readings=ledger.text),
                 _section("What is already on the user's canvas", canvas_digest),
                 _section("Earlier turns in this conversation", conversation_digest),
-                _plan_context(_as_authored(prior_plan), stated=ledger.other_counts),
+                _plan_context(prior_plan, stated=ledger.other_counts),
                 f"\nQuestion: {cut_user_text(question, MAX_QUESTION_CHARS)}\n",
                 _asks_section(asks, ask_breakdowns, asks_across_years),
                 ask,
@@ -1583,19 +1585,17 @@ def _warning_codes(warnings: object) -> tuple[str, ...]:
     return tuple(str(code) for code in codes if code)
 
 
-def _as_authored(prior_plan: dict[str, Any] | None) -> dict[str, Any] | None:
-    """`prior_plan` as the model wrote it, for `_plan_context` to render.
+def _as_authored(plan: Plan | None) -> dict[str, Any] | None:
+    """`plan` as the model wrote it, for `_plan_context` to render.
 
     A stored plan holds the copies the split of whole-history reads added
     (`Plan.rolling_copies`), which the model did not write and cannot
     patch by name. The render shows the plan without them
-    (`plan_display.shown_plan`), and the stored plan is saved as it is. A plan
-    with none differs from its authored form only in `first_years`, which
-    `_plan_context` leaves out, so it passes through unvalidated.
+    (`plan_display.shown_plan`), and the stored plan is saved as it is.
     """
-    if not prior_plan or not prior_plan.get("rolling_copies"):
-        return prior_plan
-    return plan_display.shown_plan(Plan.model_validate(prior_plan)).model_dump(mode="json")
+    if plan is None:
+        return None
+    return plan_display.shown_plan(plan).model_dump(mode="json")
 
 
 def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] = ()) -> str:

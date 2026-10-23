@@ -1885,9 +1885,10 @@ def _check_requirement_graph(
 ) -> None:
     """Reject requirements that do not agree with each other.
 
-    Every input a requirement reads names a requirement the plan states, the
-    requirements form a DAG, nothing reads a comparison or a join -- both are
-    terminal, and a calculation over either is `UnsupportedPlanError`, the one
+    The requirements read only requirements they state and form a DAG
+    (`_check_reads_resolve`, which `Plan` runs on the requirements the model
+    wrote; a copy the split adds reads only copies and their origins).
+    Nothing reads a comparison or a join -- both are terminal, and a calculation over either is `UnsupportedPlanError`, the one
     rule here that refuses what the system cannot do rather than a malformed
     draft -- and every requirement's output shape is legal
     under `planner.shapes.rejects`: a side's entity or a rank axis names a
@@ -1907,7 +1908,6 @@ def _check_requirement_graph(
     the same requirement is rejected -- a retrieved series carries a
     reference and statistics, not the figure a computed answer asks for.
     """
-    _check_reads_resolve(requirements_by_id)
     requirements = tuple(requirements_by_id.values())
     read_ids = {input_id for requirement in requirements for input_id in inputs_of(requirement)}
     terminal_kinds = {r.id: r.kind for r in requirements if isinstance(r, _TERMINAL_REQUIREMENTS)}
@@ -2119,7 +2119,12 @@ class HistorySplit(NamedTuple):
 
     def origins(self) -> dict[str, str]:
         """Each clone's id mapped to its origin's."""
-        return {copy.copy_id: copy.origin_id for copy in self.copies}
+        return copy_origins(self.copies)
+
+
+def copy_origins(copies: Iterable[RollingCopy]) -> dict[str, str]:
+    """Each copy's id in `copies` mapped to the id of the requirement it copies."""
+    return {copy.copy_id: copy.origin_id for copy in copies}
 
 
 def origin_of(split: HistorySplit, step_id: str) -> str:
@@ -2131,20 +2136,27 @@ def origin_of(split: HistorySplit, step_id: str) -> str:
     return split.origins().get(step_id, step_id)
 
 
-def authored_text(text: str, split: HistorySplit) -> str:
-    """`text` naming, in place of each copy `split` added, the requirement it copies.
+def authored_text(text: str, origins: Mapping[str, str]) -> str:
+    """`text` naming, in place of each copy `origins` maps, the requirement it copies.
 
-    Each copy id is matched as a whole identifier, so an id the model wrote
-    that only starts with one (`aid_history_2` beside `aid_history`) keeps
-    its name. Outward text built on the split plan reads through it: the
-    refusals its rules raise (`Plan`'s validation) and the referrals the
-    translator hands back (`translator.tool.authored_answer`).
+    `origins` maps each copy's id to its origin's (`copy_origins`,
+    `HistorySplit.origins`). Each copy id is matched as a whole identifier in
+    prose, so an id the model wrote that only starts with one
+    (`aid_history_2` beside `aid_history`) keeps its name, and so does a ref
+    holding one: a path or dcid segment (`dc/topic/aid_history`,
+    `/aid_history.csv`) or a prefixed name (`dc:aid_history`), where a `/`,
+    `.` or `:` joins it to another identifier character or a `/` follows.
+    Outward text built on the split plan reads through it: the refusals its
+    rules raise (`Plan`'s validation), the referrals the translator hands
+    back (`translator.tool.authored_answer`), and the prose of what a run
+    reports (`harness.graph.plan_done.authored_report`).
     """
-    origins = split.origins()
     if not origins:
         return text
     copy_id = re.compile(
-        "(?<![A-Za-z0-9_])(" + "|".join(map(re.escape, origins)) + ")(?![A-Za-z0-9_])"
+        r"(?<![A-Za-z0-9_/.:])("
+        + "|".join(map(re.escape, origins))
+        + r")(?![A-Za-z0-9_/]|[.:][A-Za-z0-9_])"
     )
     return copy_id.sub(lambda match: origins[match[1]], text)
 
@@ -2184,7 +2196,7 @@ def whole_history_split(
     """
     years = {entry.requirement_id: entry.year for entry in first_years}
     made = list(copies)
-    origins = {copy.copy_id: copy.origin_id for copy in made}
+    origins = copy_origins(made)
     split = list(requirements)
     whole: dict[str, int] = {}
     read: list[str] = []
@@ -2585,7 +2597,7 @@ def _topological_order(requirements_by_id: dict[str, EvidenceRequirement]) -> li
     """Return every requirement id ordered so each comes after everything `inputs_of` names.
 
     A post-order depth-first walk. Assumes the requirements already form a
-    DAG -- `_check_requirement_graph` calls `_find_cycle` before this runs.
+    DAG -- `_check_reads_resolve` calls `_find_cycle` before this runs.
     """
     order: list[str] = []
     visited: set[str] = set()
@@ -3862,7 +3874,7 @@ def authored(plan: Plan) -> Plan:
     rolling-start read in it needs the first years it no longer carries.
     `translation` and `workflow` are `plan`'s own.
     """
-    origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    origins = copy_origins(plan.rolling_copies)
     return plan.model_copy(
         update={
             "evidence_requirements": tuple(
@@ -3872,6 +3884,49 @@ def authored(plan: Plan) -> Plan:
             ),
             "rolling_copies": (),
             "first_years": (),
+        }
+    )
+
+
+def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequirement]) -> Plan:
+    """`plan` stating `requirements` in place of those the model wrote, split again under its `first_years`.
+
+    `requirements` stand for `authored(plan)`'s. The result carries their
+    split (`split_of`) in `evidence_requirements` and `rolling_copies`, and a
+    copy that copies the same origin in `plan` keeps `plan`'s pin for it,
+    its own windowed pin (`submission.service._window_pins`).
+
+    Raises:
+        ValueError: If the plan stating `requirements`, or its split, does
+            not validate.
+    """
+    origins = copy_origins(plan.rolling_copies)
+    pins = {
+        requirement.id: requirement.source_spec_id
+        for requirement in plan.evidence_requirements
+        if requirement.id in origins and isinstance(requirement, DatasetRequirement)
+    }
+    stated = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "evidence_requirements": tuple(requirements),
+            "rolling_copies": (),
+        }
+    )
+    split = split_of(stated)
+    if not split.copies:
+        return stated
+    kept = split.origins()
+    return Plan.model_validate(
+        {
+            **stated.model_dump(),
+            "evidence_requirements": tuple(
+                requirement.model_copy(update={"source_spec_id": pins[requirement.id]})
+                if requirement.id in pins and kept.get(requirement.id) == origins[requirement.id]
+                else requirement
+                for requirement in split.requirements
+            ),
+            "rolling_copies": split.copies,
         }
     )
 
@@ -3945,7 +4000,7 @@ def _naming_origins(error: ValueError, split: HistorySplit) -> ValueError:
     an `UnsupportedPlanError` or a plain `ValueError`
     (`_check_requirement_graph`). Each comes back as its own kind.
     """
-    message = authored_text(str(error), split)
+    message = authored_text(str(error), split.origins())
     if isinstance(error, RollingPlanError):
         named = dict.fromkeys(origin_of(split, step_id) for step_id in error.requirement_ids)
         return RollingPlanError(

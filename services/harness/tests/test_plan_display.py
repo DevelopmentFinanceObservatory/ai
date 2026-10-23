@@ -59,6 +59,8 @@ from planner.records import (
     BreakdownDimension,
     DenominatorScope,
     EntityIn,
+    EvidenceIssue,
+    EvidenceIssueCode,
     GroupBy,
     GrowthChange,
     PeriodThreshold,
@@ -70,6 +72,7 @@ from planner.records import (
     Reduction,
     RelativePeriod,
     RollingWindow,
+    Severity,
     StatVarReading,
     ValueThreshold,
 )
@@ -2240,3 +2243,53 @@ def test_the_shown_plan_is_the_authored_plan_with_the_compiled_parts_folded(
     ]
     assert [source.spec_id for source in shown.workflow.sources] == [SPEC_DEBT]
     assert [issue.requirement_id for issue in shown.workflow.warnings] == ["debt"]
+
+
+def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and its copy both read short of 2015-2024, and the copy says its
+    retrieval asks for every year from 2000. The card shows one gap for
+    `debt`, the copy's, in the words of the plan the model wrote, beside the
+    origin's own warning of another code."""
+    plan = stored_split_plan(decision)
+    assert plan.workflow is not None
+
+    def issue(code: EvidenceIssueCode, requirement_id: str, detail: str) -> EvidenceIssue:
+        return EvidenceIssue(
+            code=code, severity=Severity.WARNING, requirement_id=requirement_id, detail=detail
+        )
+
+    copy_gap = (
+        "requirement 'debt_history': the source covers 2000-2023, the requirement asks for "
+        "2015-2024, and its retrieval requests every year from 2000"
+    )
+    warned = plan.model_copy(
+        update={
+            "workflow": plan.workflow.model_copy(
+                update={
+                    "warnings": (
+                        issue(
+                            EvidenceIssueCode.WINDOW_SHORT,
+                            "debt",
+                            "the source covers 2016-2023, the requirement asks for 2015-2024",
+                        ),
+                        issue(EvidenceIssueCode.UNIT_UNVERIFIED, "debt", "no unit stated"),
+                        issue(EvidenceIssueCode.WINDOW_SHORT, "debt_history", copy_gap),
+                    )
+                }
+            )
+        }
+    )
+
+    shown = shown_plan(warned).workflow
+
+    assert shown is not None
+    assert [(w.requirement_id, w.code, w.detail) for w in shown.warnings] == [
+        ("debt", EvidenceIssueCode.UNIT_UNVERIFIED, "no unit stated"),
+        (
+            "debt",
+            EvidenceIssueCode.WINDOW_SHORT,
+            copy_gap.replace("'debt_history'", "'debt'"),
+        ),
+    ]

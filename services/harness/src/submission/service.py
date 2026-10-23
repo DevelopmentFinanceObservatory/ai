@@ -350,6 +350,7 @@ def admit(
     removed_decisions = patch.removed_decisions
     removed_evidence_requirements = patch.removed_evidence_requirements
     existing = load_plan(view.state)
+    referral = _authored_referral(view, existing)
     resolved = _resolve_intent(
         existing,
         amends_version=proposal.amends_version,
@@ -362,20 +363,10 @@ def admit(
         return resolved
     previous, rounds = resolved
     if previous is not None:
-        # The chain reads the plan as the model wrote it, so a patch naming
-        # a requirement the split added names the one it copies.
-        copied = {copy.copy_id: copy.origin_id for copy in previous.rolling_copies}
+        # The chain reads the plan as the model wrote it. The model is shown
+        # no copy the split added, so a patch naming a copy's id names a
+        # requirement of its own, and the split copies under the next free id.
         previous = authored(previous)
-        evidence_requirements = [
-            requirement.model_copy(update={"id": copied[requirement.id]})
-            if requirement.id in copied
-            else requirement
-            for requirement in evidence_requirements
-        ]
-        removed_evidence_requirements = [
-            copied.get(requirement_id, requirement_id)
-            for requirement_id in removed_evidence_requirements
-        ]
     held_copies = windowed_pins(view.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in held_copies.values()}
     if to_origin:
@@ -396,7 +387,7 @@ def admit(
         compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
     )
     user_settled = _user_settled_measures(measures, view, pins)
-    evidence_requirements = _stated_source_given_way(evidence_requirements, view)
+    evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
     settled, evidence_requirements = _measure_decisions(
         settle_decisions(
             patch.decisions,
@@ -455,7 +446,7 @@ def admit(
             previous=previous,
             reads_user_words=reads_user_words,
         )
-        or _referral_unanswered(existing, view)
+        or _referral_unanswered(existing, referral, view)
         or (
             None
             if user_spoke
@@ -552,6 +543,7 @@ def admit(
     blocked = _unrecordable(
         plan,
         view,
+        referral=referral,
         stated=stated,
         previous=previous,
         reads_user_words=reads_user_words,
@@ -559,8 +551,9 @@ def admit(
     )
     if blocked is not None:
         return blocked
-    # The plan keeps the first years its split reads, so a plan reading
-    # none records none and keeps the revision it had before the field.
+    # The plan keeps the first years its split reads. A plan reading no
+    # whole history carries no `first_years`, so they leave its
+    # `plan_revision` unchanged.
     whole = set(split_of(plan).first_years_read)
     plan = plan.model_copy(
         update={
@@ -1397,7 +1390,9 @@ def _question_fixed_amendment_invalid(
     )
 
 
-def _referral_unanswered(existing: Plan | None, view: SessionView) -> dict[str, object] | None:
+def _referral_unanswered(
+    existing: Plan | None, referral: Referral | None, view: SessionView
+) -> dict[str, object] | None:
     """Return the refusal for a `propose_plan` call over a referral the user has not
     answered, or `None` to let the call through.
 
@@ -1408,9 +1403,9 @@ def _referral_unanswered(existing: Plan | None, view: SessionView) -> dict[str, 
     referral would drop what the referral names and go on to translate. Every
     other kind is the planner's to settle, so the call goes through. The
     refusal points at the tool that asks the user, since `propose_plan` is
-    what it stops.
+    what it stops. `referral` is the pending one as the planner reads it
+    (`_authored_referral`).
     """
-    referral = _authored_referral(view)
     if (
         existing is None
         or referral is None
@@ -1455,12 +1450,12 @@ def _combination_ask() -> Action:
 
 
 def _stated_source_given_way(
-    requirements: Sequence[EvidenceRequirement], view: SessionView
+    requirements: Sequence[EvidenceRequirement], referral: Referral | None, view: SessionView
 ) -> list[EvidenceRequirement]:
     """`requirements`, with the stated `source` dropped from a requirement that pins the source the user chose.
 
-    A pending `requirement_unmeetable` referral marked `source_mismatch`
-    hands a requirement back because the source it states names none of the
+    A pending `requirement_unmeetable` referral (`referral`, as
+    `_authored_referral` gives it) marked `source_mismatch` hands a requirement back because the source it states names none of the
     sources discovery found, and offers those. A pin of one of them that the
     user picked, answering an ask raised after the referral
     (`SessionView.answers_since_referral`), names the exact source they chose, so the
@@ -1471,7 +1466,6 @@ def _stated_source_given_way(
     referral, so the compiler still refuses a source the user neither named
     nor chose.
     """
-    referral = _authored_referral(view)
     if referral is None or not referral.source_mismatch:
         return list(requirements)
     offered = {candidate.spec_id for candidate in referral.candidates}
@@ -1486,14 +1480,15 @@ def _stated_source_given_way(
     ]
 
 
-def _authored_referral(view: SessionView) -> Referral | None:
+def _authored_referral(view: SessionView, recorded: Plan | None) -> Referral | None:
     """The session's pending referral as the planner reads it, naming each requirement by the id the model wrote.
 
-    The referral saved in session state keys on the recorded plan's ids,
-    where a copy the split added names its own (`translator.tool.authored_answer`).
+    The referral saved in session state keys on the ids of `recorded`, the
+    plan on record, where a copy the split added names its own
+    (`translator.tool.authored_answer`). `admit` reads it once and hands it
+    to each check that reads the referral.
     """
     referral = load_referral(view.state)
-    recorded = load_plan(view.state)
     if referral is None or recorded is None or not recorded.rolling_copies:
         return referral
     return Referral.model_validate(
@@ -1501,10 +1496,12 @@ def _authored_referral(view: SessionView) -> Referral | None:
     )
 
 
-def _choice_not_offered(plan: Plan, view: SessionView) -> dict[str, object] | None:
+def _choice_not_offered(
+    plan: Plan, referral: Referral | None, view: SessionView
+) -> dict[str, object] | None:
     """Return the refusal for a pin a pending source choice did not offer, or `None`.
 
-    A `choice_required` referral names the sources each requirement it is
+    A `choice_required` `referral`, as `_authored_referral` gives it, names the sources each requirement it is
     about may pin (`Referral.offered`): its `candidates`, and each stale
     pin's, which discovery recorded and no model wrote. While it is pending,
     each such requirement as `plan` states it either pins one of them or
@@ -1517,7 +1514,6 @@ def _choice_not_offered(plan: Plan, view: SessionView) -> dict[str, object] | No
     have the translator's search find those sources again
     (`_withheld_scope_dropped`).
     """
-    referral = _authored_referral(view)
     if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
         return None
     for requirement_id, candidates in referral.offered().items():
@@ -1797,16 +1793,15 @@ def _consenting_decisions(plan: Plan, requirement: SumOfRequirement) -> dict[str
 
 
 def _source_ref_unpicked(
-    plan: Plan, view: SessionView, previous: Plan | None
+    plan: Plan, referral: Referral | None, view: SessionView, previous: Plan | None
 ) -> dict[str, object] | None:
     """A new source reference must be a source option the user actually picked.
 
     The options are the candidates the open `source_name_ambiguous` referral
-    offers for the requirement's `source` wording, or for its `source_code`
+    (`referral`, as `_authored_referral` gives it) offers for the requirement's `source` wording, or for its `source_code`
     when more than one publisher holds the code.
     """
     picked = view.answers_since_referral()[1]
-    referral = _authored_referral(view)
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_ref is None:
             continue
@@ -1850,6 +1845,7 @@ def _unrecordable(
     plan: Plan,
     view: SessionView,
     *,
+    referral: Referral | None,
     stated: Plan,
     previous: Plan | None,
     reads_user_words: bool,
@@ -1864,7 +1860,7 @@ def _unrecordable(
     reference the user did not pick (`_source_ref_unpicked`) and a pin a
     pending source choice did not offer (`_choice_not_offered`), both
     against `stated`, the plan before its split and `_window_pins`, with
-    the pending referral naming the requirements the model wrote
+    `referral`, the pending referral naming the requirements the model wrote
     (`_authored_referral`), for a
     sum of two datasets the user was not asked to combine
     (`_combination_unasked`, against `stated`, the plan before `_window_pins`
@@ -1890,8 +1886,8 @@ def _unrecordable(
             )
         )
     return (
-        _source_ref_unpicked(stated, view, previous)
-        or _choice_not_offered(stated, view)
+        _source_ref_unpicked(stated, referral, view, previous)
+        or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous)
         or _decline_unearned(plan, previous, view)
         or _breakdown_decline_unearned(stated, view)

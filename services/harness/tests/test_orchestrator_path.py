@@ -35,7 +35,7 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
-    _stopped_steps,
+    _stop_causes,
 )
 from harness.graph.state import (
     APPROVE_INTERRUPT,
@@ -991,9 +991,8 @@ async def test_a_breakdown_refused_at_run_time_hands_back_a_failed_step_and_ask(
     ]
     # An output the failed step does not feed, and that never ran, was not run.
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    workflow = Plan.model_validate_json(session.state["plan"]).workflow
-    stopped = _stopped_steps(workflow, "totals")
-    assert stopped == {"totals"}
+    stopped = _stop_causes(Plan.model_validate_json(session.state["plan"]), "totals")
+    assert stopped == {"totals": "totals"}
     upstream = PlanAsk(ask="the debt service series", outputs=("retrieve",))
     assert _ask_status(upstream, {}, {"step_id": "totals"}, stopped)["answered_by"] == [
         {"step": "retrieve", "status": "not_run"}
@@ -1009,7 +1008,7 @@ def test_an_ask_answered_in_part_hands_back_its_steps_and_the_part_not_computed(
         not_computed="their total",
     )
 
-    assert _ask_status(ask, {}, None, set()) == {
+    assert _ask_status(ask, {}, None, {}) == {
         "ask": "bilateral, imputed and their total",
         "answered_by": [{"step": "joined", "status": "not_run"}],
         "not_computed": {"part": "their total", "reason": DECLINE_REASONS[code]},

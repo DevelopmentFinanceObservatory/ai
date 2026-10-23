@@ -455,7 +455,7 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
             derived_requirement(),
         ],
     )
-    refused = _choice_not_offered(repinned, context)
+    refused = _choice_not_offered(repinned, load_referral(context.state), context)
 
     assert refused is not None
     assert refused["code"] == ProblemCode.SOURCE_NOT_OFFERED.value
@@ -484,18 +484,33 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
         (france[::-1], "recipient"),
         (france, "recipients"),
     ]:
-        dropped_by_unpinning = _choice_not_offered(unpinned(entities, across), context)
+        dropped_by_unpinning = _choice_not_offered(
+            unpinned(entities, across), load_referral(context.state), context
+        )
         assert dropped_by_unpinning is not None, (entities, across)
         assert dropped_by_unpinning["code"] == ProblemCode.SOURCE_NOT_OFFERED.value
         assert dropped_by_unpinning["detail"]["repair"] == repair
     if named_source is not None:
         for variant in ["  ids  ", "the IDS", "THE (IDS)."]:
-            assert _choice_not_offered(unpinned(france, "recipient", variant), context) is not None
+            assert (
+                _choice_not_offered(
+                    unpinned(france, "recipient", variant), load_referral(context.state), context
+                )
+                is not None
+            )
     # A different named table changes the search too, so the translator may
     # try it rather than rejecting the proposal before discovery runs.
-    assert _choice_not_offered(unpinned(france, "recipient", "DAC2a"), context) is None
+    assert (
+        _choice_not_offered(
+            unpinned(france, "recipient", "DAC2a"), load_referral(context.state), context
+        )
+        is None
+    )
     africa_named = [*france, Entity(name="Africa", role="recipient")]
-    assert _choice_not_offered(unpinned(africa_named, None), context) is None
+    assert (
+        _choice_not_offered(unpinned(africa_named, None), load_referral(context.state), context)
+        is None
+    )
 
 
 async def test_requirement_unmeetable_action_refers(

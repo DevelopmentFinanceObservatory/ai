@@ -74,6 +74,8 @@ from planner.plan import (
     SumOfRequirement,
     answering_results,
     authored,
+    authored_text,
+    copy_origins,
     frame_shapes,
     is_search_pin,
 )
@@ -127,7 +129,7 @@ def shown_plan(plan: Plan) -> Plan:
     The result is a view for reading and is not validated. Shapes, which
     need the first years, are read off `plan` itself (`answer_scopes`).
     """
-    origins = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    origins = copy_origins(plan.rolling_copies)
     shown = authored(plan)
     if not origins:
         return shown
@@ -160,6 +162,12 @@ def _without_copies(
 
     A binding's source is the one at its own position in `sources`
     (`Workflow.source_of`), so a copy's binding takes that source with it.
+
+    A warning names the requirement the model wrote, and its prose names no
+    copy (`planner.plan.authored_text`). Where a copy holds warnings of a
+    code, they stand in for its origin's of that code: the copy reads the
+    origin's stated years over a retrieval from the dataset's first year,
+    and its finding says both (`compiler.evidence._asked_for`).
     """
     copied = {
         index
@@ -171,10 +179,20 @@ def _without_copies(
         for index, source in enumerate(workflow.sources)
         if not (index in copied and workflow.evidence_bindings[index].spec_id == source.spec_id)
     )
+    on_copies = {
+        (origins[issue.requirement_id], issue.code)
+        for issue in workflow.warnings
+        if issue.requirement_id in origins
+    }
     warnings: list[EvidenceIssue] = []
     for issue in workflow.warnings:
+        if (issue.requirement_id, issue.code) in on_copies:
+            continue
         named = issue.model_copy(
-            update={"requirement_id": origins.get(issue.requirement_id, issue.requirement_id)}
+            update={
+                "requirement_id": origins.get(issue.requirement_id, issue.requirement_id),
+                "detail": authored_text(issue.detail, origins),
+            }
         )
         if named not in warnings:
             warnings.append(named)

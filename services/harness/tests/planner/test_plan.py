@@ -76,6 +76,7 @@ from planner.plan import (
     UnsupportedOperation,
     UnsupportedPlanError,
     _build_shapes,
+    authored_text,
     cut_user_text,
     frame_shapes,
     full_history,
@@ -5533,6 +5534,24 @@ def test_rolling_years_no_result_reads_together_may_state_two_newest_years(
     steps = [_years("since", _DATASET, _gte(2019, -5)), _years("until", _DATASET, _lte(2023, 0))]
 
     assert _plan(decision(), evidence_requirements=[requirement(period_end_open=True), *steps])
+
+
+@pytest.mark.parametrize(
+    ("text", "named"),
+    [
+        pytest.param("step 'aid_history' failed.", "step 'aid' failed.", id="quoted"),
+        pytest.param("aid_history: no data", "aid: no data", id="before-a-colon"),
+        pytest.param("read aid_history.", "read aid.", id="ending-a-sentence"),
+        pytest.param("aid_history_2 ran", "aid_history_2 ran", id="a-longer-id"),
+        pytest.param("dc/topic/aid_history", "dc/topic/aid_history", id="a-dcid-segment"),
+        pytest.param("/aid_history.csv", "/aid_history.csv", id="a-path"),
+        pytest.param("aid_history.csv", "aid_history.csv", id="a-file-name"),
+        pytest.param("dc:aid_history", "dc:aid_history", id="a-prefixed-name"),
+        pytest.param("aid_history/rows", "aid_history/rows", id="a-path-head"),
+    ],
+)
+def test_authored_text_renames_a_copy_named_in_prose_and_keeps_refs(text: str, named: str) -> None:
+    assert authored_text(text, {"aid_history": "aid"}) == named
 
 
 def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(

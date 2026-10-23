@@ -106,7 +106,7 @@ steps:
 
 def _top_donors() -> tuple[Plan, PlanRecord]:
     plan = _plan("guatemala_top_donors").approve(at=datetime.now(UTC))
-    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_step="top_donors")
+    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_steps={"top_donors"})
     return plan, record
 
 
@@ -185,7 +185,7 @@ def test_plan_record_render_fits_its_budget_and_repeats(budget: int) -> None:
 
 def test_plan_record_folds_steps_but_keeps_outputs_and_the_failed_step() -> None:
     plan, _ = _join()
-    record = PlanRecord.from_plan(plan, failed_step="bilateral_oda")
+    record = PlanRecord.from_plan(plan, failed_steps={"bilateral_oda"})
     full = record.render(budget=10_000)
     # One character short of the whole render: only the first level applies.
     text = record.render(budget=len(full) - 1)
