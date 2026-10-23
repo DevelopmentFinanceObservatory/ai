@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal, cast
 
+import pyarrow as pa
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, ComposedUnit, UnitCell
 
@@ -99,8 +100,9 @@ class SideSums:
     shape and holds how many rows each sum read, and `entity_counts` how
     many entities those rows hold: distinct value combinations across the
     entity roles (`common.entity_roles`) outside `by`. `stat_var` is the whole frame's sole
-    `stat_var`. `pooled_parties` holds what the side's sums pooled in each flow
-    party role outside `by` (`common.PooledParties`).
+    `stat_var`. `table` is the side's narrowed rows, `cell_rows` the positions in
+    `table` of each (key, period) sum's rows, and `pooled_roles` the flow party
+    roles outside `entity` and `by`, which `pooled_over` reads.
     """
 
     stat_var: str
@@ -111,7 +113,17 @@ class SideSums:
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     exclusions: Exclusions
-    pooled_parties: tuple[PooledParties, ...] = ()
+    table: pa.Table
+    cell_rows: dict[tuple[Key, str], pa.Array]
+    pooled_roles: tuple[str, ...]
+
+    def pooled_over(self, cells: Iterable[tuple[Key, str]]) -> tuple[PooledParties, ...]:
+        """What the sums of `cells`, the (key, period) cells a result divides,
+        pooled in each of `pooled_roles` (`common.PooledParties`). A cell the
+        verb leaves out, such as a period the other side lacks, adds nothing."""
+        rows = [self.cell_rows[cell] for cell in dict.fromkeys(cells)]
+        contributing = self.table.take(pa.concat_arrays(rows)) if rows else self.table.slice(0, 0)
+        return pooled_parties(contributing, self.pooled_roles)
 
 
 def sum_side(
@@ -169,9 +181,11 @@ def sum_side(
     key_columns = [cast("list[str]", groups.keys.column(column).to_pylist()) for column in by]
     periods = cast("list[str]", groups.keys.column(TIME_PERIOD_COLUMN).to_pylist())
     by_key_and_period: dict[tuple[str, ...], dict[str, list[float]]] = {}
+    cell_rows: dict[tuple[Key, str], pa.Array] = {}
     for group, (start, end) in enumerate(pairwise(groups.offsets)):
         key = tuple(column[group] for column in key_columns)
         by_key_and_period.setdefault(key, {})[periods[group]] = values[start:end]
+        cell_rows[key, periods[group]] = groups.indices[start:end]
 
     summed: dict[tuple[str, ...], dict[str, float]] = {}
     row_counts = {
@@ -197,10 +211,6 @@ def sum_side(
                 raise NonFiniteCellError(time_period=period, reason="overflow") from exc
         summed[key] = summed_periods
 
-    pooled = pooled_parties(
-        table, (column for column in role_columns(frame) if column not in (*entity, *by))
-    )
-
     entities: dict[tuple[str, ...], dict[str, int]] = {}
     for (*key, period), count in entity_counts(
         table, keys=(*by, TIME_PERIOD_COLUMN), entity_columns=entity_roles(frame)
@@ -216,7 +226,11 @@ def sum_side(
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
         exclusions=exclusions,
-        pooled_parties=pooled,
+        table=table,
+        cell_rows=cell_rows,
+        pooled_roles=tuple(
+            column for column in role_columns(frame) if column not in (*entity, *by)
+        ),
     )
 
 

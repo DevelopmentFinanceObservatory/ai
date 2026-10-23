@@ -223,7 +223,8 @@ class QuotientOfResult:
     key's own, so `denominator_only_periods` is empty for it.
 
     `numerator_pooled` and `denominator_pooled` hold what each side's sums
-    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`),
+    read from the cells behind `frame`'s rows, so a cell left out adds nothing.
     """
 
     frame: Frame
@@ -534,6 +535,8 @@ def run_quotient_of(
             kept_cells, keyed=bool(numerator_by), denominator=denominator, pooled=pooled
         ),
         exclusions=exclusions,
-        numerator_pooled=numerator.pooled_parties,
-        denominator_pooled=denominator.pooled_parties,
+        numerator_pooled=numerator.pooled_over(kept_cells),
+        denominator_pooled=denominator.pooled_over(
+            (() if pooled else key, period) for key, period in kept_cells
+        ),
     )
