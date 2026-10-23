@@ -101,6 +101,7 @@ from pydantic import ValidationError
 from submission.service import OneYear, _window_pins
 
 from ..decision_drafts import drafts
+from .test_agent import _response_event
 
 ASK = "the donors that give the most aid to Kenya"
 OTHER_ASK = "how aid to Kenya has moved"
@@ -285,7 +286,7 @@ def _refused(result: dict[str, Any], *gaps: dict[str, Any]) -> None:
     assert result["outcome"] == Outcome.INVALID_INPUT.value, result
     assert result["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, result
     found = [
-        {key: value for key, value in gap.items() if key != "one_year"}
+        {key: value for key, value in gap.items() if key not in ("keep_years", "one_year")}
         for gap in result["detail"]["gaps"]
     ]
     assert found == list(gaps)
@@ -311,6 +312,14 @@ _REDUCING = {
 }
 
 
+# The change keeping the years each of `_REDUCING`'s steps is offered.
+_KEEPS_YEARS = {
+    "aggregate": {"group_by": ["entity", "period"]},
+    "one_figure": {"group_by": ["period"]},
+    "rank": {"per_period": True},
+}
+
+
 @pytest.mark.parametrize("step", sorted(_REDUCING))
 def test_one_figure_over_years_answers_an_ask_across_years(
     decision: Callable[..., Decision], step: str
@@ -324,6 +333,7 @@ def test_one_figure_over_years_answers_an_ask_across_years(
     admitted = _propose(marked, requirements, [decision(), *cited])
 
     _refused(refused, _gap(years=EVERY_YEAR))
+    assert refused["detail"]["gaps"][0]["keep_years"] == _KEEPS_YEARS[step]
     assert "1990-2024" in refused["message"]
     assert load_plan(unmarked.state) is None
     assert admitted["outcome"] == Outcome.OK.value, admitted
@@ -642,6 +652,33 @@ def test_the_remedy_an_amendment_entrys_refusal_offers_is_admitted(
     assert "name 'result' in `across_years`" in refused["message"]
     assert "resolved by `user`" not in refused["message"]
     assert admitted["outcome"] == Outcome.OK.value, admitted
+
+
+def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping(
+    decision: Callable[..., Decision],
+) -> None:
+    """The user chose one total over every donor and the year read. The
+    decision records the empty group, so a later patch grouping the total by
+    entity contradicts it while the user has said nothing since."""
+    one_figure = USER_TOTAL.model_copy(update={"fixes": DecisionFixes(group_by=())})
+    ctx = _context(amendment=False)
+    step = _total(decision_ids=("one_total",), group_by=())
+    first = _propose(ctx, [_aid(period=ONE_YEAR_ONLY), step], [decision(), one_figure])
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    (made,) = [d for d in recorded.decisions if d.slot == "one_total"]
+    assert made.fixes == DecisionFixes(group_by=())
+    ctx.session.events = [_response_event("propose_plan", first)]
+
+    regrouped = _propose(ctx, [_total(decision_ids=("one_total",), group_by=(GroupBy.ENTITY,))], [])
+
+    assert regrouped["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, regrouped
+    assert {key: regrouped["detail"][key] for key in ("field", "decided", "stated")} == {
+        "field": "group_by",
+        "decided": [],
+        "stated": ["entity"],
+    }
 
 
 def _amended(ctx: Any, decision: Callable[..., Decision], step: str) -> None:
@@ -1501,7 +1538,7 @@ def test_a_result_no_ask_asks_for_is_listed_or_removed_and_the_asked_total_kept(
 
     _refused(refused, _gap(output="top", asks=(), years=EVERY_YEAR))
     assert "list 'top' in `answered` under an ask marked (across years)" in refused["message"]
-    assert "add `period`" not in refused["message"]
+    assert refused["detail"]["gaps"][0]["keep_years"] is None
     assert listed["outcome"] == Outcome.OK.value, listed
 
 
@@ -1525,14 +1562,13 @@ def test_the_aggregate_keeping_the_years_the_refusal_names_is_admitted(
     decision: Callable[..., Decision], group_by: tuple[GroupBy, ...], kept: tuple[GroupBy, ...]
 ) -> None:
     by_sector = _aid().model_copy(update={"breakdown": _SECTORS})
-    words = " and ".join(f"`{column.value}`" for column in kept)
 
     refused = _propose(_context(), [by_sector, _total(group_by=group_by)], [decision()])
     admitted = _propose(_context(), [by_sector, _total(group_by=kept)], [decision()])
 
     assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
-    named = "add `period` to the `group_by` of 'result'" if len(group_by) < 2 else f"by {words}"
-    assert named in refused["message"]
+    (gap,) = refused["detail"]["gaps"]
+    assert gap["keep_years"] == {"group_by": [column.value for column in kept]}
     assert admitted["outcome"] == Outcome.OK.value, admitted
 
 

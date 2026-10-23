@@ -685,8 +685,10 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
         ),
         pytest.param(
             (),
-            "Total external debt service paid as one figure over every year and party",
-            "The total of external debt service paid as one figure over every year and party.",
+            "Total external debt service paid as one figure over all the years, parties and "
+            "codes read",
+            "The total of external debt service paid, as one figure over all the years, "
+            "parties and codes read.",
             id="one-figure",
         ),
     ],

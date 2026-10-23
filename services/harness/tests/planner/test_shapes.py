@@ -1802,6 +1802,20 @@ def test_an_aggregate_by_entity_alone_over_a_limited_per_period_rank_is_refused(
     reason = rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=False)
     assert reason is not None
     assert "rank the source once with the limit and per_period=false instead" in reason
+    # One figure over every row, or one per code, sums the same cut years.
+    assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=False, by_period=False) == reason
+    sectors = ranked(
+        _shape(roles=(RoleDimension(role="sector", requirement_id="req_a", breakdown=True),)),
+        axis="sector",
+        window=None,
+        per_period=True,
+        limit=5,
+        step_id=None,
+    )
+    assert (
+        rejects(ShapeVerb.AGGREGATE, sectors, by_entity=False, by_period=False, by_breakdown=True)
+        == reason
+    )
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=False, by_period=True) is None
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=True) is None
 

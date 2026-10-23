@@ -471,9 +471,11 @@ class DecisionFixes(StrictModel):
     )
     group_by: tuple[GroupBy, ...] | None = Field(
         default=None,
-        min_length=1,
         max_length=MAX_GROUP_BY,
-        description="The group_by columns this decision fixes, when it fixes them.",
+        description=(
+            "The group_by columns this decision fixes, when it fixes them; empty for one "
+            "figure over every row."
+        ),
     )
     window_start: Year | None = Field(
         default=None, description="The window's start year this decision fixes, when it fixes one."
@@ -3094,9 +3096,15 @@ def _check_population_claims_are_cited(
 
 
 def _stated(requirement: EvidenceRequirement, field: str) -> Any:
-    """The value `requirement` states for `field`, a field its kind declares; `None` when empty."""
+    """The value `requirement` states for `field`, a field its kind declares, or `None`.
+
+    An empty tuple is `None` where it is the field's default, which states
+    nothing, as `entities` and `across` leave it. Where the field has no
+    default, as `group_by`, empty is the value stated.
+    """
     value = getattr(requirement, field)
-    return None if value == () else value
+    unset = type(requirement).model_fields[field].default
+    return None if value == () and unset == () else value
 
 
 def _same(first: Any, second: Any) -> bool:

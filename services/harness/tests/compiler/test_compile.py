@@ -5436,6 +5436,7 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
     assert issue.requirement_id == "health"
     assert "covers every 'country' and names none of them" in issue.reason
     assert "name them in the requirement's `entities`" in issue.reason
+    assert "`group_by` is []" in issue.reason
 
 
 def test_a_donor_across_a_lone_open_destination_is_source_unusable(
@@ -5779,7 +5780,6 @@ def test_the_drc_drafts_compile_and_total_every_donor(
     assert total.expected_role_keys == _frame_role_columns(total_group_by[1:])
 
 
-_KENYA_RECIPIENT = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
 UNITED_KINGDOM = ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom")
 
 
@@ -5804,8 +5804,9 @@ def test_a_share_two_donors_hold_of_every_donors_total_compiles_from_one_figure_
     # "What share of the ODA Kenya received in 2015-2022 came from the
     # United States and the United Kingdom together?" A total grouped by
     # entity keeps the two donors apart, so the unkeyed share takes a whole
-    # side naming two donors and pools them, and is refused. A total over every row is one figure on each side, and the
-    # share divides one by the other.
+    # side naming two donors and pools them, and is refused. A total over
+    # every row is one figure on each side, and the share divides one by the
+    # other.
     years = Period(start=2015, end=2022)
     kenya = Entity(name="Kenya", role="recipient")
     named = DatasetRequirement(
@@ -5847,12 +5848,12 @@ def test_a_share_two_donors_hold_of_every_donors_total_compiles_from_one_figure_
     sources = {
         "named": source(
             spec_id=SPEC_KENYA,
-            entities=(UNITED_STATES, UNITED_KINGDOM, _KENYA_RECIPIENT),
+            entities=(UNITED_STATES, UNITED_KINGDOM, _KENYA),
             **_pinned("Oda"),
         ),
         "every": source(
             spec_id=SPEC_OTHER,
-            entities=(_KENYA_RECIPIENT,),
+            entities=(_KENYA,),
             open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
             **_pinned("Oda"),
         ),
@@ -5866,6 +5867,8 @@ def test_a_share_two_donors_hold_of_every_donors_total_compiles_from_one_figure_
     if refused:
         assert _codes(result) == list(refused)
         assert result.workflow is None
+        pooling = next(i for i in result.issues if i.code is Code.ENTITY_REQUIRED)
+        assert "`group_by` is []" in pooling.reason
         return
     assert result.ok, result.issues
     assert result.workflow is not None

@@ -936,6 +936,17 @@ def test_a_quotients_key_repair_names_both_of_its_axes(code: CompileIssueCode) -
     assert "`denominator_axis`" in repair
 
 
+@pytest.mark.parametrize(
+    "code", [CompileIssueCode.SHARE_AXIS_REQUIRED, CompileIssueCode.ENTITY_REQUIRED]
+)
+def test_a_side_pooling_members_may_be_repaired_into_one_figure(code: CompileIssueCode) -> None:
+    """A side pooling several members can total them into one figure first."""
+    repair = permitted_repair(code)
+
+    assert "`aggregate`" in repair
+    assert "`group_by` is []" in repair
+
+
 @pytest.mark.parametrize("code", list(CompileIssueCode))
 def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
     code: CompileIssueCode,

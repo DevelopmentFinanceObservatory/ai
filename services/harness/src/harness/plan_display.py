@@ -416,17 +416,22 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
     return len(named) > 1 or any(entity.members for entity in named)
 
 
-def _group_by_phrase(group_by: Sequence[GroupBy], *, breakdown: Breakdown | None = None) -> str:
-    """`group_by` in words. A group by breakdown names the dimension of `breakdown`,
-    the one the aggregate's input states. An empty group is one figure over every row."""
+def _group_by_phrase(
+    group_by: Sequence[GroupBy], *, breakdown: Breakdown | None = None, grouped: bool = False
+) -> str:
+    """`group_by` in words, after "grouped" when `grouped`. A group by breakdown names
+    the dimension of `breakdown`, the one the aggregate's input states. An empty group
+    is one figure over whatever years, parties and codes the input holds, which a
+    filter or a named side may narrow, so it names none of them."""
     if not group_by:
-        return "as one figure over every year and party"
+        return "as one figure over all the years, parties and codes read"
     words = {
         GroupBy.PERIOD: "year",
         GroupBy.ENTITY: "entity",
         GroupBy.BREAKDOWN: breakdown.dimension.value if breakdown is not None else "breakdown",
     }
-    return " and ".join(f"by {words[key]}" for key in GroupBy if key in group_by)
+    phrase = " and ".join(f"by {words[key]}" for key in GroupBy if key in group_by)
+    return f"grouped {phrase}" if grouped else phrase
 
 
 def _breakdown_of(requirement: EvidenceRequirement, plan: Plan) -> Breakdown | None:
@@ -864,9 +869,10 @@ def _reading_clause(source: SelectedSource) -> str | None:
 def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
     word = _REDUCTION_WORDS[requirement.reduction]
-    group = _group_by_phrase(requirement.group_by, breakdown=_breakdown_of(requirement, plan))
-    grouped = f", grouped {group}" if requirement.group_by else f" {group}"
-    return f"The {word} of {_measure_of(upstream, plan)}{grouped}."
+    group = _group_by_phrase(
+        requirement.group_by, breakdown=_breakdown_of(requirement, plan), grouped=True
+    )
+    return f"The {word} of {_measure_of(upstream, plan)}, {group}."
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:

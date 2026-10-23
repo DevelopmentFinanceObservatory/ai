@@ -3236,18 +3236,20 @@ _RANK_THE_SOURCE_ONCE = "rank the source once with the limit and per_period=fals
     ("group_by", "refused"),
     [
         ((GroupBy.ENTITY,), True),
+        ((), True),
         ((GroupBy.PERIOD,), False),
         ((GroupBy.ENTITY, GroupBy.PERIOD), False),
     ],
 )
-def test_an_aggregate_over_a_limited_per_period_rank_fails_only_by_entity_alone(
+def test_an_aggregate_over_a_limited_per_period_rank_fails_without_period(
     decision: DecisionFactory,
     requirement: RequirementFactory,
     group_by: tuple[GroupBy, ...],
     refused: bool,
 ) -> None:
     # By entity alone, each debtor's total covers only the years it made the
-    # cut; by period, each year totals the five it kept.
+    # cut, and one figure over every row adds a different five each year; by
+    # period, each year totals the five it kept.
     dataset = requirement()
     rank = _top_five_each_year(dataset.id)
     totals = AggregateRequirement(

@@ -1695,7 +1695,8 @@ class _Build:
                 CompileIssueCode.ENTITY_REQUIRED,
                 f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
                 f"requirement names several entities on one side of the flow {names!r}; "
-                "say which",
+                "say which, or total them first with an aggregate grouped by period, or "
+                "whose `group_by` is [] for one figure",
                 operation_id=op_id,
                 requirement_id=pooled[0][0].id,
             )
@@ -1708,7 +1709,8 @@ class _Build:
                 f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
                 f"requirement covers every {column.role!r} and names none of them, "
                 "so the side cannot say which it reads; name them in the requirement's "
-                "`entities`, or collapse them with an aggregate grouped by period first",
+                "`entities`, or collapse them first with an aggregate grouped by period, "
+                "or whose `group_by` is [] for one figure",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )

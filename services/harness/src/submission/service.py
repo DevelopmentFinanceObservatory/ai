@@ -2041,9 +2041,11 @@ def _period_reduction_unstated(
     steps = {requirement.id: requirement for requirement in plan.evidence_requirements}
     sentences = []
     offered: list[dict[str, object] | None] = []
+    kept: list[dict[str, object] | None] = []
     for gap in gaps:
         held = gap.held
         offer: dict[str, object] | None = None
+        keep: dict[str, object] | None = None
         read = held.one_year
         years = held.phrase()
         step = repr(gap.step_id)
@@ -2074,6 +2076,7 @@ def _period_reduction_unstated(
                 "or remove it."
             )
         elif isinstance(reducing, RankRequirement):
+            keep = {"per_period": True}
             remedies = f"To keep the years, set `per_period` to true on {step}."
             if read is not None:
                 offer = _one_year_offer(OneYear.WINDOW, read, gap.together_with)
@@ -2090,6 +2093,7 @@ def _period_reduction_unstated(
                 )
         else:
             assert isinstance(reducing, AggregateRequirement)
+            keep = {"group_by": [column.value for column in _years_kept(reducing)]}
             remedies = f"To keep the years, {_keep_the_years(reducing)}."
             if read is not None:
                 offer = _one_year_offer(OneYear.FILTER, read, gap.together_with)
@@ -2105,6 +2109,7 @@ def _period_reduction_unstated(
                     "in `across_years`."
                 )
         offered.append(offer)
+        kept.append(keep)
         sentences.append(
             f"{step} reduces {years} to one figure, {result} answers {answers}. {unasked}. "
             f"{remedies}"
@@ -2123,9 +2128,10 @@ def _period_reduction_unstated(
                     "follows_newest": gap.held.follows_newest,
                     "until": gap.held.until,
                     "dataset_requirement_id": gap.held.dataset_id,
+                    "keep_years": keep_years,
                     "one_year": one_year,
                 }
-                for gap, one_year in zip(gaps, offered, strict=True)
+                for gap, keep_years, one_year in zip(gaps, kept, offered, strict=True)
             ]
         },
     )
@@ -2160,17 +2166,25 @@ def _across_years_unread(
     )
 
 
-def _keep_the_years(aggregate: AggregateRequirement) -> str:
-    """How `aggregate`, whose `group_by` lacks `period`, keeps the years, as its refusal says it.
+def _years_kept(aggregate: AggregateRequirement) -> tuple[GroupBy, ...]:
+    """The `group_by` that keeps the years of `aggregate`, whose `group_by` lacks `period`.
 
     It adds `period` while the group names fewer than `MAX_GROUP_BY`
-    columns. At the cap it groups by `entity` and `breakdown`, and `entity`
-    already keeps a breakdown's codes, so `period` takes `breakdown`'s place.
+    columns, an empty group included. At the cap it groups by `entity` and
+    `breakdown`, and `entity` already keeps a breakdown's codes, so `period`
+    takes `breakdown`'s place.
     """
-    step = repr(aggregate.id)
     if len(aggregate.group_by) < MAX_GROUP_BY:
-        return f"add `period` to the `group_by` of {step}"
+        return (*aggregate.group_by, GroupBy.PERIOD)
     assert set(aggregate.group_by) == {GroupBy.ENTITY, GroupBy.BREAKDOWN}
+    return (GroupBy.ENTITY, GroupBy.PERIOD)
+
+
+def _keep_the_years(aggregate: AggregateRequirement) -> str:
+    """How `aggregate` keeps the years (`_years_kept`), as its refusal says it."""
+    step = repr(aggregate.id)
+    if _years_kept(aggregate) == (*aggregate.group_by, GroupBy.PERIOD):
+        return f"add `period` to the `group_by` of {step}"
     return (
         f"group {step} by `entity` and `period`: `entity` keeps the breakdown's codes too, "
         "and a group names two columns at most"

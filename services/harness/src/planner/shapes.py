@@ -1002,8 +1002,8 @@ def aggregated(
     unchanged, since aggregate reduces rows and leaves what they measure
     alone. `cut_per_period` survives
     only a group by both entity and period, which keeps the gaps; a group by
-    period alone totals each period's kept rows, and a group by entity alone
-    is refused over a cut frame. Mixed levels survive only a group by
+    period alone totals each period's kept rows, and any group without
+    period is refused over a cut frame. Mixed levels survive only a group by
     entity that sums no open dimension. A group summing the open place
     dimension is refused over them. A group that keeps period apart keeps
     the input's own period labels, a `SPAN` included. Any other group
@@ -1699,13 +1699,16 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     A frame with no role dimension that rests on two retrievals, a
     `sum_of`'s or an unkeyed `share_of`'s or `quotient_of`'s, holds one series, so a group by
     entity reduces that series whole: a total over a span of two sources'
-    yearly sum. A group by entity keeps only the parties a requirement
-    names, so over a frame whose every party is open it would keep none.
+    yearly sum. Over one retrieval's frame it is refused, and an empty
+    group is the one figure it would mean. A group by entity keeps only the
+    parties a requirement names, so over a frame whose every party is open
+    it would keep none.
     """
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
             "aggregate cannot group by entity over a frame with no role dimension; group by "
-            "entity in the step that collapsed the roles"
+            "entity in the step that collapsed the roles, or, for one figure over every row, "
+            "set `group_by` to []"
         )
     open_roles = [role.role for role in shape.roles if role.open]
     if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):
@@ -1770,13 +1773,13 @@ def _rejects_aggregate(
             "would hold only the entities whose value fell in it; group by entity alone, or "
             "aggregate the source by period before the max or min"
         )
-    if shape.cut_per_period and by_entity and not by_period:
+    if shape.cut_per_period and not by_period:
         return (
-            f"an aggregate by entity totals each entity's series, and {_CUT_PER_PERIOD}; "
-            "rank the source once with the limit and per_period=false instead, over one year "
-            "with window_start and window_end on that year, or, only for an ask marked (across "
-            "years), with the reduction, which reduces each entity's whole series before the "
-            "limit applies"
+            "an aggregate without period totals each series over its years, and "
+            f"{_CUT_PER_PERIOD}; rank the source once with the limit and per_period=false "
+            "instead, over one year with window_start and window_end on that year, or, only "
+            "for an ask marked (across years), with the reduction, which reduces each "
+            "entity's whole series before the limit applies"
         )
     return None
 

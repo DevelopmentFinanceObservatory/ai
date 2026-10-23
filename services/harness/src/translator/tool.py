@@ -285,7 +285,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
-        "set the share's `axis` to the role it is taken per, or name the numerator's `entity`"
+        "set the share's `axis` to the role it is taken per, or name the numerator's "
+        "`entity`, or, for one figure of the members together, total each side with an "
+        "`aggregate` whose `group_by` is []"
     ),
     CompileIssueCode.SHARE_KEY_UNKNOWN: "set the share's `axis` to a role both sides carry",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: (
@@ -319,7 +321,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "the dataset, at one level of place, or drop `rolling` for fixed years"
     ),
     CompileIssueCode.ENTITY_REQUIRED: (
-        "name the entity each side reads, among those its requirement names on one side of the flow"
+        "name the entity each side reads, among those its requirement names on one side of "
+        "the flow, or total the side's members first with an `aggregate` grouped by period, "
+        "or whose `group_by` is [] for one figure"
     ),
     CompileIssueCode.UNKNOWN_ENTITY: (
         "name only entities the requirement it reads states, or add the entity to that requirement"
