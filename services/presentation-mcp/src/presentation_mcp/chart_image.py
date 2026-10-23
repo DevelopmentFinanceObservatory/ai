@@ -5,7 +5,7 @@ draws, lays it out as an SVG (`chart_svg`), and rasterises that with resvg.
 It draws the view's card face: the title, the caption, the legend of
 checkered swatches, the plot, and the footer's source line beside the
 "Built with" mark. The plot follows the view's Prefab chart: series take
-`theme.SERIES_COLOURS` in order, lines are 2 px wide without dots, bars have
+`theme.SERIES_COLOURS` in order, lines are 2 px wide, bars have
 4 px corners, horizontal grid lines sit at each value tick, and there are no
 axis lines. Value ticks read in `Intl.NumberFormat`'s en-US compact form
 ("150", "1.5K"). Where the component authors no bound on its value axis they
@@ -17,10 +17,10 @@ same (`_authored_ticks`). Prefab's charts take no bounds, so there the image
 and the view differ: the view's axis spans zero and the data. A bar starts at
 zero, or at the end of the axis nearest zero where the bounds exclude it. A
 point with only a status draws nothing, leaving a gap in its line or no bar.
-A point with no value on either side draws as a dot, which the view leaves
-out, since the image is all such a host sees. An entity-axis bar chart lays
-out horizontally under the view's rule, with its categories down the side and
-no value ticks.
+A point with no value on either side draws as a dot of radius 2.5 px; the
+view draws it as a round-capped dot as wide as the line. An entity-axis bar
+chart lays out horizontally under the view's rule, with its categories down
+the side and no value ticks.
 
 There is no image for a log value axis, which the view draws as a table, or
 for a member that is not a line or bar chart.
@@ -70,13 +70,7 @@ from xml.sax.saxutils import escape
 import resvg_py
 from fontTools.ttLib import TTFont
 
-from presentation_mcp.app_view import (
-    ChartModel,
-    PlottedSeries,
-    chart_model,
-    lone_points,
-    plots_as_chart,
-)
+from presentation_mcp.app_view import ChartModel, PlottedSeries, chart_model, plots_as_chart
 from presentation_mcp.theme import DFO_LOGO
 
 FONTS_DIR = Path(__file__).with_name("fonts")
@@ -335,10 +329,10 @@ def _line_path(
         for i, (x, y) in enumerate(run)
     ]
     marks = [
-        f'<circle cx="{_n(x)}" cy="{_n(scale(row[series.key]))}" r="{_DOT_RADIUS}" '
-        f'fill="{series.colour}"/>'
-        for row, x, lone in zip(rows, xs, lone_points(rows, series.key), strict=True)
-        if lone
+        f'<circle cx="{_n(x)}" cy="{_n(y)}" r="{_DOT_RADIUS}" fill="{series.colour}"/>'
+        for run in runs
+        if len(run) == 1
+        for x, y in run
     ]
     if commands:
         marks.insert(

@@ -20,7 +20,6 @@ from presentation_mcp.app_view import (
     app_data,
     app_shell,
     chart_model,
-    lone_points,
     notice_view,
     plots_as_chart,
     view_state,
@@ -343,48 +342,6 @@ def test_line_chart_draws_website_lines_with_compact_ticks() -> None:
     assert chart["showDots"] is False
     assert chart["valueFormat"] == "compact"
     assert chart["showLegend"] is False
-
-
-@pytest.mark.parametrize(
-    ("missing", "dots"),
-    [
-        ({"2018"}, False),
-        ({"2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023", "2024"}, True),
-        ({"2016", "2018", "2020", "2021", "2022"}, True),
-        ({"2015", "2016", "2017", "2018", "2019", "2020", "2021", "2022", "2023"}, True),
-    ],
-    ids=["a gap between runs", "first point alone", "isolated points", "last point alone"],
-)
-def test_line_chart_draws_dots_when_a_point_has_no_neighbour(missing: set[str], dots: bool) -> None:
-    envelope = resolved_revision("line_chart")
-    (one,) = envelope["component"]["series"]
-    one["points"] = [
-        {"period": point["period"], "status": "missing"} if point["period"] in missing else point
-        for point in one["points"]
-    ]
-
-    assert _only(_shell(envelope), "LineChart")["showDots"] is dots
-
-
-@pytest.mark.parametrize(
-    ("values", "lone"),
-    [
-        ([], []),
-        ([None], [False]),
-        ([1.0], [True]),
-        ([1.0, 2.0, 3.0], [False, False, False]),
-        ([1.0, None, 3.0], [True, False, True]),
-        ([1.0, 2.0, None, 4.0, None], [False, False, False, True, False]),
-        ([0.0, None, None, 0.0], [True, False, False, True]),
-    ],
-    ids=["no rows", "no value", "single", "all joined", "all lone", "mixed", "zeros"],
-)
-def test_lone_points_marks_a_value_with_no_value_on_either_side(
-    values: list[float | None], lone: list[bool]
-) -> None:
-    rows = [{"period": str(i)} | ({} if v is None else {"s0": v}) for i, v in enumerate(values)]
-
-    assert lone_points(rows, "s0") == lone
 
 
 @pytest.mark.parametrize("member", ["line_chart", "bar_chart"])

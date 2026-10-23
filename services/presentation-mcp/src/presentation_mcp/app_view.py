@@ -35,12 +35,10 @@ the info icon, and the DFO logo (a payload is model-visible in some hosts, so
 the CSS itself stays out of it), and the series colours are hex values in the
 chart and legend props.
 
-Each catalogue member maps to one Prefab component. line_chart maps to
-`LineChart`. A line cannot draw a point with no value on either side, so a
-chart shows dots when any series has such a point (`lone_points`). Prefab's dots
-are chart-wide, so that chart dots every point. bar_chart maps to `BarChart`,
-table to `DataTable`,
-stat_card to a headline amount with its unit in a lighter weight,
+Each catalogue member maps to one Prefab component: line_chart to
+`LineChart` without Prefab dots (a value with no value on either side shows
+as a round-capped dot from the theme CSS), bar_chart to `BarChart`, table to
+`DataTable`, stat_card to a headline amount with its unit in a lighter weight,
 note_narration and source_card to text. Chart ticks use Prefab's `compact`
 format. A period-axis chart draws its own legend above the plot, a swatch
 and label per series, as the website does. An entity-axis bar chart has
@@ -240,17 +238,6 @@ def chart_model(envelope: Mapping[str, Any]) -> ChartModel | None:
     )
 
 
-def lone_points(rows: Sequence[Mapping[str, Any]], key: str) -> list[bool]:
-    """Per row, whether the series `key` has a value there but none in the row
-    before or after. A line cannot draw such a point. The first and last rows
-    count their missing outer neighbour as no value."""
-    has_value = [False, *(row.get(key) is not None for row in rows), False]
-    return [
-        here and not before and not after
-        for before, here, after in zip(has_value, has_value[1:], has_value[2:], strict=False)
-    ]
-
-
 def plots_as_chart(envelope: Mapping[str, Any]) -> bool:
     """Whether the envelope draws as a chart: a line or bar chart whose value
     axis is not logarithmic. It is true exactly where `chart_model` gives a
@@ -353,8 +340,7 @@ def _chart_body(chart: ChartModel) -> _Body:
     }
     plot: Component
     if chart.kind == "line_chart":
-        dotted = any(any(lone_points(chart.rows, one.key)) for one in chart.series)
-        plot = LineChart(**shared, show_dots=dotted)
+        plot = LineChart(**shared, show_dots=False)
     else:
         plot = BarChart(**shared, horizontal=chart.horizontal)
     return [_legend(chart.series), plot] if chart.legend else [plot]

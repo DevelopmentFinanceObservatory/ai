@@ -123,6 +123,12 @@ THEME_CSS = Template("""
   stroke: var(--dfo-line) !important;
 }
 
+/* A value with no value on either side is a zero-length subpath, which a
+   round cap draws as a dot as wide as the line. */
+.recharts-line-curve {
+  stroke-linecap: round;
+}
+
 .recharts-cartesian-axis-tick-value {
   font-family: var(--font-sans);
   font-size: 8px;
