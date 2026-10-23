@@ -6,11 +6,15 @@ one UTC day at a time, and replaces that day's partition of the BigQuery table
 loaded day minus one through today. An empty table is backfilled from
 `BACKFILL_FLOOR`, the first day the prod project holds data. A run that fails
 part-way leaves every day it reached replaced whole and every other day as it
-was, so the next run heals the gap. A day Langfuse answers with no rows keeps
-its partition. A wrong environment or project key reads as empty, and Langfuse
-keeps less history than the table, so a deleted day could not be reloaded.
-Each day prints a line as it is replaced or kept, and a failure prints the day
-it stopped on before the error.
+was, so the next run heals the gap. A replace never shrinks a partition: a day
+that reads fewer rows than its partition holds, none included, keeps the
+partition and prints both counts. Langfuse deletes data by age, so after a long
+outage the oldest day of the window can come back partial, and a deleted row
+could not be reloaded. When every day of the window reads no rows, the run
+raises `EmptyWindowError` naming the window and `LANGFUSE_EXPORT_ENVIRONMENT`,
+since a wrong environment or keys for another project read as empty and prod has
+had turns every day since `BACKFILL_FLOOR`. Each day prints a line as it is
+replaced or kept, and a failure prints the day it stopped on before the error.
 
 The rows carry ids, names, the model, times, tokens and cost. Requests omit the
 `io` and `metadata` field groups, so prompts and answers stay in
@@ -30,8 +34,9 @@ Settings come from the environment or `.env`: `LANGFUSE_PUBLIC_KEY`,
 `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, `LANGFUSE_EXPORT_ENVIRONMENT`, and for
 a load also `EXPORT_BQ_PROJECT` and `EXPORT_BQ_DATASET`.
 
-Exit status: 0 when every day loaded or the check matched, 1 when the check
-found a difference or a request failed, 2 when a setting is missing.
+Exit status: 0 when every day loaded or kept or the check matched, 1 when the
+check found a difference, a request failed or the whole window read no rows, 2
+when a setting is missing.
 """
 
 from __future__ import annotations
@@ -109,6 +114,10 @@ class ExportSettings(BaseSettings):
 
 class LangfuseError(RuntimeError):
     """Langfuse kept failing a request after every retry, or refused it."""
+
+
+class EmptyWindowError(RuntimeError):
+    """Every day of the run's window read no rows, which a misconfiguration causes."""
 
 
 def _text(value: object) -> str | None:
@@ -258,6 +267,15 @@ def latest_loaded_day(bq: bigquery.Client, table_id: str) -> date | None:
     return rows[0]["day"] if rows else None
 
 
+def partition_row_counts(bq: bigquery.Client, table_id: str, first: date) -> dict[date, int]:
+    """The loaded row count of every day from `first` on that holds rows."""
+    sql = (
+        f"SELECT DATE(start_time) AS day, COUNT(*) AS row_count FROM `{table_id}` "
+        f"WHERE start_time >= TIMESTAMP('{first.isoformat()}') GROUP BY day"
+    )
+    return {row["day"]: row["row_count"] for row in bq.query(sql).result()}
+
+
 def replace_day(bq: bigquery.Client, table_id: str, day: date, rows: list[dict[str, Any]]) -> None:
     """Replace `day`'s partition with `rows` in one load job."""
     partition = f"{table_id}${day:%Y%m%d}"
@@ -274,17 +292,26 @@ def replace_day(bq: bigquery.Client, table_id: str, day: date, rows: list[dict[s
 def run_export(
     *, reader: LangfuseReader, bq: bigquery.Client, table_id: str, today: date
 ) -> list[tuple[date, int]]:
-    """Create the table if absent and replace every day `export_days` names that
-    Langfuse holds rows for. Returns each replaced day with its row count."""
+    """Create the table if absent and replace every day `export_days` names whose
+    read holds rows and at least as many as its partition. Returns each replaced day
+    with its row count. Raises `EmptyWindowError` when every day reads no rows."""
     table = bigquery.Table(table_id, schema=SCHEMA)
     table.time_partitioning = PARTITIONING
     bq.create_table(table, exists_ok=True)
+    days = export_days(latest_loaded=latest_loaded_day(bq, table_id), today=today)
+    held = partition_row_counts(bq, table_id, days[0])
     loaded = []
-    for day in export_days(latest_loaded=latest_loaded_day(bq, table_id), today=today):
+    read_any = False
+    for day in days:
         try:
             rows = [observation_row(observation) for observation in reader.observations(day)]
-            if not rows:
-                print(f"{day}: Langfuse returned no rows; partition kept", flush=True)
+            read_any = read_any or bool(rows)
+            if not rows or len(rows) < held.get(day, 0):
+                print(
+                    f"{day}: Langfuse returned {len(rows)} rows and the partition holds "
+                    f"{held.get(day, 0)}; partition kept",
+                    flush=True,
+                )
                 continue
             replace_day(bq, table_id, day, rows)
         except Exception:
@@ -292,6 +319,12 @@ def run_export(
             raise
         print(f"{day}: replaced with {len(rows)} rows", flush=True)
         loaded.append((day, len(rows)))
+    if not read_any:
+        raise EmptyWindowError(
+            f"Langfuse returned no rows for any day from {days[0]} to {days[-1]}; check "
+            "LANGFUSE_EXPORT_ENVIRONMENT and that the Langfuse keys belong to the project "
+            "holding it"
+        )
     return loaded
 
 

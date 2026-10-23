@@ -22,6 +22,7 @@ from harness.langfuse_export import (
     BACKFILL_FLOOR,
     REQUEST_INTERVAL_S,
     SCHEMA,
+    EmptyWindowError,
     LangfuseError,
     LangfuseReader,
     check_day,
@@ -87,8 +88,9 @@ class FakeQuery:
 
 
 class FakeBigQuery:
-    def __init__(self, *, latest: date | None) -> None:
+    def __init__(self, *, latest: date | None, held: dict[date, int] | None = None) -> None:
         self.latest = latest
+        self.held = held or {}
         self.created: list[bigquery.Table] = []
         self.queries: list[str] = []
         self.loads: list[tuple[str, list[dict[str, Any]], bigquery.LoadJobConfig]] = []
@@ -100,6 +102,8 @@ class FakeBigQuery:
 
     def query(self, sql: str) -> FakeQuery:
         self.queries.append(sql)
+        if "COUNT(*)" in sql:
+            return FakeQuery([{"day": day, "row_count": n} for day, n in self.held.items()])
         return FakeQuery([{"day": self.latest}])
 
     def load_table_from_json(
@@ -220,7 +224,11 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert [field.name for field in table.schema] == [field.name for field in SCHEMA]
     assert table.time_partitioning.field == "start_time"
     assert table.time_partitioning.type_ == bigquery.TimePartitioningType.DAY
-    assert bq.queries == [f"SELECT DATE(MAX(start_time)) AS day FROM `{TABLE_ID}`"]
+    assert bq.queries == [
+        f"SELECT DATE(MAX(start_time)) AS day FROM `{TABLE_ID}`",
+        f"SELECT DATE(start_time) AS day, COUNT(*) AS row_count FROM `{TABLE_ID}` "
+        "WHERE start_time >= TIMESTAMP('2026-10-20') GROUP BY day",
+    ]
 
     [(destination, rows, config)] = bq.loads
     assert destination == f"{TABLE_ID}$20261020"
@@ -233,21 +241,38 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert bq.deleted == []
 
 
-def test_an_empty_langfuse_touches_no_partition():
-    """A wrong environment or project key reads as empty. Langfuse keeps less history
-    than the table, so a deleted day could not be reloaded."""
-    bq = FakeBigQuery(latest=date(2026, 10, 21))
+def test_an_empty_window_fails_and_touches_no_partition():
+    """A wrong environment or keys for another project read as empty."""
+    bq = FakeBigQuery(latest=date(2026, 10, 21), held={date(2026, 10, 21): 9})
     empty = httpx2.MockTransport(
         lambda request: httpx2.Response(200, json={"data": [], "meta": {}})
     )
 
-    loaded = run_export(
-        reader=reader_for(empty), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 23)
-    )
+    with pytest.raises(EmptyWindowError, match="2026-10-20 to 2026-10-23"):
+        run_export(reader=reader_for(empty), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 23))
 
-    assert loaded == []
     assert bq.loads == []
     assert bq.deleted == []
+
+
+@pytest.mark.parametrize(("held", "replaced"), [(5, False), (4, True), (3, True)])
+def test_a_replace_never_shrinks_a_partition(capsys, held, replaced):
+    """Langfuse deletes data by age, so an old day can come back partial."""
+    bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: held})
+
+    loaded = run_export(
+        reader=reader_for(recorded_langfuse([])),
+        bq=bq,
+        table_id=TABLE_ID,
+        today=date(2026, 10, 21),
+    )
+
+    assert loaded == ([(RECORDED_DAY, 4)] if replaced else [])
+    assert [destination for destination, _, _ in bq.loads] == (
+        [f"{TABLE_ID}$20261020"] if replaced else []
+    )
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert ("replaced" in first_line) is replaced
 
 
 def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
