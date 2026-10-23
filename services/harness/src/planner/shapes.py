@@ -382,6 +382,34 @@ class LevelRole(NamedRole, Protocol):
 PLACE_PHRASE: Final = "country"
 
 
+def one_figure_remedy(*, each_side: bool = False) -> str:
+    """How a refusal offers one figure over every row: an aggregate with an empty `group_by`.
+
+    The figure combines the years, so it answers only an ask marked
+    (across years). `each_side` names it for both sides of an un-keyed
+    share or quotient, which pairs one figure only with another.
+    """
+    sides = " on each side" if each_side else ""
+    return (
+        f"only for an ask marked (across years), one figure{sides} with an `aggregate` whose "
+        "`group_by` is []"
+    )
+
+
+def pooling_remedy(*, one_figure: bool, each_side: bool = False) -> str:
+    """How a refusal tells a side holding several members to pool them, as its reader takes them.
+
+    Per year always: an aggregate whose `group_by` keeps `period`. One
+    figure (`one_figure_remedy`) only where `one_figure` says the reader
+    takes one: never for a keyed side, which keeps one series per key, nor
+    for a `compare` or a `sum_of`, which pair yearly series.
+    """
+    per_year = "pool the members per year with an `aggregate` whose `group_by` keeps `period`"
+    if not one_figure:
+        return per_year
+    return f"{per_year}, or, {one_figure_remedy(each_side=each_side)}"
+
+
 def place_role(role: str | None) -> bool:
     """Whether a dimension under `role` holds the places the measure is about.
 
@@ -1707,8 +1735,7 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
             "aggregate cannot group by entity over a frame with no role dimension; group by "
-            "entity in the step that collapsed the roles, or, for one figure over every row, "
-            "set `group_by` to []"
+            f"entity in the step that collapsed the roles, or, {one_figure_remedy()}"
         )
     open_roles = [role.role for role in shape.roles if role.open]
     if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):

@@ -44,6 +44,7 @@ from planner.records import (
     RelativePeriod,
     RollingWindow,
 )
+from planner.shapes import one_figure_remedy
 from planner.workflow import OpenEntityAxis, Period, ResolvedEntity, SelectedSource
 
 SPEC_KENYA = "spec_" + "a" * 32
@@ -312,7 +313,7 @@ def test_an_aggregate_grouping_by_entity_with_no_role_dimension_is_refused(
     assert "by_entity" not in shapes
     (issue,) = issues
     assert issue.startswith("by_entity: aggregate cannot group by entity")
-    assert "`group_by` to []" in issue
+    assert issue.endswith(one_figure_remedy())
     # The empty group the refusal offers reduces the yearly series to one figure.
     one_figure = by_entity_of_a_span.model_copy(update={"group_by": ()})
     shapes, issues = _resolve(

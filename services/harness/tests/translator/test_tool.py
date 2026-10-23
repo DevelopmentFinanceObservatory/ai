@@ -73,6 +73,7 @@ from planner.records import (
     RollingWindow,
     SourceNameCandidate,
 )
+from planner.shapes import pooling_remedy
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
 from translator.discovery import (
@@ -937,14 +938,18 @@ def test_a_quotients_key_repair_names_both_of_its_axes(code: CompileIssueCode) -
 
 
 @pytest.mark.parametrize(
-    "code", [CompileIssueCode.SHARE_AXIS_REQUIRED, CompileIssueCode.ENTITY_REQUIRED]
+    ("code", "one_figure"),
+    [(CompileIssueCode.SHARE_AXIS_REQUIRED, True), (CompileIssueCode.ENTITY_REQUIRED, False)],
 )
-def test_a_side_pooling_members_may_be_repaired_into_one_figure(code: CompileIssueCode) -> None:
-    """A side pooling several members can total them into one figure first."""
+def test_a_side_pooling_members_is_repaired_as_its_reader_takes_them(
+    code: CompileIssueCode, one_figure: bool
+) -> None:
+    """An un-keyed share pools each side per year or into one figure. A whole
+    side of any other calculation pools per year: the repair cannot see the
+    calculation, so it leaves one figure to the issue's reason."""
     repair = permitted_repair(code)
 
-    assert "`aggregate`" in repair
-    assert "`group_by` is []" in repair
+    assert repair.endswith(pooling_remedy(one_figure=one_figure, each_side=True))
 
 
 @pytest.mark.parametrize("code", list(CompileIssueCode))

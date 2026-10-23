@@ -421,10 +421,12 @@ def _group_by_phrase(
 ) -> str:
     """`group_by` in words, after "grouped" when `grouped`. A group by breakdown names
     the dimension of `breakdown`, the one the aggregate's input states. An empty group
-    is one figure over whatever years, parties and codes the input holds, which a
-    filter or a named side may narrow, so it names none of them."""
+    is one figure over whatever years and parties the input holds, and codes where it
+    carries a breakdown, which a filter or a named side may narrow, so it names none
+    of them."""
     if not group_by:
-        return "as one figure over all the years, parties and codes read"
+        read = "years, parties and codes" if breakdown is not None else "years and parties"
+        return f"as one figure over all the {read} read"
     words = {
         GroupBy.PERIOD: "year",
         GroupBy.ENTITY: "entity",

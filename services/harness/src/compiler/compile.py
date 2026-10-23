@@ -72,6 +72,7 @@ from planner.shapes import (
     ValueKind,
     level_roles,
     place_role,
+    pooling_remedy,
     role_named,
     roles_named,
 )
@@ -1689,14 +1690,20 @@ class _Build:
         open_column = next(
             ((column, requirement) for column, (_, requirement) in columns if column.open), None
         )
+        # Only an un-keyed share or quotient takes one figure on each side.
+        reader = self.operations.get(op_id)
+        pool = pooling_remedy(
+            one_figure=isinstance(reader, ShareOfOperation | QuotientOfOperation)
+            and reader.axis is None,
+            each_side=True,
+        )
         if pooled:
             names = [name for _, column_names in pooled for name in column_names]
             self._issue(
                 CompileIssueCode.ENTITY_REQUIRED,
                 f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
                 f"requirement names several entities on one side of the flow {names!r}; "
-                "say which, or total them first with an aggregate grouped by period, or "
-                "whose `group_by` is [] for one figure",
+                f"say which, or {pool}",
                 operation_id=op_id,
                 requirement_id=pooled[0][0].id,
             )
@@ -1709,8 +1716,7 @@ class _Build:
                 f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
                 f"requirement covers every {column.role!r} and names none of them, "
                 "so the side cannot say which it reads; name them in the requirement's "
-                "`entities`, or collapse them first with an aggregate grouped by period, "
-                "or whose `group_by` is [] for one figure",
+                f"`entities`, or {pool}",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )
@@ -1737,7 +1743,7 @@ class _Build:
         first resolved it to wherever the frame travels -- narrowed once a
         filter has kept only named entities on it -- so a reader only has to
         read its own immediate input's shape, with no walk of its own. Two
-        readers report: a period-only aggregate, or a whole side of a
+        readers report: an aggregate grouped by no entity, or a whole side of a
         two-sided operation (`_pooled_sides`), folds a surplus role into a
         figure presented as the asked entity's; a `named` rank claims to
         rank exactly the entities a filter narrowed its axis to, so a

@@ -685,10 +685,9 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
         ),
         pytest.param(
             (),
-            "Total external debt service paid as one figure over all the years, parties and "
-            "codes read",
-            "The total of external debt service paid, as one figure over all the years, "
-            "parties and codes read.",
+            "Total external debt service paid as one figure over all the years and parties read",
+            "The total of external debt service paid, as one figure over all the years and "
+            "parties read.",
             id="one-figure",
         ),
     ],
@@ -2128,6 +2127,12 @@ def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
         f"rolled up to {rolled_up_to}."
     )
     assert sentences["total"] == "The total of aid, grouped by year and by sector."
+    one_figure = plan.model_copy(
+        update={"evidence_requirements": [aid, _total("aid").model_copy(update={"group_by": ()})]}
+    )
+    assert {row["id"]: row["sentence"] for row in requirement_rows(one_figure)}["total"] == (
+        "The total of aid, as one figure over all the years, parties and codes read."
+    )
     assert sentences["ranked"].startswith(
         "Ranks by the total of aid: ranks every sector the source holds; "
     )

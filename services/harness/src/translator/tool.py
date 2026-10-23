@@ -63,6 +63,7 @@ from planner.plan import (
     split_of,
 )
 from planner.records import EvidenceIssueCode
+from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
 from planner.workflow import SelectedSource
 from pydantic import JsonValue, ValidationError
@@ -286,8 +287,7 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
         "set the share's `axis` to the role it is taken per, or name the numerator's "
-        "`entity`, or, for one figure of the members together, total each side with an "
-        "`aggregate` whose `group_by` is []"
+        f"`entity`, or {pooling_remedy(one_figure=True, each_side=True)}"
     ),
     CompileIssueCode.SHARE_KEY_UNKNOWN: "set the share's `axis` to a role both sides carry",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: (
@@ -320,10 +320,11 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "make the filters and entities along each calculation keep at least one series of "
         "the dataset, at one level of place, or drop `rolling` for fixed years"
     ),
+    # The calculation is unknown here, so this offers the per-year pooling every
+    # reader takes; the issue's reason adds one figure where its reader takes one.
     CompileIssueCode.ENTITY_REQUIRED: (
         "name the entity each side reads, among those its requirement names on one side of "
-        "the flow, or total the side's members first with an `aggregate` grouped by period, "
-        "or whose `group_by` is [] for one figure"
+        f"the flow, or {pooling_remedy(one_figure=False)}"
     ),
     CompileIssueCode.UNKNOWN_ENTITY: (
         "name only entities the requirement it reads states, or add the entity to that requirement"

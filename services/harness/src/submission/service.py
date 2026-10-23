@@ -103,6 +103,7 @@ from planner.plan import (
     full_history,
     inputs_of,
     is_search_pin,
+    keep_years_admits,
     licences_restated,
     load_ask_breakdowns,
     load_asks,
@@ -137,7 +138,7 @@ from planner.records import (
     RollingPlanError,
     Year,
 )
-from planner.shapes import PLACE_PHRASE
+from planner.shapes import PLACE_PHRASE, pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import OpenEntityAxis, ResolvedGroup, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
@@ -1916,13 +1917,16 @@ def _result_scope_unstated(plan: Plan) -> dict[str, object] | None:
             if gap.ask is not None
             else "is the plan's answer"
         )
+        # Every calculation that keeps an open party past the shape checks reads
+        # the years apart, so no result here takes one figure over them.
+        pool = pooling_remedy(one_figure=False)
         sentences.append(
             f"{gap.output_id!r} {answers} with one figure per {gap.role}, because "
             f"{gap.dataset_id!r} reads every {gap.role} (`across`) and nothing sums them. "
-            f"If the ask wants one figure for all of them, add an `aggregate` reading "
-            f"{gap.dataset_id!r} with reduction `sum` and a `group_by` keeping `period` (and "
-            "`entity`, for the entities it names), and have the calculation read it. If it "
-            f"wants a figure per {gap.role}, cite on "
+            f"If the ask wants them taken together, total {gap.dataset_id!r} with reduction "
+            f"`sum` and have any calculation read the total: {pool}, with `entity` in a "
+            "per-year `group_by` to keep the entities it names apart. "
+            f"If it wants a figure per {gap.role}, cite on "
             f"{gap.dataset_id!r} a decision whose `fixes` names `across`."
         )
     return problem(
@@ -2076,8 +2080,8 @@ def _period_reduction_unstated(
                 "or remove it."
             )
         elif isinstance(reducing, RankRequirement):
-            keep = {"per_period": True}
-            remedies = f"To keep the years, set `per_period` to true on {step}."
+            keep = _keep_years(plan, gap.step_id, {"per_period": True})
+            remedies = f"To keep the years, set `per_period` to true on {step}." if keep else ""
             if read is not None:
                 offer = _one_year_offer(OneYear.WINDOW, read, gap.together_with)
                 remedies += (
@@ -2093,8 +2097,9 @@ def _period_reduction_unstated(
                 )
         else:
             assert isinstance(reducing, AggregateRequirement)
-            keep = {"group_by": [column.value for column in _years_kept(reducing)]}
-            remedies = f"To keep the years, {_keep_the_years(reducing)}."
+            kept_by = _years_kept(reducing)
+            keep = _keep_years(plan, gap.step_id, {"group_by": kept_by})
+            remedies = f"To keep the years, {_keep_the_years(reducing, kept_by)}." if keep else ""
             if read is not None:
                 offer = _one_year_offer(OneYear.FILTER, read, gap.together_with)
                 remedies += (
@@ -2112,7 +2117,7 @@ def _period_reduction_unstated(
         kept.append(keep)
         sentences.append(
             f"{step} reduces {years} to one figure, {result} answers {answers}. {unasked}. "
-            f"{remedies}"
+            f"{remedies.lstrip()}"
         )
     return problem(
         ProblemCode.PERIOD_REDUCTION_UNSTATED,
@@ -2180,10 +2185,22 @@ def _years_kept(aggregate: AggregateRequirement) -> tuple[GroupBy, ...]:
     return (GroupBy.ENTITY, GroupBy.PERIOD)
 
 
-def _keep_the_years(aggregate: AggregateRequirement) -> str:
-    """How `aggregate` keeps the years (`_years_kept`), as its refusal says it."""
+def _keep_years(plan: Plan, step_id: str, change: dict[str, object]) -> dict[str, object] | None:
+    """`change` as `detail.gaps[].keep_years` states it, or `None` where the plan it gives fails.
+
+    The check is `planner.plan.keep_years_admits`, as `one_year` is
+    checked: a decision the step cites that fixes `group_by` or
+    `per_period` otherwise refuses it.
+    """
+    if not keep_years_admits(plan, step_id, change):
+        return None
+    return to_jsonable_python(change)
+
+
+def _keep_the_years(aggregate: AggregateRequirement, kept: tuple[GroupBy, ...]) -> str:
+    """How `aggregate` keeps the years, grouped by `kept` (`_years_kept`), as its refusal says it."""
     step = repr(aggregate.id)
-    if _years_kept(aggregate) == (*aggregate.group_by, GroupBy.PERIOD):
+    if kept == (*aggregate.group_by, GroupBy.PERIOD):
         return f"add `period` to the `group_by` of {step}"
     return (
         f"group {step} by `entity` and `period`: `entity` keeps the breakdown's codes too, "
