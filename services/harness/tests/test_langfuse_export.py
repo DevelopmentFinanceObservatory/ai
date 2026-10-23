@@ -3,14 +3,15 @@ against Langfuse, and the per-day partition replace in BigQuery.
 
 Langfuse is `httpx2.MockTransport` replaying `fixtures/langfuse_observations_turn.json`,
 two real pages (limit 3) of prod observations from one turn, recorded with
-`statusMessage` removed. BigQuery is `FakeBigQuery`, which records the calls the
+`statusMessage` removed, and answering the day-grouped metrics query from a count
+map. BigQuery is `FakeBigQuery`, which records the calls the
 job makes.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +22,15 @@ from harness import langfuse_export
 from harness.langfuse_export import (
     BACKFILL_FLOOR,
     REQUEST_INTERVAL_S,
+    RETENTION_DAYS,
     SCHEMA,
     EmptyWindowError,
+    IncompleteDaysError,
     LangfuseError,
     LangfuseReader,
     check_day,
     export_days,
+    retained_from,
     run_export,
 )
 
@@ -50,13 +54,23 @@ class FakeClock:
         self.now += seconds
 
 
-def recorded_langfuse(requests: list[httpx2.Request]) -> httpx2.MockTransport:
-    """Answers the recorded pages for `RECORDED_DAY` by cursor, and an empty page for
-    any other day."""
+def recorded_langfuse(
+    requests: list[httpx2.Request], counts: dict[date, int] | None = None
+) -> httpx2.MockTransport:
+    """Answers the recorded pages for `RECORDED_DAY` by cursor, an empty page for any
+    other day, and the day-grouped metrics query with `counts`, by default the
+    recording's four observations on `RECORDED_DAY`."""
     pages = {page["cursor"]: page["answer"] for page in RECORDING["pages"]}
+    counts = {RECORDED_DAY: 4} if counts is None else counts
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
+        if request.url.path == "/api/public/v2/metrics":
+            data = [
+                {"time_dimension": day.isoformat(), "count_count": n}
+                for day, n in sorted(counts.items())
+            ]
+            return httpx2.Response(200, json={"data": data})
         if not request.url.params["fromStartTime"].startswith(RECORDED_DAY.isoformat()):
             return httpx2.Response(200, json={"data": [], "meta": {}})
         return httpx2.Response(200, json=pages[request.url.params.get("cursor")])
@@ -200,11 +214,47 @@ def test_mapping_drops_status_message_and_user_id():
     ],
 )
 def test_export_days_replace_from_latest_minus_one(latest, today, first, last):
-    days = export_days(latest_loaded=latest, today=today)
+    days = export_days(latest_loaded=latest, today=today, langfuse={}, held={})
 
     assert days[0] == first
     assert days[-1] == last
     assert len(days) == (last - first).days + 1
+
+
+@pytest.mark.parametrize(
+    ("langfuse", "held", "added"),
+    [
+        # A day a run read short stays in every later window until its counts match.
+        ({date(2026, 10, 15): 4}, {date(2026, 10, 15): 3}, [date(2026, 10, 15)]),
+        # A day Langfuse holds and BigQuery lacks.
+        ({date(2026, 10, 12): 4}, {}, [date(2026, 10, 12)]),
+        # A partition Langfuse no longer counts.
+        ({}, {date(2026, 10, 12): 4}, [date(2026, 10, 12)]),
+        ({date(2026, 10, 15): 4}, {date(2026, 10, 15): 4}, []),
+        # Days before the retention window are left to the age rule.
+        ({date(2026, 9, 23): 4}, {date(2026, 9, 23): 3}, []),
+    ],
+)
+def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added):
+    today = date(2026, 11, 1)
+    latest = date(2026, 10, 30)
+
+    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held)
+
+    assert days == [*added, *export_days(latest_loaded=latest, today=today, langfuse={}, held={})]
+
+
+@pytest.mark.parametrize(
+    ("today", "first"),
+    [
+        (date(2026, 11, 30), date(2026, 11, 1)),
+        # The floor holds whole: nothing before it was ever exported.
+        (date(2026, 10, 23), BACKFILL_FLOOR),
+    ],
+)
+def test_retained_from_is_the_oldest_whole_day(today, first):
+    assert retained_from(today) == first
+    assert (today - first).days <= RETENTION_DAYS - 1
 
 
 def logged_days(output: str) -> list[str]:
@@ -224,10 +274,11 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert [field.name for field in table.schema] == [field.name for field in SCHEMA]
     assert table.time_partitioning.field == "start_time"
     assert table.time_partitioning.type_ == bigquery.TimePartitioningType.DAY
+    # The partition counts reach back to the oldest day Langfuse holds whole.
     assert bq.queries == [
         f"SELECT DATE(MAX(start_time)) AS day FROM `{TABLE_ID}`",
         f"SELECT DATE(start_time) AS day, COUNT(*) AS row_count FROM `{TABLE_ID}` "
-        "WHERE start_time >= TIMESTAMP('2026-10-20') GROUP BY day",
+        f"WHERE start_time >= TIMESTAMP('{BACKFILL_FLOOR}') GROUP BY day",
     ]
 
     [(destination, rows, config)] = bq.loads
@@ -255,9 +306,8 @@ def test_an_empty_window_fails_and_touches_no_partition():
     assert bq.deleted == []
 
 
-@pytest.mark.parametrize(("held", "replaced"), [(5, False), (4, True), (3, True)])
-def test_a_replace_never_shrinks_a_partition(capsys, held, replaced):
-    """Langfuse deletes data by age, so an old day can come back partial."""
+@pytest.mark.parametrize(("held", "replaced"), [(4, True), (3, True)])
+def test_a_replace_grows_or_keeps_a_partition(capsys, held, replaced):
     bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: held})
 
     loaded = run_export(
@@ -267,12 +317,85 @@ def test_a_replace_never_shrinks_a_partition(capsys, held, replaced):
         today=date(2026, 10, 21),
     )
 
-    assert loaded == ([(RECORDED_DAY, 4)] if replaced else [])
+    assert loaded == [(RECORDED_DAY, 4)]
+    assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
+    assert capsys.readouterr().out.splitlines()[0].startswith("2026-10-20: replaced")
+
+
+@pytest.mark.parametrize(
+    ("held", "counts", "replaced"),
+    [
+        # Fewer rows than the partition holds: the partition is kept.
+        ({RECORDED_DAY: 5}, {RECORDED_DAY: 4}, False),
+        # Fewer rows than Langfuse counts: the read still grows the partition.
+        ({RECORDED_DAY: 3}, {RECORDED_DAY: 6}, True),
+    ],
+)
+def test_a_retained_day_read_short_fails_after_the_other_days(capsys, held, counts, replaced):
+    bq = FakeBigQuery(latest=date(2026, 10, 21), held=held)
+
+    with pytest.raises(IncompleteDaysError) as failure:
+        run_export(
+            reader=reader_for(recorded_langfuse([], counts)),
+            bq=bq,
+            table_id=TABLE_ID,
+            today=date(2026, 10, 22),
+        )
+
+    message = str(failure.value)
+    assert "2026-10-20 read 4 rows" in message
+    assert f"Langfuse counts {counts[RECORDED_DAY]}" in message
+    assert f"the partition holds {held[RECORDED_DAY]}" in message
     assert [destination for destination, _, _ in bq.loads] == (
         [f"{TABLE_ID}$20261020"] if replaced else []
     )
+    # The later days were still read.
+    assert logged_days(capsys.readouterr().out) == ["2026-10-20", "2026-10-21", "2026-10-22"]
+
+
+def test_a_day_missing_from_bigquery_is_loaded():
+    """A run that stopped part-way left 10-20 unloaded while later days loaded."""
+    bq = FakeBigQuery(latest=date(2026, 10, 25))
+    requests: list[httpx2.Request] = []
+
+    loaded = run_export(
+        reader=reader_for(recorded_langfuse(requests)),
+        bq=bq,
+        table_id=TABLE_ID,
+        today=date(2026, 10, 26),
+    )
+
+    assert loaded == [(RECORDED_DAY, 4)]
+    days_read = sorted(
+        {r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params}
+    )
+    assert days_read == ["2026-10-20", "2026-10-24", "2026-10-25", "2026-10-26"]
+    [metrics] = [r for r in requests if r.url.path == "/api/public/v2/metrics"]
+    query = json.loads(metrics.url.params["query"])
+    assert query["timeDimension"] == {"granularity": "day"}
+    assert query["fromTimestamp"] == f"{BACKFILL_FLOOR}T00:00:00Z"
+    assert query["toTimestamp"] == "2026-10-27T00:00:00Z"
+    assert query["filters"][0]["value"] == ["dfo-prod-ai"]
+
+
+def test_a_short_day_past_the_retention_edge_is_kept_without_failing(capsys):
+    """Langfuse deletes data by age, so a day older than the window comes back partial."""
+    today = RECORDED_DAY + timedelta(days=RETENTION_DAYS)
+    assert retained_from(today) == RECORDED_DAY + timedelta(days=1)
+    bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: 5})
+
+    loaded = run_export(
+        reader=reader_for(recorded_langfuse([], {})),
+        bq=bq,
+        table_id=TABLE_ID,
+        today=today,
+    )
+
+    assert loaded == []
+    assert bq.loads == []
     first_line = capsys.readouterr().out.splitlines()[0]
-    assert ("replaced" in first_line) is replaced
+    assert first_line.startswith("2026-10-20: partition kept")
+    assert "retention edge" in first_line
 
 
 def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
@@ -280,7 +403,7 @@ def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         # 10-21's first page answers and its second page keeps failing.
-        if request.url.params["fromStartTime"].startswith("2026-10-21"):
+        if request.url.params.get("fromStartTime", "").startswith("2026-10-21"):
             if "cursor" in request.url.params:
                 return httpx2.Response(502)
             return httpx2.Response(200, json=RECORDING["pages"][0]["answer"])
@@ -312,7 +435,13 @@ def test_empty_table_backfills_from_the_floor():
         today=date(2026, 10, 20),
     )
 
-    days_read = sorted({request.url.params["fromStartTime"][:10] for request in requests})
+    days_read = sorted(
+        {
+            request.url.params["fromStartTime"][:10]
+            for request in requests
+            if "fromStartTime" in request.url.params
+        }
+    )
     assert days_read[0] == BACKFILL_FLOOR.isoformat()
     assert len(days_read) == 16
     assert loaded == [(RECORDED_DAY, 4)]

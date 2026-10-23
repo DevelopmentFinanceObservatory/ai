@@ -3,18 +3,26 @@
 Each run reads `GET /api/public/v2/observations` for one Langfuse environment,
 one UTC day at a time, and replaces that day's partition of the BigQuery table
 `observations`, which is day-partitioned on `start_time`. The days are the latest
-loaded day minus one through today. An empty table is backfilled from
-`BACKFILL_FLOOR`, the first day the prod project holds data. A run that fails
-part-way leaves every day it reached replaced whole and every other day as it
-was, so the next run heals the gap. A replace never shrinks a partition: a day
-that reads fewer rows than its partition holds, none included, keeps the
-partition and prints both counts. Langfuse deletes data by age, so after a long
-outage the oldest day of the window can come back partial, and a deleted row
-could not be reloaded. When every day of the window reads no rows, the run
-raises `EmptyWindowError` naming the window and `LANGFUSE_EXPORT_ENVIRONMENT`,
-since a wrong environment or keys for another project read as empty and prod has
-had turns every day since `BACKFILL_FLOOR`. Each day prints a line as it is
-replaced or kept, and a failure prints the day it stopped on before the error.
+loaded day minus one through today, plus every day Langfuse still holds whole
+(`retained_from` on) whose observation count, from one `GET /api/public/v2/metrics`
+query grouped by day, differs from its partition's row count. An empty table is
+backfilled from `BACKFILL_FLOOR`, the first day the prod project holds data. A
+run that fails part-way leaves every day it reached replaced whole and every
+other day as it was, and the next run's count comparison picks up the gap.
+
+A replace never shrinks a partition: a day that reads fewer rows than its
+partition holds, none included, keeps the partition and prints both counts.
+Langfuse deletes data by age, so a day before `retained_from` can come back
+partial, and a deleted row could not be reloaded; such a day is kept and logged.
+A day from `retained_from` on that reads fewer rows than its partition holds or
+than Langfuse counts is a fault. The run processes the other days and then
+raises `IncompleteDaysError` naming every such day with its counts, and the day
+stays in later runs until the counts match. When every day of the run reads no
+rows, the run raises `EmptyWindowError` naming the days and
+`LANGFUSE_EXPORT_ENVIRONMENT`, since a wrong environment or keys for another
+project read as empty and prod has had turns every day since `BACKFILL_FLOOR`.
+Each day prints a line as it is replaced or kept, and a failure prints the day it
+stopped on before the error.
 
 The rows carry ids, names, the model, times, tokens and cost. Requests omit the
 `io` and `metadata` field groups, so prompts and answers stay in
@@ -35,7 +43,8 @@ Settings come from the environment or `.env`: `LANGFUSE_PUBLIC_KEY`,
 a load also `EXPORT_BQ_PROJECT` and `EXPORT_BQ_DATASET`.
 
 Exit status: 0 when every day loaded or kept or the check matched, 1 when the
-check found a difference, a request failed or the whole window read no rows, 2
+check found a difference, a request failed, a retained day read short or the
+whole run read no rows, 2
 when a setting is missing.
 """
 
@@ -55,6 +64,10 @@ from google.cloud import bigquery
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKFILL_FLOOR = date(2026, 10, 5)
+# Langfuse Cloud's Hobby plan holds 30 days of data
+# (https://langfuse.com/docs/administration/data-retention), deleting
+# observations by `start_time` age.
+RETENTION_DAYS = 30
 TABLE = "observations"
 
 # Every group except `io` and `metadata` (free text) and `time` and `prompt`,
@@ -120,6 +133,11 @@ class EmptyWindowError(RuntimeError):
     """Every day of the run's window read no rows, which a misconfiguration causes."""
 
 
+class IncompleteDaysError(RuntimeError):
+    """A day Langfuse still holds whole read fewer rows than its partition or
+    Langfuse's own count."""
+
+
 def _text(value: object) -> str | None:
     """Langfuse sends an unset string field as `""`, and BigQuery holds it as NULL."""
     return value if isinstance(value, str) and value else None
@@ -152,12 +170,38 @@ def observation_row(observation: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def export_days(*, latest_loaded: date | None, today: date) -> list[date]:
-    """The days a run replaces: the latest loaded day minus one through today, or
-    `BACKFILL_FLOOR` through today when nothing is loaded."""
-    first = BACKFILL_FLOOR if latest_loaded is None else latest_loaded - timedelta(days=1)
-    first = max(first, BACKFILL_FLOOR)
-    return [first + timedelta(days=offset) for offset in range((today - first).days + 1)]
+def retained_from(today: date) -> date:
+    """The oldest day Langfuse still holds whole. Its age at the end of `today` is
+    `RETENTION_DAYS`, so the day before it is the oldest Langfuse may have partly
+    deleted."""
+    return max(today - timedelta(days=RETENTION_DAYS - 1), BACKFILL_FLOOR)
+
+
+def _catch_up_from(latest_loaded: date | None) -> date:
+    if latest_loaded is None:
+        return BACKFILL_FLOOR
+    return max(latest_loaded - timedelta(days=1), BACKFILL_FLOOR)
+
+
+def export_days(
+    *,
+    latest_loaded: date | None,
+    today: date,
+    langfuse: Mapping[date, int],
+    held: Mapping[date, int],
+) -> list[date]:
+    """The days a run replaces: the latest loaded day minus one (or `BACKFILL_FLOOR`
+    when nothing is loaded) through today, and every day from `retained_from` on
+    whose Langfuse count differs from its partition's row count."""
+    first = _catch_up_from(latest_loaded)
+    days = {first + timedelta(days=offset) for offset in range((today - first).days + 1)}
+    retained = retained_from(today)
+    days.update(
+        day
+        for day in langfuse.keys() | held.keys()
+        if retained <= day <= today and langfuse.get(day, 0) != held.get(day, 0)
+    )
+    return sorted(days)
 
 
 def _day_bounds(day: date) -> tuple[str, str]:
@@ -229,15 +273,14 @@ class LangfuseReader:
                 return
             params["cursor"] = cursor
 
-    def day_totals(self, day: date) -> tuple[int, float]:
-        """The observation count and summed total cost Langfuse's metrics report for `day`."""
-        start, end = _day_bounds(day)
-        query = {
+    def _metrics(
+        self, *, first: date, last: date, metrics: list[dict[str, str]], by_day: bool
+    ) -> list[dict[str, Any]]:
+        """The metrics rows for the environment's observations from `first` through
+        `last` (UTC), one row a day when `by_day` and one row otherwise."""
+        query: dict[str, Any] = {
             "view": "observations",
-            "metrics": [
-                {"measure": "count", "aggregation": "count"},
-                {"measure": "totalCost", "aggregation": "sum"},
-            ],
+            "metrics": metrics,
             "dimensions": [],
             "filters": [
                 {
@@ -247,11 +290,36 @@ class LangfuseReader:
                     "type": "stringOptions",
                 }
             ],
-            "fromTimestamp": start,
-            "toTimestamp": end,
+            "fromTimestamp": _day_bounds(first)[0],
+            "toTimestamp": _day_bounds(last)[1],
         }
-        answer = self._get("/api/public/v2/metrics", {"query": json.dumps(query)})
-        rows = answer["data"]
+        if by_day:
+            query["timeDimension"] = {"granularity": "day"}
+        return self._get("/api/public/v2/metrics", {"query": json.dumps(query)})["data"]
+
+    def day_counts(self, *, first: date, last: date) -> dict[date, int]:
+        """The observation count Langfuse's metrics report for each day from `first`
+        through `last` that holds observations. The metrics bucket a day by UTC
+        start time, the bounds `observations` reads."""
+        rows = self._metrics(
+            first=first,
+            last=last,
+            metrics=[{"measure": "count", "aggregation": "count"}],
+            by_day=True,
+        )
+        return {date.fromisoformat(row["time_dimension"]): int(row["count_count"]) for row in rows}
+
+    def day_totals(self, day: date) -> tuple[int, float]:
+        """The observation count and summed total cost Langfuse's metrics report for `day`."""
+        rows = self._metrics(
+            first=day,
+            last=day,
+            metrics=[
+                {"measure": "count", "aggregation": "count"},
+                {"measure": "totalCost", "aggregation": "sum"},
+            ],
+            by_day=False,
+        )
         if not rows:
             return 0, 0.0
         return int(rows[0]["count_count"]), float(rows[0]["sum_totalCost"] or 0.0)
@@ -294,37 +362,55 @@ def run_export(
 ) -> list[tuple[date, int]]:
     """Create the table if absent and replace every day `export_days` names whose
     read holds rows and at least as many as its partition. Returns each replaced day
-    with its row count. Raises `EmptyWindowError` when every day reads no rows."""
+    with its row count. Raises `EmptyWindowError` when every day reads no rows, and
+    otherwise `IncompleteDaysError` when a day from `retained_from` on read fewer
+    rows than its partition or Langfuse's count."""
     table = bigquery.Table(table_id, schema=SCHEMA)
     table.time_partitioning = PARTITIONING
     bq.create_table(table, exists_ok=True)
-    days = export_days(latest_loaded=latest_loaded_day(bq, table_id), today=today)
-    held = partition_row_counts(bq, table_id, days[0])
+    latest = latest_loaded_day(bq, table_id)
+    retained = retained_from(today)
+    langfuse = reader.day_counts(first=retained, last=today)
+    held = partition_row_counts(bq, table_id, min(_catch_up_from(latest), retained))
+    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held)
     loaded = []
+    short = []
     read_any = False
     for day in days:
         try:
             rows = [observation_row(observation) for observation in reader.observations(day)]
-            read_any = read_any or bool(rows)
-            if not rows or len(rows) < held.get(day, 0):
-                print(
-                    f"{day}: Langfuse returned {len(rows)} rows and the partition holds "
-                    f"{held.get(day, 0)}; partition kept",
-                    flush=True,
-                )
-                continue
-            replace_day(bq, table_id, day, rows)
+            replaced = bool(rows) and len(rows) >= held.get(day, 0)
+            if replaced:
+                replace_day(bq, table_id, day, rows)
         except Exception:
             print(f"{day}: failed; this day and later days were not replaced", flush=True)
             raise
-        print(f"{day}: replaced with {len(rows)} rows", flush=True)
-        loaded.append((day, len(rows)))
+        read_any = read_any or bool(rows)
+        if day >= retained:
+            counts = (
+                f"read {len(rows)} rows, Langfuse counts {langfuse.get(day, 0)}, "
+                f"the partition holds {held.get(day, 0)}"
+            )
+            if len(rows) < max(held.get(day, 0), langfuse.get(day, 0)):
+                short.append(f"{day} {counts}")
+        else:
+            counts = (
+                f"read {len(rows)} rows, the partition holds {held.get(day, 0)}, "
+                "past Langfuse's retention edge"
+            )
+        if replaced:
+            print(f"{day}: replaced; {counts}", flush=True)
+            loaded.append((day, len(rows)))
+        else:
+            print(f"{day}: partition kept; {counts}", flush=True)
     if not read_any:
         raise EmptyWindowError(
             f"Langfuse returned no rows for any day from {days[0]} to {days[-1]}; check "
             "LANGFUSE_EXPORT_ENVIRONMENT and that the Langfuse keys belong to the project "
             "holding it"
         )
+    if short:
+        raise IncompleteDaysError(f"days read short of their counts: {', '.join(short)}")
     return loaded
 
 
