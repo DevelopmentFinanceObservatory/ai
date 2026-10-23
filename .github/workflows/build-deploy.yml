@@ -87,3 +87,21 @@ jobs:
             --region="$REGION" \
             --project="$PROJECT_ID" \
             --quiet
+
+      # The Langfuse export job runs `python -m harness.langfuse_export` on the
+      # same image. infra defines it in production only and sets
+      # vars.JOB_LANGFUSE_EXPORT there, so an Environment without the var skips
+      # this step.
+      - name: Point the Langfuse export job at the new image
+        if: vars.JOB_LANGFUSE_EXPORT != ''
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+          REGION: ${{ vars.REGION }}
+          PROJECT_ID: ${{ vars.PROJECT_ID }}
+          JOB_LANGFUSE_EXPORT: ${{ vars.JOB_LANGFUSE_EXPORT }}
+        run: |
+          gcloud run jobs update "$JOB_LANGFUSE_EXPORT" \
+            --image="$IMAGE" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --quiet
