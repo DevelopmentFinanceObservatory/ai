@@ -13,7 +13,8 @@ op-spec and frame grammar keep every number finite. A `category_match` is
 `is_in`, under which a null cell matches none of the predicate's strings,
 as `None in values` does. A `place_level` reads each distinct cell of a
 place-type column with `common.place_type.levels_of` and keeps the rows
-whose place sits at its level.
+whose place sits at its level. A strict one refuses a place with no known
+level among the rows every other predicate keeps (`_keep_mask`).
 
 Filter is architecturally distinct from every other verb this toolkit
 implements. It never combines two rows' own values into one number, so
@@ -388,22 +389,55 @@ def _predicate_mask(table: pa.Table, predicate: Predicate) -> pa.Array:
             _THRESHOLD_KERNELS[predicate.op], column, pa.scalar(predicate.value, type=column.type)
         )
     if predicate.kind == "place_level":
-        return _level_mask(column, predicate.column, predicate.level, strict=predicate.strict)
+        return _level_mask(column, predicate.level)
     if predicate.column == UNIT_COLUMN:
         column = array_kernel("struct_field", column, "ref")
     return array_kernel("is_in", column, value_set=pa.array(predicate.values, type=pa.string()))
 
 
-def _level_mask(column: pa.Array, name: str, level: str, *, strict: bool) -> pa.Array:
+def _level_mask(column: pa.Array, level: str | None) -> pa.Array:
     """Whether each place-type cell of `column` describes a place at `level`
-    (`common.place_type.levels_of`), decided once per distinct cell."""
+    (`common.place_type.levels_of`), decided once per distinct cell. A cell
+    with no known level matches no level, and `level=None` asks instead
+    whether a cell has no known level."""
     encoded = array_kernel("dictionary_encode", column)
     assert isinstance(encoded, pa.DictionaryArray)
     cells = cast("list[str]", encoded.dictionary.to_pylist())
-    if strict and any(not levels_of(cell) for cell in cells):
-        raise FilterPlaceLevelUnknownError(column=name)
-    matches = pa.array([level in levels_of(cell) for cell in cells], type=pa.bool_())
+    matches = pa.array(
+        [not levels_of(cell) if level is None else level in levels_of(cell) for cell in cells],
+        type=pa.bool_(),
+    )
     return array_kernel("take", matches, encoded.indices)
+
+
+def _keep_mask(table: pa.Table, predicates: Sequence[Predicate]) -> pa.Array:
+    """Whether each row of `table` satisfies every predicate. A strict
+    `place_level` predicate refuses (`FilterPlaceLevelUnknownError`) when one
+    of its own cells with no known level sits in a row that every non-strict
+    predicate keeps and that every other strict predicate keeps or cannot
+    classify. Predicate order changes neither the rows kept nor whether the
+    call refuses."""
+    masks = [_predicate_mask(table, predicate) for predicate in predicates]
+    unknown = {
+        index: _level_mask(table.column(predicate.column).combine_chunks(), None)
+        for index, predicate in enumerate(predicates)
+        if predicate.kind == "place_level" and predicate.strict
+    }
+    narrowing = [
+        array_kernel("or", mask, unknown[index]) if index in unknown else mask
+        for index, mask in enumerate(masks)
+    ]
+    for index, cells_unknown in unknown.items():
+        judged = cells_unknown
+        for other, mask in enumerate(narrowing):
+            if other != index:
+                judged = array_kernel("and", judged, mask)
+        if scalar_kernel("any", judged).as_py():
+            raise FilterPlaceLevelUnknownError(column=predicates[index].column)
+    keep = pa.repeat(pa.scalar(True), table.num_rows)
+    for mask in masks:
+        keep = array_kernel("and", keep, mask)
+    return keep
 
 
 def run_filter(
@@ -426,9 +460,7 @@ def run_filter(
     _validate_predicate_types(predicates, frame, span=span)
 
     table = frame.table
-    keep = pa.repeat(pa.scalar(True), table.num_rows)
-    for predicate in predicates:
-        keep = array_kernel("and", keep, _predicate_mask(table, predicate))
+    keep = _keep_mask(table, predicates)
     kept = table.filter(keep)
     exclusions = record_exclusion(
         Exclusions(),

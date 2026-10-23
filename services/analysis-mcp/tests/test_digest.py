@@ -1465,3 +1465,38 @@ def test_a_quotient_over_the_pooled_donors_names_the_denominators_private_donors
     digest = render_quotient_of_digest(result=result, **_identity())
 
     assert "The denominator sum of 3 providers includes 1 private donor (30)." in digest
+
+
+@pytest.mark.parametrize(
+    ("run", "render"),
+    [(run_quotient_of, render_quotient_of_digest), (run_share_of, render_share_of_digest)],
+    ids=["quotient_of", "share_of"],
+)
+def test_a_private_donor_only_in_a_period_left_out_is_not_disclosed(run, render) -> None:
+    # 2021 divides 20 by 40; the private donor's 100 sits in 2020, which the
+    # denominator lacks, so it is no part of the figure.
+    numerator = provider_frame(
+        {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)}, years=("2020",)
+    )
+    numerator_2021 = provider_frame(
+        {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)}
+    )
+    both_years = Frame.from_table(
+        columns=numerator.columns, table=pa.concat_tables([numerator.table, numerator_2021.table])
+    )
+    result = run(
+        both_years,
+        provider_frame({"country/FRA": (OFFICIAL, 40.0)}),
+        stat_var="dcid:ratio",
+        numerator_entity={},
+        denominator_entity={},
+    )
+
+    (pooled,) = result.numerator_pooled
+    assert (pooled.count, pooled.periods, pooled.private_count, pooled.private_value) == (
+        2,
+        1,
+        0,
+        0.0,
+    )
+    assert "private" not in render(result=result, **_identity())

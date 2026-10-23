@@ -23,7 +23,7 @@ from analysis_mcp.engine.rank import run_rank
 from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.identity import op_spec_hash_for
-from analysis_mcp.op_spec import AggregateOpSpec, PlaceLevelPredicate
+from analysis_mcp.op_spec import AggregateOpSpec, OrderedThresholdPredicate, PlaceLevelPredicate
 from analysis_mcp.quotient_of_tool import quotient_of
 from analysis_mcp.rank_tool import rank
 from analysis_mcp.share_of_tool import share_of
@@ -157,6 +157,92 @@ def test_a_strict_place_level_refuses_an_untyped_entity() -> None:
         )
 
     assert raised.value.column == "observationAbout_type"
+
+
+_SINCE_2020 = OrderedThresholdPredicate(column="time_period", op="gte", value="2020")
+_STRICT_COUNTRY = PlaceLevelPredicate(column="observationAbout_type", level="Country", strict=True)
+
+
+@pytest.mark.parametrize(
+    "predicates",
+    [(_SINCE_2020, _STRICT_COUNTRY), (_STRICT_COUNTRY, _SINCE_2020)],
+    ids=["strict-last", "strict-first"],
+)
+def test_a_strict_place_level_judges_only_the_rows_the_other_predicates_keep(
+    predicates: tuple[OrderedThresholdPredicate | PlaceLevelPredicate, ...],
+) -> None:
+    # Ghana's untyped 2019 row falls to the year predicate, so it cannot refuse the strict one.
+    frame = Frame.build(
+        role_keys=["observationAbout", "observationAbout_type"],
+        rows=[
+            {
+                "stat_var": _GDP,
+                "observationAbout": place,
+                "observationAbout_type": types,
+                "time_period": year,
+                "value": 1.0,
+                "unit": "USDollar",
+            }
+            for place, types, year in (
+                ("country/KEN", "Country", "2021"),
+                ("country/GHA", "untyped", "2019"),
+            )
+        ],
+    )
+    one_by_one = run_filter(
+        run_filter(frame, predicates=(_SINCE_2020,)).frame, predicates=(_STRICT_COUNTRY,)
+    )
+
+    combined = run_filter(frame, predicates=predicates)
+
+    kept = combined.frame.table.column("observationAbout").to_pylist()
+    assert kept == one_by_one.frame.table.column("observationAbout").to_pylist()
+    assert kept == ["country/KEN"]
+
+
+_STRICT_ORIGIN = PlaceLevelPredicate(column="origin_type", level="Country", strict=True)
+_STRICT_DESTINATION = PlaceLevelPredicate(column="destination_type", level="Country", strict=True)
+_STRICT_ORIGIN_CONTINENT = PlaceLevelPredicate(column="origin_type", level="Continent", strict=True)
+
+
+@pytest.mark.parametrize(
+    "predicates",
+    [
+        (_STRICT_ORIGIN, _STRICT_DESTINATION),
+        (_STRICT_DESTINATION, _STRICT_ORIGIN),
+        (_STRICT_ORIGIN, _STRICT_ORIGIN_CONTINENT),
+    ],
+    ids=["two-columns", "two-columns-reversed", "one-column-two-levels"],
+)
+def test_a_strict_place_level_cannot_hide_another_strict_ones_refusal(
+    predicates: tuple[PlaceLevelPredicate, ...],
+) -> None:
+    # The second row is untyped on both sides: each strict predicate keeps it for the other
+    # to judge, so the first to judge it refuses.
+    frame = Frame.build(
+        role_keys=["origin", "origin_type", "destination", "destination_type"],
+        rows=[
+            {
+                "stat_var": _GDP,
+                "origin": origin,
+                "origin_type": types,
+                "destination": destination,
+                "destination_type": types,
+                "time_period": "2021",
+                "value": 1.0,
+                "unit": "USDollar",
+            }
+            for origin, destination, types in (
+                ("country/KEN", "country/GHA", "Country"),
+                ("x/1", "x/2", "untyped"),
+            )
+        ],
+    )
+
+    with pytest.raises(FilterPlaceLevelUnknownError) as raised:
+        run_filter(frame, predicates=predicates)
+
+    assert raised.value.column == predicates[0].column
 
 
 def test_a_strict_flow_filter_does_not_read_the_other_partys_type() -> None:

@@ -316,7 +316,8 @@ class ShareOfResult:
     `stat_var` labels every output row; `numerator_stat_var` and
     `denominator_stat_var` are the StatVars each side resolved to.
     `numerator_pooled` and `denominator_pooled` hold what each side's sums
-    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`).
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`),
+    read from the cells behind `frame`'s rows, so a cell left out adds nothing.
     """
 
     frame: Frame
@@ -607,6 +608,7 @@ def run_share_of(
                 )
             )
 
+    shared_cells = [(key, period) for key, shared in pairing.shared.items() for period in shared]
     output_frame = frame_keeping_role_types(
         {
             STAT_VAR_COLUMN: repeated(stat_var, len(period_shares)),
@@ -654,7 +656,7 @@ def run_share_of(
         numerator_only_periods=pairing.numerator_only_periods,
         denominator_only_periods=pairing.denominator_only_periods,
         coverage=result_coverage(
-            ((key, period) for key, shared in pairing.shared.items() for period in shared),
+            shared_cells,
             keyed=bool(numerator_by),
             denominator=denominator,
             pooled=pooled,
@@ -672,6 +674,8 @@ def run_share_of(
             numerator_by=numerator_by,
             denominator_columns=denominator_columns,
         ),
-        numerator_pooled=numerator.pooled_parties,
-        denominator_pooled=denominator.pooled_parties,
+        numerator_pooled=numerator.pooled_over(shared_cells),
+        denominator_pooled=denominator.pooled_over(
+            (() if pooled else key, period) for key, period in shared_cells
+        ),
     )
