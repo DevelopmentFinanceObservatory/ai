@@ -1064,8 +1064,9 @@ _GROUP_CLOSED = {"destination": {"label": "Africa", "ref": "africa"}}
         (_GROUP_CLOSED, (GroupBy.PERIOD,), True),
         ({}, (GroupBy.PERIOD,), False),
         (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False),
+        (_GROUP_CLOSED, (), True),
     ],
-    ids=["group-closed", "member-closed", "summed-per-entity"],
+    ids=["group-closed", "member-closed", "summed-per-entity", "summed-to-one-figure"],
 )
 async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin(
     real_schemas: list[ToolSchema],

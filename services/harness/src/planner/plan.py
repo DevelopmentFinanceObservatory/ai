@@ -960,13 +960,13 @@ class AggregateRequirement(TaggedModel):
         description="How to collapse each group's rows into one figure: sum, mean, max or min."
     )
     group_by: tuple[GroupBy, ...] = Field(
-        min_length=1,
         max_length=MAX_GROUP_BY,
         description=(
             "Which columns to group by before reducing: period, entity (the roles of the "
             "entities named, plus a breakdown's codes when the input has them; an `across` "
             "party is summed), breakdown (its codes alone), or two of them. Without period, "
-            "the years reduce to one figure per group."
+            "the years reduce to one figure per group. Empty reduces every row to one figure, "
+            "over every year, party and code."
         ),
     )
 

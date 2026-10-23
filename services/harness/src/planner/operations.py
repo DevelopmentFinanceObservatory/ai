@@ -97,8 +97,10 @@ class AggregateOperation(TaggedModel):
         description="How to collapse each group's rows into one figure: sum, mean, max or min."
     )
     group_by: tuple[GroupBy, ...] = Field(
-        min_length=1,
-        description="Which columns to group by before reducing: period, entity, or both.",
+        description=(
+            "Which columns to group by before reducing: period, entity, or both; empty for "
+            "one figure over every row."
+        ),
     )
 
 

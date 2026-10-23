@@ -2987,7 +2987,7 @@ def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> 
 def _pooled_sides(operation: Operation) -> tuple[tuple[str, str | None], ...]:
     """Each input `operation` folds into one figure, with the role phrase it keys that input by.
 
-    A period-only aggregate pools its one input, and a two-sided operation
+    An aggregate grouped by no entity pools its one input, and a two-sided operation
     whichever of its sides takes no `entity`. A side of a dividing verb keyed
     by an axis (`_keyed_axes`) keeps one row per member of that column and
     pools the rest, so its phrase rides along; `None` pools every column.

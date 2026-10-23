@@ -547,7 +547,9 @@ def test_operation_rows_carries_id_kind_requirement_id_and_sentence(
 # --- A minimal retrieve-then-aggregate plan ------------------------------------
 
 
-def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
+def _retrieve_then_aggregate_plan(
+    decision: DecisionFactory, group_by: tuple[GroupBy, ...] = (GroupBy.PERIOD,)
+) -> Plan:
     dataset = DatasetRequirement(
         id="annual_debt_service",
         decision_ids=["measure"],
@@ -560,7 +562,7 @@ def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
         decision_ids=["measure"],
         input_id="annual_debt_service",
         reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD,),
+        group_by=group_by,
     )
     draft = Plan(
         question="How much has Kenya paid in debt service each year?",
@@ -577,7 +579,7 @@ def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
                 requirement_id="annual_totals",
                 input="annual_debt_service",
                 reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
+                group_by=group_by,
             ),
         ],
         terminal=["annual_totals"],
@@ -672,17 +674,36 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
     ]
 
 
+@pytest.mark.parametrize(
+    ("group_by", "label", "sentence"),
+    [
+        pytest.param(
+            (GroupBy.PERIOD,),
+            "Total external debt service paid by year",
+            "The total of external debt service paid, grouped by year.",
+            id="by-year",
+        ),
+        pytest.param(
+            (),
+            "Total external debt service paid as one figure over every year and party",
+            "The total of external debt service paid as one figure over every year and party.",
+            id="one-figure",
+        ),
+    ],
+)
 def test_a_retrieve_then_aggregate_plan_produces_two_labelled_steps(
-    decision: DecisionFactory,
+    decision: DecisionFactory, group_by: tuple[GroupBy, ...], label: str, sentence: str
 ) -> None:
-    plan = _retrieve_then_aggregate_plan(decision)
+    plan = _retrieve_then_aggregate_plan(decision, group_by)
 
     rows = step_rows(plan)
 
     assert [row["id"] for row in rows] == ["annual_debt_service", "annual_totals"]
     labels = [row["label"] for row in rows]
     assert labels[0] == "Fetch external debt service paid for Kenya"
-    assert labels[1] == "Total external debt service paid by year"
+    assert labels[1] == label
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+    assert sentences["annual_totals"] == sentence
     # Never a bare tool name.
     assert "get_data" not in labels[0]
     assert "aggregate" not in labels[1]

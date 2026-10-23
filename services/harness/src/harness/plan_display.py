@@ -418,7 +418,9 @@ def _kept_apart(role: RoleDimension, plan: Plan) -> bool:
 
 def _group_by_phrase(group_by: Sequence[GroupBy], *, breakdown: Breakdown | None = None) -> str:
     """`group_by` in words. A group by breakdown names the dimension of `breakdown`,
-    the one the aggregate's input states."""
+    the one the aggregate's input states. An empty group is one figure over every row."""
+    if not group_by:
+        return "as one figure over every year and party"
     words = {
         GroupBy.PERIOD: "year",
         GroupBy.ENTITY: "entity",
@@ -863,7 +865,8 @@ def _sentence_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
     upstream = plan.requirement(requirement.input_id)
     word = _REDUCTION_WORDS[requirement.reduction]
     group = _group_by_phrase(requirement.group_by, breakdown=_breakdown_of(requirement, plan))
-    return f"The {word} of {_measure_of(upstream, plan)}, grouped {group}."
+    grouped = f", grouped {group}" if requirement.group_by else f" {group}"
+    return f"The {word} of {_measure_of(upstream, plan)}{grouped}."
 
 
 def _sentence_growth(requirement: GrowthRequirement, plan: Plan) -> str:

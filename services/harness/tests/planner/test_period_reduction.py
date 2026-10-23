@@ -15,6 +15,7 @@ states no other reduction (`planner.plan.period_licences_held`).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -301,11 +302,20 @@ _STEPS = {
 }
 
 
-@pytest.mark.parametrize("step", sorted(_STEPS))
+# Each step reducing the years, with the decisions it cites: `_STEPS`'
+# two kinds, and an aggregate grouped by nothing, which reduces every
+# donor and year to one figure.
+_REDUCING = {
+    **{step: (build, cited) for step, (build, cited, _, _) in _STEPS.items()},
+    "one_figure": (partial(_total, group_by=()), []),
+}
+
+
+@pytest.mark.parametrize("step", sorted(_REDUCING))
 def test_one_figure_over_years_answers_an_ask_across_years(
     decision: Callable[..., Decision], step: str
 ) -> None:
-    build, cited, _, _ = _STEPS[step]
+    build, cited = _REDUCING[step]
     requirements = [_aid(), build()]
 
     unmarked = _context()
@@ -363,9 +373,9 @@ def test_a_first_draft_declines_no_ask_a_reduction_refusal_named(
         assert result["detail"]["asks"] == [0]
 
 
-@pytest.mark.parametrize("step", sorted(_STEPS))
+@pytest.mark.parametrize("step", sorted(_REDUCING))
 def test_a_plan_with_no_asks_reduces_no_years(decision: Callable[..., Decision], step: str) -> None:
-    build, cited, _, _ = _STEPS[step]
+    build, cited = _REDUCING[step]
 
     result = _propose(_context(asks=()), [_aid(), build()], [decision(), *cited], answered=())
 
@@ -1501,6 +1511,7 @@ _SECTORS = Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
 @pytest.mark.parametrize(
     ("group_by", "kept"),
     [
+        pytest.param((), (GroupBy.PERIOD,), id="nothing"),
         pytest.param((GroupBy.ENTITY,), (GroupBy.ENTITY, GroupBy.PERIOD), id="entity"),
         pytest.param((GroupBy.BREAKDOWN,), (GroupBy.BREAKDOWN, GroupBy.PERIOD), id="breakdown"),
         pytest.param(
@@ -1520,7 +1531,7 @@ def test_the_aggregate_keeping_the_years_the_refusal_names_is_admitted(
     admitted = _propose(_context(), [by_sector, _total(group_by=kept)], [decision()])
 
     assert refused["code"] == ProblemCode.PERIOD_REDUCTION_UNSTATED.value, refused
-    named = "add `period` to the `group_by` of 'result'" if len(group_by) == 1 else f"by {words}"
+    named = "add `period` to the `group_by` of 'result'" if len(group_by) < 2 else f"by {words}"
     assert named in refused["message"]
     assert admitted["outcome"] == Outcome.OK.value, admitted
 
@@ -2360,6 +2371,20 @@ _ONE_YEAR_OFFERS = [
         id="a-rank-of-years-before-the-newest",
     ),
     _offered([_aid(), _total()], [], OneYear.FILTER, None, id="a-total-of-fixed-years"),
+    _offered(
+        [_aid(), _total(group_by=())],
+        [],
+        OneYear.FILTER,
+        None,
+        id="one-figure-of-fixed-years",
+    ),
+    _offered(
+        [_open(period=ONE_YEAR_ONLY), _total(group_by=())],
+        [],
+        OneYear.FILTER,
+        0,
+        id="one-figure-of-an-open-end",
+    ),
     _offered(
         [_unpinned_open(), _total()],
         [],
