@@ -45,6 +45,7 @@
     "distinction": "join, not quotient_of: two measures side by side; no per-person figure is asked"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Put Kenya's population and GDP side by side for each year from 2010 to 2022.",
     "answer_mode": "computed",

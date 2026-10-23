@@ -135,10 +135,6 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.INPUT_SHAPE_UNSUPPORTED: (
         "a calculation was asked of data in a shape it cannot read"
     ),
-    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
-        "the dataset lists the other side of each flow without a place level, so it cannot "
-        "be kept to countries or regions"
-    ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "a ranking needs to know what it ranks",
     CompileIssueCode.SHARE_AXIS_REQUIRED: "a share needs to know what it is a share of",
     CompileIssueCode.SHARE_KEY_UNKNOWN: "a share names a part the data does not hold",
@@ -157,7 +153,6 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SOURCE_WIDER_THAN_REQUIREMENT: (
         "the dataset found covers more than was asked, and the plan did not narrow it"
     ),
-    CompileIssueCode.REQUIREMENT_UNMEETABLE: _NOT_COVERED,
     CompileIssueCode.WINDOW_OUTSIDE_PERIOD: (
         "the years asked for fall outside the period the plan covers"
     ),

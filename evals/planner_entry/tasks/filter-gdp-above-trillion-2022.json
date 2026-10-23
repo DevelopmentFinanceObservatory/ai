@@ -37,6 +37,7 @@
     "distinction": "filter, not rank: a threshold keeps every country above 1 trillion US dollars; no order or top N is asked"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which countries had a GDP above 1 trillion US dollars in 2022?",
     "answer_mode": "computed",

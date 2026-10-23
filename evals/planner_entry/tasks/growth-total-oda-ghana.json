@@ -34,6 +34,7 @@
     "aggregate",
     "growth"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "By what percentage did the total ODA Ghana received from all donors change between 2012 and 2021?",
     "answer_mode": "computed",

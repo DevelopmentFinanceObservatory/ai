@@ -50,14 +50,20 @@ from google.adk.tools.tool_context import ToolContext
 from planner.operations import Translation
 from planner.plan import (
     DatasetRequirement,
+    HistorySplit,
     Plan,
     UnsupportedOperation,
+    authored_text,
+    load_plan,
+    origin_of,
     plan_revision,
     record_optional_decline,
     record_unsupported,
     save_plan,
+    split_of,
 )
 from planner.records import EvidenceIssueCode
+from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
 from planner.workflow import SelectedSource
 from pydantic import JsonValue, ValidationError
@@ -212,17 +218,12 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.SOURCE_PIN_VIOLATED
         ):
             return IssueResolution.DISCOVER_AGAIN
-        case (
-            CompileIssueCode.SOURCE_UNUSABLE
-            | CompileIssueCode.REQUIREMENT_UNMEETABLE
-            | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE
-        ):
+        case CompileIssueCode.SOURCE_UNUSABLE | CompileIssueCode.FRAME_UNITS_IRRECONCILABLE:
             return IssueResolution.UNMEETABLE
         case CompileIssueCode.NO_CAPABILITY | CompileIssueCode.FRAME_UNIT_UNBOUND:
             return IssueResolution.UNSUPPORTED
         case (
             CompileIssueCode.INPUT_SHAPE_UNSUPPORTED
-            | CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS
             | CompileIssueCode.RANK_AXIS_REQUIRED
             | CompileIssueCode.SHARE_AXIS_REQUIRED
             | CompileIssueCode.SHARE_KEY_UNKNOWN
@@ -283,12 +284,10 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "change the calculation, or the requirement it reads, so its input has a shape the "
         "calculation takes"
     ),
-    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS: (
-        "drop the filter's place_level predicate, or the filter when it states no other"
-    ),
     CompileIssueCode.RANK_AXIS_REQUIRED: "set the rank's `axis` to the role it ranks on",
     CompileIssueCode.SHARE_AXIS_REQUIRED: (
-        "set the share's `axis` to the role it is taken per, or name the numerator's `entity`"
+        "set the share's `axis` to the role it is taken per, or name the numerator's "
+        f"`entity`, or {pooling_remedy(one_figure=True, each_side=True)}"
     ),
     CompileIssueCode.SHARE_KEY_UNKNOWN: "set the share's `axis` to a role both sides carry",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: (
@@ -321,8 +320,11 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "make the filters and entities along each calculation keep at least one series of "
         "the dataset, at one level of place, or drop `rolling` for fixed years"
     ),
+    # The calculation is unknown here, so this offers the per-year pooling every
+    # reader takes; the issue's reason adds one figure where its reader takes one.
     CompileIssueCode.ENTITY_REQUIRED: (
-        "name the entity each side reads, among those its requirement names on one side of the flow"
+        "name the entity each side reads, among those its requirement names on one side of "
+        f"the flow, or {pooling_remedy(one_figure=False)}"
     ),
     CompileIssueCode.UNKNOWN_ENTITY: (
         "name only entities the requirement it reads states, or add the entity to that requirement"
@@ -361,8 +363,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "state the same unit on both sides' requirements, so each source is retrieved in it"
     ),
     CompileIssueCode.FRAME_PRICE_BASES_DIFFER: (
-        "state one currency at current prices on both sides' requirements, so each source is "
-        "retrieved in it; no requirement may ask for constant prices"
+        "state one unit on both sides' requirements, either one currency at current prices or "
+        "one currency at constant prices of one base year, so each source is retrieved in it, "
+        "and keep a pinned source's own unit on its side"
     ),
     CompileIssueCode.FRAME_UNIT_FORMS_DIFFER: (
         "on each requirement the reason names, state the unit it gives and leave its "
@@ -786,6 +789,94 @@ def _planner_answer(result: dict[str, object]) -> dict[str, object]:
     return result
 
 
+def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str, object]:
+    """`answer` naming each requirement by the id the model wrote, under the plan's `split`.
+
+    `answer` is a referral as the planner reads it, or a translation verdict
+    carrying `named_in_place_of_across`. The draft translation runs on holds
+    the copies the split of whole-history reads added
+    (`Plan.rolling_copies`). Discovery, the compiler and the referral saved
+    in session state name a copy by its own id, which the model did not write
+    and cannot patch or pin, so the answer it reads names the copy's origin
+    (`planner.plan.origin_of`) in `requirement_id`, each stale pin's and each
+    named group's, and in the
+    prose of `reason` and each `repair`. Discovery and the compiler build
+    that prose with ids interpolated at dozens of sites, so it is rewritten
+    here (`planner.plan.authored_text`).
+
+    The model pins one source on the origin, and the split gives the copy
+    its own window of it, so what the referral offers or withholds for the
+    copy it offers or withholds for the origin
+    (`translator.referral.Referral.offered`). The referral and its stale
+    pins name each origin once: entries naming the same origin once mapped
+    join, the origin's own entry first, each candidate and withheld source
+    listed once, and the first `repair` stated kept. A named group
+    repeating one before it is dropped.
+    """
+    if not split.copies:
+        return answer
+
+    def prose(entry: dict[str, object]) -> dict[str, object]:
+        return entry | {
+            field: authored_text(text, split.origins())
+            for field in ("reason", "repair")
+            if isinstance(text := entry.get(field), str)
+        }
+
+    def named(entries: object) -> list[dict[str, object]]:
+        return [
+            prose(entry | {"requirement_id": origin_of(split, str(entry["requirement_id"]))})
+            for entry in cast("list[dict[str, object]]", entries)
+        ]
+
+    def own_first(entries: list[tuple[str, dict[str, object]]]) -> list[dict[str, object]]:
+        """`entries`, each keyed by the id it named, the origin's own before its copies'."""
+        copies = split.origins()
+        return [entry for _, entry in sorted(entries, key=lambda pair: pair[0] in copies)]
+
+    def joined(entries: list[dict[str, object]]) -> dict[str, object]:
+        """The candidates and withheld sources of `entries`, each listed once, and the first repair."""
+        fields: dict[str, object] = {}
+        for field in ("candidates", "withheld"):
+            listed: list[object] = []
+            for entry in entries:
+                listed += [
+                    item
+                    for item in cast("list[object]", entry.get(field) or [])
+                    if item not in listed
+                ]
+            if listed:
+                fields[field] = listed
+        if repairs := [entry["repair"] for entry in entries if entry.get("repair")]:
+            fields["repair"] = repairs[0]
+        return fields
+
+    mapped = prose(answer)
+    if isinstance(requirement_id := answer.get("requirement_id"), str):
+        mapped["requirement_id"] = origin_of(split, requirement_id)
+    if "stale_pins" in answer:
+        by_origin: dict[str, list[tuple[str, dict[str, object]]]] = {}
+        for pin in cast("list[dict[str, object]]", answer["stale_pins"]):
+            step_id = str(pin["requirement_id"])
+            by_origin.setdefault(origin_of(split, step_id), []).append((step_id, prose(pin)))
+        if isinstance(requirement_id, str) and (
+            shared := by_origin.pop(origin_of(split, requirement_id), None)
+        ):
+            mapped |= joined(own_first([(requirement_id, mapped), *shared]))
+        stale_pins: list[dict[str, object]] = []
+        for origin, entries in by_origin.items():
+            ordered = own_first(entries)
+            stale_pins.append(ordered[0] | joined(ordered) | {"requirement_id": origin})
+        mapped["stale_pins"] = stale_pins
+    if "named_in_place_of_across" in answer:
+        groups: list[dict[str, object]] = []
+        for group in named(answer["named_in_place_of_across"]):
+            if group not in groups:
+                groups.append(group)
+        mapped["named_in_place_of_across"] = groups
+    return mapped
+
+
 def build_translate(*, surface: ToolSurface) -> Translate:
     """Build the translation `propose_plan` runs on every plan it records, closing over `surface`.
 
@@ -809,7 +900,8 @@ def build_translate(*, surface: ToolSurface) -> Translate:
             plan goes back on, whose `outcome` says what it asks of the
             planner. Either carries `named_in_place_of_across` when a group
             was named, each entry the requirement, the entity named and the
-            `across` dropped.
+            `across` dropped. Each names a requirement by the id the model
+            wrote (`authored_answer`).
         """
         with resolving_once():
             named = await name_pinned_groups(tool_context, surface=surface)
@@ -829,6 +921,7 @@ def build_translate(*, surface: ToolSurface) -> Translate:
                     for group in named
                 ]
             }
-        return answer
+        plan = load_plan(tool_context.state)
+        return answer if plan is None else authored_answer(answer, split_of(plan))
 
     return translate

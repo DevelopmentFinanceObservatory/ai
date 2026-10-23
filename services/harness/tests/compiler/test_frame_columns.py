@@ -14,6 +14,7 @@ from compiler.frame_columns import (
     FrameColumns,
     UnboundColumnError,
     bound_arguments,
+    bound_populations,
     bound_role_keys,
     bound_stat_var_count,
     frame_columns,
@@ -41,6 +42,43 @@ def test_a_compiled_axis_binds_to_the_column_on_that_axis() -> None:
     assert columns.role_keys == ("financingProvider", "financingRecipient", "stat_var_crsPurpose")
     assert columns.column("origin") == "financingProvider"
     assert columns.column("destination") == "financingRecipient"
+
+
+def test_a_compiled_flow_type_column_binds_to_its_party_column() -> None:
+    columns = frame_columns(
+        role_keys=("financingRecipient", "financingRecipient_type"),
+        axis_by_column={"financingRecipient": "destination"},
+        compiled=("destination", "destination_type"),
+    )
+
+    assert columns.column("destination_type") == "financingRecipient_type"
+
+
+def test_a_strict_population_level_is_rebound_with_its_type_column() -> None:
+    columns = frame_columns(
+        role_keys=("financingRecipient", "financingRecipient_type"),
+        axis_by_column={"financingRecipient": "destination"},
+        compiled=("destination", "destination_type"),
+    )
+
+    assert bound_populations(
+        [
+            {
+                "spec_id": "spec_" + "a" * 32,
+                "bindings": {},
+                "levels": {"destination_type": "Country"},
+                "strict_levels": ["destination_type"],
+            }
+        ],
+        roots={"spec_" + "a" * 32: [columns]},
+    ) == [
+        {
+            "spec_id": "spec_" + "a" * 32,
+            "bindings": {},
+            "levels": {"financingRecipient_type": "Country"},
+            "strict_levels": ["financingRecipient_type"],
+        }
+    ]
 
 
 def test_a_compiled_name_the_frame_carries_binds_to_itself() -> None:
@@ -223,7 +261,7 @@ def test_any_other_verb_must_declare_its_predicted_roles_as_the_frame_spells_the
     ) == ("financingProvider", "financingRecipient")
 
 
-@pytest.mark.parametrize("suffix", ["_type", "_party_kind"])
+@pytest.mark.parametrize("suffix", ["_type", "_party_kind", "_party_class", "_party_whole"])
 def test_a_verb_keeping_a_role_declares_the_roles_enrichment_column_its_input_carries(
     suffix: str,
 ) -> None:

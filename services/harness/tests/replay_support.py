@@ -121,8 +121,9 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
 class FakeApis:
     """The apis service's publish door, replay lookup and versions route over plain dicts.
 
-    `frames` holds each published pair's rows, `recipes` its recipe, and `versions`
-    each dataset's listed versions. A pair keeps its first recipe and refuses one
+    `frames` holds each published pair's rows, `recipes` its recipe, `versions`
+    each dataset's listed versions, and `enrichment_stamp` the stamp the versions
+    answer lists, none when `None`. A pair keeps its first recipe and refuses one
     with another normal form or replay key, and a replay key names one frame, as
     apis' recipe store has it.
     """
@@ -131,14 +132,33 @@ class FakeApis:
         self.frames: dict[Pair, list[dict[str, Any]]] = {}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, Any]]] = {}
+        self.enrichment_stamp: str | None = None
         self.requests: list[httpx2.Request] = []
         self.publish_answer: httpx2.Response | None = None
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
+        path = request.url.path
+        # The versions route is open to every caller and answers in one page here.
+        if path.endswith("/versions"):
+            spec_id = path.split("/")[-2]
+            return httpx2.Response(
+                200,
+                json={
+                    "schema_version": 1,
+                    "spec_id": spec_id,
+                    "versions": self.versions.get(spec_id, []),
+                    "next_cursor": None,
+                    "complete": True,
+                }
+                | (
+                    {}
+                    if self.enrichment_stamp is None
+                    else {"enrichment_stamp": self.enrichment_stamp}
+                ),
+            )
         if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
             return problem(403, "publish_not_permitted")
-        path = request.url.path
         if path == "/api/datasets/frames/publish":
             return self.publish_answer or self._publish(
                 json.loads(gzip.decompress(request.content))
@@ -152,16 +172,6 @@ class FakeApis:
         if path.startswith("/api/datasets/frames/") and path.endswith("/recipe"):
             spec_id, content_version = path.split("/")[-3:-1]
             return self._recipe((spec_id, content_version))
-        if path.endswith("/versions"):
-            spec_id = path.split("/")[-2]
-            return httpx2.Response(
-                200,
-                json={
-                    "schema_version": 1,
-                    "spec_id": spec_id,
-                    "versions": self.versions.get(spec_id, []),
-                },
-            )
         raise AssertionError(f"unexpected call to {path}")
 
     def _recipe(self, key: Pair) -> httpx2.Response:

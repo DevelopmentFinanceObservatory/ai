@@ -14,11 +14,23 @@ One refresh (`LiveRefresh._refresh`):
    against apis itself.
 2. Reads the frame's recipe from apis.
 3. Asks apis' frame refresh about each root's dataset pair, at most
-   `MAX_CONCURRENT_ROOT_CHECKS` at once. A root still building answers
-   `pending`, and every root current answers `current`.
-4. Computes the replay key of the recipe on the roots' current pairs
-   (`common.recipe.replay_key`) and asks apis for the frame stored under it.
-   A hit is rendered without replaying.
+   `MAX_CONCURRENT_ROOT_CHECKS` at once. A root still building answers `pending`.
+   Otherwise a root whose mint record says its replay mints party kinds is named
+   under the stamp the versions route lists on the root's current version
+   (`_listed_stamp`), which is the stamp of the replay's kind file and of the mint
+   record the replay keeps. The route is read once per dataset in a refresh
+   (`LiveRefresh._listed_stamps`). The card is `current` when every root's dataset
+   pair stands and each root's identity (`common.recipe.root_identity`: the pair,
+   and the stamp a kind root is named under) is the one its mint record holds. A
+   root recorded with neither columns nor a stamp counts as minted without kinds
+   here, so a flow root recorded without kinds stands until its dataset moves.
+4. Computes the replay key of the recipe on the roots' current identities
+   (`common.recipe.replay_key`) and asks apis for the frame stored under it. A
+   root recorded with neither columns nor a stamp whose current version lists a
+   stamp is named under it only when its replay mints kinds, so its stored
+   definition is read first to learn that (`LiveRefresh._settle_kinds`). A hit is
+   rendered without replaying, so a card replays once for each change of a root's
+   pair or stamp: the replay publishes under the key the next refresh looks up.
 5. Otherwise replays the recipe (`harness.recipe_replay.replay_recipe`), which
    mints the roots, runs the verbs, and publishes the frame with its recipe.
    The replayer reads the replay key once more before it publishes, under the
@@ -51,7 +63,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -67,15 +79,18 @@ from common.live_apis import (
     RefreshResult,
 )
 from common.materialisation import MintRecord, get_store
-from common.recipe import replay_key
+from common.recipe import replay_key, root_identity
 from common.row_budget import RowBudget
 from common.telemetry import EventLevel, use_request_span
 from compiler.surface import McpSurface, ToolSurfaceUnavailableError
-from data_mcp.deadline import CallDeadline
+from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
+from data_mcp.frame_materialisation import replayed_mint_options, requests_kinds
+from data_mcp.get_data_tool import recorded_mint_request
 from data_mcp.tool_errors import ToolErrorCode
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from fastmcp.server.middleware.rate_limiting import TokenBucketRateLimiter
+from fastmcp.tools import ToolResult
 from planner.workflow import ToolId
 from presentation_mcp.client import PlatformAssembler
 from presentation_mcp.settings import Settings as PresentationSettings
@@ -92,6 +107,7 @@ from harness.recipe_replay import (
     Refused,
     Replayed,
     ToolAnswer,
+    refusal_outcome,
     replay_recipe,
 )
 from harness.settings import LIVE_REFRESH_HARD_STOP_GRACE_S, Settings
@@ -277,12 +293,26 @@ def _level(answer: _Answer) -> EventLevel:
     return "WARNING" if answer.status >= 400 else "DEFAULT"
 
 
-class _Refusal(Exception):  # noqa: N818 -- a control-flow signal carrying an answer
-    """The refresh ended in the refusal `code`. `answer` is what the route answers."""
+def _answer_of(outcome: Pending | Refused) -> _Answer:
+    """What a replay's wait or refusal makes of the refresh."""
+    if isinstance(outcome, Pending):
+        return _pending(outcome.retry_after_s, reason=outcome.reason)
+    return _refusal(outcome.code, outcome.detail)
+
+
+class _Stop(Exception):  # noqa: N818 -- a control-flow signal carrying an answer
+    """The refresh ended early. `answer` is what the route answers."""
+
+    def __init__(self, answer: _Answer) -> None:
+        self.answer = answer
+        super().__init__(answer.outcome)
+
+
+class _Refusal(_Stop):
+    """The refresh ended in the refusal `code`."""
 
     def __init__(self, code: str, detail: str) -> None:
-        self.answer = _refusal(code, detail)
-        super().__init__(code)
+        super().__init__(_refusal(code, detail))
 
 
 def _normal_form_and_roots(recipe: Mapping[str, Any]) -> tuple[str, list[MintRecord]]:
@@ -301,6 +331,109 @@ def _normal_form_and_roots(recipe: Mapping[str, Any]) -> tuple[str, list[MintRec
             RECIPE_INVALID,
             f"a root of the stored recipe is no mint record: {exc.error_count()} error(s)",
         ) from exc
+
+
+def _log_another_key(
+    component_id: str,
+    *,
+    looked_up: str,
+    identities: Sequence[Mapping[str, Any]],
+    replayed: Replayed,
+) -> None:
+    """Log a replay published under another key than the refresh looked up. The
+    replay then named a root under another stamp than the versions route listed
+    (`_listed_stamp`), as when two apis instances on different code
+    indexes answer the versions route and the mint during a deploy, and the next
+    refresh replays again until the two agree."""
+    published = replayed.recipe.get("replay_key")
+    if published is None or published == looked_up:
+        return
+    logger.warning(
+        "studio refresh: component=%s looked_up=%s published=%s roots=%s replayed_roots=%s",
+        component_id,
+        looked_up,
+        published,
+        list(identities),
+        [
+            root_identity(root["dataset"], enrichment_stamp=root.get("enrichment_stamp"))
+            for root in replayed.recipe.get("roots", ())
+        ],
+    )
+
+
+@dataclass(kw_only=True)
+class _RootCheck:
+    """One root's frame refresh answer, whether its replay mints party kinds (`kinds`,
+    `None` when the record does not say, and it stays `None` when the root's version lists
+    no stamp, since only a listed stamp makes `_settle_kinds` read the stored
+    definition), and the stamp a replay names it under (`stamp`, `_listed_stamp`)."""
+
+    result: RefreshResult
+    kinds: bool | None
+    stamp: str | None = None
+
+    def identity(self) -> dict[str, str]:
+        """The root's identity on the dataset pair the refresh answered
+        (`common.recipe.root_identity`). Not for a `Pending` answer."""
+        assert not isinstance(self.result, live_apis.Pending)
+        return root_identity(self.result.frame.as_json(), enrichment_stamp=self.stamp)
+
+
+def _kinds_from_record(record: MintRecord) -> bool | None:
+    """Whether a replay mints `record`'s root with party kinds, as far as the record
+    says, or `None` when it depends on the stored definition. A recorded stamp says
+    yes: only a mint that asked for kinds keeps one (`recorded_stamp`), and a replay of
+    the same `spec_id` reads the same identity. Recorded columns decide on their own
+    (`replayed_mint_options` reads the identity only when none are recorded)."""
+    if record.enrichment_stamp is not None:
+        return True
+    if not record.options.get("columns"):
+        return None
+    replayed = replayed_mint_options(record.options, identity=None)
+    return requests_kinds(replayed["columns"])
+
+
+def _listed_stamp(
+    record: MintRecord, result: RefreshResult, versions: Sequence[DatasetVersion]
+) -> str | None:
+    """The stamp a replay names `record`'s kind root under: the `enrichment_stamp`
+    `versions`, the versions route's answer, lists on the root's current version
+    (`result`'s pair), which is the stamp of the kind file a mint of that version
+    serves. apis lists one exactly when the version's frame holds a party role, and
+    none on a frame with no party role, whose kind file carries none. A version the
+    route does not list gives `None`; the replay then publishes under the stamp the
+    next refresh finds listed.
+
+    A root recorded with a stamp whose version lists none is logged, since the
+    recorded stamp shows its frame held a party role when it was minted.
+
+    Not for a `Pending` answer.
+    """
+    assert not isinstance(result, live_apis.Pending)
+    version = next((v for v in versions if v.content_version == result.frame.content_version), None)
+    stamp = None if version is None else version.enrichment_stamp
+    if stamp is None and record.enrichment_stamp is not None:
+        logger.warning(
+            "studio refresh: dataset=%s version=%s lists no enrichment_stamp for a root "
+            "recorded with one",
+            record.dataset.spec_id,
+            result.frame.content_version,
+        )
+    return stamp
+
+
+async def _gathered[T](calls: Iterable[Coroutine[Any, Any, T]]) -> list[T]:
+    """The results of `calls`, run concurrently, in order.
+
+    Raises:
+        Exception: The first failure among the calls, after which the rest are cancelled.
+    """
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(call) for call in calls]
+    except ExceptionGroup as failures:
+        raise failures.exceptions[0] from None
+    return [task.result() for task in tasks]
 
 
 class LiveRefresh:
@@ -404,8 +537,8 @@ class LiveRefresh:
             if not hard_stop.expired():
                 raise
             return _pending(RESUME_RETRY_AFTER_S, reason="hard_stop")
-        except _Refusal as refusal:
-            return refusal.answer
+        except _Stop as stop:
+            return stop.answer
         except LiveApisNotConfigured as exc:
             return _refusal(NOT_CONFIGURED, str(exc))
         except LiveApisError as exc:
@@ -428,28 +561,48 @@ class LiveRefresh:
         normal_form_hash, records = _normal_form_and_roots(recipe)
 
         checks = await self._check_roots(records)
-        waits = [check.retry_after_s for check in checks if isinstance(check, live_apis.Pending)]
+        waits = [
+            check.result.retry_after_s
+            for check in checks
+            if isinstance(check.result, live_apis.Pending)
+        ]
         if waits:
             return _pending(max(waits), reason="root_rebuilding")
-        if all(isinstance(check, live_apis.Current) for check in checks):
+        # A failed versions read refuses the refresh even when every pair stands: the
+        # listed stamp is all that says whether the party kinds the card was drawn with
+        # still stand, so `current` would vouch for kinds nothing checked. A retryable
+        # failure ends as `upstream_unavailable`, which a retry can clear
+        # (`REFRESH_CODES`); a non-retryable 4xx passes on apis' own code
+        # (`_apis_refusal`).
+        listed: dict[str, tuple[DatasetVersion, ...]] = {}
+        kind_roots = [
+            (record, check) for record, check in zip(records, checks, strict=True) if check.kinds
+        ]
+        stamps = await self._listed_stamps(kind_roots, listed)
+        for (_, check), stamp in zip(kind_roots, stamps, strict=True):
+            check.stamp = stamp
+        recorded = [
+            root_identity(record.dataset.model_dump(), enrichment_stamp=record.enrichment_stamp)
+            for record in records
+        ]
+        if all(isinstance(check.result, live_apis.Current) for check in checks) and (
+            [check.identity() for check in checks] == recorded
+        ):
             return _CURRENT
 
+        await self._settle_kinds(records, checks, listed, deadline=deadline)
+        identities = [check.identity() for check in checks]
         key = replay_key(
             normal_form_hash=normal_form_hash,
-            root_datasets=[
-                check.frame.as_json()
-                for check in checks
-                if not isinstance(check, live_apis.Pending)
-            ],
+            root_datasets=identities,
             execution_identities=[current_execution_identity().canonical_string()],
         )
         target = await self._apis.find_replay(replay_key=key)
         if target is None:
             replayed = await self.replay(recipe, deadline=deadline)
-            if isinstance(replayed, Pending):
-                return _pending(replayed.retry_after_s, reason=replayed.reason)
-            if isinstance(replayed, Refused):
-                raise _Refusal(replayed.code, replayed.detail)
+            if isinstance(replayed, Pending | Refused):
+                return _answer_of(replayed)
+            _log_another_key(component_id, looked_up=key, identities=identities, replayed=replayed)
             target = FramePair(replayed.frame.spec_id, replayed.frame.content_version)
 
         render = await self._apis.render(component_id=component_id, revision=revision, frame=target)
@@ -481,26 +634,101 @@ class LiveRefresh:
             )
         return frame
 
-    async def _check_roots(self, records: Sequence[MintRecord]) -> list[RefreshResult]:
-        """apis' frame refresh answer for each root's dataset pair, in order.
+    async def _check_roots(self, records: Sequence[MintRecord]) -> list[_RootCheck]:
+        """apis' frame refresh answer for each root's dataset pair, in order, at
+        most `MAX_CONCURRENT_ROOT_CHECKS` at once, with whether its replay mints party
+        kinds as far as its record says (`_kinds_from_record`). A root whose record does
+        not say is left to `_settle_kinds` and counts as minted without kinds until then.
 
         Raises:
             LiveApisError: The first failure among the calls, after which the rest are cancelled.
         """
         slots = asyncio.Semaphore(MAX_CONCURRENT_ROOT_CHECKS)
 
-        async def check(record: MintRecord) -> RefreshResult:
+        async def check(record: MintRecord) -> _RootCheck:
             async with slots:
-                return await self._apis.refresh_frame(
-                    spec_id=record.dataset.spec_id, content_version=record.dataset.content_version
+                result = await self._apis.refresh_frame(
+                    spec_id=record.dataset.spec_id,
+                    content_version=record.dataset.content_version,
                 )
+            return _RootCheck(result=result, kinds=_kinds_from_record(record))
 
-        try:
-            async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(check(record)) for record in records]
-        except ExceptionGroup as failures:
-            raise failures.exceptions[0] from None
-        return [task.result() for task in tasks]
+        return await _gathered(check(record) for record in records)
+
+    async def _listed_stamps(
+        self,
+        roots: Sequence[tuple[MintRecord, _RootCheck]],
+        listed: dict[str, tuple[DatasetVersion, ...]],
+    ) -> list[str | None]:
+        """The stamp the versions route lists on the current version of each of
+        `roots` (`_listed_stamp`), in order. `listed` holds the route's answer for each
+        dataset this refresh has read it for, and gains one for each dataset of
+        `roots` it lacks, so a refresh reads the route once per `spec_id`.
+
+        Raises:
+            LiveApisError: The first failed read, after which the rest are cancelled.
+        """
+        unread = list(
+            dict.fromkeys(
+                record.dataset.spec_id
+                for record, _ in roots
+                if record.dataset.spec_id not in listed
+            )
+        )
+        answers = await _gathered(self._apis.list_versions(spec_id=spec_id) for spec_id in unread)
+        listed.update(zip(unread, answers, strict=True))
+        return [
+            _listed_stamp(record, check.result, listed[record.dataset.spec_id])
+            for record, check in roots
+        ]
+
+    async def _settle_kinds(
+        self,
+        records: Sequence[MintRecord],
+        checks: Sequence[_RootCheck],
+        listed: dict[str, tuple[DatasetVersion, ...]],
+        *,
+        deadline: CallDeadline,
+    ) -> None:
+        """Set the stamp a replay names each root under whose record does not say
+        whether its replay mints party kinds (`kinds` is `None`). A root whose current
+        version lists no stamp is named under its pair either way, so its stored
+        definition is not read. For any other, the options its replay sends decide
+        (`data_mcp.get_data_tool.recorded_mint_request`), and one whose replay mints
+        kinds is named under the listed stamp. Only a refresh that goes on to a replay
+        key calls this.
+
+        The definition read runs under `EXTERNAL_CALL_BUDGET`, the budget the replay's
+        mints run under. The refresh deadline, `Settings.live_refresh_deadline_s`, is
+        at most 52 s, so `DIRECT_CALL_BUDGET`'s 50 s pre-mint reserve would leave a
+        definition read no time.
+
+        Raises:
+            LiveApisError: The first failure among the calls, after which the rest are cancelled.
+            _Stop: A definition read refused, as a wait or a refusal.
+        """
+        undecided = [
+            (record, check)
+            for record, check in zip(records, checks, strict=True)
+            if check.kinds is None
+        ]
+        stamps = await self._listed_stamps(undecided, listed)
+
+        async def settle(record: MintRecord, check: _RootCheck, stamp: str) -> None:
+            with use_call_budget(EXTERNAL_CALL_BUDGET):
+                request = await recorded_mint_request(record, deadline=deadline)
+            if isinstance(request, ToolResult):
+                raise _Stop(_answer_of(refusal_outcome(request.structured_content, stage="mint")))
+            _, options = request
+            check.kinds = requests_kinds(options.get("columns") or ())
+            if check.kinds:
+                check.stamp = stamp
+
+        await _gathered(
+            settle(record, check, stamp)
+            for (record, check), stamp in zip(undecided, stamps, strict=True)
+            if stamp is not None
+        )
 
     async def replay(
         self,

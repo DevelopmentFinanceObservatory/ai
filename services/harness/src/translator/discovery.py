@@ -136,6 +136,7 @@ from planner.plan import (
     PlanStatus,
     SessionState,
     Unit,
+    authored,
     dataset_of,
     discovery_time_left,
     inputs_of,
@@ -145,7 +146,9 @@ from planner.plan import (
     recorded_identity,
     retrieves_period,
     save_plan,
+    split_of,
     windowed_pins,
+    with_authored_requirements,
 )
 from planner.records import (
     AmbiguousSourceReading,
@@ -1960,7 +1963,11 @@ def resolved_spec(part: Mapping[str, Any], *, spec_id: str) -> Mapping[str, Any]
 
 
 async def _recorded_source(
-    tool_context: ToolContext, *, requirement: DatasetRequirement, surface: ToolSurface
+    tool_context: ToolContext,
+    *,
+    requirement: DatasetRequirement,
+    first_year: int | None,
+    surface: ToolSurface,
 ) -> SelectedSource | dict[str, object] | None:
     """The source of the dataset `requirement` pins, read from Search's answer for its identity on record.
 
@@ -1968,7 +1975,8 @@ async def _recorded_source(
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one a search in the conversation recorded for the pin itself
     (`planner.plan.recorded_identity`) when its window is that period, or
-    a range with no end year for a requirement stating `period_end_open`
+    a range with no end year for a requirement stating `period_end_open`,
+    from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
     is resolved through data-mcp (`resolve_definition`), which stores the
     definition for the plan's `get_data`, and the source is read from
@@ -1991,7 +1999,9 @@ async def _recorded_source(
     if (
         recorded is None
         or identity is None
-        or not retrieves_period(identity.get("requested_window"), requirement)
+        or not retrieves_period(
+            identity.get("requested_window"), requirement, first_year=first_year
+        )
     ):
         return None
     try:
@@ -2110,7 +2120,13 @@ async def _source_from_resolve_pin(
     itself is set aside too. It never honours the pin: its identity carries
     the window of the search that found it.
     """
-    read = await _pin_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    read = await _pin_source(
+        tool_context,
+        plan=plan,
+        requirement=requirement,
+        first_year=split_of(plan).whole_history.get(requirement.id),
+        surface=surface,
+    )
     if read is None or isinstance(read, dict):
         return read
     source, honoured = read
@@ -2150,10 +2166,13 @@ async def _pin_source(
     *,
     plan: Plan,
     requirement: DatasetRequirement,
+    first_year: int | None,
     surface: ToolSurface,
 ) -> tuple[SelectedSource, bool] | dict[str, object] | None:
     """The source `requirement`'s pin names, and whether it is honoured, read as `_source_from_resolve_pin` describes.
 
+    `first_year` is the year `plan`'s split reads `requirement` from
+    (`HistorySplit.whole_history`), `None` when it reads the stated period.
     The source is stamped with the requirement's `measure` as `searched_as`.
     Honoured means the block or identity reader holds it over the
     requirement's period. A source read only off the discovery log
@@ -2168,7 +2187,12 @@ async def _pin_source(
         tool_context, plan=plan, requirement=requirement
     )
     if source is None:
-        source = await _recorded_source(tool_context, requirement=requirement, surface=surface)
+        source = await _recorded_source(
+            tool_context,
+            requirement=requirement,
+            first_year=first_year,
+            surface=surface,
+        )
     if isinstance(source, dict):
         return source
     honoured = source is not None
@@ -2243,6 +2267,12 @@ async def name_pinned_groups(
     members alone is left as it is: widening it changes the scope, which the
     planner decides (`DiscoveryLog.scope_kept`).
 
+    The requirements read are those the model wrote (`authored`), so a
+    dataset read beside a copy of its whole history
+    (`Plan.rolling_copies`) is judged with the readers of both, and the
+    copies name the group as the split of the rewritten plan rebuilds them
+    (`planner.plan.with_authored_requirements`), each keeping its own pin.
+
     The side turns from open to named, so a requirement is rewritten only
     when every requirement reading it sums that side away
     (`_summed_by_every_reader`), and only when the plan still validates with
@@ -2253,25 +2283,33 @@ async def name_pinned_groups(
     The draft is saved in place, at its version, so the plan the user
     approves names the group. A pin whose source is honoured is recorded
     for the rewritten requirement (`_record_honoured_pin`), so discovery
-    reads nothing again. Returns each group named, in the plan's order;
-    empty when there is no draft or nothing to name.
+    reads nothing again. A copy pins its own dataset, over its whole
+    history, which the origin's source does not describe, so discovery
+    reads the copy's pin as it reads any other. Returns each group named,
+    in the plan's order; empty when there is no draft or nothing to name.
     """
     plan = current_draft(tool_context)
     if isinstance(plan, dict):
         return ()
+    whole_history = split_of(plan).whole_history
+    written = authored(plan)
     named: list[NamedGroup] = []
     honoured: list[tuple[DatasetRequirement, SelectedSource]] = []
-    for requirement in plan.evidence_requirements:
+    for requirement in written.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
             continue
         found = await _groups_named(
-            tool_context, plan=plan, requirement=requirement, surface=surface
+            tool_context,
+            plan=written,
+            requirement=requirement,
+            first_year=whole_history.get(requirement.id),
+            surface=surface,
         )
         if found is None:
             continue
         groups, source = found
         try:
-            plan, rewritten = _with_groups_named(plan, requirement, groups)
+            plan, written, rewritten = _with_groups_named(plan, written, requirement, groups)
         except ValueError as exc:
             logger.info(
                 "left %r with across %r: naming %r in its place does not validate: %s",
@@ -2310,9 +2348,12 @@ def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
 
 
 def _with_groups_named(
-    plan: Plan, requirement: DatasetRequirement, groups: Sequence[NamedGroup]
-) -> tuple[Plan, DatasetRequirement]:
-    """`plan` with `requirement` naming each group's entity in place of its `across` word, and that requirement.
+    plan: Plan, written: Plan, requirement: DatasetRequirement, groups: Sequence[NamedGroup]
+) -> tuple[Plan, Plan, DatasetRequirement]:
+    """`plan`, and `written` as the model wrote it, with `requirement` naming each group's entity in place of its `across` word, and that requirement.
+
+    `written` is `authored(plan)`, and the rewritten `plan` the split of the
+    rewritten `written` (`planner.plan.with_authored_requirements`).
 
     Raises:
         ValueError: If the rewritten requirement or plan does not validate.
@@ -2326,12 +2367,10 @@ def _with_groups_named(
         }
     )
     requirements = [
-        rewritten if item.id == requirement.id else item for item in plan.evidence_requirements
+        rewritten if item.id == requirement.id else item for item in written.evidence_requirements
     ]
-    rebuilt = Plan.model_validate(
-        {**plan.model_dump(), "evidence_requirements": [item.model_dump() for item in requirements]}
-    )
-    return rebuilt, rewritten
+    rebuilt = with_authored_requirements(plan, requirements)
+    return rebuilt, authored(rebuilt), rewritten
 
 
 async def _groups_named(
@@ -2339,9 +2378,13 @@ async def _groups_named(
     *,
     plan: Plan,
     requirement: DatasetRequirement,
+    first_year: int | None,
     surface: ToolSurface,
 ) -> tuple[tuple[NamedGroup, ...], SelectedSource | None] | None:
     """The group `requirement`'s pin holds each `across` side to, and the pin's source when it is honoured.
+
+    `plan` is the plan as the model wrote it, and `first_year` as
+    `_pin_source` takes it.
 
     One group per `across` word whose side the pin's source holds to one
     group (`translator.referral.closing_group`). `None` when a requirement
@@ -2352,7 +2395,9 @@ async def _groups_named(
     roles = [(word, role) for word in requirement.across if (role := party_role(word))]
     if not roles or not _summed_by_every_reader(plan, requirement.id):
         return None
-    read = await _pin_source(tool_context, plan=plan, requirement=requirement, surface=surface)
+    read = await _pin_source(
+        tool_context, plan=plan, requirement=requirement, first_year=first_year, surface=surface
+    )
     if read is None or isinstance(read, dict):
         return None
     source, honoured = read

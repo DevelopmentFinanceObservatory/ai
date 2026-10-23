@@ -46,16 +46,19 @@ from harness.wire import (
     MessageDelta,
     OperationAxis,
     OperationVerb,
+    OptionAnswer,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
     PlanStep,
     PlanVersioned,
     Seed,
+    SkippedAnswer,
     SpecBlock,
     SpecRef,
     Suggestions,
     Surface,
+    TextAnswer,
     TurnRequest,
     check_resolved_bounds,
     usable_component,
@@ -78,6 +81,7 @@ EVENT_FIXTURES = {
     "event-11-error.json": ErrorFrame,
     "event-12-done.json": Done,
     "event-13-elicitation-skippable.json": ElicitationRequest,
+    "event-14-elicitation-questions.json": ElicitationRequest,
 }
 
 REQUEST_FIXTURES = {
@@ -92,6 +96,7 @@ REQUEST_FIXTURES = {
     "request-09-composition-set-card-meta.json": CompositionMutation,
     "request-10-cancel.json": CancelRequest,
     "request-11-turn-seeded.json": TurnRequest,
+    "request-12-interrupt-answers.json": InterruptResponse,
 }
 
 
@@ -135,8 +140,9 @@ def test_request_fixture_parses_with_session_id_as_alias(name: str) -> None:
 
 def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> None:
     """`exclude_unset` round-trips hide defaults, so pin them here: a turn
-    adds its card to the canvas unless told otherwise, and an elicitation
-    is a closed single choice unless it says it takes free text or a skip."""
+    adds its card to the canvas unless told otherwise, and an elicitation's
+    question is a closed single choice unless it says it takes free text or
+    a skip, as is the pause as a whole."""
     turn = STUDIO_REQUEST_ADAPTER.validate_python(_load("request-01-turn.json"))
     assert isinstance(turn, TurnRequest)
     assert turn.auto_add is True
@@ -146,11 +152,13 @@ def test_fixtures_that_omit_optional_flags_parse_to_the_contract_defaults() -> N
 
     closed = STUDIO_FRAME_ADAPTER.validate_python(_load("event-09-elicitation-request.json"))
     assert isinstance(closed, ElicitationRequest)
-    assert closed.allow_free_text is False
+    assert closed.questions[0].allow_free_text is False
+    assert closed.questions[0].skippable is False
     assert closed.skippable is False
     open_ended = STUDIO_FRAME_ADAPTER.validate_python(_load("event-13-elicitation-skippable.json"))
     assert isinstance(open_ended, ElicitationRequest)
-    assert open_ended.allow_free_text is True
+    assert open_ended.questions[0].allow_free_text is True
+    assert open_ended.questions[0].skippable is False
     assert open_ended.skippable is True
 
 
@@ -398,6 +406,73 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_ANSWER = {
+    "kind": "interrupt.response",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "interrupt_id": "int_1",
+    "decision": "answer",
+}
+
+
+def test_interrupt_answers_parse_by_kind() -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(
+        {
+            **_ANSWER,
+            "answers": {
+                "q1": {"kind": "option", "option_id": "spec_1"},
+                "q2": {"kind": "text", "text": "constant prices"},
+                "q3": {"kind": "skipped"},
+            },
+        }
+    )
+
+    assert isinstance(accepted, InterruptResponse)
+    assert accepted.answers == {
+        "q1": OptionAnswer(kind="option", option_id="spec_1"),
+        "q2": TextAnswer(kind="text", text="constant prices"),
+        "q3": SkippedAnswer(kind="skipped"),
+    }
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param({"kind": "option"}, id="option-without-id"),
+        pytest.param({"kind": "option", "option_id": "a", "text": "b"}, id="option-and-text"),
+        pytest.param({"kind": "text", "text": ""}, id="empty-text"),
+        pytest.param({"kind": "skipped", "option_id": "a"}, id="skipped-with-id"),
+        pytest.param({"kind": "delegated"}, id="unknown-kind"),
+        pytest.param({"option_id": "a"}, id="no-kind"),
+    ],
+)
+def test_an_interrupt_answer_is_exactly_one_of_its_kinds(answer: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_ANSWER, "answers": {"q1": answer}})
+
+
+def _questions(*ids: str) -> list[dict[str, Any]]:
+    return [{"id": id_, "question": "Which?", "input": "single_select"} for id_ in ids]
+
+
+@pytest.mark.parametrize(
+    "questions",
+    [
+        pytest.param([], id="none"),
+        pytest.param(_questions("q1", "q2", "q3", "q4"), id="four"),
+        pytest.param(_questions("q1", "q1"), id="repeated-id"),
+    ],
+)
+def test_an_elicitation_holds_one_to_three_distinct_questions(
+    questions: list[dict[str, Any]],
+) -> None:
+    frame = {"event": "elicitation.request", "seq": 0, "interrupt_id": "int_1"}
+    STUDIO_FRAME_ADAPTER.validate_python({**frame, "questions": _questions("q1", "q2", "q3")})
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python({**frame, "questions": questions})
 
 
 def test_a_seeded_turn_carries_each_search_spec_and_its_operations() -> None:
@@ -815,12 +890,81 @@ def test_a_seed_keeps_the_set_its_places_were_asked_for_as() -> None:
 
 
 @pytest.mark.parametrize(
+    ("group", "kept"),
+    [
+        (
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ["official"]},
+            {"label": "all donors", "total": "DACOfficialDonors", "whole_of": ("official",)},
+        ),
+        (
+            {
+                "label": "all donors including private",
+                "total": None,
+                "whole_of": ["official", "private"],
+            },
+            {"label": "all donors including private", "whole_of": ("official", "private")},
+        ),
+        ({"label": "Africa", "ref": "africa"}, {"label": "Africa", "ref": "africa"}),
+        ({"label": "Africa", "whole_of": []}, {"label": "Africa"}),
+        (
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ["official"],
+                "side_classes": ["official", "private", "residual"],
+            },
+            {
+                "label": "all donors",
+                "total": "DACOfficialDonors",
+                "whole_of": ("official",),
+                "side_classes": ("official", "private", "residual"),
+            },
+        ),
+    ],
+    ids=[
+        "single-total",
+        "set-of-totals",
+        "without-the-field",
+        "empty-field-is-absent",
+        "with-the-sides-classes",
+    ],
+)
+def test_a_seed_carries_the_classes_a_whole_total_holds(
+    group: object, kept: dict[str, Any]
+) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {"observationAbout": group}
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is not None
+    assert seed.spec.entity_groups["observationAbout"].model_dump(exclude_none=True) == kept
+
+
+@pytest.mark.parametrize(
+    "whole_of",
+    ["official", [""], list(range(2)), ["party"]],
+    ids=["a-string", "blank-class", "not-text", "a-party-kind"],
+)
+def test_a_set_whose_whole_of_is_not_a_list_of_classes_is_dropped(whole_of: object) -> None:
+    block = _region_members_block()
+    block["resolved"]["entity_groups"] = {
+        "observationAbout": {"label": "Africa", "whole_of": whole_of}
+    }
+
+    seed = Seed.model_validate({"spec": block, "operations": []})
+
+    assert seed.spec.entity_groups is None
+
+
+@pytest.mark.parametrize(
     "group",
     [
         {"dcid": "africa", "label": "Africa"},
         {"ref": "africa", "label": "Africa", "members": ["country/KEN"]},
+        {"label": "all donors", "side_kinds": ["official"]},
     ],
-    ids=["dcid-before-ref", "unknown-member"],
+    ids=["dcid-before-ref", "unknown-member", "earlier-name-of-side-classes"],
 )
 def test_a_set_carrying_a_key_search_does_not_serve_refuses_the_seed(group: object) -> None:
     # A block from the Search wire that named a set's node `dcid` would otherwise

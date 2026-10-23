@@ -1417,7 +1417,7 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
 def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusal | None:
     """Dispatch the upstream-exact codes to their typed factories.
 
-    `code` is the refusal's own code (`_refusal_code`). Several upstream codes
+    `code` is the refusal's own code (`refusal_code`). Several upstream codes
     can share one entry here — `_UPSTREAM_CODE_MAP` is what narrows many wire
     codes onto few `ToolErrorCode`s, this table only needs one factory per
     `ToolErrorCode`. Returns `None` for `upstream_error` and anything
@@ -1532,7 +1532,7 @@ def _over_ceiling_kind(code: str | None, exc: UpstreamError) -> CeilingKind | No
     return _ceiling_kind_from_extensions(exc.extensions)
 
 
-def _refusal_code(exc: UpstreamError) -> str | None:
+def refusal_code(exc: UpstreamError) -> str | None:
     """The code of the refusal `exc` reports, which picks its `ToolRefusal`.
 
     A failed operation names the refusal that failed it in `cause.code`, the
@@ -1551,7 +1551,7 @@ def _refusal_code(exc: UpstreamError) -> str | None:
 def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
     """Translate an apis service call failure into the tool-facing refusal grammar.
 
-    The refusal's own code (`_refusal_code`) picks the refusal: the problem's
+    The refusal's own code (`refusal_code`) picks the refusal: the problem's
     `code`, or for a failed operation (`operation_failed`) the code of the
     refusal that failed it. A mapped code reaches its typed factory either
     way, so a deferred mint that `rollup_not_summable` failed refuses with the
@@ -1580,7 +1580,7 @@ def from_upstream_error(exc: UpstreamError) -> ToolRefusal:
             capability_version=exc.capability_version,
         )
 
-    code = _refusal_code(exc)
+    code = refusal_code(exc)
     retried_in_place = (
         exc.code == _OPERATION_FAILED_CODE and code in _FAILED_OPERATION_CAUSES_RETRIED_IN_PLACE
     )

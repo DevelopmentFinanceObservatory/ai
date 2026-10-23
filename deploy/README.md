@@ -36,14 +36,15 @@ and secret _names_ in each environment with per-environment values. The
 workflow YAML doesn't change between environments. Only the environment it
 targets does.
 
-| Name           | Kind   | Example value                                                                               | Who provides it                                                   |
-| -------------- | ------ | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `WIF_PROVIDER` | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | the infra repository's handoff (WIF pool/provider)                |
-| `WIF_SA`       | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | the infra repository's handoff (deployer service account)         |
-| `REGION`       | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | the infra repository's handoff                                    |
-| `PROJECT_ID`   | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | the infra repository's handoff                                    |
-| `AR_REPO`      | var    | `datacommons`                                                                               | the infra repository's handoff (Artifact Registry repo)           |
-| `SERVICE_AI`   | var    | `dfo-dev-ai`                                                                                | the infra repository's handoff, once the Cloud Run service exists |
+| Name                  | Kind   | Example value                                                                               | Who provides it                                                   |
+| --------------------- | ------ | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `WIF_PROVIDER`        | secret | `projects/123456789/locations/global/workloadIdentityPools/github/providers/github-actions` | the infra repository's handoff (WIF pool/provider)                |
+| `WIF_SA`              | secret | `dfo-ai-deployer@dev-fin-observatory.iam.gserviceaccount.com`                               | the infra repository's handoff (deployer service account)         |
+| `REGION`              | var    | `northamerica-northeast1` (dev), `europe-west1` (production)                                | the infra repository's handoff                                    |
+| `PROJECT_ID`          | var    | `dev-fin-observatory` (dev); the prod project ID in production                              | the infra repository's handoff                                    |
+| `AR_REPO`             | var    | `datacommons`                                                                               | the infra repository's handoff (Artifact Registry repo)           |
+| `SERVICE_AI`          | var    | `dfo-dev-ai`                                                                                | the infra repository's handoff, once the Cloud Run service exists |
+| `JOB_LANGFUSE_EXPORT` | var    | `dfo-prod-langfuse-export` (production only)                                                | the infra repository's handoff, once the job exists               |
 
 The Cloud Run service itself also needs `STUDIO_API_TOKEN` mounted as a
 secret (infra, in the service definition next to `GOOGLE_API_KEY`). It
@@ -87,7 +88,7 @@ The service name value above is a placeholder for illustration. infra
 names the actual service, and whatever they pick goes in this var verbatim.
 
 infra sets every variable and secret in the Environment: `SERVICE_AI`,
-`WIF_PROVIDER`, `WIF_SA`, `REGION`, `PROJECT_ID`, and `AR_REPO`. Run
+`JOB_LANGFUSE_EXPORT` (production), `WIF_PROVIDER`, `WIF_SA`, `REGION`, `PROJECT_ID`, and `AR_REPO`. Run
 `just ENV=dfo-dev handoff ai` from the infra repo for the `dev`
 Environment, and `just ENV=dfo-prod handoff ai` for `production`. The
 script also sets the deployment branch policy. The values stay reproducible
@@ -188,11 +189,11 @@ independently of each other.
 
 The module ships in the image (`services/harness/src/harness/recipe_backfill.py`) and starts no service, no model, and no MCP server. It reads three settings from the environment or `.env`, under the names the services use, and exits 2 naming any that is unset:
 
-| Setting                          | Use                                                           |
-| -------------------------------- | ------------------------------------------------------------- |
-| `DFO_APIS_URL`                   | apis' origin                                                  |
-| `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe and versions routes |
-| `FRAME_STORE_BUCKET`             | the materialisation bucket                                    |
+| Setting                          | Use                                              |
+| -------------------------------- | ------------------------------------------------ |
+| `DFO_APIS_URL`                   | apis' origin                                     |
+| `DATASETS_FIRST_PARTY_PRINCIPAL` | the publish principal, sent on the recipe routes |
+| `FRAME_STORE_BUCKET`             | the materialisation bucket                       |
 
 The identity it runs as needs to list and read objects in the bucket. `--write` also creates `mints/v4/` objects, so it needs object create.
 
@@ -241,3 +242,26 @@ Oldest frame object: 23.0 days (written 2026-09-14T00:01:00Z)
 ```
 
 The first number is the frames whose cards can be refreshed after the bucket's objects are deleted. Every frame under the second is listed above with its reason, and a card drawn from one of them cannot be refreshed. A `conflict` whose detail is `recipe_requires_matching_normal_form_hash` or `recipe_requires_matching_replay_key` means apis holds another recipe for the pair. The last line is the age of the oldest object the walk saw: a restored 30-day rule deletes every object older than 30 days on its next pass.
+
+## Langfuse export
+
+`python -m harness.langfuse_export` loads the Langfuse observations of one environment into the BigQuery table `observations`, day-partitioned on `start_time`. It runs as the Cloud Run job named by `JOB_LANGFUSE_EXPORT` on this image, and `build-deploy.yml` points that job at each new image in an Environment that sets the var. It reads these settings from the environment or `.env` and exits 2 naming any that is unset:
+
+| Setting                       | Use                                               |
+| ----------------------------- | ------------------------------------------------- |
+| `LANGFUSE_PUBLIC_KEY`         | the Langfuse project's public key                 |
+| `LANGFUSE_SECRET_KEY`         | its secret key                                    |
+| `LANGFUSE_BASE_URL`           | the Langfuse origin, `https://cloud.langfuse.com` |
+| `LANGFUSE_EXPORT_ENVIRONMENT` | the Langfuse environment to export, `dfo-prod-ai` |
+| `EXPORT_BQ_PROJECT`           | the BigQuery project holding the dataset          |
+| `EXPORT_BQ_DATASET`           | the dataset, `langfuse_export`                    |
+
+Each run replaces every day from the latest loaded day minus one through today (UTC), and every day of the last 30 whose Langfuse observation count differs from its partition's row count, one load job per day writing that day's partition with `WRITE_TRUNCATE`. The counts come from one `GET /api/public/v2/metrics` query grouped by day. Langfuse's Hobby plan has a 30-day data access window: the API shows observations from the last 30 days by start time and hides older ones, which stay stored. The 30 days are today and the 29 before it, and the day before them is the newest the window may have partly hidden. A replace never shrinks a partition: a day that reads fewer rows than its partition holds, none included, keeps the partition and prints both counts. A day older than the 30 that reads short is kept and logged. A day of the 30 that reads fewer rows than its partition holds or than Langfuse counts fails the run: the other days still load, then the run exits 1 naming every such day with its counts, and the day stays in later runs until the counts match. A day of the 30 whose partition holds rows Langfuse no longer counts, such as an observation deleted in the Langfuse UI, fails every run until its rows are deleted from the table, after which the next run reloads it: `` bq query --use_legacy_sql=false 'DELETE FROM `PROJECT.DATASET.observations` WHERE DATE(start_time) = "YYYY-MM-DD"' ``. When every day of the run reads no rows, the run exits 1 naming the days and `LANGFUSE_EXPORT_ENVIRONMENT`, since a wrong environment or keys for another project read as empty and prod has had turns every day since 2026-10-05. Each day prints a line as it is replaced or kept, and a failure prints the day it stopped on. An empty table is backfilled from 2026-10-05. The job creates the table when it is absent. Its identity needs `roles/bigquery.jobUser` on the project and `roles/bigquery.dataEditor` on the dataset.
+
+The rows hold ids, trace and session ids, names, type, level, environment, model, start and end time, latency, time to first token, tokens and cost. The job never requests the `io` or `metadata` field groups and leaves out `statusMessage` and `userId`. Langfuse requests go out at most one every two seconds, under Hobby's 30 requests a minute: one metrics query a run, then the pages. A 429 waits for its `Retry-After`.
+
+`--check-day DAY` reads one day and compares its row count and summed cost with `GET /api/public/v2/metrics` for the same day and environment. It needs only the Langfuse settings, writes nothing, and exits 1 on a difference.
+
+```
+uv run --package harness python -m harness.langfuse_export --check-day 2026-10-20
+```

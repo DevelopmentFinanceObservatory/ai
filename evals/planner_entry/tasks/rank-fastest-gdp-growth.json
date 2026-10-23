@@ -36,6 +36,7 @@
     "growth",
     "rank"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Which five countries had the fastest GDP growth between 2015 and 2022?",
     "answer_mode": "computed",

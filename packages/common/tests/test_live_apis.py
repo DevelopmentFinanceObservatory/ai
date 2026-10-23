@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from common import live_apis
 from common.apis_auth import TOKEN_HEADER, ApisAuthError, AuthProvider
 from common.live_apis import (
     FRAME_NOT_REFRESHABLE,
@@ -18,6 +19,7 @@ from common.live_apis import (
     RENDER_TARGET_MISMATCH,
     RENDERING_NOT_RECORDED,
     RESPONSE_INVALID,
+    SPEC_NOT_FOUND,
     Current,
     DatasetVersion,
     FramePair,
@@ -230,56 +232,71 @@ async def test_find_replay_is_none_on_recipe_not_found() -> None:
 _GROUPBY = {"by": ["recipient"], "op": "sum"}
 
 
-async def test_list_versions_parses_newest_first_with_base_versions() -> None:
+def versions_page(
+    versions: list[dict[str, Any]], *, next_cursor: object = None, complete: object = True
+) -> httpx2.Response:
+    return ok(
+        {
+            "schema_version": 1,
+            "spec_id": SPEC,
+            "versions": versions,
+            "next_cursor": next_cursor,
+            "complete": complete,
+        }
+    )
+
+
+def plain(content_version: str) -> dict[str, Any]:
+    return {
+        "content_version": content_version,
+        "base_content_version": None,
+        "rendering": "plain",
+        "groupby": None,
+    }
+
+
+async def test_list_versions_parses_newest_first_with_base_versions_and_no_credential() -> None:
     calls = Calls(
-        ok(
-            {
-                "schema_version": 1,
-                "spec_id": SPEC,
-                "versions": [
-                    {
-                        "content_version": "cv_5",
-                        "base_content_version": "cv_1",
-                        "rendering": "groupby",
-                        "groupby": _GROUPBY,
-                        "without_party_totals": True,
-                    },
-                    {
-                        "content_version": "cv_4",
-                        "base_content_version": "cv_1",
-                        "rendering": "without_party_totals",
-                        "groupby": None,
-                        "without_party_totals": True,
-                    },
-                    {
-                        "content_version": "cv_3",
-                        "base_content_version": "cv_1",
-                        "rendering": "not_recorded",
-                        "groupby": None,
-                    },
-                    {
-                        "content_version": "cv_2",
-                        "base_content_version": "cv_1",
-                        "rendering": "groupby",
-                        "groupby": _GROUPBY,
-                    },
-                    {
-                        "content_version": "cv_1",
-                        "base_content_version": None,
-                        "rendering": "plain",
-                        "groupby": None,
-                    },
-                ],
-            }
+        versions_page(
+            [
+                {
+                    "content_version": "cv_5",
+                    "base_content_version": "cv_1",
+                    "rendering": "groupby",
+                    "groupby": _GROUPBY,
+                    "without_party_totals": True,
+                },
+                {
+                    "content_version": "cv_4",
+                    "base_content_version": "cv_1",
+                    "rendering": "without_party_totals",
+                    "groupby": None,
+                    "without_party_totals": True,
+                },
+                {
+                    "content_version": "cv_3",
+                    "base_content_version": "cv_1",
+                    "rendering": "not_recorded",
+                    "groupby": None,
+                },
+                {
+                    "content_version": "cv_2",
+                    "base_content_version": "cv_1",
+                    "rendering": "groupby",
+                    "groupby": _GROUPBY,
+                },
+                plain("cv_1"),
+            ]
         )
     )
 
-    async with make_client(calls) as client:
+    async with make_client(calls, datasets_principal=None, live_refresh_principal=None) as client:
         versions = await client.list_versions(spec_id=SPEC)
 
     (request,) = calls.requests
     assert (request.method, request.url.path) == ("GET", f"/api/datasets/{SPEC}/versions")
-    assert request.headers[PRINCIPAL_HEADER] == DATASETS_PRINCIPAL
+    assert not request.url.params
+    assert PRINCIPAL_HEADER not in request.headers
     assert versions == (
         DatasetVersion("cv_5", "cv_1", "groupby", _GROUPBY, without_party_totals=True),
         DatasetVersion("cv_4", "cv_1", "without_party_totals", None, without_party_totals=True),
@@ -287,6 +304,39 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
         DatasetVersion("cv_2", "cv_1", "groupby", _GROUPBY),
         DatasetVersion("cv_1", None, "plain", None),
     )
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [{"enrichment_stamp": "ens_1"}, {}, {"enrichment_stamp": 7}],
+    ids=["stamp-listed", "no-stamp-listed", "stamp-not-text"],
+)
+async def test_list_versions_carries_each_versions_own_stamp(listed: dict[str, Any]) -> None:
+    calls = Calls(
+        ok(
+            {
+                "schema_version": 1,
+                "spec_id": SPEC,
+                "versions": [
+                    {
+                        "content_version": "cv_2",
+                        "base_content_version": None,
+                        "rendering": "plain",
+                        "enrichment_stamp": "ens_2",
+                    },
+                    {"content_version": "cv_1", "base_content_version": None, "rendering": "plain"},
+                ],
+                "next_cursor": None,
+                "complete": True,
+                **listed,
+            }
+        )
+    )
+
+    async with make_client(calls) as client:
+        versions = await client.list_versions(spec_id=SPEC)
+
+    assert [version.enrichment_stamp for version in versions] == ["ens_2", None]
 
 
 @pytest.mark.parametrize(
@@ -328,7 +378,7 @@ async def test_list_versions_parses_newest_first_with_base_versions() -> None:
 async def test_list_versions_refuses_a_version_outside_the_contract(
     version: dict[str, Any],
 ) -> None:
-    calls = Calls(ok({"schema_version": 1, "spec_id": SPEC, "versions": [version]}))
+    calls = Calls(versions_page([version]))
 
     async with make_client(calls) as client:
         with pytest.raises(LiveApisError) as refused:
@@ -337,11 +387,120 @@ async def test_list_versions_refuses_a_version_outside_the_contract(
     assert refused.value.code == RESPONSE_INVALID
 
 
-async def test_list_versions_of_an_unstored_dataset_is_empty() -> None:
-    calls = Calls(ok({"schema_version": 1, "spec_id": SPEC, "versions": []}))
+async def test_list_versions_follows_each_cursor_and_joins_the_pages_in_order() -> None:
+    calls = Calls(
+        versions_page([plain("cv_3"), plain("cv_2")], next_cursor="c1", complete=False),
+        versions_page([plain("cv_1")], next_cursor="c2", complete=False),
+        versions_page([plain("cv_0")]),
+    )
+
+    async with make_client(calls) as client:
+        versions = await client.list_versions(spec_id=SPEC)
+
+    assert [version.content_version for version in versions] == ["cv_3", "cv_2", "cv_1", "cv_0"]
+    assert [request.url.path for request in calls.requests] == [
+        f"/api/datasets/{SPEC}/versions"
+    ] * 3
+    assert [dict(request.url.params) for request in calls.requests] == [
+        {},
+        {"cursor": "c1"},
+        {"cursor": "c2"},
+    ]
+
+
+async def test_list_versions_of_a_dataset_holding_none_is_empty() -> None:
+    calls = Calls(versions_page([]))
 
     async with make_client(calls) as client:
         assert await client.list_versions(spec_id=SPEC) == ()
+
+
+async def test_list_versions_of_an_id_apis_registers_no_dataset_under_is_empty() -> None:
+    calls = Calls(problem(404, SPEC_NOT_FOUND))
+
+    async with make_client(calls) as client:
+        assert await client.list_versions(spec_id=SPEC) == ()
+
+
+async def test_list_versions_raises_a_dataset_gone_after_its_first_page() -> None:
+    calls = Calls(
+        versions_page([plain("cv_1")], next_cursor="c1", complete=False),
+        problem(404, SPEC_NOT_FOUND),
+    )
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.list_versions(spec_id=SPEC)
+
+    assert (raised.value.status, raised.value.code) == (404, SPEC_NOT_FOUND)
+
+
+@pytest.mark.parametrize(
+    ("status", "code"), [(409, "identity_quarantined"), (400, "request_invalid")]
+)
+async def test_list_versions_raises_every_other_refusal(status: int, code: str) -> None:
+    calls = Calls(problem(status, code))
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as raised:
+            await client.list_versions(spec_id=SPEC)
+
+    assert (raised.value.status, raised.value.code) == (status, code)
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        [versions_page([plain("cv_1")], next_cursor=None, complete=False)],
+        [versions_page([plain("cv_1")], next_cursor="", complete=False)],
+        [versions_page([plain("cv_1")], next_cursor="c1", complete=True)],
+        [versions_page([plain("cv_1")], complete=None)],
+        [versions_page([], next_cursor="c1", complete=False)],
+        [
+            versions_page([plain("cv_2")], next_cursor="c1", complete=False),
+            versions_page([plain("cv_1")], next_cursor="c1", complete=False),
+        ],
+    ],
+    ids=[
+        "incomplete_without_cursor",
+        "incomplete_with_blank_cursor",
+        "complete_with_cursor",
+        "no_complete",
+        "incomplete_and_empty",
+        "cursor_repeated",
+    ],
+)
+async def test_list_versions_refuses_a_page_outside_the_contract(
+    pages: list[httpx2.Response],
+) -> None:
+    calls = Calls(*pages)
+
+    async with make_client(calls) as client:
+        with pytest.raises(LiveApisError) as refused:
+            await client.list_versions(spec_id=SPEC)
+
+    assert refused.value.code == RESPONSE_INVALID
+    assert len(calls.requests) == len(pages)
+
+
+async def test_list_versions_refuses_a_walk_past_the_page_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_apis, "VERSIONS_MAX_PAGES", 3)
+    requests: list[httpx2.Request] = []
+
+    def endless(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return versions_page(
+            [plain(f"cv_{len(requests)}")], next_cursor=f"c{len(requests)}", complete=False
+        )
+
+    async with make_client(endless) as client:
+        with pytest.raises(LiveApisError) as refused:
+            await client.list_versions(spec_id=SPEC)
+
+    assert refused.value.code == RESPONSE_INVALID
+    assert len(requests) == 3
 
 
 # refresh_frame
@@ -588,7 +747,6 @@ async def test_recipe_routes_refuse_an_unset_datasets_principal_before_any_reque
             client.put_recipe(spec_id=OPS, content_version=OCV, recipe=RECIPE),
             client.read_recipe(spec_id=OPS, content_version=OCV),
             client.find_replay(replay_key="rpk_" + "1" * 32),
-            client.list_versions(spec_id=SPEC),
         ):
             with pytest.raises(LiveApisNotConfigured, match="DATASETS_FIRST_PARTY_PRINCIPAL"):
                 await call
@@ -774,7 +932,7 @@ async def test_an_unparsed_5xx_is_retryable_and_carries_no_code() -> None:
 
 
 async def test_an_id_cannot_alter_the_route() -> None:
-    calls = Calls(ok({"schema_version": 1, "spec_id": SPEC, "versions": []}))
+    calls = Calls(versions_page([]))
 
     async with make_client(calls) as client:
         await client.list_versions(spec_id="spec_x/../ops_y")

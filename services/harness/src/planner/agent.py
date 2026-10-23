@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -57,6 +57,8 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.long_running_tool import LongRunningFunctionTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.graph.orchestrate import counts_chosen
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.service import (
@@ -76,7 +78,7 @@ from translator.discovery import (
     resolved_spec,
 )
 from translator.referral import USER_DECIDES, clear_referral, load_referral
-from translator.tool import Translate
+from translator.tool import Translate, authored_answer
 
 from planner.declaration import PlanTool
 from planner.plan import (
@@ -98,11 +100,13 @@ from planner.plan import (
     load_plan,
     pin_sources,
     plan_revision,
+    record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
+    split_of,
 )
 from planner.records import (
     OpenPeriodFault,
@@ -184,8 +188,8 @@ _PLANNING = (
     "totals every party into one series per year, which a `share_of` or "
     "`quotient_of` reads as a whole side. Over a requirement that names "
     "no entity, a group by `entity` keeps nothing and is refused. Group "
-    "by period, or `rank` with a `reduction` to set each member's total "
-    "beside the others. Do not sum a rate, index or per-person figure.\n\n"
+    "by period, or `rank` to set each member beside the others. Do not "
+    "sum a rate, index or per-person figure.\n\n"
     'A party the question names no member of, such as the donors of "top '
     'donors", goes in `across` (see `across`). A region or group named '
     'alone, such as "Africa", is one entity with its own figure. "African '
@@ -195,6 +199,9 @@ _PLANNING = (
     "`origin` is the giving party (an entity `role` of donor, creditor or "
     "exporter), `destination` the receiving party (recipient, debtor or "
     "importer), `observationAbout` the place.\n\n"
+    "For recipient countries, use `across=['recipient']` and a direct filter with "
+    "`{{kind:'place_level', role:'recipient', level:'Country', strict:true}}` in its `predicates`. "
+    "Route calculations through it. Do the same for donor, creditor or debtor countries.\n\n"
     "A requirement whose `across` is the place, such as `'country'`, "
     "names no place, so its retrieval holds every level (see `level` on "
     "`place_level`). Before a `rank`, an `aggregate` across places, a "
@@ -225,12 +232,16 @@ _PLANNING = (
     "question names a finer one. Then add an `aggregate` with "
     "`reduction='sum'` and `group_by` period and breakdown, which totals "
     "the parties the question leaves open within each sector, and a "
-    "`rank` with `axis='sector'` and a `limit`. To set that ranking "
-    "beside another year, widen the period to cover both. State "
+    "`rank` with `axis='sector'` and a `limit`, of one year unless the "
+    "ask is marked (across years). To set that ranking beside another "
+    "year, widen the period to cover both. State "
     "`per_period` on the rank for each year's ranking side by side, or "
     "read a `growth` over the aggregate between the two years for each "
     "sector's change. A derived requirement's figures are what a question "
-    "about a value, a growth, a share or a rank asks for.\n\n"
+    "about a value, a growth, a share or a rank asks for. Which members, "
+    "or how many, meet a condition is a `filter` with a `value_threshold` "
+    "over one figure per member, and a `period_threshold` for the year; "
+    "the members it keeps are the answer and their count.\n\n"
     "When the answer is one total of two different sources, such as "
     "bilateral aid plus imputed multilateral aid, state a `sum_of`, "
     "naming each side's `entity` when its requirement names several on "
@@ -249,15 +260,26 @@ _PLANNING = (
     "that overlap.\n\n"
     "A sum states the same `unit` on both inputs, or on neither. To total "
     "several entities of one series, `aggregate` it.\n\n"
-    'A total over a span of years, such as "the total between 2010 and '
-    'the latest", is one figure. Do not give a figure per year. An '
+    "One figure or one ranking over several years taken together answers "
+    "only an ask marked (across years), whatever years the question "
+    "names, or the user's own words asking for it. When your message "
+    'says "The user asks for this change to the plan" and the change asks '
+    "for one figure or one ranking over the years, or no asks are listed "
+    "and the question asks for one, name the step that combines them in "
+    "`across_years`. For either, an "
     "`aggregate` with `reduction='sum'` grouped by `entity` alone sums "
     "the years, as a rank's `reduction` does for a ranking of each "
-    "entity's total. A total of two sources over a span states the "
-    "question's own period on both dataset requirements, adds the two "
-    "yearly series with a `sum_of` first, and then sums the years of that "
-    "one series with an `aggregate` grouped by `entity`. The `sum_of` "
-    "adds the years both sources report and names any year one lacks.\n\n"
+    "entity's total, an `aggregate` with an empty `group_by` sums the "
+    "entities and the years into one figure, and a total of two sources states the question's own "
+    "period on both dataset requirements, adds the two yearly series with "
+    "a `sum_of` first, and then sums the years of that one series with an "
+    "`aggregate` grouped by `entity`. The `sum_of` adds the years both "
+    "sources report and names any year one lacks. Otherwise every "
+    "`aggregate` keeps `period` in its `group_by`, and a rank over several "
+    "years with `per_period` unset reads one year, the newest unless the "
+    "question names another: state `window_start` and `window_end` both "
+    "that year, with `rolling` at offset 0 on both when the question "
+    "words it against the newest data.\n\n"
     "When a part of the question earns a decline (see `declined`), such "
     "as a calculation over a comparison or a join, state it in `declined` "
     "and plan what can still be answered, or propose `declined` alone "
@@ -271,10 +293,10 @@ _PLANNING = (
     "State a rank's `limit` when the question asks for a top or bottom N, "
     'or for the members that hold the most, as "top donors" or "which '
     'sectors received the most" does, with a `Decision` fixing the N when '
-    "the question names none. A top N by each entity's total is one rank "
-    "stating the `reduction` and the `limit` with `per_period` unset. No "
-    "rank reads another rank's output, so put the `limit` on the one rank "
-    "that reads the measure.\n\n"
+    "the question names none. For an ask marked (across years), a top N "
+    "by each entity's total is one rank stating the `reduction` and the "
+    "`limit` with `per_period` unset. No rank reads another rank's "
+    "output, so put the `limit` on the one rank that reads the measure.\n\n"
     "To rank entities by a growth, a per-entity `share_of` or a "
     "`quotient_of`, compute that first and rank its result. A per-period "
     "rank with a `limit` keeps an entity only in the periods it made the "
@@ -524,7 +546,7 @@ def _execution_blocked(plan: Plan, tool_context: ToolContext) -> dict[str, objec
             "The translator referred this plan back; settle the referral with the user "
             "and propose again before executing.",
             outcome=Outcome.REFUSED,
-            detail={"referral": referral.model_dump(mode="json")},
+            detail={"referral": authored_answer(referral.model_dump(mode="json"), split_of(plan))},
             action=Action(call=REQUEST_INPUT_FUNCTION_CALL_NAME)
             if asks_user
             else PROPOSE_PLAN_PROPOSER.action(),
@@ -618,28 +640,85 @@ def _transient_retry(arguments: Mapping[str, Any], state: SessionState) -> Plan 
     return plan
 
 
-def _offered_candidates(args: dict[str, Any]) -> frozenset[str]:
-    """The candidates an `adk_request_input` call's own function-call event
-    offered, from either shape that name occurs under:
-
-    - the planner's own `ask_user` tool call: a plain `FunctionTool` call,
-      so `args` is exactly the kwargs the model supplied, flat --
-      `args["candidates"]`.
-    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
-      built through ADK's own `google.adk.workflow.utils.
-      _workflow_hitl_utils.create_request_input_event`, which dumps the
-      whole `RequestInput` into `args` -- the caller's own `payload` (where
-      `ask` puts `candidates`) nests under `args["payload"]`.
-    """
-    candidates = args.get("candidates")
-    if not candidates:
-        payload = args.get("payload")
-        candidates = payload.get("candidates") if isinstance(payload, dict) else None
+def _candidate_ids(candidates: Any) -> frozenset[str]:
+    """The spec_ids of a list of `{"spec_id", "label"}` candidates."""
     return frozenset(
         str(candidate["spec_id"])
         for candidate in candidates or []
         if isinstance(candidate, dict) and candidate.get("spec_id")
     )
+
+
+def _offered_candidates(args: dict[str, Any]) -> dict[str, frozenset[str]]:
+    """The candidates an `adk_request_input` call's own function-call event
+    offered, by the id of the question that offered them, from any shape that
+    name occurs under:
+
+    - the planner's own `ask_user` tool call: a plain `FunctionTool` call,
+      so `args` is exactly the kwargs the model supplied, flat --
+      `args["candidates"]`, the one question `q1`.
+    - the graph's `ask` node, under `harness.graph`'s `CLARIFY_INTERRUPT`:
+      built through ADK's own `google.adk.workflow.utils.
+      _workflow_hitl_utils.create_request_input_event`, which dumps the
+      whole `RequestInput` into `args`, so the caller's own `payload` nests
+      under `args["payload"]`. Its `questions` each carry their own `id` and
+      `candidates`, whose ids are scoped to that question. A `payload` with
+      `candidates` and no `questions` holds the one question `q1`.
+    """
+    candidates = args.get("candidates")
+    payload = args.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if not candidates and payload.get("questions"):
+        return {
+            str(question["id"]): _candidate_ids(question.get("candidates"))
+            for question in payload["questions"]
+            if isinstance(question, dict) and question.get("id")
+        }
+    return {"q1": _candidate_ids(candidates or payload.get("candidates"))}
+
+
+def _answers(result: object) -> dict[str, dict[str, Any]]:
+    """An `adk_request_input` response's `result` as one answer per question id
+    (`harness.graph.state.resume_answers`). A missing result and a dismissal of the
+    whole pause hold none."""
+    return {} if result is None else resume_answers(result) or {}
+
+
+def _picks(result: object, offered: dict[str, frozenset[str]]) -> tuple[str, ...]:
+    """The spec_ids `result` picks, in question order, each as an option its own
+    question offered.
+
+    A skipped or free-text answer picks nothing, and neither does an id another
+    question offered."""
+    return tuple(
+        str(answer["spec_id"])
+        for question_id, answer in _answers(result).items()
+        if isinstance(answer, dict)
+        and answer.get("kind") == "option"
+        and str(answer.get("spec_id")) in offered.get(question_id, frozenset())
+    )
+
+
+def _answered_calls(tool_context: ToolContext) -> Iterator[tuple[dict[str, Any], object]]:
+    """Each interrupt answer with the nearest preceding call sharing its id."""
+    calls: dict[str, dict[str, Any]] = {}
+    for event in tool_context.session.events:
+        if not (event.content and event.content.parts):
+            continue
+        for part in event.content.parts:
+            call = part.function_call
+            if (
+                call is not None
+                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
+                and call.id is not None
+            ):
+                calls[call.id] = call.args or {}
+                continue
+            response = part.function_response
+            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
+                continue
+            if response.id in calls:
+                yield calls[response.id], (response.response or {}).get("result")
 
 
 def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
@@ -657,11 +736,18 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     `create_request_input_event` builds the call with `id=interrupt_id`, and
     `create_request_input_response` builds the answer with
     `FunctionResponse.id` set to that same `interrupt_id`; `harness.studio`'s
-    `/interrupt` route is what actually sends it, shaped
-    `{"result": {"spec_id": ...}}` for a chosen candidate. A call with no
+    `/interrupt` route is what actually sends it, its `result` read as one
+    answer per question id (`harness.graph.state.resume_answers`), a chosen
+    candidate as `{"kind": "option", "spec_id": ...}`. A call with no
     paired response yet -- the run is still paused there, or the answer
     hasn't arrived -- contributes nothing: its candidates were offered, not
     elected.
+
+    One response's picks elect the counts they choose, read against the
+    turn's search blocks (`harness.graph.orchestrate.counts_chosen`): a pick
+    of other prices alone chooses no count, and a count picked with other
+    prices elects the listed reading measuring both, the one the `ask`
+    node tells the agent to fetch.
 
     Every `adk_request_input` call the workflow itself raises (the `ask`
     node of `harness.graph`, under `CLARIFY_INTERRUPT`) shares the one fixed
@@ -700,46 +786,33 @@ def _elected_spec_ids(tool_context: ToolContext) -> frozenset[str]:
     `tool_context.session` is the same live `Session` every other seam
     shares, `events` included.
     """
-    offered_by_call: dict[str, frozenset[str]] = {}
+    specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     elected: set[str] = set()
-    for event in tool_context.session.events:
-        if not (event.content and event.content.parts):
-            continue
-        for part in event.content.parts:
-            call = part.function_call
-            if (
-                call is not None
-                and call.name == REQUEST_INPUT_FUNCTION_CALL_NAME
-                and call.id is not None
-            ):
-                offered_by_call[call.id] = _offered_candidates(call.args or {})
-                continue
-            response = part.function_response
-            if response is None or response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
-                continue
-            offered = offered_by_call.get(response.id)
-            if not offered:
-                continue
-            result = (response.response or {}).get("result")
-            spec_id = result.get("spec_id") if isinstance(result, dict) else None
-            if spec_id is not None and str(spec_id) in offered:
-                elected.add(str(spec_id))
+    for args, result in _answered_calls(tool_context):
+        elected |= counts_chosen(_picks(result, _offered_candidates(args)), specs)
     return frozenset(elected)
+
+
+def _said(answer: object) -> str:
+    """What one answer says: the candidate picked or the user's own words, else nothing."""
+    if not isinstance(answer, dict):
+        return ""
+    key = {"option": "spec_id", "text": "text"}.get(answer.get("kind"))
+    value = answer.get(key) if key else None
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _is_answer(body: dict[str, Any]) -> bool:
     """Whether an `adk_request_input` response body carries something the user said.
 
     A user's answer is `{"result": ...}` (`harness.studio`'s `/interrupt` route wraps
-    it, as ADK wraps any non-dict value): free text, `{"text": ...}` for a reply
-    outside the offered options, or `{"spec_id": ...}` for a chosen candidate. A
-    body with no `result` is a call the tool or ADK rejected. `{"skip": true}` is the
-    user declining to choose, and blank text says nothing.
+    it, as ADK wraps any non-dict value), read as `harness.graph.state.resume_answers`
+    reads it: a pick of a candidate, or free text for a reply outside the offered
+    options. A body with no `result` is a call the tool or ADK rejected. A dismissal of
+    the pause and a question left to the planner are the user declining to choose, and
+    blank text says nothing.
     """
-    result = body.get("result")
-    if isinstance(result, dict):
-        result = result.get("text") or result.get("spec_id")
-    return isinstance(result, str) and bool(result.strip())
+    return any(_said(answer) for answer in _answers(body.get("result")).values())
 
 
 def _is_amendment(body: dict[str, Any]) -> bool:
@@ -846,7 +919,7 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
     """
     answered = False
     referral: tuple[object, object] | None = None
-    asks: dict[str, frozenset[str]] = {}
+    asks: dict[str, dict[str, frozenset[str]]] = {}
     picked: set[str] = set()
     for event in tool_context.session.events:
         if not (event.content and event.content.parts):
@@ -868,10 +941,7 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
                 if response.id not in asks or not _is_answer(body):
                     continue
                 answered = True
-                result = body.get("result")
-                spec_id = result.get("spec_id") if isinstance(result, dict) else None
-                if spec_id is not None and str(spec_id) in asks[response.id]:
-                    picked.add(str(spec_id))
+                picked.update(_picks(body.get("result"), asks[response.id]))
             elif "translation" in body:
                 translation = body["translation"]
                 referral = (
@@ -912,11 +982,11 @@ def _combination_picks(
     off that refusal's own response event, so the model cannot point an ask at another sum. A
     refusal binds the first ask after it and no other, so an ask with no refusal of its own
     before it asks about nothing. Each response pairs with the nearest preceding call sharing
-    its `id`, as `_elected_spec_ids` pairs them. Studio sends a picked option's id as
-    `{"spec_id": id}`. Each answer about a combination replaces the one before it, and free text
-    or a skip records `None`, so a user who changes their mind, or answers outside the options,
-    ends with no pick for it. The flag says whether any answer to any combination ask, about a
-    combination or about nothing, was other than `COMBINE_OPTION`.
+    its `id`, as `_elected_spec_ids` pairs them. The combination ask is one question, `q1`
+    (`harness.graph.state.resume_answers`). Each answer about a combination replaces the one
+    before it, and free text or a skip records `None`, so a user who changes their mind, or
+    answers outside the options, ends with no pick for it. The flag says whether any answer to
+    any combination ask, about a combination or about nothing, was other than `COMBINE_OPTION`.
     """
     offered = [dict(option) for option in COMBINATION_OPTIONS]
     ids = {option["id"] for option in COMBINATION_OPTIONS}
@@ -946,8 +1016,10 @@ def _combination_picks(
             if response.name != REQUEST_INPUT_FUNCTION_CALL_NAME:
                 refused = _refused_combination(body) or refused
             elif response.id in asks:
-                result = body.get("result")
-                option = result.get("spec_id") if isinstance(result, dict) else None
+                answer = _answers(body.get("result")).get("q1")
+                option = (
+                    answer.get("spec_id") if answer and answer.get("kind") == "option" else None
+                )
                 declined = declined or option != COMBINE_OPTION
                 combination = asks[response.id]
                 if combination is not None:
@@ -993,6 +1065,10 @@ class ToolContextSession:
     def record_unsupported(self, operation: UnsupportedOperation) -> None:
         """Record `operation` as answered `unsupported` in this planner entry."""
         record_unsupported(self.tool_context.state, operation)
+
+    def record_reduction_refused(self, asks: Iterable[int]) -> None:
+        """Record `asks` as named by a `PERIOD_REDUCTION_UNSTATED` refusal in this planner entry."""
+        record_reduction_refused_asks(self.tool_context.state, asks)
 
     def record_admission(self, admission: Admission) -> None:
         """Record `admission` in the call's state."""
@@ -1057,19 +1133,31 @@ _PROPOSE_PLAN_ARGUMENTS = {
     ),
     "declined": (
         "Each part of the question no operation computes, one per `code` and "
-        "`ask_ref`. Only an `unsupported` answer earns a decline, with that "
+        "`ask_ref`. An `unsupported` answer earns a decline, with that "
         "answer's code: one `propose_plan` answered, itself or in its `translation`, "
         "or a run-time refusal the plan is replanned from that names the code. A "
         "`requirement_unmeetable` translation whose `reason` says it earns a "
         "decline earns that code too, which the plan may make or leave out. "
         "`breakdown_not_kept` is earned when an `ask_role_dropped` problem names "
-        "the ask and the source its answer pins cannot hold that party open."
+        "the ask and the source its answer pins cannot hold that party open. A "
+        "first plan may also decline as `no_operation_covers` an ask no "
+        "requirement kind or chain of them states."
     ),
     "answered": (
         "When the brief lists asks, the requirements that answer each one, "
         "keyed by `ask`. Every ask is answered here or declined in `declined` "
         "with its number as `ask_ref`, exactly once, or both when the plan "
         "computes part of it."
+    ),
+    "across_years": (
+        "The `id` of each step that combines its years, an `aggregate` whose `group_by` "
+        "leaves out `period` or a `rank` with a `reduction` and `per_period` false, because "
+        "the user's own words ask for one figure or one ranking over them: a change to the "
+        "plan the user asks for, or, when no asks are listed, the question itself. A step "
+        "named once keeps that standing in later patches while its kind and `reduction` "
+        "stay, and loses it when an `aggregate`'s `group_by` gains `period` or a `rank` "
+        "sets `per_period`. Leave it empty for a step that answers an ask marked "
+        "(across years)."
     ),
     "amends_version": (
         "The `version` this call patches, as the last `propose_plan` call "
@@ -1175,8 +1263,9 @@ def _first_year_unreadable(
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
         f"The first year {detail['spec_id']} holds could not be read: {exc}. The plan is "
-        "sound and nothing was recorded; propose it again, or state the start as a fixed "
-        "year and roll only the end.",
+        "sound and nothing was recorded; propose it again, or, where the window covers "
+        "several years, state the start as a fixed year and roll only the end; a window of "
+        "one year cannot, so drop `rolling` and `period_end_open` there for fixed years.",
         outcome=Outcome.REFUSED,
         detail=detail,
     )
@@ -1186,6 +1275,7 @@ def build_planner_tools(
     *,
     translate: Translate | None = None,
     question_fixed: bool = False,
+    reads_user_words: bool = True,
     surface: ToolSurface | None = None,
 ) -> list[BaseTool]:
     """Build the planner's tool set.
@@ -1207,6 +1297,11 @@ def build_planner_tools(
     to `submission.service.submit` on every call, and selects `_FIXED_ARGUMENTS`'
     descriptions of `question` and `starts_new_plan`, so those two arguments
     describe the mode this tool set actually enforces.
+
+    `reads_user_words` closes over into `propose_plan` the same way, for
+    `submission.service.admit`. It says whether the planner reads the
+    user's own words in every entry, so `propose_plan`'s `across_years` may
+    name a step in any of them.
     """
 
     # Named `ask_user` here, for readability, but renamed below (once
@@ -1280,6 +1375,7 @@ def build_planner_tools(
         removed_evidence_requirements: list[str] = [],  # noqa: B006
         declined: list[Decline] = [],  # noqa: B006
         answered: list[AskAnswer] = [],  # noqa: B006
+        across_years: list[str] = [],  # noqa: B006
         amends_version: int | None = None,
         starts_new_plan: bool = False,
     ) -> dict[str, object]:
@@ -1300,10 +1396,12 @@ def build_planner_tools(
                 removed_evidence_requirements=removed_evidence_requirements,
                 declined=declined,
                 answered=answered,
+                across_years=across_years,
                 amends_version=amends_version,
                 starts_new_plan=starts_new_plan,
             ),
             question_fixed=question_fixed,
+            reads_user_words=reads_user_words,
             proposer=PROPOSE_PLAN_PROPOSER,
         )
 
@@ -1416,6 +1514,7 @@ def create_planner_agent(
     translate: Translate | None = None,
     surface: ToolSurface | None = None,
     question_fixed: bool = False,
+    reads_user_words: bool = True,
     prefix_cache: PrefixCache | None = None,
 ) -> LlmAgent:
     """Build the planner `LlmAgent`.
@@ -1442,6 +1541,14 @@ def create_planner_agent(
             that brief (see `submission.service._resolve_intent`). False, the default, is the standalone
             planner's and `harness_pair_v1`'s own behaviour: a restart begins
             a fresh plan.
+        reads_user_words: Whether the planner reads the user's own words in
+            every entry, so `propose_plan`'s `across_years` may name a step
+            in any of them. True, the default, is the standalone planner's
+            and `harness_pair_v1`'s, which plan the user's question
+            themselves. `harness.planner_seam` sets it false, since there the
+            orchestrator reads the user's words and marks its asks, and the
+            planner reads them only in an entry the user's amendment opens
+            (`planner.plan.amendment_entry`).
         prefix_cache: The process's shared cache of static prompt prefixes.
             Given, and `model_name` naming a Gemini model, every call reads
             the instruction and tool declarations from it. Either way a
@@ -1465,6 +1572,7 @@ def create_planner_agent(
             *build_planner_tools(
                 translate=translate,
                 question_fixed=question_fixed,
+                reads_user_words=reads_user_words,
                 surface=surface,
             ),
         ],

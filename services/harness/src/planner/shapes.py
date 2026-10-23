@@ -30,7 +30,7 @@ column behind either.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final, Literal, Protocol
@@ -42,9 +42,12 @@ from planner.records import (
     Identifier,
     Period,
     PeriodThreshold,
+    PlaceLevel,
     Predicate,
     RankAmong,
     Reduction,
+    RollingWindow,
+    ValueThreshold,
 )
 
 
@@ -88,7 +91,7 @@ class TimeLabel(StrEnum):
     different years. Each row's year is real, so a year threshold `filter`
     reads it, and `compare`, `quotient_of` and `join` match it on each
     entity's own year against a series of years whose period covers the
-    picked frame's. Every
+    picked frame's, now and as newer data arrives. Every
     reader that sets entities side by side within one year, or follows one
     entity across years, refuses it: `growth`, `rank` in either mode (its
     coverage counts every year of the window, and each entity holds one),
@@ -152,6 +155,9 @@ class RoleDimension:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    mixed_levels: bool = False
+    levelled: bool = False
+    level_filterable: bool = False
 
 
 # The measure count of a family read separately whose source lists none of its
@@ -159,6 +165,98 @@ class RoleDimension:
 SEVERAL: Final = "several"
 
 type MeasureCount = int | Literal["several"] | None
+
+
+class EndDrift(StrEnum):
+    """What sets a frame's last year once newer data arrives.
+
+    `FIXED` is a fixed year: a fixed bound, or the end a retrieval states.
+    `ANCHOR` is a bound that follows the newest data. At run time it is the
+    anchor, the newest year at least half the series hold
+    (`executor.run`, analysis-mcp's `resolve_anchor`), moved by the bound's
+    offset; the run resolves one anchor per group of rolling years
+    (`planner.plan.rolling_groups`), and every step of one group counts
+    from it. `DATA`
+    is each series' own newest year, which a retrieval stating no end year
+    holds, so a series reporting past the anchor holds years after it.
+    """
+
+    FIXED = "fixed"
+    ANCHOR = "anchor"
+    DATA = "data"
+
+
+class StartDrift(StrEnum):
+    """What sets a frame's first year once newer data arrives.
+
+    `FIXED` is a fixed year. `ANCHOR` is a bound that follows the newest
+    data, at the anchor moved by its offset (`EndDrift.ANCHOR`). `TRAILS`
+    is a fixed year that sets the start today with a bound on the anchor
+    behind it, which passes it once the anchor has moved far enough, and
+    sets the start from then on. A start that follows has nothing trailing
+    it, since the bound setting it today stays ahead of every bound behind
+    it.
+    """
+
+    FIXED = "fixed"
+    ANCHOR = "anchor"
+    TRAILS = "trails"
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodDrift:
+    """How the years a frame holds differ from the `period` it states today, and how newer data moves them.
+
+    `start` says what sets the first year as newer data arrives, and
+    `start_offset` is the offset on the anchor of the bound that sets it,
+    or trails it, set exactly when `start` is not `FIXED`. `end`
+    says what sets the last year as newer data arrives, and `end_offset` is
+    the offset of the bound that sets it on the anchor, set exactly when
+    `end` is `ANCHOR`. `until` is the last year a fixed bound lets a moving
+    end reach, `None` when nothing stops it. `until` is always later than
+    the end, and `None` when the end is fixed. A frame whose start follows
+    and whose end follows the anchor keeps as many years as it holds today.
+    One whose end is open to the data holds every year from its start to
+    each series' newest, which can lie past the anchor. One whose first year
+    rises with the anchor below a fixed last year runs out of years
+    (`years_run_out`). `excluded` is every fixed year a filter's `ne` removed
+    upstream, which the frame does not hold, so a later bound that
+    makes one of them its first or last year keeps the year beyond it
+    (`_Years.held`). `decided_by_data` says which of these years the rows
+    hold, first to last, only the data decides: a `ValueThreshold` upstream
+    kept the rows whose values pass, over rows labelled with their own
+    years, so the years left lie anywhere inside these. A span written over
+    such rows carries a label inside these years that no plan knows
+    (`_value_kept_span_pairs`), so a reader asking only whether a window
+    holds the label (`_rejects_rank_window`) reads these years alone.
+    """
+
+    start: StartDrift = StartDrift.FIXED
+    start_offset: int | None = None
+    end: EndDrift = EndDrift.FIXED
+    end_offset: int | None = None
+    until: int | None = None
+    excluded: frozenset[int] = frozenset()
+    decided_by_data: bool = False
+
+    def __post_init__(self) -> None:
+        assert (self.end is EndDrift.ANCHOR) == (self.end_offset is not None), self
+        assert (self.start is not StartDrift.FIXED) == (self.start_offset is not None), self
+
+    @property
+    def widens(self) -> bool:
+        """Whether newer data adds years after the end that no moving start takes away.
+
+        The end moves, and the start does not follow the same anchor: either
+        it stays put, or the end is open to each series' own newest year.
+        """
+        return self.end is not EndDrift.FIXED and not (
+            self.start is StartDrift.ANCHOR and self.end is EndDrift.ANCHOR
+        )
+
+
+# The drift of a frame over fixed years.
+FIXED: Final = PeriodDrift()
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,12 +276,13 @@ class FrameShape:
     (`compiler.frame_columns.bound_stat_var_count`). `value` and `time`
     state what kind of number and what kind of period label the frame's own
     columns carry. `period` is the years the
-    frame can carry, `None` only when no dataset requirement bounds it.
-    `one_row_per_entity` is whether the frame already holds one value per
-    entity, so a rank over it needs no reduction. `cut_per_period` is
-    whether a per-period rank `limit` removed rows from a frame spanning
-    more than one year: an entity keeps only the periods it made the cut
-    in, so its series misses years its source holds. A reader that follows
+    frame can carry today, `None` only when no dataset requirement bounds
+    it, and `drift` how newer data moves them. `one_row_per_entity` is
+    whether the frame holds one value per entity, and keeps holding one as
+    newer data arrives, so a rank over it needs no reduction.
+    `cut_per_period` is whether a per-period rank `limit` removed rows from
+    a frame spanning, or coming to span, more than one year. An entity keeps
+    only the periods it made the cut in, so its series misses years its source holds. A reader that follows
     one entity across periods refuses such a frame. `limited` is whether a
     rank `limit` upstream kept only some entities, in either mode and over
     any period: the frame holds neither the entities a filter named nor the
@@ -200,8 +299,10 @@ class FrameShape:
     a retrieval that names no place holds every place with data, the world,
     regions, countries and their subdivisions alike, until a place-level
     filter keeps one. `place_typed` is whether a place-level filter may read
-    the frame: that retrieval, read through filters only, since every other
-    verb drops the place-type column the compiler asks `get_data` for.
+    the frame: a retrieval's open role, read through filters only, since
+    every other verb drops the place-type column the compiler asks
+    `get_data` for. Both read the roles (`RoleDimension.mixed_levels` and
+    `level_filterable`).
 
     `composed_unit` is whether the frame's values are in a unit two measures
     compose, dollars per person: a `quotient_of`'s result, and whatever a
@@ -212,6 +313,17 @@ class FrameShape:
     in a `sum_of`, under a `sum` reduction or on a `share_of` side summing
     several rows, nor divides again in a `quotient_of`, and a `compare` or
     a `share_of` pairs it only with another value in a composed unit.
+
+    `span_of` names the step whose output first carried the frame's `SPAN`
+    label, `None` when the frame carries no span or its step is not named.
+    analysis-mcp writes one label for every row of a step that collapses
+    periods: a `sum` or `mean` aggregate labels each row with every period
+    it collapsed, across all groups, a growth its window and a collapsing
+    rank the years its window kept. A step that keeps its input's labels
+    keeps the name: a filter, an aggregate or rank over a span, and a
+    two-sided step whose two sides name the same step. So two frames
+    naming the same step carry the same label as newer data arrives,
+    whatever rows a filter later kept of either (`_spans_move_together`).
 
     Time grain is not a field here: every frame this algebra describes is
     annual, and a derived frame inherits its input's grain unchanged.
@@ -227,9 +339,19 @@ class FrameShape:
     limited: bool
     roots: tuple[Identifier, ...]
     unsummable_axes: tuple[str, ...] | None = None
-    mixed_levels: bool = False
-    place_typed: bool = False
     composed_unit: bool = False
+    drift: PeriodDrift = FIXED
+    span_of: Identifier | None = None
+
+    @property
+    def mixed_levels(self) -> bool:
+        """Whether any role holds places at more than one level."""
+        return any(role.mixed_levels for role in self.roles)
+
+    @property
+    def place_typed(self) -> bool:
+        """Whether any role carries the place-type column a place-level filter reads."""
+        return any(role.level_filterable for role in self.roles)
 
 
 class NamedRole(Protocol):
@@ -242,9 +364,50 @@ class NamedRole(Protocol):
     def place(self) -> bool: ...
 
 
+class LevelRole(NamedRole, Protocol):
+    """What `level_filter` reads of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
+
+    @property
+    def requirement_id(self) -> Identifier: ...
+
+    @property
+    def open(self) -> bool: ...
+
+    @property
+    def level_filterable(self) -> bool: ...
+
+
 # The phrase a refusal tells the planner to write for a place dimension whose
 # entities state no role.
 PLACE_PHRASE: Final = "country"
+
+
+def one_figure_remedy(*, each_side: bool = False) -> str:
+    """How a refusal offers one figure over every row: an aggregate with an empty `group_by`.
+
+    The figure combines the years, so it answers only an ask marked
+    (across years). `each_side` names it for both sides of an un-keyed
+    share or quotient, which pairs one figure only with another.
+    """
+    sides = " on each side" if each_side else ""
+    return (
+        f"only for an ask marked (across years), one figure{sides} with an `aggregate` whose "
+        "`group_by` is []"
+    )
+
+
+def pooling_remedy(*, one_figure: bool, each_side: bool = False) -> str:
+    """How a refusal tells a side holding several members to pool them, as its reader takes them.
+
+    Per year always: an aggregate whose `group_by` keeps `period`. One
+    figure (`one_figure_remedy`) only where `one_figure` says the reader
+    takes one: never for a keyed side, which keeps one series per key, nor
+    for a `compare` or a `sum_of`, which pair yearly series.
+    """
+    per_year = "pool the members per year with an `aggregate` whose `group_by` keeps `period`"
+    if not one_figure:
+        return per_year
+    return f"{per_year}, or, {one_figure_remedy(each_side=each_side)}"
 
 
 def place_role(role: str | None) -> bool:
@@ -330,23 +493,434 @@ def _intersection(left: Period | None, right: Period | None) -> Period | None:
     return Period(start=start, end=end) if end >= start else None
 
 
-def windowed_years(period: Period | None, window: Period | None) -> Period | None:
-    """Return the years of `period` that `window` keeps; either side unbounded leaves the other.
+@dataclass(frozen=True, slots=True)
+class _Years:
+    """The years a frame holds today, `start` to `end`, and how newer data moves them.
 
-    `None` only when both are unbounded: `_rejects_rank_window` refuses a
-    window that shares no year with a bounded period before any caller
-    reads this.
+    `end` may fall before `start`, which a bound leaving no year does. The
+    caller refuses or drops such years (`held`). `start` and `end` are the
+    bounds, and may name a year a filter removed (`PeriodDrift.excluded`).
+    """
+
+    start: int
+    end: int
+    drift: PeriodDrift
+
+    @classmethod
+    def of(cls, period: Period, drift: PeriodDrift) -> _Years:
+        return cls(start=period.start, end=period.end, drift=drift)
+
+    def held(self) -> tuple[Period | None, PeriodDrift]:
+        """The years these hold, first to last, `None` when they hold none, and how newer data moves them.
+
+        A year a filter removed (`PeriodDrift.excluded`) is skipped as a
+        first or last year held. Such a year is fixed, removed from fixed years
+        (`planner.plan._check_exclusions_fixed`), so only the other side of
+        a two-sided verb moves an end past it, and only as far as the fixed
+        `until` that side's years set: `until` moves back past removed years
+        too, and an end with no later year left to reach is fixed.
+        """
+        drift = self.drift
+        start, end = self.start, self.end
+        while start in drift.excluded:
+            start += 1
+        while end in drift.excluded:
+            end -= 1
+        if drift.until is not None:
+            until = drift.until
+            while until > end and until in drift.excluded:
+                until -= 1
+            if until <= end:
+                drift = replace(drift, end=EndDrift.FIXED, end_offset=None, until=None)
+            else:
+                drift = replace(drift, until=until)
+        return (Period(start=start, end=end) if end >= start else None), drift
+
+    def from_year(
+        self, first: int, *, moves: StartDrift = StartDrift.FIXED, offset: int | None = None
+    ) -> _Years:
+        """These years once a first year `first`, moving with newer data as `moves` says, bounds them.
+
+        `offset` is the offset on the anchor of the bound that sets that
+        first year or trails it, set exactly when `moves` is not `FIXED`.
+        The later start holds, and a following bound on the same year makes
+        the start follow. A following bound behind the start that holds, and
+        a following start a later fixed bound overtakes, trail it (`trail`).
+        A first year that trails is fixed today, with its bound on the
+        anchor trailing it.
+        """
+        assert (moves is not StartDrift.FIXED) == (offset is not None), (moves, offset)
+        if moves is StartDrift.TRAILS:
+            assert offset is not None
+            return self.from_year(first).trail(offset)
+        drift = self.drift
+        if first <= self.start:
+            if offset is None:
+                return self
+            if first < self.start:
+                return self.trail(offset)
+        if offset is not None:
+            moved = replace(drift, start=StartDrift.ANCHOR, start_offset=offset)
+            return replace(self, start=first, drift=moved)
+        trails = drift.start is not StartDrift.FIXED
+        moved = replace(
+            drift,
+            start=StartDrift.TRAILS if trails else StartDrift.FIXED,
+            start_offset=drift.start_offset if trails else None,
+        )
+        return replace(self, start=first, drift=moved)
+
+    def trail(self, offset: int) -> _Years:
+        """These years once a bound on the anchor at `offset` sits behind their first year today.
+
+        Behind a fixed first year it trails (`StartDrift.TRAILS`), and of
+        several the one at the latest offset passes it first. Behind a start
+        that follows the anchor it stays behind, and changes nothing.
+        """
+        drift = self.drift
+        if drift.start is StartDrift.ANCHOR or (
+            drift.start_offset is not None and drift.start_offset >= offset
+        ):
+            return self
+        return replace(self, drift=replace(drift, start=StartDrift.TRAILS, start_offset=offset))
+
+    def to_year(self, last: int, *, moves: EndDrift, offset: int | None = None) -> _Years:
+        """These years once a bound keeps `last` and earlier, moving with newer data as `moves` says.
+
+        `offset` is the bound's own offset from the anchor, for a bound on
+        the anchor. The earlier end holds, and a moving bound before a fixed
+        end lets the end move as far as that end. A bound on the anchor at an
+        end open to the data makes the anchor the end, since the frame's
+        newest year is at least as late as an anchor resolved over the
+        frame's own retrievals, as every rolling step's anchor is. A
+        two-sided step pairing an open side with a side on an anchor
+        resolved without it is refused (`anchor_misses`). A fixed bound stops a moving end there.
+        """
+        drift = self.drift
+        if moves is not EndDrift.FIXED:
+            if last < self.end:
+                until = drift.until if drift.end is not EndDrift.FIXED else self.end
+                moved = replace(drift, end=moves, end_offset=offset, until=until)
+                return _Years(start=self.start, end=last, drift=moved)
+            if last == self.end and moves is EndDrift.ANCHOR and drift.end is EndDrift.DATA:
+                moved = replace(drift, end=EndDrift.ANCHOR, end_offset=offset)
+                return replace(self, drift=moved)
+            return self
+        end = min(self.end, last)
+        if drift.end is EndDrift.FIXED:
+            return replace(self, end=end)
+        until = last if drift.until is None else min(drift.until, last)
+        if until <= end:
+            fixed = replace(drift, end=EndDrift.FIXED, end_offset=None, until=None)
+            return replace(self, end=end, drift=fixed)
+        return replace(self, end=end, drift=replace(drift, until=until))
+
+    def within(self, other: Period, drift: PeriodDrift) -> _Years:
+        """The years these and `other`, moving as `drift` says, both hold.
+
+        The first year of `other` bounds these as it moves (`from_year`),
+        so either side order gives the same years. A year either side
+        removed is removed from both, and years the data decides on either
+        side are decided by the data on both.
+        """
+        years = replace(
+            self,
+            drift=replace(
+                self.drift,
+                excluded=self.drift.excluded | drift.excluded,
+                decided_by_data=self.drift.decided_by_data or drift.decided_by_data,
+            ),
+        )
+        years = years.from_year(other.start, moves=drift.start, offset=drift.start_offset)
+        years = years.to_year(other.end, moves=drift.end, offset=drift.end_offset)
+        if drift.until is not None:
+            years = years.to_year(drift.until, moves=EndDrift.FIXED)
+        return years
+
+
+def _paired_years(left: FrameShape, right: FrameShape) -> tuple[Period | None, PeriodDrift]:
+    """The years a two-sided verb's output holds: those both sides hold, and how they move.
+
+    `None` with the drift of fixed years when either side is unbounded, and
+    `None` when bounded sides share no year, which `_rejects_paired_periods`
+    refuses before any transform reads these.
+    """
+    if left.period is None or right.period is None:
+        return None, FIXED
+    return _Years.of(left.period, left.drift).within(right.period, right.drift).held()
+
+
+def windowed(
+    shape: FrameShape, window: Period | None, rolling: RollingWindow | None = None
+) -> tuple[Period | None, PeriodDrift]:
+    """Return the years of `shape` that a rank or growth `window` keeps, and how newer data moves them.
+
+    Either side unbounded leaves the other. `rolling` names the window's
+    ends that follow the newest data. The years are `None` only when both
+    are unbounded, or when the window keeps none of them:
+    `_rejects_rank_window` refuses a window that shares no year with a
+    bounded period before any caller reads this.
     """
     if window is None:
-        return period
-    if period is None:
-        return window
-    return _intersection(period, window)
+        return shape.period, shape.drift
+    period = shape.period if shape.period is not None else window
+    years = _Years.of(period, shape.drift)
+    start = rolling.window_start if rolling is not None else None
+    years = years.from_year(
+        window.start,
+        moves=StartDrift.FIXED if start is None else StartDrift.ANCHOR,
+        offset=None if start is None else start.offset,
+    )
+    end = rolling.window_end if rolling is not None else None
+    years = years.to_year(
+        window.end,
+        moves=EndDrift.FIXED if end is None else EndDrift.ANCHOR,
+        offset=None if end is None else end.offset,
+    )
+    return years.held()
 
 
-def _spans_years(period: Period | None) -> bool:
-    """Whether `period` covers more than one year; an unbounded one may."""
-    return period is None or period.end > period.start
+@dataclass(frozen=True, slots=True)
+class _MovingYear:
+    """How newer data moves one year: a frame's first or last year, or a step's window year.
+
+    `moves` is `EndDrift.FIXED`, `ANCHOR` for a year on the anchor at an
+    offset, or `DATA` for each series' own newest year, which only a last
+    year is. `trails` is a first year a fixed year sets today, behind which
+    a bound on the anchor sits until the anchor has moved far enough to
+    pass it (`StartDrift.TRAILS`). `offset` is the offset on the anchor of
+    a year on it, or of the bound a trailing year trails. Every year on the
+    anchor or trailing that `_stays` compares after a first year carries
+    one.
+    `until` is the fixed year a moving last year stops at. `today` is the
+    year today, where the caller states it: a bound's, which `_stays`
+    compares a stopped year's `until` against, and both years', whose
+    order today `_stays` then checks too.
+    """
+
+    moves: EndDrift = EndDrift.FIXED
+    trails: bool = False
+    offset: int | None = None
+    until: int | None = None
+    today: int | None = None
+
+    @property
+    def rises(self) -> bool:
+        """Whether newer data moves the year later: it moves, or a bound on the anchor will move it."""
+        return self.moves is not EndDrift.FIXED or self.trails
+
+
+def _first_year(drift: PeriodDrift) -> _MovingYear:
+    """How newer data moves the first year of a frame moving as `drift` says."""
+    moves = EndDrift.ANCHOR if drift.start is StartDrift.ANCHOR else EndDrift.FIXED
+    return _MovingYear(
+        moves=moves, trails=drift.start is StartDrift.TRAILS, offset=drift.start_offset
+    )
+
+
+def _last_year(drift: PeriodDrift, today: int | None = None) -> _MovingYear:
+    """How newer data moves the last year of a frame moving as `drift` says, `today` today."""
+    return _MovingYear(moves=drift.end, offset=drift.end_offset, until=drift.until, today=today)
+
+
+def _stays(
+    year: _MovingYear, bound: _MovingYear, *, after: bool, same_series: bool = False
+) -> bool:
+    """Whether `year`, at or after `bound` today when `after` and at or before it otherwise, stays so as newer data arrives.
+
+    This is the one place the rule is written, for every reader asking
+    whether a year stays inside years that move: `years_run_out`,
+    `anchor_year_stays`, `growth_endpoint_leaves`, `span_end_leaves` and
+    `_picked_year_leaves`. Where both years state `today`, `year` has to
+    stand there today too. Every other reader has checked that already. A
+    year moves only later, under the stated coverage every rule assumes
+    (planner/README.md, 'Years a step reads'). Every rolling year of one
+    group counts from one newest year (`planner.plan._check_rolling_years_agree`), and the
+    years compared here always fall in one group, since a step reading both
+    merges their groups. So the years held today order two years that both
+    follow it as long as both do.
+
+    After a first year, a year stays when the bound is fixed, and against
+    a bound that rises only when the year follows the anchor itself, or
+    trails a bound on it, at an offset no earlier than the bound's
+    (`offset`). Against a trailing bound, a year on the anchor stays, since
+    the bound's offset sits behind a fixed year the year holds today.
+
+    Before a last year, a year stays when it is fixed and so does not
+    rise, or when a fixed bound stops it (`until`) at or before the bound's
+    year today. Otherwise it leaves a fixed bound, and a moving one a
+    fixed bound stops before the year's own stop. A year on the anchor
+    stays before a bound moving with no such stop: one ending on each
+    series' own newest reaches the newest year read over its retrievals
+    (`anchor_misses`). One ending on each series' own newest stays only
+    before such a bound over the same series, entity by entity
+    (`same_series`).
+    """
+    if (
+        year.today is not None
+        and bound.today is not None
+        and (year.today < bound.today if after else year.today > bound.today)
+    ):
+        return False
+    if after:
+        follows = year.moves is EndDrift.ANCHOR or year.trails
+        if follows and bound.rises:
+            assert year.offset is not None and bound.offset is not None, (year, bound)
+            follows = year.offset >= bound.offset
+        return not bound.rises or follows
+    if not year.rises:
+        return True
+    if year.until is not None and bound.today is not None and year.until <= bound.today:
+        return True
+    if bound.moves is EndDrift.FIXED or (
+        bound.until is not None and (year.until is None or year.until > bound.until)
+    ):
+        return False
+    return year.moves is not EndDrift.DATA or (bound.moves is EndDrift.DATA and same_series)
+
+
+def years_run_out(shape: FrameShape) -> str | None:
+    """Why newer data leaves `shape` no year, or `None` when it keeps some.
+
+    A bound that follows the anchor sets the first year, or will once it
+    passes a fixed one (`StartDrift.TRAILS`), and a fixed bound caps
+    the last year: the end is fixed, or a moving end stops at `until`. Each
+    new year moves the first year a year closer to that cap, whichever step
+    states either bound, until the frame keeps none (`_stays`). A window or
+    a filter keeping one year on the anchor over years a fixed bound caps
+    runs out the same way. `planner.plan` and `compiler.shapes` read this on
+    every step's output, so a first year that follows the newest data is
+    refused against a fixed last year in the same filter or window as in a
+    step it reads, or on the other side of a two-sided verb.
+    """
+    drift = shape.drift
+    if _stays(_first_year(drift), _last_year(drift), after=False):
+        return None
+    return (
+        f"its first year follows the newest data and {_fixed_cap(shape)} caps the years it "
+        "reads, here or in a step it reads, so each new year moves the first year toward "
+        "that last year until no year is left; have the last year follow the newest data "
+        "too, or fix the first year"
+    )
+
+
+def anchor_year_stays(drift: PeriodDrift) -> bool:
+    """Whether a year on the anchor stays inside the years of a frame moving as `drift` says.
+
+    A fixed bound that caps the last year, a fixed end or a moving end that
+    stops at `until`, leaves it behind (`_stays`).
+    """
+    return _stays(_MovingYear(moves=EndDrift.ANCHOR), _last_year(drift), after=False)
+
+
+def _fixed_cap(shape: FrameShape) -> str:
+    """The fixed last year that caps `shape`'s years, as a refusal names it."""
+    until = shape.drift.until
+    cap = until if until is not None else shape.period.end if shape.period else None
+    return "a fixed last year" if cap is None else f"a fixed last year, {cap},"
+
+
+def growth_endpoint_leaves(
+    shape: FrameShape, window: Period, rolling: RollingWindow | None
+) -> str | None:
+    """Why newer data takes a growth window's first or last year out of `shape`, or `None`.
+
+    `run_growth` reads each entity's values in exactly those two years and
+    leaves out an entity missing either (`endpoint_missing`), so each has to
+    stay a year the input holds, where a rank window keeps reading whatever
+    years it shares with the input (`windowed`). An endpoint that
+    follows the newest data leaves an input whose last year a fixed bound
+    caps: the end is fixed, or a moving end stops at `until`. A fixed
+    endpoint leaves an input whose first year rises with the newest data,
+    or will once it passes a fixed one (`StartDrift.TRAILS`). An
+    endpoint that follows the newest data over a first year doing the same
+    moves with it (`_stays`). `planner.plan` and `compiler.shapes` read
+    this on every growth.
+    """
+    first, last = _first_year(shape.drift), _last_year(shape.drift)
+    for name, year, relative in (
+        ("first", window.start, rolling.window_start if rolling is not None else None),
+        ("last", window.end, rolling.window_end if rolling is not None else None),
+    ):
+        endpoint = (
+            _MovingYear()
+            if relative is None
+            else _MovingYear(moves=EndDrift.ANCHOR, offset=relative.offset)
+        )
+        if not _stays(endpoint, last, after=False):
+            return (
+                f"a growth reads each entity's values in its window's first and last years, and "
+                f"its {name} year follows the newest data while {_fixed_cap(shape)} caps this "
+                "input, so "
+                "newer data moves that year past the input's years and leaves out every "
+                "entity; have the input's last year follow the newest data too, or fix the "
+                "window's years"
+            )
+        if not _stays(endpoint, first, after=True):
+            return (
+                f"a growth reads each entity's values in its window's first and last years, and "
+                f"its {name} year, {year}, is fixed while this input's first year follows the "
+                "newest data, so newer data moves the input's first year past it and leaves out "
+                "every entity; have that window year follow the newest data too, or fix the "
+                "input's first year"
+            )
+    return None
+
+
+def anchor_misses(sides: Sequence[FrameShape], anchored: Collection[str]) -> str | None:
+    """Why a two-sided step's open side can lack the years its other side follows, or `None`.
+
+    `anchored` is the retrievals the run resolves the step's newest year
+    over (`planner.plan.anchored_over`). A side whose first or last year
+    follows that year keeps years counted from it as newer data arrives. A
+    side whose last year is each series' own newest (`EndDrift.DATA`)
+    reaches the year only when it is resolved over that side's retrievals
+    too: otherwise the side's dataset can lag the other's, and the two
+    share no year once the other reports one it lacks. A rolling bound on a
+    step reading both sides resolves the year over both. `_stays` takes a
+    last year on each series' own newest as reaching the newest year, which
+    this rule makes true. `planner.plan` and `compiler.shapes` read it on
+    every step with two sides.
+    """
+    if not any(_follows_the_anchor(side.drift) for side in sides):
+        return None
+    missed = sorted(
+        {
+            root
+            for side in sides
+            if side.drift.end is EndDrift.DATA
+            for root in side.roots
+            if root not in anchored
+        }
+    )
+    if not missed:
+        return None
+    return (
+        f"one side's years follow the newest year, read over {sorted(anchored)!r}, and the "
+        f"other ends at each series' own newest year over {missed!r}, which that newest year "
+        "is not read over, so once one dataset reports a year the other lacks the sides "
+        "share no year; state the rolling bound on a step that reads both sides, where the "
+        "newest year is read over both, or fix the years"
+    )
+
+
+def _follows_the_anchor(drift: PeriodDrift) -> bool:
+    """Whether a bound on the anchor sets, or will set, a frame's first or last year."""
+    return drift.end is EndDrift.ANCHOR or _first_year(drift).rises
+
+
+def spans_years(period: Period | None, drift: PeriodDrift = FIXED) -> bool:
+    """Whether `period` covers, or newer data makes it cover, more than one year; an unbounded one may.
+
+    It comes to cover more when newer data adds years at its end that no
+    moving start takes away (`PeriodDrift.widens`).
+    """
+    return period is None or period.end > period.start or drift.widens
+
+
+def _shape_spans_years(shape: FrameShape) -> bool:
+    """Whether `shape`'s years are, or newer data makes them, more than one (`spans_years`)."""
+    return spans_years(shape.period, shape.drift)
 
 
 def _merged_time(left: FrameShape, right: FrameShape) -> TimeLabel:
@@ -365,11 +939,26 @@ def _merged_time(left: FrameShape, right: FrameShape) -> TimeLabel:
     return TimeLabel.OBSERVATION
 
 
+def _merged_span_of(left: FrameShape, right: FrameShape) -> Identifier | None:
+    """The step a two-sided verb's output span is named for: the one both sides name, else `None`."""
+    return left.span_of if left.span_of == right.span_of else None
+
+
 def _merged_roots(
     left: tuple[Identifier, ...], right: tuple[Identifier, ...]
 ) -> tuple[Identifier, ...]:
     """Return the sorted union of two sides' retrieval roots."""
     return tuple(sorted(set(left) | set(right)))
+
+
+def _without_level_filterability(roles: Sequence[RoleDimension]) -> tuple[RoleDimension, ...]:
+    """Roles after a calculation that no longer proves their type columns survived."""
+    return tuple(replace(role, level_filterable=False) for role in roles)
+
+
+def _role_key(role: RoleDimension) -> tuple[Identifier, str | None]:
+    """Return the stable identity used to carry a role through a filter."""
+    return (role.requirement_id, role.role)
 
 
 # --- The ten transforms ----------------------------------------------------
@@ -382,8 +971,7 @@ def retrieved(
     period: Period,
     measures: MeasureCount,
     unsummable_axes: tuple[str, ...] | None = None,
-    place_typed: bool = False,
-    mixed_levels: bool = False,
+    end_open: bool = False,
 ) -> FrameShape:
     """The shape a fresh `get_data` retrieval carries.
 
@@ -395,17 +983,20 @@ def retrieved(
     values are kept, and this function states which requirement a role
     belongs to and whether it is narrowed.
     `measures` and `unsummable_axes` are the caller's (see `FrameShape`).
-    `place_typed` lets a place-level filter read the retrieval, which
-    names no place. `mixed_levels` says it holds places at every level. The
-    plan states the first for a requirement whose `across` names the place
-    (`planner.plan.names_no_place`), since it cannot know which axis the word
-    covers. The compiler states both from the selected source: only a
-    source that leaves `observationAbout` open over several places mixes
-    levels (`compiler.evidence.opens_place_axis`).
+    Each role states whether a place-level filter may read it
+    (`level_filterable`) and whether it holds places at every level
+    (`mixed_levels`). The plan marks every open role filterable and none
+    mixed, since it cannot know which axis an `across` word covers. The
+    compiler states both from the selected source: only a source that leaves
+    `observationAbout` open over several places mixes levels
+    (`compiler.evidence.opens_place_axis`).
+
+    `end_open` says the retrieval states no end year (`period_end_open`), so
+    newer data adds years after `period`, up to each series' own newest
+    (`EndDrift.DATA`).
     """
-    stamped = tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles)
     return FrameShape(
-        roles=stamped,
+        roles=tuple(replace(role, requirement_id=requirement_id, narrowed=False) for role in roles),
         measures=measures,
         value=ValueKind.MEASURED,
         time=TimeLabel.OBSERVATION,
@@ -415,8 +1006,7 @@ def retrieved(
         limited=False,
         roots=(requirement_id,),
         unsummable_axes=unsummable_axes,
-        mixed_levels=mixed_levels,
-        place_typed=place_typed,
+        drift=PeriodDrift(end=EndDrift.DATA if end_open else EndDrift.FIXED),
     )
 
 
@@ -427,6 +1017,7 @@ def aggregated(
     by_entity: bool,
     by_period: bool,
     by_breakdown: bool = False,
+    step_id: Identifier | None,
 ) -> FrameShape:
     """The shape `aggregate` produces, reducing `shape` by `reduction` per entity and/or period.
 
@@ -435,37 +1026,43 @@ def aggregated(
     entity keeps the parties the requirement names and sums an open
     dimension away, as it sums the periods a group without period. The frame
     becomes one row per entity exactly when the group does not keep
-    period apart. `measures`, `value` and `period` carry through unchanged --
-    aggregate reduces rows, not what they measure. `cut_per_period` survives
+    period apart. `measures`, `value`, `period` and its `drift` carry through
+    unchanged, since aggregate reduces rows and leaves what they measure
+    alone. `cut_per_period` survives
     only a group by both entity and period, which keeps the gaps; a group by
-    period alone totals each period's kept rows, and a group by entity alone
-    is refused over a cut frame. Mixed levels survive only a group by
+    period alone totals each period's kept rows, and any group without
+    period is refused over a cut frame. Mixed levels survive only a group by
     entity that sums no open dimension. A group summing the open place
     dimension is refused over them. A group that keeps period apart keeps
     the input's own period labels, a `SPAN` included. Any other group
     labels each row with the period that supplied its value under a `max`
     or `min`, as analysis-mcp does: over a series
     of years that is one `PICKED` year per row (a single year when the
-    period holds one), and over a `SPAN` it is the span itself. A `sum` or
+    period holds one and newer data adds none, `spans_years`), and over a
+    `SPAN` it is the span itself. A `sum` or
     `mean` over any other group collapses the periods into a `SPAN`. Over a
     `PICKED` input analysis-mcp labels that span with the picked years the
-    rows hold, which only the data decides, so its `period` is `None`.
+    rows hold, which only the data decides, so its `period` is `None`. A
+    span the aggregate writes is named for `step_id`, and one it keeps
+    keeps its name (`FrameShape.span_of`).
     """
     period = shape.period
     if by_period:
         time = shape.time
     elif reduction in (Reduction.MAX, Reduction.MIN) and shape.time is not TimeLabel.SPAN:
-        time = TimeLabel.PICKED if _spans_years(shape.period) else TimeLabel.OBSERVATION
+        time = TimeLabel.PICKED if _shape_spans_years(shape) else TimeLabel.OBSERVATION
     else:
         time = TimeLabel.SPAN
         if shape.time is TimeLabel.PICKED:
             period = None
+    drift = shape.drift if period is not None else FIXED
     if by_entity:
         roles = tuple(role for role in shape.roles if not role.open)
     elif by_breakdown:
         roles = tuple(role for role in shape.roles if role.breakdown)
     else:
         roles = ()
+    roles = _without_level_filterability(roles)
     return FrameShape(
         roles=roles,
         measures=shape.measures,
@@ -477,12 +1074,27 @@ def aggregated(
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels and by_entity,
         composed_unit=shape.composed_unit,
+        drift=drift,
+        span_of=_span_of(time, shape, step_id),
     )
 
 
-def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameShape:
+def _span_of(time: TimeLabel, shape: FrameShape, step_id: Identifier | None) -> Identifier | None:
+    """The step a step's output span is named for: its input's when it keeps the input's span, else `step_id`."""
+    if time is not TimeLabel.SPAN:
+        return None
+    return shape.span_of if shape.time is TimeLabel.SPAN else step_id
+
+
+def grown(
+    shape: FrameShape,
+    *,
+    change: GrowthChange,
+    window: Period,
+    rolling: RollingWindow | None = None,
+    step_id: Identifier | None,
+) -> FrameShape:
     """The shape `growth` produces over `window`, read as `change` says.
 
     Every row is labelled with `window` itself, the interval
@@ -492,7 +1104,10 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
     points when the input was a `RATIO`. An absolute change over an
     `ORDINAL` input is a count of places and stays `ORDINAL`.
     An absolute change stays in its input's unit, a composed one included;
-    a relative change has none.
+    a relative change has none. `rolling` names the window's ends that
+    follow the newest data, and the frame moves as the years of `shape` the
+    window keeps do (`windowed`), though the window, and so the label, is
+    stated whatever years the data leaves. The span is named for `step_id`.
     """
     if change is GrowthChange.RELATIVE:
         value = ValueKind.RATIO
@@ -500,8 +1115,9 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
         value = ValueKind.ORDINAL
     else:
         value = ValueKind.DIFFERENCE
+    roles = _without_level_filterability(shape.roles)
     return FrameShape(
-        roles=shape.roles,
+        roles=roles,
         measures=shape.measures,
         value=value,
         time=TimeLabel.SPAN,
@@ -511,8 +1127,9 @@ def grown(shape: FrameShape, *, change: GrowthChange, window: Period) -> FrameSh
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels,
         composed_unit=shape.composed_unit and change is GrowthChange.ABSOLUTE,
+        drift=replace(windowed(shape, window, rolling)[1], decided_by_data=False),
+        span_of=step_id,
     )
 
 
@@ -523,6 +1140,8 @@ def ranked(
     window: Period | None,
     per_period: bool,
     limit: int | None,
+    rolling: RollingWindow | None = None,
+    step_id: Identifier | None,
 ) -> FrameShape:
     """The shape `rank` produces, in its collapsing or per-period mode.
 
@@ -536,8 +1155,8 @@ def ranked(
     afterwards. Its `value` is the rank position itself, an
     `ORDINAL`, unless `limit` is set: a limited ranking keeps each period's
     top entities with their measured values, as `run_rank` writes them, and
-    marks the frame `cut_per_period` when it spans more than one real
-    period. A `SPAN` input holds one period, so has no gap to leave. A
+    marks the frame `cut_per_period` when it spans, or newer data makes it
+    span, more than one real period. A `SPAN` input holds one period, so has no gap to leave. A
     per-period rank over a frame already cut keeps its gaps. Either mode
     marks the frame `limited` when `limit` is set.
 
@@ -545,11 +1164,15 @@ def ranked(
     keeps: `run_rank` labels a collapsed row with the extent of the periods
     it ranked, so a 2010-2025 window over 2018-2022 labels each row
     `2018/2022`. Over a `SPAN`, `_rejects_rank` admits only a window that
-    contains it, so the period stays the span's own.
+    contains it, so the period stays the span's own. `rolling` names the
+    window's ends that follow the newest data, which move the years it
+    keeps (`windowed`). A span the rank writes is named for `step_id`. A
+    per-period rank keeps its input's span and its name, and so does a
+    collapsing rank over a span with no window (`FrameShape.span_of`).
     """
     axis_role = _select_role(shape.roles, axis)
-    roles = (axis_role,) if axis_role is not None else ()
-    period = windowed_years(shape.period, window)
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
+    period, drift = windowed(shape, window, rolling)
     limited = limit is not None or shape.limited
     if per_period:
         return FrameShape(
@@ -561,10 +1184,12 @@ def ranked(
             one_row_per_entity=False,
             cut_per_period=(limit is not None or shape.cut_per_period)
             and shape.time is TimeLabel.OBSERVATION
-            and _spans_years(period),
+            and spans_years(period, drift),
             limited=limited,
             roots=shape.roots,
             composed_unit=shape.composed_unit and limit is not None,
+            drift=drift,
+            span_of=shape.span_of,
         )
     return FrameShape(
         roles=roles,
@@ -578,82 +1203,231 @@ def ranked(
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
         composed_unit=shape.composed_unit,
+        drift=drift,
+        span_of=_span_of(TimeLabel.SPAN, shape, step_id) if window is None else step_id,
     )
 
 
-def _year_bounds(predicates: Sequence[Predicate]) -> tuple[int | None, int | None]:
-    """The first and last year the `PeriodThreshold` bounds in `predicates` leave standing.
+type _ThresholdEnd = tuple[int, int | None]
 
-    `gte` and `lte` close on their own year, `gt` on the year after and `lt`
-    on the year before. Either end is `None` when no threshold bounds it.
+
+def _threshold_ends(
+    threshold: PeriodThreshold,
+) -> tuple[_ThresholdEnd | None, _ThresholdEnd | None]:
+    """The first and the last year `threshold` keeps, each `None` where it bounds no such end.
+
+    Each end is a year today and its offset on the anchor, `None` for a
+    fixed threshold. `gte`, `lte` and `eq` close on their own year, `gt` on
+    the year after and `lt` on the year before. `ne` bounds neither end.
     """
-    thresholds = [p for p in predicates if isinstance(p, PeriodThreshold)]
-    lower = max(
-        (p.year + 1 if p.op == "gt" else p.year for p in thresholds if p.op in ("gt", "gte")),
-        default=None,
-    )
-    upper = min(
-        (p.year - 1 if p.op == "lt" else p.year for p in thresholds if p.op in ("lt", "lte")),
-        default=None,
-    )
-    return lower, upper
+    rolling = threshold.rolling
+    first = last = None
+    if threshold.op in ("gt", "gte", "eq"):
+        after = 1 if threshold.op == "gt" else 0
+        first = (threshold.year + after, None if rolling is None else rolling.offset + after)
+    if threshold.op in ("lt", "lte", "eq"):
+        before = 1 if threshold.op == "lt" else 0
+        last = (threshold.year - before, None if rolling is None else rolling.offset - before)
+    return first, last
 
 
 @dataclass(frozen=True, slots=True)
 class YearFilter:
-    """What a filter's `PeriodThreshold` predicates leave of a frame's period.
+    """What a filter's `PeriodThreshold` predicates leave of a frame's years.
 
     `period` is the frame's period narrowed to the first and the last year
-    left, `None` for an unbounded one. `leaves_one_year` is whether the
-    predicates leave exactly one year standing.
+    left, `None` for an unbounded one, and `drift` how newer data moves
+    them. `leaves_one_year` is whether the predicates leave exactly one
+    year standing, and newer data adds none (`spans_years`). `first_kept`
+    and `last_kept` are the first and the last year the predicates
+    themselves keep, whatever the frame holds, `None` for an end none
+    bounds (`_kept_years`). `by_value` is whether a `ValueThreshold` among
+    the predicates keeps only the rows whose values pass, so only the data
+    decides which of these years the rows hold.
     """
 
     period: Period | None
     leaves_one_year: bool
+    drift: PeriodDrift = FIXED
+    first_kept: _MovingYear | None = None
+    last_kept: _MovingYear | None = None
+    by_value: bool = False
 
 
-def year_filter(period: Period | None, predicates: Sequence[Predicate]) -> YearFilter | str:
-    """Read the `PeriodThreshold` predicates in `predicates` against `period`.
+def _kept_years(
+    thresholds: Sequence[PeriodThreshold],
+) -> tuple[_MovingYear | None, _MovingYear | None]:
+    """The first and the last year `thresholds` keep, today and as newer data moves them.
 
-    `eq` leaves one year, `_year_bounds` closes the others on a bound, and
+    The latest first year and the earliest last year any threshold sets
+    hold. A threshold stated with `rolling` sets a year on the anchor at its
+    offset (one more for `gt`, one less for `lt`), and a fixed one a fixed
+    year. A first year on the anchor behind a fixed one trails it, and a
+    last year on the anchor before a fixed one stops at it (`until`). One
+    that a fixed year bounds the other way today does not pass it.
+    """
+    ends = [_threshold_ends(threshold) for threshold in thresholds]
+    firsts = [first for first, _ in ends if first is not None]
+    lasts = [last for _, last in ends if last is not None]
+    return _kept_year(firsts, first=True), _kept_year(lasts, first=False)
+
+
+def _kept_year(ends: Sequence[_ThresholdEnd], *, first: bool) -> _MovingYear | None:
+    """The first year, when `first`, or the last year that `ends` keep together (`_kept_years`).
+
+    Each end is a year today and its offset on the anchor (`_threshold_ends`).
+    """
+    pick = max if first else min
+    fixed = pick((year for year, offset in ends if offset is None), default=None)
+    rolling = pick(((year, offset) for year, offset in ends if offset is not None), default=None)
+    if rolling is None:
+        return None if fixed is None else _MovingYear(today=fixed)
+    year, offset = rolling
+    if fixed is None or (year >= fixed if first else year < fixed):
+        until = None if first else fixed
+        return _MovingYear(moves=EndDrift.ANCHOR, offset=offset, until=until, today=year)
+    return _MovingYear(trails=first, offset=offset if first else None, today=fixed)
+
+
+def year_filter(
+    period: Period | None, predicates: Sequence[Predicate], *, drift: PeriodDrift = FIXED
+) -> YearFilter | str:
+    """Read the `PeriodThreshold` predicates in `predicates` against `period`, moving as `drift` says.
+
+    `eq` leaves one year, `_threshold_ends` closes the others on a bound, and
     `ne` removes its year, which moves an end only when that year is the
     first or the last left. `year != 2020` over 2020-2021 is therefore 2021
-    alone, and `year != 2021` over 2020-2022 is still 2020-2022. A filter
+    alone, and `year != 2021` over 2020-2022 leaves 2020-2022. The frame
+    keeps the years an `ne` removes as removed (`PeriodDrift.excluded`),
+    here and in every later step, so a later bound or window ending on one
+    of them ends on the year beyond it. An `ne` names a fixed year over
+    years that newer data does not move, since `planner.plan` refuses any
+    other (`RollingIssue.EXCLUSION_ROLLS`). A filter
     with no year predicate leaves `period` as it is and leaves no one year,
     whatever `period` spans. An unbounded `period` stays unbounded, and one
     year stands over it only where an `eq` or a pair of meeting bounds names
     it. Predicates that leave no year of `period` return the refusal reason:
     bounds that cross, an `eq` year outside `period` or its bounds, two
     different `eq` years, or `ne` years that remove every year left.
+
+    A threshold stated with `rolling` follows the newest data. A first year
+    such a threshold sets moves with it, a last year it sets follows the
+    anchor at the offset of that year (`EndDrift.ANCHOR`), the threshold's
+    own for `lte` and `eq` and one less for `lt`, and a fixed last year
+    stops a `period` that newer data widens there. `year
+    >= 2024` over 2024 with no end year leaves 2024 today and 2025 with it
+    once 2025 arrives, so it leaves no one year. A first year that follows
+    the newest data below a fixed last year leaves years today, and newer
+    data none (`years_run_out`).
     """
     thresholds = [p for p in predicates if isinstance(p, PeriodThreshold)]
-    lower, upper = _year_bounds(thresholds)
+    by_value = any(isinstance(p, ValueThreshold) for p in predicates)
+    first_kept, last_kept = _kept_years(thresholds)
     if period is None:
-        named = any(p.op == "eq" for p in thresholds) or (lower is not None and lower == upper)
-        return YearFilter(period=None, leaves_one_year=named)
-    start = period.start if lower is None else max(lower, period.start)
-    end = period.end if upper is None else min(upper, period.end)
-    years = set(range(start, end + 1))
+        named = any(p.op == "eq" for p in thresholds) or (
+            first_kept is not None and last_kept is not None and first_kept.today == last_kept.today
+        )
+        return YearFilter(
+            period=None,
+            leaves_one_year=named,
+            drift=drift,
+            first_kept=first_kept,
+            last_kept=last_kept,
+            by_value=by_value,
+        )
+    years = _Years.of(period, drift)
     for threshold in thresholds:
-        if threshold.op == "eq":
-            years &= {threshold.year}
-        elif threshold.op == "ne":
-            years.discard(threshold.year)
-    if not years:
+        first, last = _threshold_ends(threshold)
+        if first is not None:
+            year, offset = first
+            moves = StartDrift.FIXED if offset is None else StartDrift.ANCHOR
+            years = years.from_year(year, moves=moves, offset=offset)
+        if last is not None:
+            year, offset = last
+            years = years.to_year(
+                year, moves=EndDrift.FIXED if offset is None else EndDrift.ANCHOR, offset=offset
+            )
+    removed = years.drift.excluded | {t.year for t in thresholds if t.op == "ne"}
+    if set(range(years.start, years.end + 1)) <= removed:
         return f"the year filter leaves no year of {period.start}-{period.end}"
+    narrowed, left = replace(years, drift=replace(years.drift, excluded=removed)).held()
+    assert narrowed is not None, years
     return YearFilter(
-        period=Period(start=min(years), end=max(years)),
-        leaves_one_year=bool(thresholds) and len(years) == 1,
+        period=narrowed,
+        leaves_one_year=bool(thresholds) and not spans_years(narrowed, left),
+        drift=left,
+        first_kept=first_kept,
+        last_kept=last_kept,
+        by_value=by_value,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class LevelFilter:
+    """What a filter's `PlaceLevel` predicates keep at one level.
+
+    `role_keys` names, as `(requirement_id, role)`, each role a predicate
+    targets (`level_roles`), in predicate order. `available` is whether there
+    is one and each carries the place-type column a level reads
+    (`RoleDimension.level_filterable`).
+    """
+
+    role_keys: tuple[tuple[Identifier, str | None], ...] = ()
+    available: bool = False
+
+
+def level_roles[R: LevelRole](predicate: PlaceLevel, roles: Sequence[R]) -> tuple[R, ...]:
+    """The roles of `roles` a `PlaceLevel` keeps one level of.
+
+    A predicate stating its `role` targets the dimensions that phrase names
+    (`roles_named`). One stating none targets every place dimension, else
+    the one open role, such as a flow side, and nothing when several are
+    open. One result is a selection. None, or several, is a refusal each
+    caller words.
+    """
+    if predicate.role is not None:
+        return roles_named(roles, predicate.role)
+    places = tuple(role for role in roles if role.place)
+    if places:
+        return places
+    open_roles = tuple(role for role in roles if role.open)
+    return open_roles if len(open_roles) == 1 else ()
+
+
+def level_filter(roles: Sequence[LevelRole], predicates: Sequence[Predicate]) -> LevelFilter | str:
+    """Read the `PlaceLevel` predicates in `predicates` against `roles`.
+
+    Each predicate keeps one level of the role it targets (`level_roles`).
+    A predicate targeting several roles returns the refusal reason. One
+    targeting none levels nothing, and a filter with no levelled role, or
+    one whose role lost its place-type column, reads a level only where the
+    frame is `place_typed` (`rejects`).
+    """
+    keys: dict[tuple[Identifier, str | None], None] = {}
+    for predicate in predicates:
+        if not isinstance(predicate, PlaceLevel):
+            continue
+        targets = level_roles(predicate, roles)
+        if len(targets) > 1:
+            named = predicate.role or "an omitted role"
+            return (
+                f"a place_level filter names {named!r}, which resolves to {len(targets)} "
+                "roles; state one role"
+            )
+        for target in targets:
+            keys[(target.requirement_id, target.role)] = None
+    available = bool(keys) and all(
+        role.level_filterable for role in roles if (role.requirement_id, role.role) in keys
+    )
+    return LevelFilter(role_keys=tuple(keys), available=available)
 
 
 def filtered(
     shape: FrameShape,
     *,
     narrowed_roles: Sequence[str | None],
-    period: Period | None,
-    pins_one_year: bool,
-    keeps_one_level: bool = False,
+    years: YearFilter,
+    levelled_role_keys: Sequence[tuple[Identifier, str | None]] = (),
 ) -> FrameShape:
     """The shape `filter` produces: everything `shape` carries, plus what got narrowed.
 
@@ -665,13 +1439,18 @@ def filtered(
     one, and stating it narrows the dimension it names (`roles_named`)
     alone, a place word naming the place dimension. Each matching
     dimension is marked `narrowed=True` and every other field is kept.
-    `period` and `pins_one_year` are `year_filter`'s reading of the filter's
-    predicates against `shape.period`: its `period` and `leaves_one_year`. A filter keeps `cut_per_period` only while `period`
-    still spans more than one year, since a single period has no gap
-    between periods, and always keeps `limited`. A `PICKED` frame narrowed
-    to one year is a plain `OBSERVATION`: every row left is in that year. A filter that
-    `keeps_one_level` (a `PlaceLevel` predicate) leaves its places at one
-    level; every filter keeps the place-type column its input carries.
+    `years` is `year_filter`'s reading of the filter's predicates against
+    `shape`'s years, which the output holds. A filter that leaves one year
+    holds one row per entity. A filter keeps `cut_per_period` only while
+    the years span, or newer data makes them span, more than one
+    (`spans_years`), since a single period has no gap between periods, and
+    always keeps `limited`. A `PICKED` frame narrowed to one year is a
+    plain `OBSERVATION`: every row left is in that year. A filter leaves
+    the roles of `levelled_role_keys` (`level_filter`) at one level. Every
+    filter keeps the place-type column its input carries. A
+    value threshold over rows labelled with their own years leaves years
+    only the data decides (`PeriodDrift.decided_by_data`). Over a span it
+    keeps rows whose one label a step has already written.
     """
     narrows_every_role = None in narrowed_roles
     named = [
@@ -680,25 +1459,35 @@ def filtered(
         if phrase is not None
         for role in roles_named(shape.roles, phrase)
     ]
+    levelled = set(levelled_role_keys)
     roles = tuple(
-        replace(role, narrowed=True) if narrows_every_role or role in named else role
+        replace(
+            role,
+            narrowed=role.narrowed or narrows_every_role or role in named,
+            levelled=role.levelled or _role_key(role) in levelled,
+            mixed_levels=False if _role_key(role) in levelled else role.mixed_levels,
+        )
         for role in shape.roles
     )
-    picked_one_year = shape.time is TimeLabel.PICKED and not _spans_years(period)
+    several = spans_years(years.period, years.drift)
+    picked_one_year = shape.time is TimeLabel.PICKED and not several
+    drift = years.drift
+    if years.by_value and shape.time is not TimeLabel.SPAN:
+        drift = replace(drift, decided_by_data=True)
     return FrameShape(
         roles=roles,
         measures=shape.measures,
         value=shape.value,
         time=TimeLabel.OBSERVATION if picked_one_year else shape.time,
-        period=period,
-        one_row_per_entity=shape.one_row_per_entity or pins_one_year,
-        cut_per_period=shape.cut_per_period and not pins_one_year and _spans_years(period),
+        period=years.period,
+        one_row_per_entity=shape.one_row_per_entity or years.leaves_one_year,
+        cut_per_period=shape.cut_per_period and not years.leaves_one_year and several,
         limited=shape.limited,
         roots=shape.roots,
         unsummable_axes=shape.unsummable_axes,
-        mixed_levels=shape.mixed_levels and not keeps_one_level,
-        place_typed=shape.place_typed,
         composed_unit=shape.composed_unit,
+        drift=drift,
+        span_of=shape.span_of,
     )
 
 
@@ -713,34 +1502,39 @@ def shared(
 
     Only the numerator's side decides the output's role dimension -- the one
     narrow-lineage rule every non-terminal verb here follows, so which
-    requirement stands behind the output column is always answerable. The
-    result keeps every numerator entity: a pooled denominator divides each
-    by one total per period, and analysis-mcp's `run_share_of` refuses a
-    per-axis call outright at the first numerator key the denominator has no
-    group for. So the output is `limited` exactly when the numerator is.
-    `run_share_of` writes one row per numerator key per period it shares
-    with its denominator, and refuses a key sharing none, so the output
-    holds one row per entity whenever the numerator does: a share of each
+    requirement stands behind the output column is always answerable.
+    analysis-mcp's `run_share_of` writes one row per numerator key per
+    period it shares with its denominator. It drops a key the denominator
+    has no group for, or one sharing no period with its group, and says so
+    in its result, as `quotiented` describes for `run_quotient_of`, which
+    does not make the output `limited`: a pooled denominator divides every
+    entity by one total per period, and `rejects` refuses a per-axis share
+    over a limited denominator. So the output is `limited` exactly when the
+    numerator is, and it holds one row per entity whenever the numerator
+    does: a share of each
     entity's total over 2018-2022 is one ratio per entity, which a rank
     reads with no reduction. It can also hold one row per entity when only
     the denominator does, such as a yearly series over a denominator
     filtered to one year; `one_row_per_entity` reads the numerator alone,
-    and `period`, the intersection of both sides' periods, then names the
-    one year. `scope` takes no part in this shape; it is accepted for
+    and `period`, the years both sides hold (`_paired_years`), then names
+    the one year. `scope` takes no part in this shape. It is accepted for
     symmetry with `rejects`, which does read it.
     """
     axis_role = _select_role(numerator.roles, axis) if axis is not None else None
-    roles = (axis_role,) if axis_role is not None else ()
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
+    period, drift = _paired_years(numerator, denominator)
     return FrameShape(
         roles=roles,
         measures=1,
         value=ValueKind.RATIO,
         time=_merged_time(numerator, denominator),
-        period=_intersection(numerator.period, denominator.period),
+        period=period,
         one_row_per_entity=numerator.one_row_per_entity,
         cut_per_period=False,
         limited=numerator.limited,
         roots=_merged_roots(numerator.roots, denominator.roots),
+        drift=drift,
+        span_of=_merged_span_of(numerator, denominator),
     )
 
 
@@ -758,7 +1552,7 @@ def quotiented(
     no column of the result. analysis-mcp's `run_quotient_of` writes one row
     per numerator key per period both sides report, so the output holds one
     row per entity when either side does, and its period is the years both
-    cover. It drops a key the denominator has no group for and says so in
+    hold (`_paired_years`). It drops a key the denominator has no group for and says so in
     its result, which does not make the output `limited`: only a rank
     `limit` upstream does, on the numerator, or on a denominator keyed by
     `denominator_axis`, whose missing entities take their numerator rows
@@ -766,8 +1560,8 @@ def quotiented(
     quotient's series.
     """
     axis_role = _select_role(numerator.roles, axis) if axis is not None else None
-    roles = (axis_role,) if axis_role is not None else ()
-    period = _intersection(numerator.period, denominator.period)
+    roles = _without_level_filterability((axis_role,) if axis_role is not None else ())
+    period, drift = _paired_years(numerator, denominator)
     return FrameShape(
         roles=roles,
         measures=1,
@@ -776,10 +1570,12 @@ def quotiented(
         period=period,
         one_row_per_entity=numerator.one_row_per_entity or denominator.one_row_per_entity,
         cut_per_period=(numerator.cut_per_period or denominator.cut_per_period)
-        and _spans_years(period),
+        and spans_years(period, drift),
         limited=numerator.limited or (denominator_axis is not None and denominator.limited),
         roots=_merged_roots(numerator.roots, denominator.roots),
         composed_unit=True,
+        drift=drift,
+        span_of=_merged_span_of(numerator, denominator),
     )
 
 
@@ -788,17 +1584,20 @@ def compared(left: FrameShape, right: FrameShape) -> FrameShape:
 
     The difference is in the two sides' one unit, composed when theirs is.
     """
+    period, drift = _paired_years(left, right)
     return FrameShape(
         roles=(),
         measures=1,
         value=ValueKind.DIFFERENCE,
         time=_merged_time(left, right),
-        period=_intersection(left.period, right.period),
+        period=period,
         one_row_per_entity=True,
         cut_per_period=False,
         limited=left.limited or right.limited,
         roots=_merged_roots(left.roots, right.roots),
         composed_unit=left.composed_unit and right.composed_unit,
+        drift=drift,
+        span_of=_merged_span_of(left, right),
     )
 
 
@@ -810,16 +1609,19 @@ def summed_sides(left: FrameShape, right: FrameShape) -> FrameShape:
     through to name a requirement behind it. `rejects` admits only two sides
     holding the same kind of value, which the sum keeps.
     """
+    period, drift = _paired_years(left, right)
     return FrameShape(
         roles=(),
         measures=1,
         value=left.value,
         time=_merged_time(left, right),
-        period=_intersection(left.period, right.period),
+        period=period,
         one_row_per_entity=True,
         cut_per_period=False,
         limited=left.limited or right.limited,
         roots=_merged_roots(left.roots, right.roots),
+        drift=drift,
+        span_of=_merged_span_of(left, right),
     )
 
 
@@ -836,20 +1638,25 @@ def joined(left: FrameShape, right: FrameShape) -> FrameShape:
     right_role_names = {role.role for role in right.roles if role.role is not None}
     shared_roles = tuple(
         sorted(
-            (role for name, role in left_by_role.items() if name in right_role_names),
+            _without_level_filterability(
+                tuple(role for name, role in left_by_role.items() if name in right_role_names)
+            ),
             key=lambda role: role.role or "",
         )
     )
+    period, drift = _paired_years(left, right)
     return FrameShape(
         roles=shared_roles,
         measures=2,
         value=ValueKind.MEASURED,
         time=_merged_time(left, right),
-        period=_intersection(left.period, right.period),
+        period=period,
         one_row_per_entity=False,
         cut_per_period=False,
         limited=left.limited or right.limited,
         roots=_merged_roots(left.roots, right.roots),
+        drift=drift,
+        span_of=_merged_span_of(left, right),
     )
 
 
@@ -920,13 +1727,15 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
     A frame with no role dimension that rests on two retrievals, a
     `sum_of`'s or an unkeyed `share_of`'s or `quotient_of`'s, holds one series, so a group by
     entity reduces that series whole: a total over a span of two sources'
-    yearly sum. A group by entity keeps only the parties a requirement
-    names, so over a frame whose every party is open it would keep none.
+    yearly sum. Over one retrieval's frame it is refused, and an empty
+    group is the one figure it would mean. A group by entity keeps only the
+    parties a requirement names, so over a frame whose every party is open
+    it would keep none.
     """
     if by_entity and not shape.roles and len(shape.roots) < 2:
         return (
             "aggregate cannot group by entity over a frame with no role dimension; group by "
-            "entity in the step that collapsed the roles"
+            f"entity in the step that collapsed the roles, or, {one_figure_remedy()}"
         )
     open_roles = [role.role for role in shape.roles if role.open]
     if by_entity and open_roles and all(role.open or role.breakdown for role in shape.roles):
@@ -934,7 +1743,9 @@ def _missing_group_roles(shape: FrameShape, *, by_entity: bool, by_breakdown: bo
             "aggregate grouping by entity keeps the parties the requirement names apart and "
             f"sums its open {open_roles!r} away, and this input names no entity, so the group "
             "keeps nothing; group by period alone to total every member per year, or rank "
-            "with a reduction to set each member's total beside the others"
+            "the members to set each one's figure beside the others: over one year with "
+            "window_start and window_end on that year, or, only for an ask marked (across "
+            "years), with a reduction over the years taken together"
         )
     if by_breakdown and not any(role.breakdown for role in shape.roles):
         return (
@@ -989,11 +1800,13 @@ def _rejects_aggregate(
             "would hold only the entities whose value fell in it; group by entity alone, or "
             "aggregate the source by period before the max or min"
         )
-    if shape.cut_per_period and by_entity and not by_period:
+    if shape.cut_per_period and not by_period:
         return (
-            f"an aggregate by entity totals each entity's series, and {_CUT_PER_PERIOD}; "
-            "rank the source once, with the reduction, the limit and per_period=false, which "
-            "reduces each entity's whole series before the limit applies"
+            "an aggregate without period totals each series over its years, and "
+            f"{_CUT_PER_PERIOD}; rank the source once with the limit and per_period=false "
+            "instead, over one year with window_start and window_end on that year, or, only "
+            "for an ask marked (across years), with the reduction, which reduces each "
+            "entity's whole series before the limit applies"
         )
     return None
 
@@ -1002,7 +1815,7 @@ def _rejects_growth_time(shape: FrameShape) -> str | None:
     """Return why `shape`'s periods are no series for growth to read, or `None` when they are."""
     if shape.time is TimeLabel.PICKED:
         return (
-            f"growth reads each entity's series across years, and {_PICKED}; compute the "
+            f"growth reads each entity's series over several years, and {_PICKED}; compute the "
             "growth over the source's series, then take the max or min of its result"
         )
     if shape.time is not TimeLabel.OBSERVATION:
@@ -1013,8 +1826,36 @@ def _rejects_growth_time(shape: FrameShape) -> str | None:
     return None
 
 
-def _rejects_growth(shape: FrameShape, *, change: GrowthChange) -> str | None:
-    reason = _several_measures("growth", shape) or _rejects_growth_time(shape)
+def _rejects_growth_window(shape: FrameShape, window: Period | None) -> str | None:
+    """Return why `window` leaves a growth no endpoint, or `None` when it keeps both.
+
+    `run_growth` reads each entity's values in the window's first and last
+    years and leaves out an entity missing either (`endpoint_missing`), so a
+    window ending on a year a filter removed (`PeriodDrift.excluded`) leaves
+    out every entity. A rank window is held to the same removed years
+    (`_rejects_rank_window`).
+    """
+    if window is None:
+        return None
+    removed = sorted({window.start, window.end} & shape.drift.excluded)
+    if not removed:
+        return None
+    years = " and ".join(str(year) for year in removed)
+    return (
+        f"a growth reads each entity's values in its window's first and last years, and a "
+        f"filter removed {years} from this input, so no entity has both; set the window on "
+        "years the input holds, less the years a filter removed"
+    )
+
+
+def _rejects_growth(
+    shape: FrameShape, *, change: GrowthChange, window: Period | None = None
+) -> str | None:
+    reason = (
+        _several_measures("growth", shape)
+        or _rejects_growth_time(shape)
+        or _rejects_growth_window(shape, window)
+    )
     if reason is not None:
         return reason
     if shape.cut_per_period:
@@ -1101,29 +1942,87 @@ def _covers(outer: Period | None, inner: Period | None) -> bool:
     return outer is not None and inner is not None and outer.covers(inner)
 
 
-def _rejects_rank_window(shape: FrameShape, window: Period | None) -> str | None:
+def span_end_leaves(
+    span: FrameShape, window: Period, moves: PeriodDrift, *, same_series: bool = False
+) -> Literal["first", "last"] | None:
+    """Which year of `span`'s years newer data moves out of `window`, or `None` when they stay inside.
+
+    `span` is a frame whose years a reader matches as one, by its first and
+    last year. analysis-mcp labels a span with the years it collapsed: an
+    aggregate with every year its input held, across all its rows, a growth
+    with its window's two years and a rank with the years its window kept.
+    A picked frame's rows carry any year of its period. So those years move
+    as `span.drift` says. `window` is years that hold them today, a rank
+    window or the other side of a two-sided step, and `moves` says how newer
+    data moves it.
+
+    The span's first year has to stay at or after the window's, and its
+    last year at or before the window's (`_stays`). The last years of a
+    span and a window that both end on each series' own newest stay in step
+    only over the same series (`same_series`), since the years a picked
+    frame's row may carry are its own series' years. A span read from its dataset's
+    first year is taken at the first year it states.
+
+    A rank window over a span
+    (`_rejects_rank_window`), two spans a two-sided step matches on their
+    labels (`_rejects_paired_spans`), and a series a picked side matches on
+    each entity's year (`_rejects_paired_picked`) read it, in `planner.plan`
+    and `compiler.shapes` alike.
+    """
+    drift = span.drift
+    if not _stays(_first_year(drift), _first_year(moves), after=True):
+        return "first"
+    last = _last_year(moves, today=window.end)
+    return None if _stays(_last_year(drift), last, after=False, same_series=same_series) else "last"
+
+
+def _window_drift(rolling: RollingWindow | None) -> PeriodDrift:
+    """How a rank window moves with newer data: its ends that follow the newest data, as `rolling` names them."""
+    if rolling is None:
+        return FIXED
+    end = rolling.window_end
+    start = rolling.window_start
+    return PeriodDrift(
+        start=StartDrift.FIXED if start is None else StartDrift.ANCHOR,
+        start_offset=None if start is None else start.offset,
+        end=EndDrift.FIXED if end is None else EndDrift.ANCHOR,
+        end_offset=None if end is None else end.offset,
+    )
+
+
+def _rejects_rank_window(
+    shape: FrameShape, window: Period | None, rolling: RollingWindow | None = None
+) -> str | None:
     """Return why `window` leaves a rank no row of `shape`, or `None` when it keeps some.
 
     A window sharing no year with the input's period keeps no row, and
-    `run_rank` refuses `RankNoRowsInWindowError` in either mode.
+    `run_rank` refuses `RankNoRowsInWindowError` in either mode, as it does
+    for a window keeping only years a filter removed (`PeriodDrift.excluded`).
     analysis-mcp keeps a span row only when the window holds both the
     span's start and end years, so a window that cuts the span leaves no
-    row and the rank refuses. A span whose years are unknown here is known
-    to fit no window, so any window over it is refused.
+    row and the rank refuses, today or once newer data moves the span's
+    years out of it (`span_end_leaves`, with `rolling` the window's ends
+    that follow the newest data). A span whose years are unknown here is
+    known to fit no window, so any window over it is refused.
     """
     if window is None:
         return None
-    if shape.period is not None and _intersection(shape.period, window) is None:
+    kept = _intersection(shape.period, window)
+    if shape.period is not None and (
+        kept is None or set(range(kept.start, kept.end + 1)) <= shape.drift.excluded
+    ):
         years = _years_text(shape.period)
+        removed = "" if kept is None else " less the years a filter removed"
         return (
-            f"this input holds {years}, which a {window.start}-{window.end} rank window "
-            f"misses, so no row is left to rank; set the window inside {years}, or drop it"
+            f"this input holds {years}{removed}, which a {window.start}-{window.end} rank window "
+            f"misses, so no row is left to rank; set the window inside {years}{removed}, or "
+            "drop it"
         )
     if shape.time is not TimeLabel.SPAN:
         return None
     span = shape.period
     if _covers(window, span):
-        return None
+        return _rejects_moving_span(shape, window, rolling)
     if span is None:
         return (
             "a rank window keeps a row only when it covers every year the row's period does, "
@@ -1138,6 +2037,22 @@ def _rejects_rank_window(shape: FrameShape, window: Period | None) -> str | None
     )
 
 
+def _rejects_moving_span(
+    shape: FrameShape, window: Period, rolling: RollingWindow | None
+) -> str | None:
+    """Why newer data moves the span of `shape`, which `window` covers today, out of it (`span_end_leaves`), or `None`."""
+    leaves = span_end_leaves(shape, window, _window_drift(rolling))
+    if leaves is None or shape.period is None:
+        return None
+    return (
+        f"a rank window keeps a row only when it covers every year the row's period does, "
+        f"and this input's rows carry one span over {_years_text(shape.period)}, whose "
+        f"{leaves} year newer data moves out of the {window.start}-{window.end} window, so "
+        f"the window then keeps no row; drop the window, or have its {leaves} year follow "
+        "the newest data as the span's does"
+    )
+
+
 def _rejects_rank(
     shape: FrameShape,
     *,
@@ -1146,6 +2061,7 @@ def _rejects_rank(
     window: Period | None = None,
     per_period: bool = False,
     reduction: Reduction | None = None,
+    rolling: RollingWindow | None = None,
 ) -> str | None:
     reason = (
         _several_measures("rank", shape)
@@ -1154,7 +2070,7 @@ def _rejects_rank(
         or _rejects_rank_rows(shape)
         or _rejects_rank_axis(shape, axis)
         or _rejects_rank_picked(shape)
-        or _rejects_rank_window(shape, window)
+        or _rejects_rank_window(shape, window, rolling)
     )
     if reason is not None:
         return reason
@@ -1170,13 +2086,22 @@ def _rejects_rank(
 
 
 def _rejects_filter(
-    shape: FrameShape, *, place_level: bool = False, period_threshold: bool = False
+    shape: FrameShape,
+    *,
+    place_level: bool = False,
+    place_level_available: bool = False,
+    period_threshold: bool = False,
+    years: YearFilter | None = None,
 ) -> str | None:
     """Return why a filter refuses `shape`, or `None` when it may read it.
 
-    A year threshold refuses only rows labelled with an interval. A
-    `PICKED` frame's rows each carry a real year, so a threshold keeps the
-    entities whose value fell in the years it leaves.
+    A year threshold refuses rows labelled with an interval. A `PICKED`
+    frame's rows each carry a real year, so a threshold keeps the entities
+    whose value fell in the years it leaves, `years` (`year_filter`). It
+    has to keep them as newer data moves the year a max or min falls in
+    (`_picked_year_leaves`), or the entity whose max or min moves past a
+    year the threshold keeps drops out. An unbounded picked frame leaves
+    nothing known to check.
     """
     if period_threshold and _labels_a_span(shape):
         return (
@@ -1184,7 +2109,17 @@ def _rejects_filter(
             "years, such as 2018/2022, that no year orders against; filter the years before "
             "the step that collapsed them, or drop the year predicate"
         )
-    if place_level and not shape.place_typed:
+    if shape.time is TimeLabel.PICKED and years is not None and years.period is not None:
+        leaves = _picked_year_leaves(shape, years)
+        if leaves is not None:
+            return (
+                "a year filter compares each row's year, and this input holds each entity's "
+                f"max or min at the year it fell in, which newer data can move past the "
+                f"{leaves} year the filter keeps, {_years_text(years.period)} today, so the "
+                "filter then drops that entity; filter the years before the max or min, or "
+                "drop the year predicate"
+            )
+    if place_level and not (shape.place_typed or place_level_available):
         return (
             "a place_level filter reads a requirement that names no place, directly or through "
             "other filters: a named place has no level to choose, and every other step drops "
@@ -1193,22 +2128,66 @@ def _rejects_filter(
     return None
 
 
+def _picked_year_leaves(shape: FrameShape, years: YearFilter) -> Literal["first", "last"] | None:
+    """Which year a filter keeps, `years`, newer data moves a picked row of `shape` past, or `None`.
+
+    A picked row's year moves only later, and only while the years of
+    `shape` move. So a fixed first year the filter's thresholds keep is
+    not passed, and one on the anchor stays behind every row only while
+    the first year of `shape` follows the anchor at least as far ahead. A
+    last year they keep stays after every row only while the last year of
+    `shape` sits at or before it today and stays there, unless the years of
+    `shape` do not move at all. Both compare the years today and as they
+    move (`_stays`). A filter with no year threshold keeps every entity it
+    keeps today.
+    """
+    assert shape.period is not None, shape
+    first = _first_year(shape.drift)
+    last = _last_year(shape.drift, today=shape.period.end)
+    if years.first_kept is not None and not _stays(first, years.first_kept, after=True):
+        return "first"
+    moves = first.rises or last.rises
+    if moves and years.last_kept is not None and not _stays(last, years.last_kept, after=False):
+        return "last"
+    return None
+
+
 def _rejects_paired_periods(verb: str, shape: FrameShape, other: FrameShape | None) -> str | None:
     """Return why `verb`'s two sides share no period label, or `None` when they may.
 
     `share_of`, `quotient_of`, `compare` and `join` match rows on the `time_period` string,
     so a span such as `2018/2022` matches only the same span. Against single
-    years, or against a span over other years, analysis-mcp refuses
-    (`share_of_grain_mismatch`, `comparison_periods_disjoint`) or, for a
-    join, matches no row. A span whose years are unknown here (`period` is
+    years, or against a span over other years, no key shares a period, so
+    analysis-mcp refuses (`share_of_grain_mismatch`,
+    `comparison_periods_disjoint`) or, for a join, matches no row. A span whose years are unknown here (`period` is
     `None`) is known to match no span. A `PICKED` side is read by
-    `_rejects_paired_picked`.
+    `_rejects_paired_picked`. Two bounded sides that share no year, or
+    share only years a filter removed from either (`_paired_years`), match
+    no period today, so analysis-mcp writes no row, and a step reading the
+    result has no years to be checked against.
     """
     if other is None:
         return None
+    if (
+        shape.period is not None
+        and other.period is not None
+        and _paired_years(shape, other)[0] is None
+    ):
+        removed = (
+            ", less the years a filter removed"
+            if shape.drift.excluded or other.drift.excluded
+            else ""
+        )
+        return (
+            f"{verb} matches the two sides on their periods, and one side holds "
+            f"{_years_text(shape.period)} while the other holds {_years_text(other.period)}"
+            f"{removed}, so they share no year today; read both sides over years they both hold"
+        )
     if TimeLabel.PICKED in (shape.time, other.time):
         return _rejects_paired_picked(verb, shape, other)
     if _labels_a_span(shape) is not _labels_a_span(other):
+        if (shape if _labels_a_span(shape) else other).drift.decided_by_data:
+            return _value_kept_span_pairs(verb)
         remedy = _paired_spans_remedy(verb, "collapse both sides over the same years, or neither")
         return (
             f"{verb} matches the two sides on their periods, and one side's rows carry one "
@@ -1236,7 +2215,22 @@ def _paired_spans_remedy(verb: str, remedy: str) -> str:
 
 
 def _rejects_paired_spans(verb: str, shape: FrameShape, other: FrameShape) -> str | None:
-    """Return why two sides labelled with intervals carry different spans, or `None` when equal."""
+    """Return why two sides labelled with intervals carry different spans, today or once newer data arrives, or `None` when equal.
+
+    Two spans named for the same step carry its one label in every future
+    (`FrameShape.span_of`). Otherwise both labels have to be known and
+    equal today, and stay equal: both years of each are fixed or follow the
+    newest data alike (`_spans_move_together`). A span over the rows a
+    value filter kept carries a label only the data decides
+    (`_value_kept_span_pairs`), and so does a total of picked years, which
+    carries no `period`. A span ending at each series' own newest year
+    matches no span another step wrote once newer data reaches one side's
+    dataset first.
+    """
+    if shape.span_of is not None and shape.span_of == other.span_of:
+        return None
+    if shape.drift.decided_by_data or other.drift.decided_by_data:
+        return _value_kept_span_pairs(verb)
     if shape.period is None or other.period is None:
         return (
             f"{verb} matches the two sides on their periods, and a side's rows carry a span "
@@ -1251,7 +2245,53 @@ def _rejects_paired_spans(verb: str, shape: FrameShape, other: FrameShape) -> st
             f"{other.period.start}-{other.period.end}), so no period matches; "
             f"{_paired_spans_remedy(verb, 'collapse both sides over the same years')}"
         )
+    if not _spans_move_together(shape, other):
+        return (
+            f"{verb} matches the two sides on their periods, and both carry a span over "
+            f"{_years_text(shape.period)} today, but newer data moves the two spans' years "
+            "apart, so once either side's dataset reports a newer year no period matches; "
+            + _paired_spans_remedy(
+                verb,
+                "fix the years both sides collapse, or have both follow the newest data alike",
+            )
+        )
     return None
+
+
+# What a span over the rows a value filter kept pairs with, which is the
+# whole of `_value_kept_span_pairs`' refusal. It names no change.
+VALUE_KEPT_SPAN_PAIRS: Final = (
+    "a span over the rows a value filter kept pairs only with a span the same step wrote"
+)
+
+
+def _value_kept_span_pairs(verb: str) -> str:
+    """Why `verb` cannot pair a span over the rows a value filter kept with another step's result.
+
+    analysis-mcp labels the span with the years the kept rows fall in,
+    which only the data decides (`PeriodDrift.decided_by_data`). No change
+    gives an admitted plan computing that pairing, so the refusal says what
+    the plan cannot state and offers none.
+    """
+    return (
+        f"{verb} matches the two sides on their periods, and one side collapses the rows a "
+        "value filter kept into one span, labelled with the years those rows fall in, which "
+        f"only the data decides; {VALUE_KEPT_SPAN_PAIRS}, such as a total of it by period, so "
+        f"no plan states this {verb} of it and another step's result"
+    )
+
+
+def _spans_move_together(shape: FrameShape, other: FrameShape) -> bool:
+    """Whether two spans of different steps over the same years today keep the same years as newer data arrives.
+
+    Each holds the other's years as a window that moves as the other
+    span's years do (`span_end_leaves`).
+    """
+    for span, held in ((shape, other), (other, shape)):
+        assert held.period is not None, held
+        if span_end_leaves(span, held.period, held.drift):
+            return False
+    return True
 
 
 def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> str | None:
@@ -1260,10 +2300,13 @@ def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> s
     The picked side matches the other side's rows on each entity's own
     year, which may be any year of its period. Another picked side meets it
     only where both values fell in the same year, and a span labelled with
-    an interval matches no single year, so both are refused. Any other side,
-    a series or a span over one year (labelled with that year's point), has
-    to cover every year of the picked period; an unknown period on either
-    side covers none known.
+    an interval matches no single year, so both are refused. So is a side
+    whose years a value filter decided (`PeriodDrift.decided_by_data`),
+    which can lack the year an entity's value fell in. Any other side, a
+    series or a span over one year (labelled with that year's point), has
+    to cover every year of the picked period, less the years a filter
+    removed from the picked side, today and as newer data moves both
+    (`span_end_leaves`). An unknown period on either side covers none known.
     """
     if shape.time is other.time:
         return (
@@ -1272,15 +2315,15 @@ def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> s
             "fell in the same year; read one side as a yearly series"
         )
     picked, series = (shape, other) if shape.time is TimeLabel.PICKED else (other, shape)
-    if _labels_a_span(series):
-        return (
-            f"{verb} matches the two sides on their periods, and one side holds each "
-            "entity's max or min at the year it fell in while the other collapsed its "
-            "years into one span, so no row's year matches it; read the other side as a "
-            "yearly series"
-        )
-    if _covers(series.period, picked.period):
-        return None
+    unmatched = _picked_counterpart_misses(verb, series)
+    if unmatched is not None:
+        return unmatched
+    if (
+        series.period is not None
+        and picked.period is not None
+        and series.period.covers(picked.period)
+    ):
+        return _picked_years_leave(verb, picked, series, picked.period, series.period)
     if picked.period is None:
         return (
             f"{verb} matches the two sides on their years, and one side holds each entity's "
@@ -1297,6 +2340,65 @@ def _rejects_paired_picked(verb: str, shape: FrameShape, other: FrameShape) -> s
     )
 
 
+def _picked_counterpart_misses(verb: str, series: FrameShape) -> str | None:
+    """Why `series`'s rows can match no picked row whatever years it covers, or `None`.
+
+    A value filter can leave out the year an entity's max or min fell in
+    (`PeriodDrift.decided_by_data`), which no yearly reading of the rows fixes,
+    so it is tested before a span labelled with an interval, which matches no
+    single year.
+    """
+    if series.drift.decided_by_data:
+        return (
+            f"{verb} matches the two sides on their years, and one side holds each entity's "
+            "max or min at the year it fell in while a value filter kept only the other "
+            "side's rows whose values pass, so an entity whose year the filter left out has "
+            "no year to match; no plan pairs a max or min with the rows a value filter kept"
+        )
+    if _labels_a_span(series):
+        return (
+            f"{verb} matches the two sides on their periods, and one side holds each "
+            "entity's max or min at the year it fell in while the other collapsed its "
+            "years into one span, so no row's year matches it; read the other side as a "
+            "yearly series"
+        )
+    return None
+
+
+def _picked_years_leave(
+    verb: str, picked: FrameShape, series: FrameShape, period: Period, held: Period
+) -> str | None:
+    """Why `series`, whose `held` years cover `picked`'s `period` today, misses a year a picked row can carry, or `None`.
+
+    A filter removed the year from `series` alone, or newer data moves one
+    of `period`'s years out of `held` (`span_end_leaves`).
+    """
+    removed = sorted(
+        year
+        for year in series.drift.excluded - picked.drift.excluded
+        if period.start <= year <= period.end
+    )
+    if removed:
+        return (
+            f"{verb} matches the two sides on their years, and one side holds each entity's "
+            f"max or min at the year it fell in, any year of {_years_text(period)}, while a "
+            f"filter removed {' and '.join(map(str, removed))} from the other side, so an "
+            "entity whose value fell there has no year to match; remove the same years "
+            "from both sides, or from neither"
+        )
+    leaves = span_end_leaves(picked, held, series.drift, same_series=picked.roots == series.roots)
+    if leaves is None:
+        return None
+    return (
+        f"{verb} matches the two sides on their years, and one side holds each entity's "
+        f"max or min at the year it fell in, any year of {_years_text(period)}, "
+        f"which the other side's {_years_text(held)} cover today, but newer data "
+        f"moves the {leaves} year a max or min may fall in out of the other side's years, "
+        "so an entity whose value falls there has no year to match; read both sides over "
+        "the same fixed years, or have both follow the newest data alike"
+    )
+
+
 def _years_text(period: Period) -> str:
     return str(period.start) if period.start == period.end else f"{period.start}-{period.end}"
 
@@ -1304,7 +2406,7 @@ def _years_text(period: Period) -> str:
 def _labels_a_span(shape: FrameShape) -> bool:
     """Whether `shape`'s rows carry an interval label. A `SPAN` over one year
     is labelled with that year's point, which matches single years."""
-    return shape.time is TimeLabel.SPAN and _spans_years(shape.period)
+    return shape.time is TimeLabel.SPAN and _shape_spans_years(shape)
 
 
 def _rejects_one_sided_rate(verb: str, shape: FrameShape, other: FrameShape | None) -> str | None:
@@ -1447,12 +2549,13 @@ def _rejects_share_of(
     # Only a numerator descending from the same limited frame is sure to hold
     # nothing the limit dropped, and it would divide each entity's value by
     # itself, so every per-axis share over a limited denominator is refused.
+    # analysis-mcp leaves out each numerator entity the limit dropped.
     if scope is DenominatorScope.PER_AXIS and other is not None and other.limited:
         return (
             "a per-axis share_of divides each entity by its own denominator group, and a rank "
-            "limit kept only some entities on the denominator side, so analysis-mcp refuses "
-            "the call at the first numerator entity the limit dropped; compute the share_of "
-            f"over the unlimited denominator, then rank the shares with the limit{by_share}"
+            "limit kept only some entities on the denominator side, so analysis-mcp leaves out "
+            "every numerator entity the limit dropped; compute the share_of over the unlimited "
+            f"denominator, then rank the shares with the limit{by_share}"
         )
     reason = _rejects_share_of_axis(shape, axis=axis, scope=scope, other=other)
     if reason is None and other is not None:
@@ -1583,13 +2686,14 @@ def rejects(verb: ShapeVerb, shape: FrameShape, **options: object) -> str | None
         shape: The candidate input shape.
         options: The verb's own options -- see each rule function for which
             it reads (`by_entity`/`by_period`/`by_breakdown`/`reduction` for aggregate,
-            `change` for growth, `axis`/`among`/`window`/`per_period`/`reduction` for rank,
+            `change`/`window` for growth, `axis`/`among`/`window`/`rolling`/`per_period`/`reduction` for rank,
             `axis`/`scope`/`other`/`entity` for share_of, where `entity` is
             the one entity the side passed as `shape` narrows to,
             `axis`/`denominator_axis`/`other` for quotient_of, and
-            `other` for compare, sum_of and join), and `place_level` and
-            `period_threshold` for filter, whether it states a
-            `PlaceLevel` and a `PeriodThreshold`.
+            `other` for compare, sum_of and join), and `place_level`,
+            `period_threshold` and `years` for filter, whether it states a
+            `PlaceLevel` and a `PeriodThreshold`, and the years those
+            leave (`year_filter`).
 
     Returns:
         A reader-facing reason `verb` refuses `shape`, or `None` when it

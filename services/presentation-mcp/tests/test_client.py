@@ -917,31 +917,41 @@ async def test_a_door_refusal_of_the_steps_fails_the_publish(
 
 
 @pytest.mark.parametrize(
-    ("role", "cell"),
-    [("observationAbout", "Continent"), ("financingRecipient", "total")],
+    ("role", "described", "cells"),
+    [
+        ("observationAbout", "observationAbout_type", ("Continent",)),
+        ("financingRecipient", "financingRecipient_party_kind", ("total",)),
+        ("financingProvider", "financingProvider_party_class", ("official", "private")),
+        ("financingProvider", "financingProvider_party_whole", ("true", "false")),
+    ],
+    ids=["place-type", "party-kind", "party-class", "party-whole"],
 )
 async def test_publish_leaves_a_place_type_or_party_kind_column_out_of_the_published_frame(
-    materialisation_store: InMemoryMaterialisationStore, role: str, cell: str
+    materialisation_store: InMemoryMaterialisationStore,
+    role: str,
+    described: str,
+    cells: tuple[str, ...],
 ) -> None:
     """A level filter's output carries `observationAbout_type` as a role, and a
-    sum keyed by a flow party carries `financingRecipient_party_kind`. apis joins
-    every role's value into a series label, so the published frame holds the
-    place column alone, and the door's own `Frame.build` accepts it with every
-    row kept.
+    sum keyed by a flow party carries `financingRecipient_party_kind` and the
+    party's class and whole columns. apis joins every role's value into a
+    series label, so the published frame holds the place column alone, and the
+    door's own `Frame.build` accepts it with every row kept.
     """
-    described = f"{role}_type" if role == "observationAbout" else f"{role}_party_kind"
     rows = [
         {
             "stat_var": "dcid:LifeExpectancy_Person",
             role: place,
-            described: cell,
+            described: cells[index % len(cells)],
             "time_period": year,
             "value": value,
         }
-        for place, year, value in (
-            ("africa", "2020", 63.8),
-            ("africa", "2021", 63.2),
-            ("asia", "2020", 74.2),
+        for index, (place, year, value) in enumerate(
+            (
+                ("africa", "2020", 63.8),
+                ("africa", "2021", 63.2),
+                ("asia", "2020", 74.2),
+            )
         )
     ]
     frame = Frame.build(role_keys=[role, described], rows=rows)

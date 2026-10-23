@@ -30,6 +30,14 @@ income group, the G7. A total holds other parties' figures, so a sum across a fl
 it out. A residual ("Africa, regional") holds figures no other party does, so it adds to the
 parties. apis leaves the cell empty for a party it declares no kind for, and data-mcp
 writes that cell as `UNTYPED` too, which no kind names.
+
+Two attribute columns sit beside the kind. `{role}_party_class` (`class_column`) holds a
+row's `PartyClass`: `official` or `private` (a foundation, a national lottery) for a party,
+`residual` for a residual, and for a total the one class every party it holds shares. It is
+empty, so `UNTYPED`, for a total holding more than one class. `{role}_party_whole`
+(`whole_column`) is `WHOLE_CELL` on a total that holds a whole population in the row's dataset
+and year, such as "Official Donors, Total", and `false` on every other row. Two whole totals on
+one axis hold disjoint party classes, so a sum across a role of whole totals alone adds them.
 """
 
 from __future__ import annotations
@@ -47,6 +55,11 @@ FLOW_ROLE_COLUMNS: Mapping[str, str] = MappingProxyType(
     {"origin": "financingProvider", "destination": "financingRecipient"}
 )
 PARTY_ROLES: frozenset[str] = frozenset(FLOW_ROLE_COLUMNS.values())
+
+# The population a search names for the total across each flow party role's whole side.
+WHOLE_SIDE_POPULATIONS: Mapping[str, str] = MappingProxyType(
+    {"financingProvider": "all donors", "financingRecipient": "all recipients"}
+)
 
 # Every role a `{role}_type` column can describe, in sorted order.
 TYPED_ROLES: tuple[str, ...] = tuple(sorted({PLACE_ROLE, *PARTY_ROLES}))
@@ -77,7 +90,16 @@ PartyKind = Literal["party", "residual", "total"]
 PARTY_KINDS: frozenset[str] = frozenset(get_args(PartyKind))
 TOTAL_KIND: PartyKind = "total"
 
-_ENRICHMENT_SUFFIXES = ("_type", "_party_kind")
+# The classes apis serves in a `{role}_party_class` cell: a party's `official` or `private`, a
+# residual's `residual`. A whole total lists the classes it holds in full.
+PartyClass = Literal["official", "private", "residual"]
+PRIVATE_CLASS: PartyClass = "private"
+
+# The `{role}_party_whole` cell of a total holding a whole population; every other row's is
+# `false`.
+WHOLE_CELL = "true"
+
+_ENRICHMENT_SUFFIXES = ("_type", "_party_kind", "_party_class", "_party_whole")
 
 
 def type_column(role: str) -> str:
@@ -90,14 +112,25 @@ def kind_column(role: str) -> str:
     return f"{role}_party_kind"
 
 
-def enrichment_columns(role: str) -> tuple[str, str]:
-    """The columns that can describe `role`'s places: its type and its kind column."""
-    return type_column(role), kind_column(role)
+def class_column(role: str) -> str:
+    """The enrichment column naming each `role` party's class: `financingProvider_party_class`."""
+    return f"{role}_party_class"
+
+
+def whole_column(role: str) -> str:
+    """The enrichment column marking each `role` total that holds a whole population:
+    `financingProvider_party_whole`."""
+    return f"{role}_party_whole"
+
+
+def enrichment_columns(role: str) -> tuple[str, str, str, str]:
+    """The columns that can describe `role`'s places: its type, kind, class and whole column."""
+    return type_column(role), kind_column(role), class_column(role), whole_column(role)
 
 
 def enrichment_role(column: str, *, roles: Collection[str]) -> str | None:
-    """The role among `roles` whose type or kind column `column` is, or None when it is
-    neither."""
+    """The role among `roles` one of whose enrichment columns (`enrichment_columns`)
+    `column` is, or None when it is none of them."""
     for suffix in _ENRICHMENT_SUFFIXES:
         role = column.removesuffix(suffix)
         if role != column and role in roles:

@@ -160,14 +160,15 @@ def test_an_aggregate_states_its_own_group_by() -> None:
         AggregateOperation(
             id="totals", requirement_id="annual_totals", input="debt", reduction=Reduction.SUM
         )
-    with pytest.raises(ValidationError, match="at least 1 item"):
-        AggregateOperation(
-            id="totals",
-            requirement_id="annual_totals",
-            input="debt",
-            reduction=Reduction.SUM,
-            group_by=(),
-        )
+    # An empty group is stated, and reduces every row to one figure.
+    one_figure = AggregateOperation(
+        id="totals",
+        requirement_id="annual_totals",
+        input="debt",
+        reduction=Reduction.SUM,
+        group_by=(),
+    )
+    assert one_figure.group_by == ()
 
 
 def test_a_retrieval_may_wait_for_its_source() -> None:

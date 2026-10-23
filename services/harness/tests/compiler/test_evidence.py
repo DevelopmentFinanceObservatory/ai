@@ -26,7 +26,7 @@ from compiler.evidence import (
 from compiler.sources import member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
-from planner.plan import Coverage, DatasetRequirement, Entity, Unit
+from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
 from planner.records import EvidenceIssue, Period, ResolvedSourceMention, StatVarReading
 from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 
@@ -659,7 +659,13 @@ def test_a_constant_price_requirement_is_met_by_the_same_base_year(
 ) -> None:
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
-    assert _basis_codes(constant, source(unit_label="constant 2015 US dollars")) == []
+    assert (
+        _basis_codes(
+            constant,
+            source(unit_ref="ConstantUSD_2015", unit_label="constant 2015 US dollars"),
+        )
+        == []
+    )
 
 
 def test_a_constant_price_requirement_fails_on_another_base_year(
@@ -675,13 +681,15 @@ def test_a_constant_price_requirement_fails_on_another_base_year(
     assert (issue.found, issue.required) == (2010, 2015)
 
 
-def test_a_constant_price_requirement_is_unverified_without_a_base_year(
+def test_a_constant_price_requirement_is_refused_without_a_base_year(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
+    # An answer over a source of unknown base year would claim a year it
+    # does not have.
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
     assert _basis_codes(constant, source(unit_label="real US dollars")) == [
-        ("unit_price_basis_unverified", "warning")
+        ("unit_price_basis_unverified", "error")
     ]
 
 
@@ -1109,6 +1117,74 @@ def test_a_retrieval_matching_the_approved_source_meets_the_requirement(
     ]
 
 
+@pytest.mark.parametrize(
+    ("unit_ref", "unit_label", "request_unit", "refused_by"),
+    [
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant 2024 prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            "ConstantUSD_2024",
+            "Constant 2024 US dollars",
+            None,
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            "CurrencyUSD",
+            "US Dollar",
+            {"currency": "USD", "prices": "constant", "base_year": 2024},
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+    ],
+)
+def test_discovery_and_the_manifest_read_a_price_basis_alike(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    unit_ref: str,
+    unit_label: str,
+    request_unit: dict[str, object] | None,
+    refused_by: EvidenceIssueCode | None,
+) -> None:
+    # A retrieved series states its unit as dfo-apis writes it, a request
+    # object or a ref with no label, so a plan accepted at approval is
+    # accepted once retrieved, and one refused at run time never compiles.
+    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2024))
+    identity: dict[str, Any] = {"stat_var": "DebtServicePaid"}
+    if request_unit is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": request_unit}}
+    discovered = source(unit_ref=unit_ref, unit_label=unit_label, identity=identity)
+    retrieved = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", facet={"unit": request_unit or unit_ref})
+        ),
+    )
+
+    def refusals(evidence: RetrievalEvidence) -> list[EvidenceIssueCode]:
+        return [
+            issue.code
+            for issue in errors(check_evidence(constant, evidence))
+            if issue.code.value.startswith("unit")
+        ]
+
+    at_approval = refusals(evidence_from_source(discovered))
+    assert at_approval == refusals(retrieved)
+    assert at_approval == ([refused_by] if refused_by is not None else [])
+
+
 def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
@@ -1268,6 +1344,49 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
         for issue in issues
         if issue.code in _PER_SERIES_CODES
     ] == found
+
+
+@pytest.mark.parametrize(
+    ("start_year", "asked"),
+    [
+        pytest.param(
+            1990,
+            "the requirement asks for 2015-2024, and its retrieval requests every year from 1990",
+            id="read-from-the-first-year",
+        ),
+        pytest.param(2015, "the requirement asks for 2015-2024", id="read-from-the-stated-start"),
+    ],
+)
+def test_a_short_series_states_the_years_its_retrieval_requested(
+    requirement: RequirementFactory, start_year: int, asked: str
+) -> None:
+    """A read of a dataset from its first year on record is held to the stated
+    period, and its gap says what it requested as well."""
+    manifest = _manifest()
+    identity = {"stat_var": "DebtServicePaid", "requested_window": open_window(start_year)}
+    manifest = manifest.model_copy(
+        update={"definition": manifest.definition.model_copy(update={"identity": identity})}
+    )
+    evidence = evidence_from_manifest(
+        manifest,
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                observations=34,
+                first={"value": 1.0, "period": "1990"},
+                latest={"value": 2.0, "period": "2023"},
+            )
+        ),
+    )
+
+    (gap,) = [
+        issue
+        for issue in check_evidence(requirement(), evidence)
+        if issue.code is EvidenceIssueCode.WINDOW_SHORT
+    ]
+
+    assert gap.detail == (f"series DebtServicePaid for ['country/KEN'] covers 1990-2023, {asked}")
+    assert gap.required == {"start": 2015, "end": 2024}
 
 
 @pytest.mark.parametrize("series_stats", [None, _series_stats()], ids=["none", "empty"])
@@ -1558,8 +1677,10 @@ def test_a_place_noun_beside_a_party_word_answers_no_axis_and_names_the_whole_pa
     for axes in ((DONORS,), (RECIPIENTS,), (COUNTRIES,), (), (RECIPIENTS, DONORS)):
         assert open_axes_for((across,), axes) == (
             f"{across!r} narrows a party to its countries, and a source's open axis holds every "
-            f"{party_word}, agencies included; state `across` as {stated_as!r} to cover them "
-            "all, or name the countries in `entities`"
+            f"{party_word}, agencies included; state `across` as {stated_as!r} to open that "
+            "whole side, then add a direct `{kind:place_level, role:<party>, level:Country, "
+            "strict:true}` filter bound to that role and redirect the calculation through that "
+            "filter, or name the countries in `entities`"
         )
 
 
@@ -2784,6 +2905,28 @@ def test_a_retrieval_of_a_set_bound_as_its_total_holds_the_total_party(
         requirement(entities=[Entity(name="G7", role="donor", members=members)]),
         _g7_retrieval("GroupOfSeven"),
         approved=_total_source(source),
+    )
+
+    assert _entity_codes(issues) == codes
+
+
+@pytest.mark.parametrize(("members", "codes"), [(False, []), (True, ["group_read_as_total"])])
+def test_a_union_of_whole_totals_meets_a_bare_name_and_refuses_members(
+    requirement: RequirementFactory, source: SourceFactory, members: bool, codes: list[str]
+) -> None:
+    label = "all donors including private"
+    union = source(
+        entities=(
+            ResolvedEntity(role="origin", ref="DACOfficialDonors", label="Official Donors, Total"),
+            ResolvedEntity(role="origin", ref="DACPrivateDonors", label="Private Donors, Total"),
+        ),
+        groups=(ResolvedGroup(role="origin", label=label, whole_of=("official", "private")),),
+        identity=None,
+    )
+
+    issues = check_evidence(
+        requirement(entities=[Entity(name=label, role="donor", members=members)]),
+        evidence_from_source(union),
     )
 
     assert _entity_codes(issues) == codes

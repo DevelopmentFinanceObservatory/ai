@@ -19,6 +19,7 @@ from google.adk.events import EventActions
 from harness.plan_display import answer_scopes, step_rows
 from planner.agent import build_planner_tools
 from planner.plan import (
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     AggregateRequirement,
     AnswerMode,
@@ -48,6 +49,7 @@ from planner.records import (
     RankDirection,
     Reduction,
 )
+from planner.shapes import one_figure_remedy, pooling_remedy
 from planner.tool_results import Outcome, ProblemCode
 
 from ..decision_drafts import drafts
@@ -160,6 +162,7 @@ def _requirements(variant: str) -> list[EvidenceRequirement]:
                 among=RankAmong.POPULATION,
                 axis="donor",
                 reduction=Reduction.SUM,
+                per_period=True,
             ),
         ],
         "share-per-donor": [
@@ -254,6 +257,33 @@ def test_a_result_per_donor_rests_on_a_decision_stating_it(
         ]
     }
     assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize("across_years", [False, True], ids=["unmarked", "marked"])
+def test_a_result_per_donor_is_offered_the_donors_pooled_per_year(
+    decision: Callable[..., Decision], across_years: bool
+) -> None:
+    """The refusal offers the donors pooled per year, and no figure over the
+    years even for a marked ask: a growth, like every calculation that keeps
+    a party open past the shape checks, reads the years apart."""
+    ctx = _context()
+    ctx.state[ASKS_STATE_KEY] = [ASK]
+    ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = [0] if across_years else []
+    requirements = _requirements("per-donor-unstated")
+    tools = {tool.name: tool for tool in build_planner_tools()}
+
+    result = tools["propose_plan"].func(
+        question=ASK,
+        answer_mode=COMPUTED,
+        decisions=drafts(_decisions("per-donor-unstated", decision)),
+        evidence_requirements=requirements,
+        answered=[AskAnswer(ask=0, outputs=(requirements[-1].id,))],
+        tool_context=ctx,
+    )
+
+    assert result["code"] == ProblemCode.RESULT_SCOPE_UNSTATED.value, result
+    assert pooling_remedy(one_figure=False) in result["message"]
+    assert one_figure_remedy() not in result["message"]
 
 
 def test_one_refusal_names_every_result_kept_per_donor(

@@ -310,7 +310,11 @@ async def test_a_pending_publication_is_handed_back_with_its_run_and_carried_on_
     publisher = _FlakyPublisher()
     surface = _LinkingSurface()
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It is pending."),
         types.Part.from_text(text="It is done."),
@@ -401,7 +405,11 @@ async def test_a_resumed_runs_result_is_listed_again_until_its_hand_back_is_reco
     executor = _DescribeFails(describe)
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It is pending."),
         types.Part.from_text(text="It is computed."),
@@ -455,7 +463,11 @@ async def test_a_run_completed_in_its_own_turn_whose_frames_are_unread_is_listed
     )
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It is computed."),
         types.Part.from_text(text="It is done."),
@@ -497,7 +509,11 @@ async def test_a_resumed_run_whose_frames_stay_unread_is_listed_no_more_past_the
     publisher = _FlakyPublisher()
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It is pending."),
         *(types.Part.from_text(text="Not yet.") for _ in range(MAX_DELIVERY_ATTEMPTS + 1)),
@@ -541,7 +557,11 @@ async def test_a_run_carried_on_after_a_restart_keeps_its_frames_provenance() ->
     ledger = InMemoryRunLedger(scope=current_conversation_id.get)
     publisher = _FlakyPublisher()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It is pending."),
         planner=ScriptedPlannerModel(),
@@ -593,7 +613,11 @@ async def test_a_completed_run_admitted_again_on_a_fresh_surface_keeps_its_prove
 
     async def approved_turn(surface: Any) -> dict[str, Any]:
         runner, model = orchestrator_runner(
-            call("plan", brief="Kenya's debt service since 2015", asks=[]),
+            call(
+                "plan",
+                brief="Kenya's debt service since 2015",
+                asks=["Kenya's debt service since 2015"],
+            ),
             types.Part.from_text(text="Handed to the planner."),
             types.Part.from_text(text="It is done."),
             planner=ScriptedPlannerModel(),
@@ -700,7 +724,11 @@ async def test_a_ledger_outage_mid_run_hands_back_an_unfinished_run_carried_on_n
     finish and deliver."""
     ledger = _Outage(on_get=on_get)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Handed to the planner."),
         types.Part.from_text(text="It could not be saved."),
         types.Part.from_text(text="It is done."),

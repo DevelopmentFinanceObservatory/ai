@@ -40,6 +40,7 @@
     "distinction": "growth, not comparison: the decline is one series' change between two years, where a comparison takes the difference of two series"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Show the decline in German ODA from 2023 to 2025",
     "answer_mode": "computed",

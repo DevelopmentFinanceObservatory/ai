@@ -42,7 +42,10 @@
   ],
   "brief": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
   "asks": [
-    "Share of Kenya's ODA from the United States and the United Kingdom together, 2015 to 2022"
+    {
+      "text": "Share of Kenya's ODA from the United States and the United Kingdom together, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -54,6 +57,7 @@
     "sum_of",
     "share_of"
   ],
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
     "answer_mode": "computed",
@@ -87,9 +91,7 @@
         "id": "two_donors",
         "input_id": "oda_two",
         "reduction": "sum",
-        "group_by": [
-          "period"
-        ]
+        "group_by": []
       },
       {
         "kind": "dataset",
@@ -110,13 +112,20 @@
         ]
       },
       {
+        "kind": "aggregate",
+        "id": "oda_total_period",
+        "input_id": "oda_total",
+        "reduction": "sum",
+        "group_by": []
+      },
+      {
         "kind": "share_of",
         "id": "share",
         "numerator": {
           "input_id": "two_donors"
         },
         "denominator": {
-          "input_id": "oda_total"
+          "input_id": "oda_total_period"
         }
       }
     ],
@@ -131,7 +140,7 @@
   },
   "alternative_payloads": [
     {
-      "description": "Retrieve each donor's ODA on its own, add the two series, then take the share of the total.",
+      "description": "Retrieve each donor's ODA on its own, add the two series, total them over the years, then take the share of the total.",
       "payload": {
         "question": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?",
         "answer_mode": "computed",
@@ -201,6 +210,13 @@
             ]
           },
           {
+            "kind": "aggregate",
+            "id": "two_donors_period",
+            "input_id": "two_donors",
+            "reduction": "sum",
+            "group_by": []
+          },
+          {
             "kind": "dataset",
             "id": "oda_total",
             "measure": "total ODA",
@@ -219,13 +235,20 @@
             ]
           },
           {
+            "kind": "aggregate",
+            "id": "oda_total_period",
+            "input_id": "oda_total",
+            "reduction": "sum",
+            "group_by": []
+          },
+          {
             "kind": "share_of",
             "id": "share",
             "numerator": {
-              "input_id": "two_donors"
+              "input_id": "two_donors_period"
             },
             "denominator": {
-              "input_id": "oda_total"
+              "input_id": "oda_total_period"
             }
           }
         ],

@@ -37,6 +37,7 @@
     "distinction": "the change of one series across a window, not the difference between two series"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "By how many US dollars did Zambia's external debt stock increase between 2012 and 2020?",
     "answer_mode": "computed",

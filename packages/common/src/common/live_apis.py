@@ -7,13 +7,13 @@ route and returns a small typed result or raises `LiveApisError`.
 Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 
 - `datasets_principal` (`DATASETS_FIRST_PARTY_PRINCIPAL`, the publish door's own)
-  on the recipe routes: `put_recipe`, `read_recipe`, `find_replay`, `list_versions`.
+  on the recipe routes: `put_recipe`, `read_recipe`, `find_replay`.
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component` needs neither. A call whose principal is unset or blank raises
-`LiveApisNotConfigured` before any request is made. Neither value appears in an
-exception message, an attribute or a `repr`.
+`read_component` and `list_versions` need neither. A call whose principal is
+unset or blank raises `LiveApisNotConfigured` before any request is made. Neither
+value appears in an exception message, an attribute or a `repr`.
 
 Every call also carries the headers of the `auth` hook, once per call: the Cloud
 Run ID token from `common.apis_auth.apis_auth_provider`, which Cloud Run IAM in
@@ -61,12 +61,17 @@ _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 RECIPE_NOT_FOUND = "recipe_not_found"
 PUBLISH_CONFLICT = "publish_conflict"
 REFRESH_NOT_PERMITTED = "refresh_not_permitted"
+SPEC_NOT_FOUND = "spec_not_found"
 FRAME_NOT_REFRESHABLE = "frame_not_refreshable"
 RENDERING_NOT_RECORDED = "rendering_not_recorded"
 RENDER_TARGET_MISMATCH = "render_target_mismatch"
 
 # The one code this module mints itself, for a 2xx answer outside the contract.
 RESPONSE_INVALID = "response_invalid"
+
+# The most pages `list_versions` reads for one dataset: 100,000 versions at apis'
+# default page of 100. A walk past it is a server fault, refused as outside the contract.
+VERSIONS_MAX_PAGES = 1_000
 
 type RecipeBody = Mapping[str, Any]
 
@@ -141,13 +146,18 @@ class DatasetVersion:
     made the collapse, set exactly when `rendering` is `groupby`.
     `without_party_totals` is true when the version's frame leaves out the group totals
     of its open party roles: on every `without_party_totals` rendering, and on a
-    `groupby` one that summed such a frame."""
+    `groupby` one that summed such a frame.
+
+    `enrichment_stamp` is the stamp a file of this version holding party-kind cells
+    carries: the answering code index's digest when the version's frame holds a party
+    role, and `None` when it holds none, or when apis lists no stamp on its versions."""
 
     content_version: str
     base_content_version: str | None
     rendering: VersionRendering
     groupby: Mapping[str, Any] | None
     without_party_totals: bool = False
+    enrichment_stamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -272,27 +282,58 @@ def _dataset_version(item: dict[str, Any]) -> DatasetVersion | None:
     no `content_version`, a `rendering` that is none of the four, a `groupby` present on
     anything but a `groupby` rendering, or a `without_party_totals` that is not a
     boolean. apis leaves a false `without_party_totals` out, and a
-    `without_party_totals` rendering implies it."""
+    `without_party_totals` rendering implies it. apis also leaves out the
+    `enrichment_stamp` of a version that has none."""
     content_version = _text(item.get("content_version"))
     base_content_version = _text(item.get("base_content_version"))
     groupby = item.get("groupby")
     without_party_totals = item.get("without_party_totals", False)
+    stamp = _text(item.get("enrichment_stamp"))
     if content_version is None or not isinstance(without_party_totals, bool):
         return None
     match item.get("rendering"):
         case "groupby" if isinstance(groupby, dict):
             return DatasetVersion(
-                content_version, base_content_version, "groupby", groupby, without_party_totals
+                content_version,
+                base_content_version,
+                "groupby",
+                groupby,
+                without_party_totals,
+                enrichment_stamp=stamp,
             )
         case "without_party_totals" if groupby is None:
             return DatasetVersion(
-                content_version, base_content_version, "without_party_totals", None, True
+                content_version,
+                base_content_version,
+                "without_party_totals",
+                None,
+                True,
+                enrichment_stamp=stamp,
             )
-        case "plain" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "plain", None)
-        case "not_recorded" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "not_recorded", None)
+        case ("plain" | "not_recorded") as rendering if groupby is None:
+            return DatasetVersion(
+                content_version, base_content_version, rendering, None, enrichment_stamp=stamp
+            )
     return None
+
+
+def _versions_page(response: httpx2.Response) -> tuple[list[DatasetVersion], str | None]:
+    """One page of the versions answer and the cursor that continues it, `None` on
+    the complete page. A page that is not complete must list a version and name a
+    cursor."""
+    body = _json_object(response, "versions answer")
+    items, complete, cursor = body.get("versions"), body.get("complete"), body.get("next_cursor")
+    if not isinstance(items, list) or not isinstance(complete, bool):
+        raise _invalid(response, "versions answer")
+    if complete != (cursor is None) or (not complete and (_text(cursor) is None or not items)):
+        raise _invalid(response, "versions answer")
+    page: list[DatasetVersion] = []
+    for item in items:
+        version = _dataset_version(item) if isinstance(item, dict) else None
+        if version is None:
+            raise _invalid(response, "versions answer")
+        page.append(version)
+    return page, _text(cursor)
 
 
 def _required_frame(response: httpx2.Response, value: object, what: str) -> FramePair:
@@ -416,24 +457,6 @@ class LiveApisClient:
             raise
         return _required_frame(response, _json_object(response, "replay answer"), "replay answer")
 
-    async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
-        """The dataset's stored versions, newest first."""
-        response = await self._send(
-            "GET",
-            _VERSIONS_PATH.format(spec_id=_segment(spec_id)),
-            headers=self._datasets_headers(),
-        )
-        versions = _json_object(response, "versions answer").get("versions")
-        if not isinstance(versions, list):
-            raise _invalid(response, "versions answer")
-        parsed: list[DatasetVersion] = []
-        for item in versions:
-            version = _dataset_version(item) if isinstance(item, dict) else None
-            if version is None:
-                raise _invalid(response, "versions answer")
-            parsed.append(version)
-        return tuple(parsed)
-
     # Refresh and render routes, called with the live-refresh principal.
 
     async def refresh_frame(self, *, spec_id: str, content_version: str) -> RefreshResult:
@@ -523,6 +546,38 @@ class LiveApisClient:
             raise LiveApisTransportError(detail=type(exc).__name__) from exc
 
     # No credential.
+
+    async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
+        """Every stored version of the dataset, newest first, each with its own
+        `enrichment_stamp`, read page by page.
+
+        A dataset id apis registers no dataset under (`spec_not_found` on the
+        first page) has no versions, so it returns `()`.
+
+        Raises:
+            LiveApisError: apis refused or failed a page, `spec_not_found` on a
+                later page included, or answered one outside the contract
+                (`response_invalid`): a page that is not complete and names no new
+                cursor, or a walk that would read past `VERSIONS_MAX_PAGES` pages.
+        """
+        path = _VERSIONS_PATH.format(spec_id=_segment(spec_id))
+        try:
+            response = await self._send("GET", path)
+        except LiveApisError as exc:
+            if exc.code == SPEC_NOT_FOUND:
+                return ()
+            raise
+        versions, cursor = _versions_page(response)
+        # `followed` holds one cursor per page read but the first.
+        followed: set[str] = set()
+        while cursor is not None:
+            if cursor in followed or len(followed) + 1 >= VERSIONS_MAX_PAGES:
+                raise _invalid(response, "versions answer")
+            followed.add(cursor)
+            response = await self._send("GET", path, params={"cursor": cursor})
+            page, cursor = _versions_page(response)
+            versions.extend(page)
+        return tuple(versions)
 
     async def read_component(
         self, *, component_id: str, revision: int | None = None

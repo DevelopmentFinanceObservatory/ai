@@ -88,6 +88,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from analysis_mcp.engine.columnar import group_rows
 from analysis_mcp.engine.common import Units
 from analysis_mcp.engine.filter import (
+    FilterPlaceLevelUnknownError,
     FilterPredicateTypeMismatchError,
     FilterPredicateValueTypeMismatchError,
     FilterUnitConversionUnsupportedError,
@@ -206,20 +207,26 @@ def _narrowed(population: RootPopulation, admitted: AdmittedFrame) -> pa.Table |
             spec_id=population.spec_id,
             columns=off_series,
         )
-    predicates: list[CategoryMatchPredicate | PlaceLevelPredicate] = [
+    binding_predicates = [
         CategoryMatchPredicate(column=column, values=values)
         for column, values in population.bindings.items()
     ]
-    predicates += [
-        PlaceLevelPredicate(column=column, level=level)
+    level_predicates = [
+        PlaceLevelPredicate(column=column, level=level, strict=column in population.strict_levels)
         for column, level in population.levels.items()
     ]
     try:
-        return run_filter(frame, predicates=predicates, span=admitted.span).frame.table
+        narrowed = frame
+        if binding_predicates:
+            narrowed = run_filter(narrowed, predicates=binding_predicates, span=admitted.span).frame
+        if level_predicates:
+            narrowed = run_filter(narrowed, predicates=level_predicates, span=admitted.span).frame
+        return narrowed.table
     except (
         FilterUnknownColumnError,
         FilterPredicateTypeMismatchError,
         FilterPredicateValueTypeMismatchError,
+        FilterPlaceLevelUnknownError,
         FilterUnitConversionUnsupportedError,
     ) as exc:
         return _unresolved(

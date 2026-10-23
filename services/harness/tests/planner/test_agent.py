@@ -71,6 +71,7 @@ from planner.operations import (
 from planner.parties import PARTY_ROLES, PartyRole, flow_side, party_role
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     MAX_DECISION_DESCRIPTION_CHARS,
     MAX_PLAN_DECISIONS,
@@ -85,12 +86,16 @@ from planner.plan import (
     AnswerMode,
     AskAnswer,
     AskBreakdown,
+    ComparisonRequirement,
     DatasetRequirement,
     Decision,
     DecisionFixes,
     Decline,
     Entity,
     EvidenceRequirement,
+    FilterRequirement,
+    FirstYear,
+    FullHistory,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -110,14 +115,17 @@ from planner.plan import (
     is_dataset,
     load_plan,
     load_plan_rounds,
+    open_window,
     pin_sources,
     plan_revision,
     record_optional_decline,
     record_unsupported,
+    save_full_history,
     save_pin_sources,
     save_plan,
     save_plan_rounds,
     search_pin_slot,
+    stored_plan,
     windowed_pins,
 )
 from planner.records import (
@@ -128,6 +136,7 @@ from planner.records import (
     EvidenceIssueCode,
     GroupBy,
     Identifier,
+    PeriodThreshold,
     RankAmong,
     RankDirection,
     Reduction,
@@ -160,12 +169,21 @@ from translator.discovery import (
     load_log,
     save_log,
 )
-from translator.referral import OUTCOME_OF, Referral, ReferralKind, load_referral, save_referral
+from translator.referral import (
+    OUTCOME_OF,
+    Referral,
+    ReferralKind,
+    StalePin,
+    load_referral,
+    save_referral,
+)
 from translator.tool import Translate, build_translate
 
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
+from ..session_events import response_event
+from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
@@ -268,23 +286,9 @@ def _answer_event(spec_id: str, *, call_id: str = "call-1") -> Any:
     return SimpleNamespace(content=SimpleNamespace(parts=[part]))
 
 
-def _response_event(name: str, response: dict[str, Any]) -> Any:
-    """A fake session event for the `FunctionResponse` a tool `name` answered with.
-
-    The shape `planner.agent._answered_since_referral` reads: the planner's own
-    tool responses (`propose_plan`, whose `translation` carries a referral) and the user's answers
-    (`adk_request_input`) are all `FunctionResponse` parts on session events.
-    """
-    part = SimpleNamespace(
-        function_call=None,
-        function_response=SimpleNamespace(id=f"{name}-1", name=name, response=response),
-    )
-    return SimpleNamespace(content=SimpleNamespace(parts=[part]))
-
-
 def _referred_event(kind: ReferralKind, requirement_id: str | None) -> Any:
     """The `propose_plan` event carrying the answer whose translation hands the plan back."""
-    return _response_event(
+    return response_event(
         "propose_plan",
         {
             "outcome": Outcome.OK.value,
@@ -317,26 +321,59 @@ def _ask_answered_events(
     return [_ask_event([], call_id=call_id), _ask_response(call_id, {"result": result})]
 
 
-def _clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
+def _clarify_ask_event(*questions: list[dict[str, str]]) -> Event:
     """A real ADK event for the graph's own `clarify` interrupt
     (`harness.graph.state.CLARIFY_INTERRUPT`), built through ADK's own
     `create_request_input_event`: this is the shape `_offered_candidates`'s
     `payload` branch reads, distinct from `ask_user`'s flat
     `args["candidates"]` -- `RequestInput.model_dump` nests the caller's own
-    `payload` (where `clarify` puts `candidates`) under `args["payload"]`.
-    Every clarify round shares the fixed interrupt id `"clarify"`
-    (`CLARIFY_INTERRUPT`), which is easy to confuse with `_ask_event`'s
-    per-call id.
+    `payload` under `args["payload"]`. Each argument is one question's
+    candidates, under the ids `q1`, `q2`, ... by position
+    (`harness.graph.state.ask_questions`). Every clarify round shares the
+    fixed interrupt id `"clarify"` (`CLARIFY_INTERRUPT`), which is easy to
+    confuse with `_ask_event`'s per-call id.
     """
+    return create_request_input_event(
+        RequestInput(
+            interrupt_id="clarify",
+            payload={
+                "questions": [
+                    {"id": f"q{number}", "question": f"Question {number}", "candidates": candidates}
+                    for number, candidates in enumerate(questions, start=1)
+                ]
+            },
+        )
+    )
+
+
+def _legacy_clarify_ask_event(candidates: list[dict[str, str]]) -> Event:
+    """The `clarify` interrupt of a single question, with one flat list at
+    `payload["candidates"]`."""
     return create_request_input_event(
         RequestInput(interrupt_id="clarify", payload={"candidates": candidates})
     )
 
 
-def _clarify_answer_event(spec_id: str) -> Event:
+def _option(spec_id: str) -> dict[str, str]:
+    """One question's answer: the candidate `spec_id` picked."""
+    return {"kind": "option", "spec_id": spec_id}
+
+
+_SKIPPED = {"kind": "skipped"}
+
+
+def _clarify_answer_event(*answers: dict[str, str]) -> Event:
     """A real ADK event answering `_clarify_ask_event`, the shape
-    `harness.studio`'s `/interrupt` route actually sends for a clarify pick
-    (`create_request_input_response(CLARIFY_INTERRUPT, {"result": {"spec_id": ...}})`)."""
+    `harness.studio`'s `/interrupt` route actually sends: one answer per question,
+    by position under `q1`, `q2`, ...
+    (`create_request_input_response(CLARIFY_INTERRUPT, {"result": {"answers": ...}})`)."""
+    result = {"answers": {f"q{number}": answer for number, answer in enumerate(answers, start=1)}}
+    part = create_request_input_response("clarify", {"result": result})
+    return Event(content=types.Content(role="user", parts=[part]))
+
+
+def _legacy_clarify_answer_event(spec_id: str) -> Event:
+    """The answer body of a single-question pause: `{"spec_id": ...}`."""
     part = create_request_input_response("clarify", {"result": {"spec_id": spec_id}})
     return Event(content=types.Content(role="user", parts=[part]))
 
@@ -1783,7 +1820,7 @@ def _combination_asked(
         []
         if about is None
         else [
-            _response_event(
+            response_event(
                 "propose_plan",
                 {
                     "outcome": Outcome.REFUSED.value,
@@ -2581,6 +2618,33 @@ def test_propose_plan_refuses_a_restart_over_an_unanswered_referral(
     assert load_plan_rounds(ctx.state) == 1
 
 
+def test_a_pending_referral_on_a_copy_names_its_origin_to_the_model(
+    decision: DecisionFactory,
+) -> None:
+    """A referral on `debt_history`, the split's copy of `debt`, reaches the model as `debt`.
+
+    Both the refusal of a proposal over it and the declaration gate's
+    `detail` name the requirement the model wrote, while the referral in
+    session state keeps the copy's id.
+    """
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    save_plan(ctx.state, split_draft(decision))
+    _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, "debt_history")
+
+    refused = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
+    gated = cast("dict[str, Any]", _declare(ctx)["submission"])
+
+    assert refused["code"] == ProblemCode.REFERRAL_PENDING.value
+    assert "`debt`" in str(refused["message"])
+    assert gated["code"] == ProblemCode.REFERRAL_PENDING.value
+    assert gated["detail"]["referral"]["requirement_id"] == "debt"
+    assert "debt_history" not in json.dumps([refused, gated])
+    stored = load_referral(ctx.state)
+    assert stored is not None
+    assert stored.requirement_id == "debt_history"
+
+
 def test_a_first_draft_is_not_held_by_a_referral(
     decision: DecisionFactory, requirements: RequirementPair
 ) -> None:
@@ -2800,7 +2864,7 @@ def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
     )
     ctx.session.events.extend(_ask_answered_events())
     ctx.session.events.append(
-        _response_event("propose_plan", {"outcome": "invalid_input", "code": "invalid_plan"})
+        response_event("propose_plan", {"outcome": "invalid_input", "code": "invalid_plan"})
     )
 
     amended = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
@@ -2816,7 +2880,7 @@ def test_a_second_referral_after_a_recorded_proposal_needs_its_own_answer(
     )
     ctx.session.events.extend(_ask_answered_events())
     settled = _propose(tools, ctx, decision(rationale="Reconsidered."), ())
-    ctx.session.events.append(_response_event("propose_plan", settled))
+    ctx.session.events.append(response_event("propose_plan", settled))
     _hand_back(ctx, ReferralKind.REQUIREMENT_UNMEETABLE, requirement_id)
 
     refused = _propose(tools, ctx, decision(rationale="Reconsidered again."), ())
@@ -3924,7 +3988,39 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
                 {"spec_id": offered[1], "label": "Net disbursements"},
             ]
         ),
-        _clarify_answer_event(picked),
+        _clarify_answer_event(_option(picked)),
+    ]
+
+
+def _count_and_prices_events(count: dict[str, str], prices: dict[str, str]) -> list[Any]:
+    """One `ask_user` call with two questions, how to count the aid and in which
+    prices, and the answers `count` and `prices` to them. The prices options carry
+    no spec_id, so their ids are the positional `o1` and `o2`."""
+    return [
+        _clarify_ask_event(
+            [
+                {"spec_id": _GROSS, "label": "Gross disbursements"},
+                {"spec_id": _NET, "label": "Net disbursements"},
+            ],
+            [
+                {"spec_id": "o1", "label": "Current prices"},
+                {"spec_id": "o2", "label": "Constant prices"},
+            ],
+        ),
+        _clarify_answer_event(count, prices),
+    ]
+
+
+def _legacy_measure_ask_events(picked: str) -> list[Any]:
+    """The ask of `_measure_ask_events` in the single-question pause shape."""
+    return [
+        _legacy_clarify_ask_event(
+            [
+                {"spec_id": _GROSS, "label": "Gross disbursements"},
+                {"spec_id": _NET, "label": "Net disbursements"},
+            ]
+        ),
+        _legacy_clarify_answer_event(picked),
     ]
 
 
@@ -3942,6 +4038,30 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
             "net disbursements",
             ResolvedBy.PLANNER_DEFAULT,
         ),
+        (
+            _GROSS,
+            _count_and_prices_events(_option(_GROSS), _SKIPPED),
+            "gross disbursements",
+            ResolvedBy.USER,
+        ),
+        (
+            _GROSS,
+            _count_and_prices_events(_SKIPPED, _option("o1")),
+            "gross disbursements",
+            ResolvedBy.PLANNER_DEFAULT,
+        ),
+        (
+            _GROSS,
+            _count_and_prices_events(_SKIPPED, _option(_GROSS)),
+            "gross disbursements",
+            ResolvedBy.PLANNER_DEFAULT,
+        ),
+        (
+            _GROSS,
+            _legacy_measure_ask_events(_GROSS),
+            "gross disbursements",
+            ResolvedBy.USER,
+        ),
     ],
     ids=[
         "elected",
@@ -3950,6 +4070,10 @@ def _measure_ask_events(picked: str, *, offered: tuple[str, str] = (_GROSS, _NET
         "sibling",
         "sibling-asked",
         "same-label-other-ask",
+        "two-questions-count-answered",
+        "two-questions-count-skipped",
+        "two-questions-id-from-other-question",
+        "legacy-single-candidate-pick",
     ],
 )
 def test_a_pin_of_an_aid_measure_states_how_the_flow_is_counted(
@@ -4672,7 +4796,7 @@ def _period_moved(
 
 def _recorded(ctx: _FakeToolContext, answer: dict[str, object]) -> None:
     """Append the response that recorded a plan, as the session holds it."""
-    ctx.session.events = [*ctx.session.events, _response_event("propose_plan", answer)]
+    ctx.session.events = [*ctx.session.events, response_event("propose_plan", answer)]
 
 
 @pytest.mark.parametrize(
@@ -4794,6 +4918,56 @@ def _typed(text: str, *, branch: str | None = None) -> Event:
     )
 
 
+def test_a_users_choice_of_one_figure_over_every_row_stands_against_a_regrouping(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """The user chose one total over every row of the year read. The decision
+    records the empty group, so a patch grouping the total by entity
+    contradicts it while the user has said nothing since."""
+    dataset, derived = requirements
+    one_year = dataset.model_copy(update={"period": Period(start=2024, end=2024)})
+    one_figure = derived.model_copy(
+        update={"decision_ids": ("measure", "grouping"), "group_by": ()}
+    )
+    grouping = {
+        "slot": "grouping",
+        "description": "Whether the total is one figure or one per year.",
+        "options": ["one figure", "one per year"],
+        "chosen": "one figure",
+        "resolved_by": "user",
+        "rationale": "The user asked for one figure.",
+        "fixes": ["group_by"],
+    }
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[*drafts([decision()]), grouping],
+        evidence_requirements=[one_year, one_figure],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    (made,) = [d for d in recorded.decisions if d.slot == "grouping"]
+    assert made.fixes == DecisionFixes(group_by=())
+    _recorded(ctx, first)
+
+    regrouped = tools["propose_plan"].func(
+        evidence_requirements=[one_figure.model_copy(update={"group_by": (GroupBy.ENTITY,)})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert regrouped["code"] == ProblemCode.USER_DECISION_CONTRADICTED.value, regrouped
+    assert {key: regrouped["detail"][key] for key in ("field", "decided", "stated")} == {
+        "field": "group_by",
+        "decided": [],
+        "stated": ["entity"],
+    }
+
+
 @pytest.mark.parametrize(
     ("recorded", "after", "lands"),
     [
@@ -4803,7 +4977,7 @@ def _typed(text: str, *, branch: str | None = None) -> Event:
             True,
             lambda version: [
                 *_amendment_events("cover 2010 to 2024"),
-                _response_event("propose_plan", {"outcome": "ok", "version": version}),
+                response_event("propose_plan", {"outcome": "ok", "version": version}),
             ],
             True,
         ),
@@ -5185,7 +5359,7 @@ def test_propose_plan_accepts_a_user_election_from_the_graphs_clarify_interrupt(
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
-        _clarify_answer_event(SPEC),
+        _clarify_answer_event(_option(SPEC)),
     ]
     dataset, derived = requirements
     elected = decision(
@@ -5221,7 +5395,7 @@ def test_elected_spec_ids_pairs_a_response_with_the_call_that_precedes_it() -> N
         _clarify_ask_event(
             [{"spec_id": SPEC, "label": "a"}, {"spec_id": POPULATION_SPEC, "label": "b"}]
         ),
-        _clarify_answer_event(SPEC),
+        _clarify_answer_event(_option(SPEC)),
         _clarify_ask_event([{"spec_id": other_spec, "label": "c"}]),
     ]
     tool_context = _FakeToolContext()
@@ -6596,6 +6770,7 @@ def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     decision: DecisionFactory,
 ) -> None:
     ctx = _creditor_context((_SPEC_BY_CREDITOR, {"origin": 97}, ("creditor",)))
+    ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = [0]
 
     dropped = _propose_for_creditors(ctx, decision, across=["recipient"])
     kept = _propose_for_creditors(ctx, decision, across=["recipient", "creditor"], ranked=True)
@@ -6606,6 +6781,19 @@ def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     recorded = load_plan(ctx.state)
     assert recorded is not None
     assert recorded.ask_breakdowns == (AskBreakdown(ask=0, by=("creditor",)),)
+    assert recorded.asks_across_years == (0,)
+
+    amended = _tools_by_name()["propose_plan"].func(
+        answered=list(recorded.answered),
+        amends_version=1,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    amended_plan = load_plan(ctx.state)
+    assert amended_plan is not None
+    assert amended_plan.version == 2
+    assert amended_plan.asks_across_years == (0,)
 
 
 _OWN_PIN = {"pin": _SPEC_BY_CREDITOR}
@@ -7462,17 +7650,27 @@ def test_a_period_rolling_from_its_start_is_pinned_from_the_first_year_the_datas
 
 @pytest.mark.usefixtures("gdp_on_record")
 @pytest.mark.parametrize(
-    ("shown", "issue", "fault"),
+    ("shown", "read", "issue", "fault"),
     [
         # No answer over every year is on record, so the first year is unknown.
-        (None, "rolling_needs_open_period", "first_year_unknown"),
+        (None, False, "rolling_needs_open_period", "first_year_unknown"),
+        # `propose_plan` read the dataset over no window, and the answer stated no first year.
+        (None, True, "rolling_needs_open_period", "first_year_read_failed"),
+        # A first year no plan can state is none.
+        (
+            {"first_year": 1850, "rows": 65},
+            False,
+            "rolling_needs_open_period",
+            "first_year_unknown",
+        ),
         # 250,000 rows is the most one retrieval returns (`max_frame_rows`).
-        ({"first_year": 1960, "rows": 250_001}, "rolling_frame_too_large", None),
+        ({"first_year": 1960, "rows": 250_001}, False, "rolling_frame_too_large", None),
     ],
 )
 def test_a_start_that_follows_the_newest_data_is_refused_without_a_whole_history_to_retrieve(
     requirement: Callable[..., DatasetRequirement],
     shown: dict[str, Any] | None,
+    read: bool,
     issue: str,
     fault: str | None,
 ) -> None:
@@ -7483,6 +7681,8 @@ def test_a_start_that_follows_the_newest_data_is_refused_without_a_whole_history
         _show(ctx, pin)
     else:
         _show_block(ctx, _every_year_block(_GDP_ALL["identity"], **shown))
+    if read:
+        save_full_history(ctx.state, pin, None)
     dataset = requirement(
         decision_ids=[],
         source_spec_id=pin,
@@ -7604,6 +7804,663 @@ def test_an_open_pin_and_a_closed_period_of_it_are_pinned_apart(
     copies = windowed_pins(ctx.state)
     assert len(set(pins)) == 2
     assert {copies[copy].windowed_from for copy in pins if copy is not None} == {pin}
+
+
+# --- a dataset read from its first year serves only the readers rolling from it ---
+
+_ON_EVERY_YEAR = _FRANCE_KENYA["definition"]["identity"]
+_EVERY_YEAR_FROM = 1978  # `_FRANCE_KENYA`'s first year on record
+_RANKED_ON = Decision(
+    slot="population",
+    description="Whether to rank every donor or only the ones named.",
+    options=["every donor", "the donors named"],
+    chosen="every donor",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The question asks for the top donor among all of them.",
+    fixes=DecisionFixes(among=RankAmong.POPULATION),
+)
+_BY_DONOR = Decision(
+    slot="by_donor",
+    description="Whether aid is given per donor or summed over them.",
+    options=["per donor", "summed over donors"],
+    chosen="per donor",
+    resolved_by=ResolvedBy.PLANNER_DEFAULT,
+    rationale="The question compares donors.",
+    fixes=DecisionFixes(across=("donor",)),
+)
+_SERIES_AND_TOP = ("aid to Kenya each year since 2015", "Kenya's top donor in the newest year")
+
+
+def _aid_to_kenya(**overrides: Any) -> DatasetRequirement:
+    """Gross aid to Kenya by donor, pinned to `_GROSS` with no end year."""
+    fields: dict[str, Any] = {
+        "id": "aid",
+        "decision_ids": ["by_donor"],
+        "measure": "gross aid disbursements",
+        "entities": [Entity(name="Kenya", role="recipient")],
+        "across": ["donor"],
+        "period": Period(start=2015, end=2024),
+        "unit": Unit(currency="USD", prices="current"),
+        "source_spec_id": _GROSS,
+        "period_end_open": True,
+    }
+    return DatasetRequirement(**(fields | overrides))
+
+
+def _top_donor(input_id: str = "aid", **overrides: Any) -> RankRequirement:
+    """The donor giving the most in the newest year, both ends of the window following it."""
+    fields: dict[str, Any] = {
+        "id": "top",
+        "decision_ids": ["population"],
+        "input_id": input_id,
+        "direction": RankDirection.HIGHEST_FIRST,
+        "among": RankAmong.POPULATION,
+        "axis": "donor",
+        "reduction": Reduction.SUM,
+        "window_start": 2024,
+        "window_end": 2024,
+        "rolling": RollingWindow(
+            window_start=RelativePeriod(offset=0), window_end=RelativePeriod(offset=0)
+        ),
+    }
+    return RankRequirement(**(fields | overrides))
+
+
+_YEARLY_TOTAL = AggregateRequirement(
+    id="yearly", input_id="aid", reduction=Reduction.SUM, group_by=(GroupBy.ENTITY, GroupBy.PERIOD)
+)
+
+
+def _propose_split(
+    ctx: _FakeToolContext,
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    asks: Sequence[str],
+    answered: Sequence[AskAnswer],
+    decisions: Sequence[Decision] = (_BY_DONOR, _RANKED_ON),
+    across_years: Sequence[int] = (),
+    answer_mode: AnswerMode = AnswerMode.COMPUTED,
+    amends_version: int | None = None,
+) -> dict[str, object]:
+    """Propose `requirements` over `_GROSS`, shown with every year it holds, answering `asks`.
+
+    `across_years` numbers the asks marked as one figure over several years.
+    """
+    _show_block(ctx, _FRANCE_KENYA)
+    ctx.state[ASKS_STATE_KEY] = list(asks)
+    ctx.state[ASKS_ACROSS_YEARS_STATE_KEY] = list(across_years)
+    return _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=answer_mode,
+        decisions=drafts(decisions) if amends_version is None else [],
+        evidence_requirements=list(requirements),
+        answered=list(answered),
+        amends_version=amends_version,
+        tool_context=ctx,
+    )
+
+
+def _windows(ctx: _FakeToolContext, plan: Plan) -> dict[str, object]:
+    """The `requested_window` each dataset requirement of `plan` is retrieved over."""
+    copies = windowed_pins(ctx.state)
+    return {
+        requirement.id: copies[requirement.source_spec_id].identity["requested_window"]
+        for requirement in plan.evidence_requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+    }
+
+
+@pytest.mark.parametrize(
+    ("requirements", "asks", "answered", "copies", "starts"),
+    [
+        pytest.param(
+            [_aid_to_kenya(), _top_donor()],
+            _SERIES_AND_TOP,
+            [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))],
+            [("aid_history", "aid")],
+            {"aid": 2015, "aid_history": _EVERY_YEAR_FROM},
+            id="a-series-beside-the-rank",
+        ),
+        pytest.param(
+            [_aid_to_kenya(), _YEARLY_TOTAL, _top_donor("yearly", axis="recipient")],
+            _SERIES_AND_TOP,
+            [AskAnswer(ask=0, outputs=("yearly",)), AskAnswer(ask=1, outputs=("top",))],
+            [("aid_history", "aid"), ("yearly_history", "yearly")],
+            {"aid": 2015, "aid_history": _EVERY_YEAR_FROM},
+            id="a-yearly-total-answering-and-read-by-the-rank",
+        ),
+        pytest.param(
+            [_aid_to_kenya(), _top_donor()],
+            _SERIES_AND_TOP[1:],
+            [AskAnswer(ask=0, outputs=("top",))],
+            [],
+            {"aid": _EVERY_YEAR_FROM},
+            id="the-rank-alone",
+        ),
+        pytest.param(
+            [_aid_to_kenya(period=Period(start=_EVERY_YEAR_FROM, end=2024)), _top_donor()],
+            _SERIES_AND_TOP,
+            [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))],
+            [],
+            {"aid": _EVERY_YEAR_FROM},
+            id="a-first-year-on-record-at-the-stated-start",
+        ),
+    ],
+)
+def test_only_a_reader_rolling_from_its_start_retrieves_every_year_the_dataset_holds(
+    requirements: list[EvidenceRequirement],
+    asks: Sequence[str],
+    answered: list[AskAnswer],
+    copies: list[tuple[str, str]],
+    starts: dict[str, int],
+) -> None:
+    """`top` ranks the newest year, which can sit behind the one the plan read, so
+    it reads aid to Kenya from 1978, the first year `_GROSS` holds. A series answer
+    or a total per year beside it keeps the stated 2015-2024: its dataset is
+    retrieved over a copy of the pin from 2015, and `top` reads a requirement of
+    its own retrieved over one from 1978. The plan reads back from storage as recorded,
+    with no session state."""
+    ctx = _FakeToolContext()
+
+    result = _propose_split(ctx, requirements, asks=asks, answered=answered)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    windows = _windows(ctx, plan)
+    assert windows == {step_id: open_window(start) for step_id, start in starts.items()}
+    assert [(copy.copy_id, copy.origin_id) for copy in plan.rolling_copies] == copies
+    assert plan.first_years == (FirstYear(requirement_id="aid", year=_EVERY_YEAR_FROM),)
+    assert plan.requirement("top").input_id == (copies[-1][0] if copies else requirements[-2].id)  # type: ignore[union-attr]
+    assert stored_plan(ctx.state[PLAN_STATE_KEY], state_key=PLAN_STATE_KEY) == plan
+
+
+def test_a_stored_plan_reading_a_whole_history_with_no_first_year_is_planned_again() -> None:
+    """A plan stored before plans recorded their first years holds none, so the
+    whole-history read it states has no year to start at and it loads as no plan."""
+    ctx = _FakeToolContext()
+    _propose_split(
+        ctx,
+        [_aid_to_kenya(), _top_donor()],
+        asks=_SERIES_AND_TOP[1:],
+        answered=[AskAnswer(ask=0, outputs=("top",))],
+    )
+    stored = json.loads(ctx.state[PLAN_STATE_KEY])
+    del stored["first_years"], stored["rolling_copies"]
+
+    assert load_plan(ctx.state) is not None
+    assert stored_plan(json.dumps(stored), state_key=PLAN_STATE_KEY) is None
+
+
+def test_a_patch_applies_to_the_plan_the_model_wrote_and_is_split_again() -> None:
+    """The planner is shown the plan it wrote, and a patch of 'aid' is split
+    again, so the copy carries the change too."""
+    ctx = _FakeToolContext()
+    answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+    first = _propose_split(
+        ctx, [_aid_to_kenya(), _top_donor()], asks=_SERIES_AND_TOP, answered=answered
+    )
+    widened = _aid_to_kenya(entities=[Entity(name="Uganda", role="recipient")])
+
+    second = _propose_split(
+        ctx,
+        [widened],
+        asks=_SERIES_AND_TOP,
+        answered=answered,
+        amends_version=cast("int", first["version"]),
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [requirement.id for requirement in plan.evidence_requirements] == [
+        "aid",
+        "aid_history",
+        "top",
+    ]
+    for step_id in ("aid", "aid_history"):
+        requirement = plan.requirement(step_id)
+        assert isinstance(requirement, DatasetRequirement)
+        assert requirement.entities == (Entity(name="Uganda", role="recipient"),)
+
+
+def test_a_patch_naming_a_copy_s_id_names_a_requirement_of_its_own() -> None:
+    """The model is shown no copy, so a patch stating 'aid_history', the id
+    of 'aid''s copy, states a new requirement and leaves 'aid' as it was. The
+    split copies 'aid' under the next free id. A removal of 'aid_history'
+    names no requirement the model wrote, and is refused. 'uganda' totals
+    the new requirement, since a computed answer reads every dataset."""
+    ctx = _FakeToolContext()
+    answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+    first = _propose_split(
+        ctx, [_aid_to_kenya(), _top_donor()], asks=_SERIES_AND_TOP, answered=answered
+    )
+    version = cast("int", first["version"])
+    uganda = _aid_to_kenya(id="aid_history", entities=[Entity(name="Uganda", role="recipient")])
+
+    uganda_total = _YEARLY_TOTAL.model_copy(update={"id": "uganda", "input_id": "aid_history"})
+
+    added = _propose_split(
+        ctx,
+        [uganda, uganda_total],
+        asks=_SERIES_AND_TOP,
+        answered=[
+            AskAnswer(ask=0, outputs=("aid", "uganda")),
+            AskAnswer(ask=1, outputs=("top",)),
+        ],
+        amends_version=version,
+    )
+
+    assert added["outcome"] == Outcome.OK.value, added
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [(copy.copy_id, copy.origin_id) for copy in plan.rolling_copies] == [
+        ("aid_history_2", "aid")
+    ]
+    for step_id, place in (("aid", "Kenya"), ("aid_history_2", "Kenya"), ("aid_history", "Uganda")):
+        requirement = plan.requirement(step_id)
+        assert isinstance(requirement, DatasetRequirement)
+        assert requirement.entities == (Entity(name=place, role="recipient"),)
+    assert plan.requirement("top").input_id == "aid_history_2"  # type: ignore[union-attr]
+
+    ctx = _FakeToolContext()
+    first = _propose_split(
+        ctx, [_aid_to_kenya(), _top_donor()], asks=_SERIES_AND_TOP, answered=answered
+    )
+    removed = _tools_by_name()["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[],
+        evidence_requirements=[],
+        removed_evidence_requirements=["aid_history"],
+        answered=answered,
+        amends_version=cast("int", first["version"]),
+        tool_context=ctx,
+    )
+
+    assert removed["code"] == ProblemCode.INVALID_PLAN.value, removed
+    stored = load_plan(ctx.state)
+    assert stored is not None
+    assert [requirement.id for requirement in stored.evidence_requirements] == [
+        "aid",
+        "aid_history",
+        "top",
+    ]
+
+
+def test_a_plan_reading_no_dataset_from_its_first_year_records_no_first_year() -> None:
+    """A rank whose window rolls only at its end reads the stated years, so the
+    first year on record is not kept, and the plan's revision is the one a plan
+    with no such field has."""
+    ctx = _FakeToolContext()
+    rolling_end = _top_donor(
+        window_start=2015, rolling=RollingWindow(window_end=RelativePeriod(offset=0))
+    )
+
+    result = _propose_split(
+        ctx,
+        [_aid_to_kenya(), rolling_end],
+        asks=_SERIES_AND_TOP[1:],
+        answered=[AskAnswer(ask=0, outputs=("top",))],
+        across_years=[0],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert (plan.rolling_copies, plan.first_years) == ((), ())
+    assert _windows(ctx, plan) == {"aid": open_window(2015)}
+
+
+def _over(step_id: str, input_id: str, threshold: PeriodThreshold) -> FilterRequirement:
+    return FilterRequirement(id=step_id, input_id=input_id, predicates=(threshold,))
+
+
+_ON_THE_NEWEST = RelativePeriod(offset=0)
+
+
+@pytest.mark.parametrize(
+    ("requirements", "code"),
+    [
+        pytest.param(
+            [
+                _aid_to_kenya(),
+                _over("f", "aid", PeriodThreshold(op="lte", year=2023, rolling=_ON_THE_NEWEST)),
+                _YEARLY_TOTAL.model_copy(update={"id": "answer", "input_id": "f"}),
+                _top_donor("f"),
+            ],
+            ProblemCode.INVALID_PLAN,
+            id="rolling-years-from-two-newest-years",
+        ),
+        pytest.param(
+            [
+                _aid_to_kenya(),
+                _over("f", "aid", PeriodThreshold(op="ne", year=2020)),
+                _YEARLY_TOTAL.model_copy(update={"id": "answer", "input_id": "f"}),
+                _top_donor("f"),
+            ],
+            ProblemCode.INVALID_PLAN,
+            id="a-year-removed-from-years-that-move",
+        ),
+        pytest.param(
+            [
+                _aid_to_kenya(),
+                _aid_to_kenya(id="other"),
+                ComparisonRequirement(
+                    id="answer",
+                    minuend=RequirementSide(input_id="aid"),
+                    subtrahend=RequirementSide(input_id="other"),
+                ),
+                _top_donor("answer"),
+            ],
+            ProblemCode.OPERATION_UNSUPPORTED,
+            id="a-rank-of-a-comparison",
+        ),
+    ],
+)
+def test_a_refusal_of_a_split_plan_names_only_requirements_the_model_wrote(
+    requirements: list[EvidenceRequirement], code: ProblemCode
+) -> None:
+    """`top` rolls from its start, and reads a step that `answer`, answering
+    ask 0, reads or is, so the rules judge a copy of that step over every
+    year the datasets hold. Whatever rule refuses the plan, the answer names
+    the requirements the model wrote and no copy."""
+    ctx = _FakeToolContext()
+
+    refused = _propose_split(
+        ctx,
+        requirements,
+        asks=_SERIES_AND_TOP,
+        answered=[AskAnswer(ask=0, outputs=("answer",)), AskAnswer(ask=1, outputs=("top",))],
+    )
+
+    assert refused["code"] == code.value, refused
+    assert "_history" not in json.dumps(refused)
+    assert load_plan(ctx.state) is None
+
+
+def test_a_source_the_user_picked_stays_admitted_once_a_copy_reads_its_dataset() -> None:
+    """The user picks the source a `source_name_ambiguous` referral on 'aid'
+    offers, and the draft naming it is admitted. A later patch pins 'aid' and
+    has `top` roll, so it reads a copy of it, 'aid_history', carrying the same
+    source. The patch leaves the source as the user picked it, so it is
+    admitted, and so is the next one. The first draft ranks a fixed year,
+    so it needs no pin."""
+    ctx = _FakeToolContext()
+    kind = ReferralKind.SOURCE_NAME_AMBIGUOUS
+    save_referral(ctx.state, _referral_of(kind, "aid"))
+    ctx.session.events.extend(
+        [
+            _referred_event(kind, "aid"),
+            _ask_event([{"spec_id": "provenance/a", "label": "A"}]),
+            _answer_event("provenance/a"),
+        ]
+    )
+    named = {"source": "shared", "source_ref": "provenance/a"}
+    answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+    first = _propose_split(
+        ctx,
+        [_aid_to_kenya(source_spec_id=None, **named), _top_donor(rolling=None)],
+        asks=_SERIES_AND_TOP,
+        answered=answered,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+
+    pinned = _propose_split(
+        ctx,
+        [_aid_to_kenya(**named), _top_donor()],
+        asks=_SERIES_AND_TOP,
+        answered=answered,
+        amends_version=cast("int", first["version"]),
+    )
+    assert pinned["outcome"] == Outcome.OK.value, pinned
+    again = _propose_split(
+        ctx,
+        [_top_donor()],
+        asks=_SERIES_AND_TOP,
+        answered=answered,
+        amends_version=cast("int", pinned["version"]),
+    )
+
+    assert again["outcome"] == Outcome.OK.value, again
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [copy.copy_id for copy in plan.rolling_copies] == ["aid_history"]
+    for step_id in ("aid", "aid_history"):
+        requirement = plan.requirement(step_id)
+        assert isinstance(requirement, DatasetRequirement)
+        assert requirement.source_ref == "provenance/a"
+
+
+# Gross aid since 2015, as discovery finds it for 'aid' searching 2015 on, and
+# the pin discovery did not find again, aid from Germany since 2015.
+_SINCE_2015, _SINCE_2015_IDENTITY = windowed_identity(_ON_EVERY_YEAR, open_window(2015))
+_STALE, _STALE_IDENTITY = windowed_identity(
+    _ON_EVERY_YEAR | {"entities": {"destination": ["country/KEN"], "origin": ["country/DEU"]}},
+    open_window(2015),
+)
+
+
+@pytest.fixture
+def sources_since_on_record() -> Iterator[None]:
+    """`_SINCE_2015` and `_STALE` on record, as `harness.studio` sets the lookup for a turn."""
+    recorded = {
+        _SINCE_2015: RecordedIdentity(identity=_SINCE_2015_IDENTITY),
+        _STALE: RecordedIdentity(identity=_STALE_IDENTITY),
+    }
+    token = current_recorded_identity.set(recorded.get)
+    yield
+    current_recorded_identity.reset(token)
+
+
+@pytest.mark.usefixtures("sources_since_on_record")
+@pytest.mark.parametrize(
+    ("whole", "stale", "pin", "refused"),
+    [
+        pytest.param("aid_history", ("aid",), _SINCE_2015, False, id="both-stale-offered"),
+        pytest.param("aid_history", ("aid",), _STALE, True, id="both-stale-not-offered"),
+        pytest.param("aid_history", (), _SINCE_2015, False, id="copy-stale-offered"),
+        pytest.param("aid_history", (), _STALE, True, id="copy-stale-not-offered"),
+        pytest.param("aid", (), _SINCE_2015, False, id="read-whole-offered"),
+    ],
+)
+def test_a_pin_a_source_choice_offered_is_judged_as_the_model_wrote_it(
+    whole: str, stale: tuple[str, ...], pin: str, refused: bool
+) -> None:
+    """Discovery did not find the pin of `whole`, the requirement reading
+    'aid' from its first year, and of 'aid' too where `stale` lists it, and
+    offers `_SINCE_2015` for each. `whole` is 'aid''s copy 'aid_history'
+    where 'aid' answers ask 0, and 'aid' itself where only `top` reads it.
+    The model reads one choice, for 'aid'. Pinned there, it is admitted,
+    though `whole` retrieves a windowed copy of it from 1978. The stale pin
+    is refused, naming 'aid'."""
+    ctx = _FakeToolContext()
+    for spec_id in (_SINCE_2015, _STALE):
+        save_full_history(ctx.state, spec_id, FullHistory(first_year=_EVERY_YEAR_FROM, rows=35))
+    answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+    asks = _SERIES_AND_TOP
+    if whole == "aid":
+        answered, asks = [AskAnswer(ask=0, outputs=("top",))], _SERIES_AND_TOP[1:]
+    first = _propose_split(
+        ctx, [_aid_to_kenya(source_spec_id=_STALE), _top_donor()], asks=asks, answered=answered
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    offered = (SelectedSource(spec_id=_SINCE_2015, sentence="gross aid", has_data=True),)
+    save_referral(
+        ctx.state,
+        Referral(
+            kind=ReferralKind.PINNED_SOURCE_NOT_FOUND,
+            reason="r",
+            requirement_id=whole,
+            candidates=offered,
+            stale_pins=tuple(
+                StalePin(requirement_id=step_id, candidates=offered) for step_id in stale
+            ),
+        ),
+    )
+
+    repinned = _propose_split(
+        ctx,
+        [_aid_to_kenya(source_spec_id=pin)],
+        asks=asks,
+        answered=answered,
+        amends_version=cast("int", first["version"]),
+    )
+
+    if refused:
+        assert repinned["code"] == ProblemCode.SOURCE_NOT_OFFERED.value, repinned
+        assert repinned["detail"] == {"requirement_id": "aid", "candidates": [_SINCE_2015]}
+        assert "_history" not in json.dumps(repinned)
+    else:
+        assert repinned["outcome"] == Outcome.OK.value, repinned
+        plan = load_plan(ctx.state)
+        assert plan is not None
+        read = plan.requirement(whole)
+        assert isinstance(read, DatasetRequirement) and read.source_spec_id is not None
+        assert windowed_pins(ctx.state)[read.source_spec_id].windowed_from == _SINCE_2015
+        if whole != "aid":
+            assert plan.requirement("aid").source_spec_id == _SINCE_2015  # type: ignore[union-attr]
+
+
+# Gross aid over every year it holds, as discovery finds it for 'aid''s copy,
+# which searches from the dataset's first year.
+_WHOLE, _WHOLE_IDENTITY = windowed_identity(_ON_EVERY_YEAR, open_window(_EVERY_YEAR_FROM))
+
+
+@pytest.mark.parametrize("on_record", [True, False], ids=["on-record", "not-on-record"])
+def test_a_pin_offered_for_a_copy_s_whole_history_reads_the_origin_s_stated_years(
+    on_record: bool,
+) -> None:
+    """Discovery did not find the pin of 'aid_history', 'aid''s copy, and offers
+    `_WHOLE`, found over every year the dataset holds. The model reads the
+    choice for 'aid' and pins it there. With its identity on record, 'aid'
+    retrieves it from its stated 2015 and the copy from 1978. With none, the
+    years it holds are unknown, so the pin is refused for 'aid' and nothing
+    reads the whole history in its place."""
+    lookup = {_STALE: RecordedIdentity(identity=_STALE_IDENTITY)}
+    if on_record:
+        lookup[_WHOLE] = RecordedIdentity(identity=_WHOLE_IDENTITY)
+    token = current_recorded_identity.set(lookup.get)
+    try:
+        ctx = _FakeToolContext()
+        for spec_id in (_WHOLE, _STALE):
+            save_full_history(ctx.state, spec_id, FullHistory(first_year=_EVERY_YEAR_FROM, rows=35))
+        answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
+        first = _propose_split(
+            ctx,
+            [_aid_to_kenya(source_spec_id=_STALE), _top_donor()],
+            asks=_SERIES_AND_TOP,
+            answered=answered,
+        )
+        assert first["outcome"] == Outcome.OK.value, first
+        save_referral(
+            ctx.state,
+            Referral(
+                kind=ReferralKind.PINNED_SOURCE_NOT_FOUND,
+                reason="r",
+                requirement_id="aid_history",
+                candidates=(SelectedSource(spec_id=_WHOLE, sentence="gross aid", has_data=True),),
+            ),
+        )
+
+        repinned = _propose_split(
+            ctx,
+            [_aid_to_kenya(source_spec_id=_WHOLE)],
+            asks=_SERIES_AND_TOP,
+            answered=answered,
+            amends_version=cast("int", first["version"]),
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    if not on_record:
+        assert repinned["code"] == ProblemCode.INVALID_PLAN.value, repinned
+        assert repinned["detail"] == {
+            "issue": "rolling_needs_open_period",
+            "requirement_ids": ["aid"],
+            "fault": "no_source_on_record",
+        }
+        assert load_plan(ctx.state).version == first["version"]  # type: ignore[union-attr]
+        return
+    assert repinned["outcome"] == Outcome.OK.value, repinned
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    held = windowed_pins(ctx.state)
+    windows = {}
+    for step_id in ("aid", "aid_history"):
+        read = plan.requirement(step_id)
+        assert isinstance(read, DatasetRequirement) and read.source_spec_id is not None
+        windows[step_id] = (
+            held[read.source_spec_id].identity["requested_window"]
+            if read.source_spec_id in held
+            else _WHOLE_IDENTITY["requested_window"]
+        )
+    assert windows == {"aid": open_window(2015), "aid_history": open_window(_EVERY_YEAR_FROM)}
+
+
+@pytest.fixture
+def gross_on_record() -> Iterator[None]:
+    """`_GROSS`'s identity on record, so a closed requirement over it is copied too."""
+    recorded = RecordedIdentity(identity=_ON_EVERY_YEAR)
+    token = current_recorded_identity.set({_GROSS: recorded}.get)
+    yield
+    current_recorded_identity.reset(token)
+
+
+@pytest.mark.parametrize(
+    ("requirements", "starts"),
+    [
+        pytest.param(
+            [_aid_to_kenya(), _top_donor()],
+            {"aid": 2015, "aid_history": _EVERY_YEAR_FROM},
+            id="a-dataset-and-its-copy",
+        ),
+        pytest.param(
+            [_aid_to_kenya(), _aid_to_kenya(id="earlier", period=Period(start=2000, end=2024))],
+            {"aid": 2015, "earlier": 2000},
+            id="two-open-periods",
+        ),
+        pytest.param(
+            [
+                _aid_to_kenya(period_end_open=False),
+                _aid_to_kenya(
+                    id="earlier", period=Period(start=2000, end=2010), period_end_open=False
+                ),
+            ],
+            {"aid": 2015, "earlier": 2000},
+            id="two-closed-periods",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("gross_on_record")
+def test_one_measure_decision_over_several_periods_keeps_its_pin_and_each_its_copy(
+    requirements: list[EvidenceRequirement], starts: dict[str, int]
+) -> None:
+    """`propose_plan` writes the measure decision `_GROSS` offers, and every
+    requirement over the pin cites it. Over different periods the requirements
+    retrieve different spec_ids, so the decision keeps the pin it fixes, and
+    each requirement its own copy over its period."""
+    ctx = _FakeToolContext()
+    outputs = tuple(requirement.id for requirement in requirements)
+
+    result = _propose_split(
+        ctx,
+        requirements,
+        asks=_SERIES_AND_TOP,
+        answered=[AskAnswer(ask=0, outputs=outputs[:1]), AskAnswer(ask=1, outputs=outputs[1:])],
+        decisions=[_BY_DONOR, _RANKED_ON] if "top" in outputs else [_BY_DONOR],
+        answer_mode=AnswerMode.COMPUTED if "top" in outputs else AnswerMode.SERIES,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (measure,) = [d for d in plan.decisions if d.fixes and d.fixes.source_spec_id]
+    assert measure.fixes is not None and measure.fixes.source_spec_id == _GROSS
+    citing = {r.id for r in plan.evidence_requirements if measure.slot in r.decision_ids}
+    assert citing == set(starts)
+    windows = _windows(ctx, plan)
+    assert {step_id: windows[step_id]["start_year"] for step_id in starts} == starts  # type: ignore[index]
 
 
 # --- reading a pinned dataset's first year, for a start that follows the newest data ---
@@ -7779,6 +8636,19 @@ def test_a_pin_read_from_the_block_the_planner_was_shown_keeps_its_set() -> None
     assert [(group.label, group.ref) for group in recorded.groups] == [("Africa", "africa")]
 
 
+def test_a_shown_block_with_a_set_of_an_unknown_class_puts_no_pin_on_record() -> None:
+    fixture = Path(__file__).parent.parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    block["resolved"]["entity_groups"]["observationAbout"]["whole_of"] = ["party"]
+    spec_id = block["spec_id"]
+
+    recorded = identity_on_record(
+        spec_id, shown={spec_id: PinSource(block=block, settled=True)}, end_open=True
+    )
+
+    assert recorded is None
+
+
 def test_amendment_keeps_measure_choice_from_the_compiled_family(
     decision: DecisionFactory, requirements: RequirementPair
 ):
@@ -7873,12 +8743,14 @@ def test_prior_translator_provider_sources_remain_summable(decision, pinning_dec
     )
     readings = [
         {
+            "text": "aid to Ghana",
             "status": "definite",
             "spec_id": SPEC_GHANA_AID,
             "provenance_ref": CRS,
             "provenance_account": PROVIDER_ACCOUNT,
         },
         {
+            "text": "debt of Ghana",
             "status": "definite",
             "spec_id": SPEC_GHANA_DEBT,
             "provenance_ref": DAC2A,
@@ -7917,15 +8789,24 @@ def test_chosen_source_reference_is_bound_to_its_requirement(decision, requireme
         update={"id": target, "source": "shared", "source_ref": "provenance/a"}
     )
     changed = plan.model_copy(update={"evidence_requirements": (modified,)})
-    assert (_source_ref_unpicked(changed, ToolContextSession(ctx), None) is None) == (
-        target == dataset.id
-    )
+    assert (
+        _source_ref_unpicked(changed, load_referral(ctx.state), ToolContextSession(ctx), None)
+        is None
+    ) == (target == dataset.id)
     changed_wording = changed.model_copy(
         update={"evidence_requirements": (modified.model_copy(update={"source": "unrelated"}),)}
     )
-    assert _source_ref_unpicked(changed_wording, ToolContextSession(ctx), None) is not None
+    assert (
+        _source_ref_unpicked(
+            changed_wording, load_referral(ctx.state), ToolContextSession(ctx), None
+        )
+        is not None
+    )
     ctx.state.pop("translator:referral")
-    assert _source_ref_unpicked(changed, ToolContextSession(ctx), None) is not None
+    assert (
+        _source_ref_unpicked(changed, load_referral(ctx.state), ToolContextSession(ctx), None)
+        is not None
+    )
 
 
 @pytest.mark.parametrize(
@@ -7963,7 +8844,9 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
     plan = Plan(
         question="question", decisions=[decision()], evidence_requirements=[repaired, derived]
     )
-    assert (_source_ref_unpicked(plan, ToolContextSession(ctx), None) is None) == valid
+    assert (
+        _source_ref_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None) is None
+    ) == valid
 
 
 @pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])

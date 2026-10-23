@@ -457,6 +457,15 @@ def test_a_mint_record_stored_without_a_stat_var_count_reads_as_unknown() -> Non
     assert record.stat_var_count is None
 
 
+def test_a_mint_records_enrichment_stamp_round_trips_and_stays_out_of_an_unstamped_record() -> None:
+    record = _mint_record(_ref())
+    stamped = record.model_copy(update={"enrichment_stamp": "stamp-a"})
+
+    assert b"enrichment_stamp" not in encode_mint_record(record)
+    assert decode_mint_record(encode_mint_record(stamped)) == stamped
+    assert decode_mint_record(encode_mint_record(record)).enrichment_stamp is None
+
+
 async def test_list_frames_is_oldest_first_by_first_write_whatever_was_read_since() -> None:
     """A read moves an entry in the eviction order and leaves its place in the listing,
     and an expired entry is not listed."""

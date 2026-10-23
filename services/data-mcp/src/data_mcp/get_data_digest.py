@@ -39,6 +39,7 @@ from typing import Any, cast
 
 from common.materialisation import FrameRef
 from common.period_note import period_note
+from common.place_type import WHOLE_SIDE_POPULATIONS
 from common.price_basis import price_basis_reading
 
 from data_mcp.frame_materialisation import MaterialisationOutcome
@@ -583,13 +584,21 @@ def _gap_words(path: str) -> str:
 
 def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[str, str]) -> str:
     """The line naming the group totals apis left out of the frame on one party role
-    (`options.without_party_totals`), each by its label when this call resolved it."""
+    (`options.without_party_totals`), each by its label when this call resolved it, and the
+    population a search names for that side's whole total when the role has one."""
     totals = [entity_labels.get(ref, ref) for ref in left_out.entities]
     noun = "group total" if len(totals) == 1 else "group totals"
     names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
-    return (
+    line = (
         f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
         "frame holds that side's other parties."
+    )
+    population = WHOLE_SIDE_POPULATIONS.get(left_out.role)
+    if population is None:
+        return line
+    return (
+        f"{line} For the total across the whole side, search again naming the population "
+        f'("{population}") with no operation over that side.'
     )
 
 

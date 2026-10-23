@@ -99,6 +99,7 @@ from analysis_mcp.engine.common import (
     facet_columns,
     frame_keeping_role_types,
     narrow_and_resolve,
+    private_parties,
     record_counted_exclusion,
     record_exclusion,
     require_one_place_level,
@@ -175,7 +176,8 @@ class RankResult:
     whether the output frame's `value` is the rank position.
     `window_period_count` is how many periods the window holds before
     unit-less rows are left out, the periods each entity's coverage is
-    measured against.
+    measured against. `private_parties` are the `(role, party)` pairs of the
+    ranked roles whose party is of the private class, which the digest tags.
     """
 
     frame: Frame
@@ -194,6 +196,7 @@ class RankResult:
     limit: int | None = None
     exclusions: Exclusions = field(default_factory=Exclusions)
     window_period_count: int = 0
+    private_parties: tuple[tuple[str, str], ...] = ()
 
     @property
     def kept_ranks(self) -> tuple[EntityRank, ...]:
@@ -475,7 +478,8 @@ def run_rank(
     require_one_place_level(frame, rank_by)
     # A total of other parties is neither ranked beside them nor summed into
     # an entity's value, whether its role is ranked or pooled. A ranked role
-    # holding only totals ("which regions receive the most?") ranks them.
+    # holding only totals ("which regions receive the most?") ranks them, and
+    # a ranked role holding parties leaves out its unallocated residuals.
     frame, party_exclusions = without_party_totals(frame, role_columns(frame), ranked=rank_by)
     # `exclude_unitless=True`: `resolved.unit` labels every ranked entity's
     # output row alike. An entity whose rows leave `unit` unbound is excluded;
@@ -664,4 +668,5 @@ def run_rank(
         entity_ranks=tuple(entity_ranks),
         exclusions=exclusions,
         window_period_count=pre_exclusion_period_count,
+        private_parties=private_parties(table, entity_columns),
     )

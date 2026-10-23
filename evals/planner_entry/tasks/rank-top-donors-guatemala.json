@@ -33,9 +33,10 @@
   ],
   "neighbour": {
     "kind": "aggregate",
-    "distinction": "rank, not aggregate: the donors are ordered by their totals, and an aggregate over the donors would sum them away"
+    "distinction": "rank, not aggregate: the donors are ordered by what each gave in the newest year, and an aggregate over the donors would sum them away"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "who are the top donors to Guatemala",
     "answer_mode": "computed",
@@ -98,6 +99,8 @@
         "axis": "donor",
         "reduction": "sum",
         "limit": 10,
+        "window_start": 2024,
+        "window_end": 2024,
         "decision_ids": [
           "top_n",
           "every_donor"

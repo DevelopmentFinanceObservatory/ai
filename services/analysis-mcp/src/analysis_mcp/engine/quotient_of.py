@@ -48,7 +48,6 @@ operation's own ref, since one variable over another is a third.
 
 from __future__ import annotations
 
-import heapq
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
@@ -71,6 +70,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     agreed_facets,
     combine_exclusions,
     facet_columns,
@@ -85,15 +85,15 @@ from analysis_mcp.engine.two_sided import (
     SideSums,
     denominator_key_columns,
     divide_cell,
+    key_sample,
     pair_periods,
     record_cells,
+    record_unmatched_keys,
     record_unmatched_periods,
     result_coverage,
+    split_keys,
     sum_side,
 )
-
-# How many keys per side a `QuotientOfNoKeyMatchedError` samples.
-KEY_SAMPLE_CAP = 20
 
 
 class QuotientOfSideUnitUnsupportedError(Exception):
@@ -111,10 +111,11 @@ class QuotientOfSideUnitUnsupportedError(Exception):
 
 class QuotientOfNoKeyMatchedError(Exception):
     """Both sides hold keys and no numerator key has a denominator group
-    under `denominator_by`'s mapping. `numerator_keys`/`denominator_keys` are each side's `KEY_SAMPLE_CAP`
-    smallest keys, each as `(column, value)` pairs under that side's own
-    column names; `numerator_key_count`/`denominator_key_count` are how many
-    keys each side holds.
+    under `denominator_by`'s mapping. `numerator_keys`/`denominator_keys` are
+    each side's sample of keys (`analysis_mcp.engine.two_sided.key_sample`),
+    each as `(column, value)` pairs under that side's own column names;
+    `numerator_key_count`/`denominator_key_count` are how many keys each side
+    holds.
     """
 
     def __init__(
@@ -220,6 +221,10 @@ class QuotientOfResult:
     and not on the other, sorted by key under `numerator_by`'s names. A key
     holding none is absent, and a pooled denominator has no periods of one
     key's own, so `denominator_only_periods` is empty for it.
+
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`),
+    read from the cells behind `frame`'s rows, so a cell left out adds nothing.
     """
 
     frame: Frame
@@ -247,6 +252,8 @@ class QuotientOfResult:
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
 
     @property
     def dropped_key_count(self) -> int:
@@ -275,23 +282,24 @@ def _sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """`sum_side` for `side`. A composed side refuses as `_unit_part`
     refuses it (`QuotientOfSideUnitUnsupportedError`) whether its cells hold
     one row or several."""
     try:
-        return sum_side(frame, side=side, entity=entity, by=by, pinned_unit=pinned_unit)
+        return sum_side(
+            frame,
+            side=side,
+            entity=entity,
+            by=by,
+            pinned_unit=pinned_unit,
+            numerator_by=numerator_by,
+        )
     except ComposedUnitSumError as exc:
         raise QuotientOfSideUnitUnsupportedError(
             side=side, reason="composed", unit=exc.unit
         ) from exc
-
-
-def _key_sample(sums: SideSums, columns: Sequence[str]) -> tuple[KeyPairs, ...]:
-    return tuple(
-        tuple(zip(columns, key, strict=True))
-        for key in heapq.nsmallest(KEY_SAMPLE_CAP, sums.by_key)
-    )
 
 
 def _all_periods(sums: SideSums) -> list[str]:
@@ -339,6 +347,7 @@ def run_quotient_of(
         entity=denominator_entity,
         by=denominator_columns,
         pinned_unit=denominator_pinned_unit,
+        numerator_by=numerator_by,
     )
     numerator_stat_var = require_single_stat_var(numerator_frame)
     denominator_stat_var = require_single_stat_var(denominator_frame)
@@ -361,17 +370,11 @@ def run_quotient_of(
             denominator_periods=_all_periods(denominator),
         )
 
-    unmatched_keys: list[tuple[str, ...]] = []
-    paired_keys: list[tuple[str, ...]] = []
-    for key in numerator_keys:
-        if pooled or key in denominator.by_key:
-            paired_keys.append(key)
-        else:
-            unmatched_keys.append(key)
+    paired_keys, unmatched_keys = split_keys(numerator_keys, denominator, pooled=pooled)
     if not paired_keys:
         raise QuotientOfNoKeyMatchedError(
-            numerator_keys=_key_sample(numerator, numerator_by),
-            denominator_keys=_key_sample(denominator, denominator_columns),
+            numerator_keys=key_sample(numerator, numerator_by),
+            denominator_keys=key_sample(denominator, denominator_columns),
             numerator_key_count=len(numerator.by_key),
             denominator_key_count=len(denominator.by_key),
         )
@@ -387,7 +390,6 @@ def run_quotient_of(
     period_quotients: list[PeriodQuotient] = []
     kept_cells: list[tuple[tuple[str, ...], str]] = []
     zero_denominator_cells: list[ZeroDenominatorCell] = []
-    keys_without_shared_period: list[tuple[str, ...]] = []
     keys_with_zero_denominator: list[tuple[str, ...]] = []
     # Every denominator (group, period) some numerator key shares that sums
     # to zero. A pooled group serves every key, so each cell counts once.
@@ -397,9 +399,7 @@ def run_quotient_of(
         numerator_by_period = numerator.by_key.get(key, {})
         denominator_by_period = denominator.by_key.get(group, {})
         key_pairs = tuple(zip(numerator_by, key, strict=True))
-        if not shared:
-            keys_without_shared_period.append(key)
-        elif all(denominator_by_period[period] == 0.0 for period in shared):
+        if shared and all(denominator_by_period[period] == 0.0 for period in shared):
             keys_with_zero_denominator.append(key)
         for period in shared:
             numerator_value = numerator_by_period[period]
@@ -445,13 +445,8 @@ def run_quotient_of(
     )
 
     exclusions = combine_exclusions(numerator.exclusions, denominator.exclusions)
-    exclusions = record_cells(
-        exclusions,
-        reason="unmatched_key",
-        side="numerator",
-        sums=numerator,
-        columns=numerator_by,
-        cells=((key, period) for key in unmatched_keys for period in numerator.by_key[key]),
+    exclusions = record_unmatched_keys(
+        exclusions, numerator=numerator, numerator_by=numerator_by, keys=unmatched_keys
     )
     exclusions = record_unmatched_periods(
         exclusions,
@@ -525,9 +520,7 @@ def run_quotient_of(
         denominator_coverage_fraction=pairing.denominator_coverage_fraction,
         period_quotients=tuple(period_quotients),
         unmatched_keys=tuple(tuple(zip(numerator_by, key, strict=True)) for key in unmatched_keys),
-        keys_without_shared_period=tuple(
-            tuple(zip(numerator_by, key, strict=True)) for key in keys_without_shared_period
-        ),
+        keys_without_shared_period=pairing.keys_without_shared_period,
         keys_with_zero_denominator=tuple(
             tuple(zip(numerator_by, key, strict=True)) for key in keys_with_zero_denominator
         ),
@@ -542,4 +535,8 @@ def run_quotient_of(
             kept_cells, keyed=bool(numerator_by), denominator=denominator, pooled=pooled
         ),
         exclusions=exclusions,
+        numerator_pooled=numerator.pooled_over(kept_cells),
+        denominator_pooled=denominator.pooled_over(
+            (() if pooled else key, period) for key, period in kept_cells
+        ),
     )

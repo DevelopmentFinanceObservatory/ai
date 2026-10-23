@@ -108,6 +108,7 @@ __all__ = [
     "Refused",
     "Replayed",
     "ToolAnswer",
+    "refusal_outcome",
     "replay_recipe",
 ]
 
@@ -244,24 +245,20 @@ class _Stopped(Exception):  # noqa: N818 -- a control-flow signal carrying an ou
         super().__init__(type(outcome).__name__)
 
 
-def _refusal_stop(structured: Mapping[str, Any] | None, *, stage: Stage) -> _Stopped:
-    """What a data-mcp or analysis-mcp refusal envelope makes of the replay: a wait
+def refusal_outcome(structured: Mapping[str, Any] | None, *, stage: Stage) -> Pending | Refused:
+    """What a data-mcp or analysis-mcp refusal envelope makes of a replay: a wait
     when it says to retry after a delay, else a refusal under its own code."""
     body = structured or {}
     if body.get("retry_mode") == _RETRY_AFTER_DELAY:
         wait = body.get("retry_after_s")
-        return _Stopped(
-            Pending(
-                retry_after_s=float(wait) if isinstance(wait, int | float) else BUSY_RETRY_AFTER_S,
-                reason="busy",
-            )
+        return Pending(
+            retry_after_s=float(wait) if isinstance(wait, int | float) else BUSY_RETRY_AFTER_S,
+            reason="busy",
         )
-    return _Stopped(
-        Refused(
-            code=str(body.get("code") or "refusal_unreadable"),
-            detail=str(body.get("message") or "the refusal carried no message"),
-            stage=stage,
-        )
+    return Refused(
+        code=str(body.get("code") or "refusal_unreadable"),
+        detail=str(body.get("message") or "the refusal carried no message"),
+        stage=stage,
     )
 
 
@@ -425,7 +422,7 @@ class _Replay:
         if isinstance(minted, QueuedOperation):
             raise _Stopped(Pending(retry_after_s=minted.retry_after_s, reason="mint_queued"))
         if isinstance(minted, ToolResult):
-            raise _refusal_stop(minted.structured_content, stage="mint")
+            raise _Stopped(refusal_outcome(minted.structured_content, stage="mint"))
         if minted.dataset.spec_id != record.dataset.spec_id:
             raise _Stopped(
                 Refused(
@@ -574,7 +571,7 @@ class _Replay:
         )
         resolved = answer.structured_content or {}
         if answer.is_error:
-            raise _refusal_stop(resolved, stage="anchor")
+            raise _Stopped(refusal_outcome(resolved, stage="anchor"))
         self.populations = populations
         self.period = resolved["period"]
         self.anchor_key = resolved["anchor_key"]
@@ -635,7 +632,7 @@ class _Replay:
             )
         result = answer.structured_content or {}
         if answer.is_error:
-            raise _refusal_stop(result, stage="verb")
+            raise _Stopped(refusal_outcome(result, stage="verb"))
         ref = FrameRef(spec_id=result["spec_id"], content_version=result["content_version"])
         if expected is not None and ref != expected:
             logger.warning(
@@ -841,8 +838,8 @@ async def replay_recipe(
         call_tool: Calls an analysis-mcp tool by name: the eight verbs and
             `resolve_anchor`.
         store: The process's materialisation store, `common.materialisation.get_store()`.
-        apis: The apis client. `list_versions`, `find_replay` and
-            `read_recipe` are called, all under the datasets principal.
+        apis: The apis client. `find_replay` and `read_recipe` are called under
+            the datasets principal, and `list_versions`, which needs none.
         publish: Publishes the final frame with its recipe.
         row_budget: The rows replays may hold at once. Each verb call claims its
             inputs' rows, `resolve_anchor` the roots', and the publish the final
@@ -894,11 +891,13 @@ async def replay_recipe(
 
 def _names_its_groupby(record: MintRecord) -> bool:
     """Whether `record` is a groupby root whose frame is held under the pair
-    `frame_ref_for` derives from its dataset, columns and groupby."""
+    `frame_ref_for` derives from its dataset, columns, groupby and the enrichment
+    stamp the record keeps."""
     groupby = record.options.get("groupby")
     return groupby is not None and record.frame == frame_ref_for(
         spec_id=record.dataset.spec_id,
         content_version=record.dataset.content_version,
         columns=tuple(record.options.get("columns") or ()),
         groupby=groupby,
+        enrichment_stamp=record.enrichment_stamp,
     )

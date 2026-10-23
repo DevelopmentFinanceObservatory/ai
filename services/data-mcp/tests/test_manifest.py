@@ -229,6 +229,24 @@ def test_a_manifest_without_year_counts_dumps_neither_member() -> None:
     assert coverage.keys() == _DEFINITION_MANIFEST["coverage"].keys()
 
 
+def test_an_artifacts_enrichment_stamp_survives_stripping_and_stays_out_of_a_dump_without_one() -> (
+    None
+):
+    [artifact, *others] = _DEFINITION_MANIFEST["artifacts"]
+    stamped = strip_manifest(
+        {
+            **_DEFINITION_MANIFEST,
+            "artifacts": [{**artifact, "enrichment_stamp": "stamp-a"}, *others],
+        }
+    )
+
+    assert stamped.artifacts[0].enrichment_stamp == "stamp-a"
+    assert stamped.model_dump(mode="json")["artifacts"][0]["enrichment_stamp"] == "stamp-a"
+    bare = strip_manifest(_DEFINITION_MANIFEST)
+    assert bare.artifacts[0].enrichment_stamp is None
+    assert "enrichment_stamp" not in bare.model_dump(mode="json")["artifacts"][0]
+
+
 def test_a_coverage_dimension_from_a_dfo_apis_without_axes_still_parses() -> None:
     stripped = strip_manifest(_DEFINITION_MANIFEST)
 

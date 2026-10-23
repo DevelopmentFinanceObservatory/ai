@@ -193,7 +193,8 @@ def test_top_members_ranks_nothing_across_unlike_values(other: dict[str, Any]) -
 
 def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
     """A group total such as the G7, a residual and a party with no kind are
-    left out of a ranking of donors."""
+    left out of a ranking of donors. A private donor, of kind `party` with
+    its class in a column of its own, ranks beside the others."""
     cells = {
         "DACOfficialDonors": "total",
         "GroupOfSeven": "total",
@@ -201,9 +202,14 @@ def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
         "Unknown": "untyped",
         "Germany": "party",
         "Japan": "party",
+        "GatesFoundation": "party",
     }
 
-    assert comparable_members(cells, dimension="financingProvider") == {"Germany", "Japan"}
+    assert comparable_members(cells, dimension="financingProvider") == {
+        "Germany",
+        "Japan",
+        "GatesFoundation",
+    }
 
 
 def test_comparable_members_keeps_the_places_at_the_level_most_share() -> None:

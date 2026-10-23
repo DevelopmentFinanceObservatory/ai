@@ -47,6 +47,7 @@
     "distinction": "aggregate, not sum_of: the providers are summed within each recipient, and Kenya and Ghana stay apart; nothing from two sources is added"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "gross ODA disbursements for health to Kenya and Ghana from all providers summed, 2020 to 2024, in current US dollars",
     "answer_mode": "computed",

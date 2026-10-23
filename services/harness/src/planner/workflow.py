@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from common.hashed_fields import HASHED_WHEN_SET
+from common.place_type import PartyClass
 from pydantic import Field, JsonValue, model_validator
 
 from planner.records import (
@@ -76,10 +77,17 @@ class ResolvedGroup(StrictModel):
     graph node, `None` when the graph holds none (a resolver group such as
     "G7"). `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
-    when the role binds the set's members, one entity each. A requirement's
-    `Entity` naming the label, case-folded, on the set's side of the flow is
-    met by the source under either reading (`compiler.evidence.resolve_group`),
-    except that one asking for the members is not met by the total.
+    when the role binds the set's members, one entity each. `whole_of` names
+    the classes of party (`common.place_type.PartyClass`) the bound total holds
+    in full, or all the totals of a union read as one population ("all donors
+    including private"), whose `total` is `None`; empty for any other set.
+    `side_classes` names the classes of party, totals aside, the source publishes
+    on the side such a set is read on, so a reading can say what the population
+    leaves out; empty for any other set and on a search answer without it.
+    A requirement's `Entity` naming the label, case-folded, on the set's side
+    of the flow is met by the source under either reading
+    (`compiler.evidence.resolve_group`), except that one asking for the members
+    is not met by the total.
     """
 
     role: str = Field(min_length=1)
@@ -90,6 +98,18 @@ class ResolvedGroup(StrictModel):
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
+    whole_of: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda classes: not classes
+    )
+    side_classes: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda classes: not classes
+    )
+
+    @property
+    def reads_total(self) -> bool:
+        """Whether the role binds a total, the set's own (`total`) or a whole
+        population's (`whole_of`), and no member."""
+        return self.total is not None or bool(self.whole_of)
 
 
 class OpenAxis(StrictModel):

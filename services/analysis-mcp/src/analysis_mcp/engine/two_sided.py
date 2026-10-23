@@ -1,11 +1,12 @@
 """What every numerator-over-denominator verb does before and after its own
 pairing rules: sum one side per (key, period), map `denominator_by` onto the
-denominator's own columns, match each paired key's periods with its
-denominator group's and record the periods left out, and divide one matched
-cell.
+denominator's own columns, split the numerator keys holding a denominator
+group from those holding none and record the latter, match each paired key's
+periods with its group's and record the periods left out, and divide one
+matched cell.
 
-Which units, facets and keys may pair across the two sides, and what a key
-sharing no period means, is each verb's own rule and stays in its own engine module
+Which units, facets and keys may pair across the two sides is each verb's
+own rule and stays in its own engine module
 (`analysis_mcp.engine.share_of`, `analysis_mcp.engine.quotient_of`). The
 exceptions here carry no verb's name, so each verb surfaces them as its own
 refusal.
@@ -13,12 +14,14 @@ refusal.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import Literal, cast
 
+import pyarrow as pa
 from dfo_frame_grammar import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, ComposedUnit, UnitCell
 
@@ -28,9 +31,11 @@ from analysis_mcp.engine.common import (
     ExclusionReason,
     Exclusions,
     FacetSelection,
+    PooledParties,
     combine_exclusions,
     entity_roles,
     narrow_and_resolve,
+    pooled_parties,
     record_counted_exclusion,
     require_one_place_level,
     require_single_stat_var,
@@ -48,6 +53,9 @@ type Key = tuple[str, ...]
 type KeyPairs = tuple[tuple[str, str], ...]
 # One key and the sorted periods it holds on one side alone.
 type KeyPeriods = tuple[KeyPairs, tuple[str, ...]]
+
+# The number of keys per side that the refusal for a call with no paired key samples.
+KEY_SAMPLE_CAP = 20
 
 
 class NonFiniteCellError(Exception):
@@ -92,7 +100,9 @@ class SideSums:
     shape and holds how many rows each sum read, and `entity_counts` how
     many entities those rows hold: distinct value combinations across the
     entity roles (`common.entity_roles`) outside `by`. `stat_var` is the whole frame's sole
-    `stat_var`.
+    `stat_var`. `table` is the side's narrowed rows, `cell_rows` the positions in
+    `table` of each (key, period) sum's rows, and `pooled_roles` the flow party
+    roles outside `entity` and `by`, which `pooled_over` reads.
     """
 
     stat_var: str
@@ -103,6 +113,17 @@ class SideSums:
     facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     exclusions: Exclusions
+    table: pa.Table
+    cell_rows: dict[tuple[Key, str], pa.Array]
+    pooled_roles: tuple[str, ...]
+
+    def pooled_over(self, cells: Iterable[tuple[Key, str]]) -> tuple[PooledParties, ...]:
+        """What the sums of `cells`, the (key, period) cells a result divides,
+        pooled in each of `pooled_roles` (`common.PooledParties`). A cell the
+        verb leaves out, such as a period the other side lacks, adds nothing."""
+        rows = [self.cell_rows[cell] for cell in dict.fromkeys(cells)]
+        contributing = self.table.take(pa.concat_arrays(rows)) if rows else self.table.slice(0, 0)
+        return pooled_parties(contributing, self.pooled_roles)
 
 
 def sum_side(
@@ -112,6 +133,7 @@ def sum_side(
     entity: Mapping[str, str],
     by: Sequence[str],
     pinned_unit: UnitCell | None,
+    numerator_by: Sequence[str] = (),
 ) -> SideSums:
     """Narrow `frame` to `entity`'s own rows, resolve unit/facets over
     exactly that slice, then sum (`math.fsum`) every remaining row sharing
@@ -128,13 +150,21 @@ def sum_side(
     as the harness's `planner.shapes` refuses either side of a share over such a frame.
     A flow party that totals other parties is left out of the side, whether
     the side sums across its role or keys by it, unless `entity` binds that
-    role (`without_party_totals`).
+    role (`without_party_totals`). A whole total beside members of other
+    classes stays, summed across or its own key. A whole total that may hold
+    a member is left out of a role in `by` or `numerator_by` and refused on
+    any other. A denominator passes its numerator's `numerator_by`, so a role
+    the numerator keys by keeps the same rows on both sides even where the
+    denominator sums across it.
     """
     stat_var = require_single_stat_var(frame)
     validate_entity_columns(frame, (*entity, *by))
     require_one_place_level(frame, role_columns(frame))
     frame, party_exclusions = without_party_totals(
-        frame, (column for column in role_columns(frame) if column not in entity), side=side
+        frame,
+        (column for column in role_columns(frame) if column not in entity),
+        keyed=(*by, *numerator_by),
+        side=side,
     )
     # `exclude_unitless=True`: a row leaving `unit` unbound is excluded from
     # this side's sum, consistent with the policy `aggregate` applies.
@@ -151,9 +181,11 @@ def sum_side(
     key_columns = [cast("list[str]", groups.keys.column(column).to_pylist()) for column in by]
     periods = cast("list[str]", groups.keys.column(TIME_PERIOD_COLUMN).to_pylist())
     by_key_and_period: dict[tuple[str, ...], dict[str, list[float]]] = {}
+    cell_rows: dict[tuple[Key, str], pa.Array] = {}
     for group, (start, end) in enumerate(pairwise(groups.offsets)):
         key = tuple(column[group] for column in key_columns)
         by_key_and_period.setdefault(key, {})[periods[group]] = values[start:end]
+        cell_rows[key, periods[group]] = groups.indices[start:end]
 
     summed: dict[tuple[str, ...], dict[str, float]] = {}
     row_counts = {
@@ -194,6 +226,11 @@ def sum_side(
         facet_selections=resolved.facet_selections,
         warnings=tuple(resolved.warnings),
         exclusions=exclusions,
+        table=table,
+        cell_rows=cell_rows,
+        pooled_roles=tuple(
+            column for column in role_columns(frame) if column not in (*entity, *by)
+        ),
     )
 
 
@@ -237,6 +274,29 @@ def divide_cell(*, numerator_value: float, denominator_value: float, time_period
     return quotient + 0.0
 
 
+def split_keys(
+    numerator_keys: Iterable[Key], denominator: SideSums, *, pooled: bool
+) -> tuple[list[Key], list[Key]]:
+    """`numerator_keys`, in the order given, split into the keys holding a
+    denominator group (every key when `pooled`) and the keys holding none,
+    which a verb leaves out and records as `unmatched_key`
+    (`record_unmatched_keys`)."""
+    paired: list[Key] = []
+    unmatched: list[Key] = []
+    for key in numerator_keys:
+        (paired if pooled or key in denominator.by_key else unmatched).append(key)
+    return paired, unmatched
+
+
+def key_sample(sums: SideSums, columns: Sequence[str]) -> tuple[KeyPairs, ...]:
+    """The `KEY_SAMPLE_CAP` smallest of `sums`' keys, as `(column, value)`
+    pairs under `columns`."""
+    return tuple(
+        tuple(zip(columns, key, strict=True))
+        for key in heapq.nsmallest(KEY_SAMPLE_CAP, sums.by_key)
+    )
+
+
 @dataclass(frozen=True, kw_only=True)
 class PeriodPairing:
     """How each numerator key that pairs with a denominator group meets it
@@ -244,6 +304,10 @@ class PeriodPairing:
 
     `shared` maps each paired key, in the order given, to the sorted
     periods it shares with its group, empty when it shares none.
+    `keys_without_shared_period` are those keys sharing none, in the same
+    order and as `(column, value)` pairs: a verb leaves each out of its
+    result and names it, and refuses only when no key shares a period
+    (`matched_periods` is empty).
     `numerator_periods` and `denominator_periods` are every period the
     paired keys and their groups hold, and `matched_periods` every period
     some key shares with its group, all sorted. A side's coverage fraction
@@ -261,6 +325,7 @@ class PeriodPairing:
     """
 
     shared: dict[Key, tuple[str, ...]]
+    keys_without_shared_period: tuple[KeyPairs, ...]
     numerator_periods: tuple[str, ...]
     denominator_periods: tuple[str, ...]
     matched_periods: tuple[str, ...]
@@ -313,6 +378,11 @@ def pair_periods(
     matched_cells = sum(len(periods) for periods in shared.values())
     return PeriodPairing(
         shared=shared,
+        keys_without_shared_period=tuple(
+            tuple(zip(numerator_by, key, strict=True))
+            for key, periods in shared.items()
+            if not periods
+        ),
         numerator_periods=tuple(
             sorted({period for key in paired_keys for period in numerator.by_key.get(key, {})})
         ),
@@ -357,6 +427,25 @@ def record_cells(
         row_count=sum(sums.row_counts[key][period] for key, period in cells),
         entities={column: [key[index] for key, _ in cells] for index, column in enumerate(columns)},
         side=side,
+    )
+
+
+def record_unmatched_keys(
+    exclusions: Exclusions,
+    *,
+    numerator: SideSums,
+    numerator_by: Sequence[str],
+    keys: Sequence[Key],
+) -> Exclusions:
+    """`exclusions`, plus an `unmatched_key` record for every numerator cell
+    of `keys`, the keys holding no denominator group (`split_keys`)."""
+    return record_cells(
+        exclusions,
+        reason="unmatched_key",
+        side="numerator",
+        sums=numerator,
+        columns=numerator_by,
+        cells=((key, period) for key in keys for period in numerator.by_key[key]),
     )
 
 

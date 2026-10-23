@@ -58,8 +58,9 @@ from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
     TYPED_ROLES,
-    enrichment_columns,
     enrichment_role,
+    kind_column,
+    type_column,
 )
 from common.row_budget import row_budget
 from compiler.sources import (
@@ -129,7 +130,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
-    AskOption,
+    AskQuestion,
     DescribedFrame,
     PendingAsk,
     PendingPlan,
@@ -156,7 +157,7 @@ from harness.tool_contracts import (
     harness_retry_mode,
     measure_choice,
 )
-from harness.turn_records import SETTLED_STATUSES, SearchReading
+from harness.turn_records import SETTLED_STATUSES, SearchReading, SiblingReading
 from harness.wire import RetryMode, usable_component
 
 logger = logging.getLogger(__name__)
@@ -323,8 +324,21 @@ class AskedOutput(BaseModel):
     over: list[PartyRole] = Field(
         default=[],
         description=(
-            "each party the output totals across, every member summed into one figure: "
-            '["donor"] for "total aid from all donors"'
+            "each party the output totals across into one figure: "
+            '["donor"] for "total aid from all donors". Such a party stays out of open_roles, '
+            "and the search call names the population as an entity"
+        ),
+    )
+    across_years: bool = Field(
+        default=False,
+        description=(
+            "true when the user asked for this output as one figure, or one ranking, taken "
+            'across several years: a total, an average, a peak or a low over them ("the '
+            'total between 2015 and 2022", "in total, over all years", "the year aid '
+            'peaked"). It permits the plan to combine the years and requires nothing. Leave '
+            "it false for a figure for each year and for one year, and for a total or a "
+            "ranking when the user named no years: the years a source holds are not a span "
+            "the user asked for"
         ),
     )
 
@@ -458,12 +472,13 @@ def _covering_selects(
 
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Each `dimension` member's kind or type cell among `rows`; empty when
-    the rows carry neither of its enrichment columns."""
+    """Each `dimension` member's kind or type cell among `rows`, the kind where
+    both are held; empty when the rows carry neither column. A party's class
+    and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
         for row in rows
-        for column in enrichment_columns(dimension)
+        for column in (type_column(dimension), kind_column(dimension))
         if row.get(column) is not None and row.get(dimension) is not None
     }
 
@@ -662,8 +677,8 @@ def _cut_note(cut: TopMembers) -> str:
     kind and the members with no value at the cut's period counted apart."""
     return (
         f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
-        f"value in {cut.period}, highest first. Left out as group totals or members of "
-        f"another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
+        f"value in {cut.period}, highest first. Left out as group totals, unallocated amounts "
+        f"or members of another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
         f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
         f"{cut.period}."
     )
@@ -912,9 +927,14 @@ def _validated_arguments(
 
 
 def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
-    """The refusal of a `plan` call whose `asks` break the planner's limits
-    (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None."""
+    """The refusal of a `plan` call whose `asks` list none or break the
+    planner's limits (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None.
+
+    A plan held to no asks has no ask to license combining a step's years
+    (`planner.plan.Plan.period_licences`), so a brief lists at least one."""
     problems = []
+    if not asks:
+        problems.append("asks lists no outputs: list each output the user asked for")
     if len(asks) > MAX_PLAN_ASKS:
         problems.append(
             f"asks lists {len(asks)} outputs, more than {MAX_PLAN_ASKS}: merge outputs the "
@@ -936,7 +956,7 @@ def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
     return {
         "refusal": f"plan recorded nothing: {'; '.join(problems)}.",
         "code": ToolErrorCode.REQUEST_INVALID.value,
-        "legal": {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]},
+        "legal": {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]},
     }
 
 
@@ -1008,25 +1028,49 @@ def _ask_breakdowns(asks: Sequence[AskedOutput]) -> list[AskBreakdown]:
     ]
 
 
+def _asks_across_years(asks: Sequence[AskedOutput]) -> list[int]:
+    """The numbers of the asks that set `across_years`."""
+    return [number for number, ask in enumerate(asks) if ask.across_years]
+
+
 def _named_spec_ids(tool_context: ToolContext) -> set[str]:
     """Every spec_id this turn's search results named: each part's own and each
-    candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count a part's
-    result offers (`measure_choice`)."""
+    candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count and other
+    prices a part's result offers (`measure_choice`)."""
     specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     named = set(specs)
     for block in specs.values():
+        choice = measure_choice(block or {})
         named.update(
             alternative["spec_id"]
-            for alternative in measure_choice(block or {}).get("alternatives") or ()
+            for key in ("alternatives", "other_prices")
+            for alternative in choice.get(key) or ()
         )
     return named
 
 
-def _options_refusal(options: list[AskOption], named: set[str]) -> dict[str, Any] | None:
-    """The refusal of an `ask_user` call whose options carry a spec_id no search
-    result this turn named (`_named_spec_ids`), or one spec_id twice, or None."""
+# The questions one `ask_user` call may put to the user in one pause.
+MAX_ASK_QUESTIONS = 3
+
+
+def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[str, Any] | None:
+    """The refusal of an `ask_user` call that asks no question or more than
+    `MAX_ASK_QUESTIONS`, asks a question with no option, offers a spec_id no
+    search result this turn named (`_named_spec_ids`), or offers one spec_id
+    on two options of the call; None when it asks well."""
+    options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
-    problems = [
+    problems = []
+    if not 1 <= len(questions) <= MAX_ASK_QUESTIONS:
+        problems.append(
+            f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
+        )
+    problems += [
+        f"question {question.question!r} offers no option"
+        for question in questions
+        if not question.options
+    ]
+    problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
         for option in options
         if option.spec_id is not None and option.spec_id not in named
@@ -1152,12 +1196,14 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     """Add a `fetch` result to every stored search reading of its spec_id.
 
     A spec_id that no reading holds as its own, but one offered as a
-    candidate or as another count (`SearchReading.alternatives`), first
-    gains a reading of its own, read from its block (`chosen_part`) with the
+    candidate, as another count (`SearchReading.alternatives`) or as the
+    same count in other prices (`SearchReading.other_prices`), first gains
+    a reading of its own, read from its block (`chosen_part`) with the
     offering reading's text, skills and departures and asked parties and
     its own warnings, else the offering reading's. A spec_id no reading
-    offers as a candidate is another count, and its reading names the
-    reading that offered it (`SearchReading.other_count_of`).
+    offers as a candidate is a sibling (`_offered_sibling`), and its reading
+    names the reading that offered it (`SearchReading.sibling_of`) and the
+    count it reads.
     """
     spec_id = result["spec_id"]
     state = tool_context.state
@@ -1169,10 +1215,8 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     candidate_of = next(
         (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
     )
-    count_of = next(
-        (r for r in searches if any(a.spec_id == spec_id for a in r.alternatives)), None
-    )
-    offered = candidate_of or count_of
+    sibling = None if candidate_of else _offered_sibling(searches, spec_id)
+    offered = candidate_of or (sibling[0] if sibling else None)
     if block and offered is not None and all(r.spec_id != spec_id for r in searches):
         warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
         if warnings is None:
@@ -1182,17 +1226,17 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             skills=offered.skills,
             observed_at=datetime.now(UTC),
         )
-        searches.append(
-            chosen.model_copy(
-                update={
-                    "separate": offered.separate,
-                    "departures": offered.departures,
-                    "asked_roles": offered.asked_roles,
-                    "open_roles": offered.open_roles,
-                    "other_count_of": None if candidate_of else offered.spec_id,
-                }
-            )
-        )
+        update: dict[str, Any] = {
+            "separate": offered.separate,
+            "departures": offered.departures,
+            "asked_roles": offered.asked_roles,
+            "open_roles": offered.open_roles,
+        }
+        if sibling is not None:
+            link = sibling[1]
+            counted_as = link.label if link.axis == "what" else offered.counted_as
+            update |= {"sibling_of": link, "counted_as": counted_as}
+        searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
         (reading.with_fetch(result) if reading.spec_id == spec_id else reading).model_dump(
             mode="json"
@@ -1209,6 +1253,22 @@ def _open_roles(part: SearchPart) -> list[str]:
     "from" gives "origin".
     """
     return list(dict.fromkeys(role for word in part.open_roles or () if (role := open_party(word))))
+
+
+def _offered_sibling(
+    searches: Sequence[SearchReading], spec_id: str
+) -> tuple[SearchReading, SiblingReading] | None:
+    """The first reading of `searches` offering `spec_id` as another count or
+    in other prices, with the link a reading of `spec_id` keeps to it; `None`
+    when none does."""
+    for reading in searches:
+        if reading.spec_id is None:
+            continue
+        for axis, offers in (("what", reading.alternatives), ("unit", reading.other_prices)):
+            label = next((offer.label for offer in offers if offer.spec_id == spec_id), None)
+            if label is not None:
+                return reading, SiblingReading(spec_id=reading.spec_id, axis=axis, label=label)
+    return None
 
 
 def _asked_roles(part: SearchPart) -> list[str]:
@@ -1321,9 +1381,23 @@ def build_orchestrator_tools(
         `entities`, as spoken. Use `to` for a recipient and `from` for a
         donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
         creditor" or "which donors" question leaves that flow side open in
-        `open_roles`. A rank over `origin` or `destination` also opens that
-        side. Keep `open_roles` when the user explicitly asks to break down
-        that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
+        `open_roles`. A total across a side leaves it out of `open_roles` and
+        names the population the user asked for: "aid to Ethiopia from all
+        donors" names "all donors" as a `from` entity, which covers official
+        and private donors, and a donor side left unnamed on DAC2a covers
+        official donors only. For a named population, search binds the
+        source's published total. Where the source publishes none, search
+        departs `whole_total_unpublished` and returns the members, whose sum
+        is the total. Where the source holds no series of that total, such as
+        "official donors" on the CRS, search finds no data. A published total
+        stands in only where no operation runs over its side: any operation
+        over `origin` or `destination`, `aggregate` included, opens that side and keeps its members. Search
+        lists "official donors" member by member only where the dataset holds
+        no private donors, and otherwise refuses `entity_role_not_admitted`:
+        open the donor side and keep the parties whose
+        `financingProvider_party_kind` is `party` and
+        `financingProvider_party_class` is `official`. Keep `open_roles` when the
+        user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",
         "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,
@@ -1368,9 +1442,10 @@ def build_orchestrator_tools(
         any, its `group_readings` when it reads a named group as the
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
-        with the others under `alternatives`, each with its spec_id and
-        label, and lists the `source_codes` of the indicators it found, each
-        with the publisher that issues it when search names one. And
+        with other counts under `alternatives` and the same count in other
+        prices under `other_prices`, each with its spec_id and label, and
+        lists the `source_codes` of the indicators it found, each with the
+        publisher that issues it when search names one. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
@@ -1826,45 +1901,47 @@ def build_orchestrator_tools(
             )
         return result
 
-    def ask_user(
-        question: str, options: list[AskOption], tool_context: ToolContext
-    ) -> dict[str, Any]:
-        """Ask the user a question before going on, offering the likely answers.
+    def ask_user(questions: list[AskQuestion], tool_context: ToolContext) -> dict[str, Any]:
+        """Ask the user one to three questions before going on, with the likely
+        answers to each. The user sees them together in one pause and answers
+        each by picking an option, writing their own answer, or leaving it to
+        you.
 
-        `options` are the answers to choose from, at least one; the user may
-        also write their own or skip. An option for a way of counting that a
-        search result names carries that count's spec_id, and the answer
-        names it when the user picks it. End your turn after calling it; the
-        answer comes back as the next message.
+        Ask only what changes the answer. Each question offers at least one
+        option. An option for a count or prices that a search result names
+        carries the spec_id the result gives it, and the answer names that
+        spec_id when the user picks it. Each spec_id goes on one option. End
+        your turn after calling ask_user. Every answer comes back as the next
+        message.
         """
-        if not options:
-            return _failed(
-                HarnessCode.TOOL_ARGUMENTS_INVALID, "ask_user needs at least one option to offer."
-            )
-        refused = _options_refusal(options, _named_spec_ids(tool_context))
+        refused = _questions_refusal(questions, _named_spec_ids(tool_context))
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")
         if spent:
             return spent
-        return _pend(tool_context, PendingAsk(question=question, options=list(options)))
+        return _pend(tool_context, PendingAsk(questions=list(questions)))
 
     def plan(brief: str, asks: list[AskedOutput], tool_context: ToolContext) -> dict[str, Any]:
         """Hand a question to the planner, which builds a plan that
         constructs the answer from the data. The user approves the plan
         before it runs.
 
-        `brief` is the whole question in full: every measure, place and
-        period. `asks` lists each output the user asked for, one per entry,
-        in the user's terms: a number, a ranking, a chart, a comparison; at
-        most six, each one short line. A figure over a span is an ask of its
-        own: "the total between 2010 and the latest" is one cumulative
-        number beside the yearly figures. A view added to help read the
-        answer is not an ask. The planner answers or declines each ask, so
-        an output left off the list can drop out of the plan unnoticed.
-        Each ask is `{"text", "by", "over"}`. Every party a search this turn
-        held open goes in some ask's `by` or `over`, and the plan keeps the
-        parties each ask lists in `by` together in one output.
+        `brief` is the whole question in full: every measure and place, and
+        the period the user named. When the user named none, say so, with
+        the year you chose if you chose one. The years a source holds are
+        not the question's period. `asks` lists each output the user asked
+        for, one per entry, in the user's terms: a number, a ranking, a
+        chart, a comparison; at least one and at most six, each one short line. One figure
+        the user asked for across several years is an ask of its own that
+        sets `across_years`: "the total between 2010 and the latest" is one
+        cumulative number beside the yearly figures. A view added to help
+        read the answer is not an ask. The planner answers or declines each
+        ask, so an output left off the list can drop out of the plan
+        unnoticed.
+        Each ask is `{"text", "by", "over", "across_years"}`. Every party a
+        search this turn held open goes in some ask's `by` or `over`, and the
+        plan keeps the parties each ask lists in `by` together in one output.
         End your turn after calling it; the plan's result comes back as the
         next message.
         """
@@ -1881,6 +1958,7 @@ def build_orchestrator_tools(
                 brief=brief,
                 asks=[text.strip() for text in texts],
                 ask_breakdowns=_ask_breakdowns(asks),
+                asks_across_years=_asks_across_years(asks),
             ),
         )
 

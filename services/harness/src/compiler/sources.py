@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS
+from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
     AmbiguousSourceReading,
     Period,
@@ -42,7 +42,7 @@ from planner.workflow import (
     ResolvedGroup,
     SelectedSource,
 )
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -634,6 +634,11 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     A group stating no name names nothing a requirement can ask for, so it is
     left out rather than failing the block. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
+    `whole_of` is the classes of party a whole-population total holds, or a
+    union of such totals, absent for any other set. `side_classes` is the
+    classes of party, totals aside, the dataset publishes on such a set's side,
+    absent for any other set and from a Search that predates it. A class outside
+    `common.place_type.PartyClass` fails the block.
     """
     found = []
     for role, raw in groups.items():
@@ -645,6 +650,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     label=label,
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
+                    whole_of=_party_classes(group.get("whole_of")),
+                    side_classes=_party_classes(group.get("side_classes")),
                 )
             )
     return tuple(found)
@@ -751,13 +758,61 @@ def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, 
     return definitions
 
 
+# What a whole-population total holds, by flow side and class of party.
+_WHOLE_OF_HOLDS: dict[tuple[str, PartyClass], str] = {
+    ("origin", "official"): "all official donors",
+    ("origin", "private"): "private donors",
+    ("destination", "official"): "every recipient country",
+    ("destination", "residual"): "aid the source allocates to no single country",
+}
+
+
+def _whole_scope(group: ResolvedGroup) -> str:
+    """What `group`'s whole-population total holds, and on the donor side the private
+    donors it leaves out when the source publishes some there (`side_classes`). A group
+    without `side_classes` says nothing it leaves out, since nothing says what the side
+    holds."""
+    held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, cls), cls) for cls in group.whole_of)
+    if (
+        group.role == "origin"
+        and "private" in group.side_classes
+        and "private" not in group.whole_of
+    ):
+        return f"{held} (private donors are outside it)"
+    return held
+
+
+def _whole_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str:
+    """The sentence saying `group` is read as the source's total for a whole population."""
+    scope = _whole_scope(group)
+    if group.total is None:
+        return (
+            f"The figure for {group.label} adds up the totals the source publishes for "
+            f"{scope}, not its members' figures."
+        )
+    party = labels.get(group.total, group.total)
+    subject = (
+        group.label if party.casefold() == group.label.casefold() else f"{group.label} are {party}"
+    )
+    return (
+        f"The figures for {subject}, the total the source publishes for {scope}, "
+        "not its members' figures added up."
+    )
+
+
 def total_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str | None:
     """The sentence saying `group` is read as its published total, or `None` when it binds members.
 
     `labels` maps a ref to its label, so the total party is named as the
     source names it ("Africa, Total") where that differs from the set's
-    own name.
+    own name. A group with `whole_of` is read as the source's total for a
+    whole population ("Official Donors, Total, the total the source publishes
+    for all official donors (private donors are outside it)" where the source
+    publishes private donors), or as the sum of such totals when it names no
+    single party.
     """
+    if group.whole_of:
+        return _whole_reading(group, labels)
     if group.total is None:
         return None
     party = labels.get(group.total, group.total)
@@ -790,7 +845,7 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     members leaves out what the source allocates to the group and to no
     single member ("Africa, regional"), which only the group's total counts.
     """
-    if group.total is not None:
+    if group.reads_total:
         return None
     if answer is None:
         return (
@@ -883,6 +938,18 @@ def _sequence_of_any(value: object) -> list[object]:
 
 def _strings(value: object) -> list[str]:
     return [item for item in _sequence_of_any(value) if isinstance(item, str)]
+
+
+_PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
+
+
+def _party_classes(value: object) -> tuple[PartyClass, ...]:
+    """The classes of party `value` lists, none when it lists none.
+
+    Raises:
+        pydantic.ValidationError: When it lists a class outside `PartyClass`.
+    """
+    return _PARTY_CLASSES.validate_python(_strings(value))
 
 
 def _text(value: object) -> str | None:

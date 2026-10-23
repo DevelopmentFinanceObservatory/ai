@@ -37,6 +37,7 @@ from dfo_frame_grammar.grammar import UnitCell
 from analysis_mcp.artifact import Exclusion, Interval, Time
 from analysis_mcp.disambiguation import truncate_value
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary
+from analysis_mcp.engine.common import PooledParties
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
 from analysis_mcp.engine.filter import FilterResult, FilterRowSummary
 from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
@@ -135,6 +136,107 @@ def _key_text(key: Sequence[tuple[str, str]]) -> str:
     return ", ".join(f"{column}={truncate_value(value)}" for column, value in key)
 
 
+# How a flow party role's pooled parties are named in a sum's private-party line, one and
+# several: its members, its private members, its whole totals and its private whole totals.
+# A pool of members beside whole totals names the totals `whole total` on every role.
+_MEMBER_NOUNS: dict[str, tuple[str, str]] = {"financingProvider": ("provider", "providers")}
+_OTHER_MEMBER_NOUNS = ("party", "parties")
+_PRIVATE_MEMBER_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("private donor", "private donors")
+}
+_OTHER_PRIVATE_MEMBER_NOUNS = ("private party", "private parties")
+_WHOLE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("whole total of providers", "whole totals of providers")
+}
+_WHOLE_TOTALS = ("whole total", "whole totals")
+_PRIVATE_TOTAL_NOUNS: dict[str, tuple[str, str]] = {
+    "financingProvider": ("total of private donors", "totals of private donors")
+}
+_OTHER_PRIVATE_TOTAL_NOUNS = ("private total", "private totals")
+
+
+def _counted(count: int, nouns: tuple[str, str], *, qualifier: str = "") -> str:
+    """`3 providers`, or `3 listed providers` with `qualifier` `listed `."""
+    return f"{count} {qualifier}{nouns[count != 1]}"
+
+
+def _pool_text(pooled: PooledParties, *, qualifier: str = "") -> str:
+    """`3 providers`, `2 whole totals of providers`, or `1 whole total and 1 provider`: the
+    parties a sum pooled, members and whole totals counted apart."""
+    members = pooled.count - pooled.total_count
+    member_nouns = _MEMBER_NOUNS.get(pooled.role, _OTHER_MEMBER_NOUNS)
+    if not pooled.total_count:
+        return _counted(members, member_nouns, qualifier=qualifier)
+    if not members:
+        nouns = _WHOLE_TOTAL_NOUNS.get(pooled.role, _WHOLE_TOTALS)
+        return _counted(pooled.count, nouns, qualifier=qualifier)
+    totals = _counted(pooled.total_count, _WHOLE_TOTALS, qualifier=qualifier)
+    return f"{totals} and {_counted(members, member_nouns)}"
+
+
+def _private_count_text(pooled: PooledParties, count: int) -> str:
+    """`24 private donors`, `1 total of private donors`, or both joined: the `count` private
+    parties a sum pooled, whole totals first."""
+    totals = pooled.private_total_count or 0
+    parts = []
+    if totals:
+        parts.append(
+            _counted(totals, _PRIVATE_TOTAL_NOUNS.get(pooled.role, _OTHER_PRIVATE_TOTAL_NOUNS))
+        )
+    if count - totals:
+        parts.append(
+            _counted(
+                count - totals,
+                _PRIVATE_MEMBER_NOUNS.get(pooled.role, _OTHER_PRIVATE_MEMBER_NOUNS),
+            )
+        )
+    return " and ".join(parts)
+
+
+def _private_clause(pooled: PooledParties, count: int) -> str:
+    """`24 private donors (311400000)`: the `count` private parties a sum pooled and their
+    value, over the periods when the sum spans several. A value past the finite range is left
+    out, and the count stands alone."""
+    if pooled.private_value is None:
+        return _private_count_text(pooled, count)
+    value = _format_number(pooled.private_value)
+    over = f" over {pooled.periods} periods" if pooled.periods > 1 else ""
+    return f"{_private_count_text(pooled, count)} ({value}{over})"
+
+
+def _private_lines(pooled: Sequence[PooledParties], *, subject: str) -> list[str]:
+    """One line per pooled role that held private parties: `subject` is the sum the line
+    describes, and the private parties are in it because they sum like any other. A role whose
+    frame carries no class column gets no line."""
+    return [
+        f"{subject} of {_pool_text(entry)} includes {_private_clause(entry, entry.private_count)}."
+        for entry in pooled
+        if entry.private_count
+    ]
+
+
+def _two_sided_pooled_lines(
+    result: QuotientOfResult | ShareOfResult, *, keyed_roles: frozenset[str] = frozenset()
+) -> list[str]:
+    """The private-party lines of a two-input verb's sums. A denominator that pools a role the
+    numerator is keyed by ("each donor's share") divides by the sum of the listed parties, and
+    says so, whether or not private parties are among them."""
+    lines = _private_lines(result.numerator_pooled, subject="The numerator sum")
+    listed = [entry for entry in result.denominator_pooled if entry.role in keyed_roles]
+    for entry in listed:
+        text = f"Shares of the sum of the {_pool_text(entry, qualifier='listed ')}"
+        if entry.private_count:
+            text += f", which includes {_private_count_text(entry, entry.private_count)}"
+        lines.append(f"{text}.")
+    lines.extend(
+        _private_lines(
+            [entry for entry in result.denominator_pooled if entry not in listed],
+            subject="The denominator sum",
+        )
+    )
+    return lines
+
+
 _MAGNITUDE_SELECTION = "kept the largest-magnitude entries"
 _RANK_ORDER_SELECTION = f"kept the first {_LIST_CAP} in rank order, rank 1 first"
 
@@ -169,6 +271,7 @@ _EXCLUSION_REASON_TEXT: dict[str, str] = {
     "unmatched_key": "had no matching key on the other side",
     "beyond_limit": "ranked beyond the limit",
     "party_total": "totals of other parties, left out so no figure counts twice",
+    "party_residual": "unallocated residuals, left out of a ranking of members",
 }
 
 # `entity_not_selected` and `period_unmatched` are excluded here: a
@@ -436,6 +539,8 @@ def render_aggregate_digest(
     )
 
     sections = [header, groups_block, unit_line, coverage_line]
+    if aggregation == "sum":
+        sections.extend(_private_lines(result.pooled_parties, subject="This sum"))
 
     if result.warnings:
         sections.append(
@@ -781,26 +886,29 @@ def render_sum_of_digest(
     return "\n\n".join(sections)
 
 
-def _rank_line(rank: EntityRank) -> str:
+def _rank_line(rank: EntityRank, *, private: frozenset[tuple[str, str]]) -> str:
     key_text = _key_text(rank.entity_key)
+    tag = " (private)" if any(pair in private for pair in rank.entity_key) else ""
     return (
-        f"  #{rank.rank} {key_text}: {_format_number(rank.value)} "
+        f"  #{rank.rank} {key_text}{tag}: {_format_number(rank.value)} "
         f"[n={rank.row_count}, coverage={rank.coverage_fraction:.0%}]"
     )
 
 
-def _rank_block(ranks: Sequence[EntityRank]) -> str:
+def _rank_block(ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]) -> str:
     """`ranks`, already in rank order, as a `_rank_line`-per-entity block
     capped at `_LIST_CAP` -- shared by the collapse mode's own single block
     and by `_per_period_ranks_block`'s block-per-period call, one period's
     own ranking at a time."""
     shown = ranks[:_LIST_CAP]
-    lines = [_rank_line(rank) for rank in shown]
+    lines = [_rank_line(rank, private=private) for rank in shown]
     block = "\n".join([f"{len(ranks)} ranked entit(y/ies):", *lines])
     return block + _truncation_note(shown, len(ranks), selection=_RANK_ORDER_SELECTION)
 
 
-def _per_period_ranks_block(entity_ranks: Sequence[EntityRank]) -> str:
+def _per_period_ranks_block(
+    entity_ranks: Sequence[EntityRank], *, private: frozenset[tuple[str, str]]
+) -> str:
     """One block per period, each capped and truncation-noted exactly like
     the collapse mode's single block. `entity_ranks` is already grouped by
     period -- the engine (`engine.rank._rank_per_period`) emits one
@@ -815,7 +923,8 @@ def _per_period_ranks_block(entity_ranks: Sequence[EntityRank]) -> str:
             periods.append(rank.time_period)
         grouped.setdefault(rank.time_period, []).append(rank)
     blocks = [
-        f"{period}:\n  " + _rank_block(grouped[period]).replace("\n", "\n  ") for period in periods
+        f"{period}:\n  " + _rank_block(grouped[period], private=private).replace("\n", "\n  ")
+        for period in periods
     ]
     return "\n".join(blocks)
 
@@ -845,11 +954,12 @@ def render_rank_digest(
     rank number say which entries the output frame holds.
     """
     reduction_text = result.aggregation if result.aggregation is not None else "(raw value)"
-    window_text = (
-        f"{result.window_start}..{result.window_end}"
-        if result.window_start is not None
-        else "(no window)"
-    )
+    if result.window_start is None:
+        window_text = "(no window)"
+    elif result.window_start == result.window_end:
+        window_text = result.window_start
+    else:
+        window_text = f"{result.window_start}..{result.window_end}"
     header = f"rank: {', '.join(rank_by)} by {reduction_text}, window {window_text}"
     if result.per_period:
         header += ", per_period=True"
@@ -865,10 +975,11 @@ def render_rank_digest(
     # period, so the head of each block is what a caller asking for "the 20
     # lowest/highest" wants. A magnitude selection would show the opposite
     # end of the ranking from rank 1.
+    private = frozenset(result.private_parties)
     ranks_block = (
-        _per_period_ranks_block(result.entity_ranks)
+        _per_period_ranks_block(result.entity_ranks, private=private)
         if result.per_period
-        else _rank_block(result.entity_ranks)
+        else _rank_block(result.entity_ranks, private=private)
     )
 
     unit_line = f"unit: {_unit_text(result.resolved_unit)}"
@@ -1001,7 +1112,17 @@ def render_share_of_digest(
         header,
         *lead,
         label_line,
+        *_two_sided_pooled_lines(
+            result,
+            keyed_roles=frozenset(role for share in result.period_shares for role, _ in share.key),
+        ),
         *_periods_left_out_lines(result),
+        *_dropped_keys_lines(
+            (
+                (_NO_DENOMINATOR_MATCH, result.unmatched_keys),
+                (_NO_SHARED_PERIOD, result.keys_without_shared_period),
+            )
+        ),
         shares_block,
         coverage_line,
     ]
@@ -1011,7 +1132,14 @@ def render_share_of_digest(
                 ["warnings:", *(f"  - {truncate_value(warning)}" for warning in result.warnings)]
             )
         )
-    sections.extend(_artifact_sections(exclusions=exclusions, time_line=_time_line(time)))
+    sections.extend(
+        _artifact_sections(
+            exclusions=[
+                exclusion for exclusion in exclusions if not _dropped_line_covers(exclusion)
+            ],
+            time_line=_time_line(time),
+        )
+    )
     derived_note = _derived_note(derived)
     if derived_note is not None:
         sections.append(derived_note)
@@ -1030,12 +1158,13 @@ def render_share_of_digest(
 _LEFT_OUT_NAME_CAP = 5
 
 
-def _quotient_line_covers(exclusion: Exclusion) -> bool:
-    """Whether `render_quotient_of_digest`'s own left-out lines state all
-    `exclusion` holds, so its exclusions block leaves the record out. The
-    dropped-keys line names every unmatched key. The zero-denominator line
-    gives cells and periods and no key, so it covers a `zero_denominator`
-    record only when that record names no key either."""
+def _dropped_line_covers(exclusion: Exclusion) -> bool:
+    """Whether a `share_of` or `quotient_of` digest's own left-out lines
+    state all `exclusion` holds, so its exclusions block leaves the record
+    out. The dropped-keys line names every unmatched key. The
+    zero-denominator line gives cells and periods and no key, so it covers a
+    `zero_denominator` record only when that record names no key either; a
+    `share_of` call records none, since it refuses a zero denominator."""
     return exclusion.reason == "unmatched_key" or (
         exclusion.reason == "zero_denominator" and not any(exclusion.entities.values())
     )
@@ -1105,23 +1234,33 @@ def _coverage_line(result: QuotientOfResult | ShareOfResult, *, keyed: bool) -> 
     )
 
 
+def _dropped_keys_lines(dropped: Sequence[tuple[str, Sequence[KeyPairs]]]) -> list[str]:
+    """A line naming the numerator keys a two-sided result holds no row for,
+    each `(why, keys)` of `dropped` that has keys, or no line when none
+    has."""
+    named = [f"{len(keys)} {why} ({_keys_named(keys)})" for why, keys in dropped if keys]
+    return [f"numerator keys left out: {'; '.join(named)}"] if named else []
+
+
+# Why `_dropped_keys_lines` names a key with no denominator group, and one
+# sharing no period with its group.
+_NO_DENOMINATOR_MATCH = "with no denominator match"
+_NO_SHARED_PERIOD = "sharing no period with the denominator"
+
+
 def _quotient_left_out_lines(result: QuotientOfResult) -> list[str]:
     """One line for each kind of thing the quotient leaves out, when there is
     any: the periods and pairs `_periods_left_out_lines` names, the
     numerator keys the result holds no row for, by why, and cells whose
     denominator sums to zero."""
     lines = _periods_left_out_lines(result)
-    dropped = [
-        f"{len(keys)} {why} ({_keys_named(keys)})"
-        for why, keys in (
-            ("with no denominator match", result.unmatched_keys),
-            ("sharing no period with the denominator", result.keys_without_shared_period),
+    lines += _dropped_keys_lines(
+        (
+            (_NO_DENOMINATOR_MATCH, result.unmatched_keys),
+            (_NO_SHARED_PERIOD, result.keys_without_shared_period),
             ("with a zero denominator in every matched period", result.keys_with_zero_denominator),
         )
-        if keys
-    ]
-    if dropped:
-        lines.append(f"numerator keys left out: {'; '.join(dropped)}")
+    )
     zero_cells = result.zero_denominator_cells
     if zero_cells:
         periods = sorted({cell.time_period for cell in zero_cells})
@@ -1184,7 +1323,8 @@ def render_quotient_of_digest(
 
     coverage_line = _coverage_line(result, keyed=any(keys))
 
-    sections = [header, label_line, *_quotient_left_out_lines(result)]
+    sections = [header, label_line, *_two_sided_pooled_lines(result)]
+    sections += _quotient_left_out_lines(result)
     sections += [quotients_block, coverage_line]
     if result.warnings:
         sections.append(
@@ -1195,7 +1335,7 @@ def render_quotient_of_digest(
     sections.extend(
         _artifact_sections(
             exclusions=[
-                exclusion for exclusion in exclusions if not _quotient_line_covers(exclusion)
+                exclusion for exclusion in exclusions if not _dropped_line_covers(exclusion)
             ],
             time_line=_time_line(time),
         )

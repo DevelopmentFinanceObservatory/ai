@@ -19,11 +19,12 @@ side, not landing in the stop bucket by omission:
   entity, unit, facet, window, coverage or denominator -- and choosing one
   changes the plan. Goes to the planner as `MethodChoiceNeeded`, candidates
   attached. `share_of_key_unmatched` belongs here alongside
-  `share_of_zero_denominator` and `share_of_grain_mismatch`, which fires
-  only when a key shares no period with its denominator: which
-  denominator_frame_ref or entity binding covers the missing key or years
-  is a data-dependent choice, not something the compiler could have ruled
-  out.
+  `share_of_zero_denominator` and `share_of_grain_mismatch`. `share_of`
+  leaves out and records a key with no denominator group or none sharing a
+  period with it, and refuses only when no key has a group or none shares
+  a period. Which denominator_frame_ref or entity binding covers the
+  missing keys or years is a data-dependent choice, not something the
+  compiler could have ruled out.
   `quotient_of_zero_denominator` and `quotient_of_no_key_matched` sit beside
   them for the same reason: `quotient_of` refuses only when every matched
   cell divides by zero, or when no numerator key pairs with a denominator
