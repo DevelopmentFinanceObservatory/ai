@@ -115,7 +115,16 @@ stated twice, an `EntityIn` naming the same entities in another order
 included. Two `EntityIn`s whose names resolve to one entity, such as one
 naming it under its role and one under none, write one predicate too, and the
 compiler refuses that filter with `bad_args`, by analysis-mcp's own op-spec
-check (`compiler.arguments.op_spec_errors`). A dataset
+check (`compiler.arguments.op_spec_errors`). An `EntityIn` keeps only names
+the dataset requirements behind its input state, under its `role` when it
+gives one (`planner.plan.unknown_names`, which the compiler reads for
+`unknown_entity`). A breakdown's codes are no entities. The frame holds the
+labels apis decodes for them, which no plan knows, so a filter keeps no
+sector by name, and a requirement whose measure names the sector reads it. A
+two-sided step reads a side naming no entity as one series on every role but
+its key, so a side over an `across` party nobody named is refused with the
+pooling remedy (`planner.shapes.open_on_whole_side`, which the compiler reads
+for `entity_required`). A dataset
 requirement may pin `source_spec_id` to the exact dataset definition
 discovery is to use, after which discovery has to find that definition and
 nothing else. A pin needs no decision, since the requirement states it. A pin

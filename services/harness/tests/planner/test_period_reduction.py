@@ -1224,7 +1224,7 @@ def _two_donors() -> DatasetRequirement:
                 FilterRequirement(
                     id="kept",
                     input_id="aid",
-                    predicates=(EntityIn(names=("France",), role="donor"),),
+                    predicates=(EntityIn(names=("Kenya",), role="recipient"),),
                 ),
                 _total(input_id="kept"),
             ],
@@ -1402,13 +1402,13 @@ def _open(**overrides: Any) -> DatasetRequirement:
                 FilterRequirement(
                     id="kept",
                     input_id="aid",
-                    predicates=(EntityIn(names=("France",), role="donor"),),
+                    predicates=(EntityIn(names=("Kenya",), role="recipient"),),
                 ),
                 _total(input_id="kept"),
             ],
             [],
             ONE_YEAR_ONLY,
-            id="through-a-filter-on-donors",
+            id="through-a-filter-on-the-recipient",
         ),
         pytest.param(
             [
@@ -2335,7 +2335,15 @@ def _follow(requirements: list[EvidenceRequirement], refused: dict[str, Any]) ->
     requirements[index : index + 1] = [one_year, step.model_copy(update={"input_id": "one_year"})]
 
 
+def _open_two_donors(period: Period) -> DatasetRequirement:
+    """Aid to Kenya from France and Germany retrieved with no end year (`_open`)."""
+    return _open(period=period).model_copy(
+        update={"entities": _two_donors().entities, "across": ()}
+    )
+
+
 def _france() -> FilterRequirement:
+    """Kenya's aid from France, a donor a filter keeps only where the requirement names it."""
     return FilterRequirement(
         id="france", input_id="aid", predicates=(EntityIn(names=("France",), role="donor"),)
     )
@@ -2464,7 +2472,12 @@ _ONE_YEAR_OFFERS = [
         id="a-rank-beside-a-branch-reading-from-the-first-year",
     ),
     _offered(
-        [_open(period=ONE_YEAR_ONLY), _latest_year(), _france(), _total(input_id="france")],
+        [
+            _open_two_donors(ONE_YEAR_ONLY),
+            _latest_year(),
+            _france(),
+            _total(input_id="france"),
+        ],
         [POPULATION],
         OneYear.FILTER,
         0,
@@ -3144,16 +3157,17 @@ def test_a_max_by_entity_pairs_with_no_series_a_value_filter_kept(
 
 
 def _ranks_compared() -> list:
-    """Each donor ranked by the sum and by the mean of its aid from 2020 to the newest year, one less the other."""
+    """France and Germany ranked by the sum and by the mean of their aid from 2020 to the newest
+    year, France's rank by one less its rank by the other."""
     return [
-        _open(period=Period(start=2020, end=2024)),
+        _open_two_donors(Period(start=2020, end=2024)),
         _ranked(id="by_sum", **_ROLLING_END),
         _ranked(id="by_mean", reduction=Reduction.MEAN, **_ROLLING_END),
         ComparisonRequirement(
             id="gap",
             decision_ids=("measure",),
-            minuend=_side("by_sum"),
-            subtrahend=_side("by_mean"),
+            minuend=RequirementSide(input_id="by_sum", entity="France"),
+            subtrahend=RequirementSide(input_id="by_mean", entity="France"),
         ),
     ]
 
@@ -3668,7 +3682,7 @@ def test_the_requirement_limit_counts_the_requirements_the_model_wrote(
         FilterRequirement(
             id=f"donor_{n}",
             input_id="aid",
-            predicates=(EntityIn(names=(f"Donor {n}",), role="donor"),),
+            predicates=(ValueThreshold(op="gt", value=float(n)),),
         )
         for n in range(MAX_PLAN_REQUIREMENTS - 2)
     ]
