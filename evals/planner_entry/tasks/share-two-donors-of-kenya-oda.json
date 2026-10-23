@@ -91,9 +91,7 @@
         "id": "two_donors",
         "input_id": "oda_two",
         "reduction": "sum",
-        "group_by": [
-          "entity"
-        ]
+        "group_by": []
       },
       {
         "kind": "dataset",
@@ -118,9 +116,7 @@
         "id": "oda_total_period",
         "input_id": "oda_total",
         "reduction": "sum",
-        "group_by": [
-          "entity"
-        ]
+        "group_by": []
       },
       {
         "kind": "share_of",
@@ -218,9 +214,7 @@
             "id": "two_donors_period",
             "input_id": "two_donors",
             "reduction": "sum",
-            "group_by": [
-              "entity"
-            ]
+            "group_by": []
           },
           {
             "kind": "dataset",
@@ -245,9 +239,7 @@
             "id": "oda_total_period",
             "input_id": "oda_total",
             "reduction": "sum",
-            "group_by": [
-              "entity"
-            ]
+            "group_by": []
           },
           {
             "kind": "share_of",
