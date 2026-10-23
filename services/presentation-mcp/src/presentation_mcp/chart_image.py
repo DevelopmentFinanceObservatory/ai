@@ -70,7 +70,13 @@ from xml.sax.saxutils import escape
 import resvg_py
 from fontTools.ttLib import TTFont
 
-from presentation_mcp.app_view import ChartModel, PlottedSeries, chart_model, plots_as_chart
+from presentation_mcp.app_view import (
+    ChartModel,
+    PlottedSeries,
+    chart_model,
+    lone_points,
+    plots_as_chart,
+)
 from presentation_mcp.theme import DFO_LOGO
 
 FONTS_DIR = Path(__file__).with_name("fonts")
@@ -329,10 +335,10 @@ def _line_path(
         for i, (x, y) in enumerate(run)
     ]
     marks = [
-        f'<circle cx="{_n(x)}" cy="{_n(y)}" r="{_DOT_RADIUS}" fill="{series.colour}"/>'
-        for run in runs
-        if len(run) == 1
-        for x, y in run
+        f'<circle cx="{_n(x)}" cy="{_n(scale(row[series.key]))}" r="{_DOT_RADIUS}" '
+        f'fill="{series.colour}"/>'
+        for row, x, lone in zip(rows, xs, lone_points(rows, series.key), strict=True)
+        if lone
     ]
     if commands:
         marks.insert(
