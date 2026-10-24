@@ -318,6 +318,70 @@ def test_a_search_pin_decision_is_left_out_of_the_record_and_the_card() -> None:
     assert all(slot not in row["decision_ids"] for row in requirement_rows(plan))
 
 
+_GROSS = ("gross disbursements", "net disbursements")
+
+
+@pytest.mark.parametrize(
+    ("imputed_options", "imputed_chosen", "listed"),
+    [
+        (_GROSS, "gross disbursements", "bilateral"),
+        (("net disbursements", "gross disbursements"), "gross disbursements", "bilateral"),
+        (_GROSS, "net disbursements", "both"),
+        (("gross disbursements", "commitments"), "gross disbursements", "both"),
+    ],
+    ids=["same choice", "same choice, net elected", "different chosen", "different options"],
+)
+def test_search_pins_making_one_choice_list_one_decision(
+    imputed_options: tuple[str, ...], imputed_chosen: str, listed: str
+) -> None:
+    """A numerator and a denominator pin counted the same way list one decision,
+    the one the user settled, and each requirement cites it. Pins whose
+    choices differ list one decision each."""
+    joined = _plan("france_guatemala_join")
+    bilateral, imputed = search_pin_slot(_BILATERAL_SPEC), search_pin_slot(_IMPUTED_SPEC)
+    pins = {
+        "bilateral_oda": Decision(
+            slot=bilateral,
+            description="How the flow is counted.",
+            options=_GROSS,
+            chosen="gross disbursements",
+            resolved_by=ResolvedBy.USER,
+            rationale="The user's question named gross disbursements.",
+            fixes=DecisionFixes(source_spec_id=_BILATERAL_SPEC),
+        ),
+        "imputed_multilateral_oda": Decision(
+            slot=imputed,
+            description="How the flow is counted.",
+            options=imputed_options,
+            chosen=imputed_chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search elected gross disbursements for this source.",
+            fixes=DecisionFixes(source_spec_id=_IMPUTED_SPEC),
+        ),
+    }
+    plan = joined.model_copy(
+        update={
+            "decisions": (*joined.decisions, *reversed(pins.values())),
+            "evidence_requirements": tuple(
+                r.model_copy(update={"decision_ids": (*r.decision_ids, pins[r.id].slot)})
+                if r.id in pins
+                else r
+                for r in joined.evidence_requirements
+            ),
+        }
+    )
+
+    record = PlanRecord.from_plan(plan)
+
+    expected = [bilateral] if listed == "bilateral" else [imputed, bilateral]
+    assert [d.slot for d in record.decisions][len(joined.decisions) :] == expected
+    cited = {row["id"]: row["decision_ids"] for row in requirement_rows(plan)}
+    for requirement, pin in pins.items():
+        assert cited[requirement][-1] == (bilateral if listed == "bilateral" else pin.slot)
+    shown = {d.slot for d in record.decisions}
+    assert all(slot in shown for slots in cited.values() for slot in slots)
+
+
 def test_plan_record_maps_each_ask_to_its_output_steps_or_its_decline() -> None:
     plan = _plan("france_guatemala_join").model_copy(
         update={
