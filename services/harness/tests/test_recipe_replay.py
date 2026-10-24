@@ -281,8 +281,17 @@ class Scene:
             )
         )
 
-    async def joined(self, left: FrameRef, right: FrameRef) -> FrameRef:
-        return _ref(await join(frame_ref=left.model_dump(), right_frame_ref=right.model_dump()))
+    async def joined(
+        self, left: FrameRef, right: FrameRef, *, join_keys: Sequence[str] = ()
+    ) -> FrameRef:
+        """`left` joined with `right` on `join_keys`, auto-detected when empty."""
+        return _ref(
+            await join(
+                frame_ref=left.model_dump(),
+                right_frame_ref=right.model_dump(),
+                join_keys=tuple(join_keys),
+            )
+        )
 
     async def rolling_beside_fixed(self) -> tuple[FrameRef, dict[str, Any]]:
         """A rolling filter on `SPEC` joined with the whole of `_BESIDE`, published."""

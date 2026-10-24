@@ -425,6 +425,11 @@ def _failure(**overrides: object) -> ToolFailure:
             {"code": "rolling_anchor_unresolved", "fix": {"detail": "no_qualifying_period"}},
             False,
         ),
+        # The two sides of a pairing name no entity in common: a fact of the data.
+        (
+            {"code": "rolling_anchor_unresolved", "fix": {"detail": "pairing_shares_no_key"}},
+            False,
+        ),
         # Every other detail, and a refusal stating none, says what the run
         # itself sent does not fit.
         ({"code": "rolling_anchor_unresolved", "fix": {"detail": "literal_differs"}}, True),

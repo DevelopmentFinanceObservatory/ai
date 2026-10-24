@@ -628,27 +628,35 @@ async def test_a_revise_is_judged_as_the_stored_card_with_the_patch_merged_in(
     assert len(replays.populations) == 1
 
 
+async def _other_datasets(scene: Scene, *spec_ids: str) -> None:
+    """Hold a frame for each of `spec_ids` beside `SPEC`, every reporter 2019 to 2021."""
+    for spec_id in spec_ids:
+        scene.dataset.others[spec_id] = Frame.build(
+            role_keys=["reporter"],
+            rows=reporter_rows(
+                {reporter: yearly(range(2019, 2022), start=1.0) for reporter in REPORTERS},
+                stat_var=f"dcid:{spec_id[-4:]}",
+            ),
+        )
+
+
 async def test_a_card_on_a_frame_whose_populations_reach_past_its_tree_is_replayed_over_its_own(
     scene: Scene,
 ) -> None:
     """S1 on A, S2 on B and S3 on C are filters on one latest year over all
     three, because T3 joins S2 with S3 as T2 joins S1 with S2. T2 reads A and B
     alone, so it has no anchor of its own, and a card on it is written on a
-    frame replayed over A and B."""
+    frame replayed over A and B, paired on the reporter T2 joins on."""
     gni, debt = "spec_" + "b" * 32, "spec_" + "c" * 32
-    for spec_id, stat_var in ((gni, "dcid:GNI"), (debt, "dcid:Debt")):
-        scene.dataset.others[spec_id] = Frame.build(
-            role_keys=["reporter"],
-            rows=reporter_rows(
-                {reporter: yearly(range(2019, 2022), start=1.0) for reporter in REPORTERS},
-                stat_var=stat_var,
-            ),
-        )
+    await _other_datasets(scene, gni, debt)
     every = [SPEC, gni, debt]
     s1, s2, s3 = [
         await scene.since(await scene.root(spec_id=spec_id), spec_ids=every) for spec_id in every
     ]
-    t2, t3 = [await scene.joined(left, right) for left, right in ((s1, s2), (s2, s3))]
+    t2, t3 = [
+        await scene.joined(left, right, join_keys=("reporter",))
+        for left, right in ((s1, s2), (s2, s3))
+    ]
     del t3  # it puts C in the population, and is not drawn
     with pytest.raises(RecipeAnchorError):
         await build_recipe(t2, store=scene.store)
@@ -657,14 +665,62 @@ async def test_a_card_on_a_frame_whose_populations_reach_past_its_tree_is_replay
 
     drawn = FrameRef.model_validate((await _admit(cards, _card(t2.model_dump())))["frame_ref"])
 
+    paired = {
+        "pair": [[{"spec_id": SPEC, "bindings": {}}], [{"spec_id": gni, "bindings": {}}]],
+        "keys": {"reporter": "reporter"},
+    }
     assert drawn != t2
-    assert [[population["spec_id"] for population in call] for call in replays.populations] == [
-        [SPEC, gni]
-    ]
+    assert [list(call) for call in replays.populations] == [[paired]]
     replayed = await cards.frame(drawn.model_dump())
     assert replayed is not None
     assert replayed.recipe["anchor"] is not None
-    assert [population["spec_id"] for population in replayed.populations] == [SPEC, gni]
+    assert replayed.populations == [paired]
+    # A card selecting one reporter on that frame narrows each side of the pairing.
+    await _admit(cards, _card(drawn.model_dump(), select={"reporter": "dcid:FRA"}))
+    fra = {"spec_id": SPEC, "bindings": {"reporter": ["dcid:FRA"]}}
+    assert list(replays.populations[-1]) == [
+        {"pair": [[fra], [{**fra, "spec_id": gni}]], "keys": {"reporter": "reporter"}}
+    ]
+
+
+@pytest.mark.parametrize("join_keys", [("reporter",), ()], ids=["keyed", "auto-detected"])
+async def test_a_card_that_narrows_nothing_is_written_on_a_frame_with_its_own_anchor(
+    scene: Scene, join_keys: tuple[str, ...]
+) -> None:
+    """T joins S1 on A with S2 on B, both filters on one latest year over A and
+    B, recorded as two flat populations: a direct caller's join, or one minted
+    before a keyed join was counted as a pairing. T's tree now gives a pairing,
+    or none when its join leaves the keys to auto-detection. A card that
+    narrows no series is still written on T, which its anchor covers. One that
+    narrows them replays over the pairing, and is withheld when no pairing can
+    be stated."""
+    gni = "spec_" + "b" * 32
+    await _other_datasets(scene, gni)
+    both = [SPEC, gni]
+    s1, s2 = [
+        await scene.since(await scene.root(spec_id=spec_id), spec_ids=both) for spec_id in both
+    ]
+    joined = await scene.joined(s1, s2, join_keys=join_keys)
+    assert (await build_recipe(joined, store=scene.store))["anchor"] is not None
+    replays = Replays(scene)
+    cards = RollingCards(replay=replays)
+
+    drawn = await _admit(cards, _card(joined.model_dump()))
+
+    assert drawn["frame_ref"] == joined.model_dump()
+    assert replays.populations == []
+    narrowing = _card(joined.model_dump(), select={"reporter": "dcid:FRA"})
+    if join_keys:
+        await _admit(cards, narrowing)
+        fra = {"spec_id": SPEC, "bindings": {"reporter": ["dcid:FRA"]}}
+        assert [list(call) for call in replays.populations] == [
+            [{"pair": [[fra], [{**fra, "spec_id": gni}]], "keys": {"reporter": "reporter"}}]
+        ]
+        return
+    with pytest.raises(CardWithheld) as withheld:
+        await _admit(cards, narrowing)
+    assert withheld.value.refusal["code"] == HarnessCode.ROLLING_REPLAY_REFUSED
+    assert replays.populations == []
 
 
 async def test_only_the_most_recently_used_replays_are_remembered(

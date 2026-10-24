@@ -98,8 +98,9 @@ reproducing the identical failing call.
 
 `rolling_anchor_unresolved` stops under every `fix.detail`, and the detail
 says whose stop it is. `no_qualifying_period` is `resolve_anchor` finding no
-year that half of the series hold, which the user is told. Every other detail
-says the populations, root frames, key or periods the executor itself sent do
+year that half of the series hold, and `pairing_shares_no_key` a keyed verb
+whose two sides name no entity in common. The user is told of both. Every other
+detail says the populations, root frames, key or periods the executor itself sent do
 not fit together (`is_anchor_fault`); the run reports that as an
 `internal_error`, since nothing the user asked for is wrong.
 
@@ -329,10 +330,12 @@ HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
 }
 
 
-# analysis-mcp's code for a newest period that is not established, and the one
-# `fix.detail` of it that states a fact of the data.
+# analysis-mcp's code for a newest period that is not established, and the
+# `fix.detail`s of it that state a fact of the data: no year that half of the
+# series hold, and a pairing whose two sides name no entity in common.
 ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
-_NO_QUALIFYING_PERIOD = "no_qualifying_period"
+PAIRING_SHARES_NO_KEY = "pairing_shares_no_key"
+_DATA_DETAILS = frozenset({"no_qualifying_period", PAIRING_SHARES_NO_KEY})
 
 
 class ToolFailure(StrictModel):
@@ -401,11 +404,11 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
     together, and a rolling `growth`, `rank` or `filter` refuses a key,
     population, root or period that its stored resolution does not cover. The
     executor writes all of them, so either is its own fault. Only a refusal
-    whose `fix.detail` says no period qualified is about the data.
+    whose `fix.detail` says no period qualified, or that a pairing's two sides
+    share no key, is about the data.
     """
     return (
-        failure.code == ROLLING_ANCHOR_UNRESOLVED
-        and failure.fix.get("detail") != _NO_QUALIFYING_PERIOD
+        failure.code == ROLLING_ANCHOR_UNRESOLVED and failure.fix.get("detail") not in _DATA_DETAILS
     )
 
 

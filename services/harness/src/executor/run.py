@@ -259,6 +259,7 @@ from executor.classify import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
+    PAIRING_SHARES_NO_KEY,
     ROLLING_ANCHOR_UNRESOLVED,
     TRANSIENT_CODES,
     Disposition,
@@ -358,6 +359,15 @@ _ANCHOR_REFUSAL_MESSAGES = {
     ),
 }
 _NAMED_YEARS_REMEDY = "Ask for the period in named years instead."
+# The message and remedy for a `rolling_anchor_unresolved` whose `fix.detail`
+# says more than its code.
+_ANCHOR_DETAIL_WORDING = {
+    PAIRING_SHARES_NO_KEY: (
+        "The two sides this question pairs name no place or party in common, so "
+        "nothing can be matched across them in any year.",
+        "Ask about a place or party both sides report on.",
+    ),
+}
 
 # The comparisons under which a rolled period threshold is where a filter's
 # rows start, and how far past the threshold the first year kept is.
@@ -1791,10 +1801,14 @@ class _Run:
         failure = parse_tool_failure(result.structured_content or {})
         if is_anchor_fault(failure):
             return self._anchor_fault(step, failure)
-        message = _ANCHOR_REFUSAL_MESSAGES.get(failure.code)
-        if message is not None:
+        detail = failure.fix.get("detail")
+        worded = _ANCHOR_DETAIL_WORDING.get(detail) if isinstance(detail, str) else None
+        if worded is None and (message := _ANCHOR_REFUSAL_MESSAGES.get(failure.code)):
+            worded = (message, _NAMED_YEARS_REMEDY)
+        if worded is not None:
+            message, remedy = worded
             failure = failure.model_copy(
-                update={"message": message, "fix": failure.fix | {"remedy": _NAMED_YEARS_REMEDY}}
+                update={"message": message, "fix": failure.fix | {"remedy": remedy}}
             )
         return self._step_refused(step.id, _RESOLVE_ANCHOR, result, failure)
 

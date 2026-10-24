@@ -12,7 +12,9 @@ A record holds what was resolved from beside the result:
 - `populations`: the populations the period was taken over, in the spelling
   `common.rolling.canonical_populations` gives them. A population's `levels` is
   written only when it holds a column to a level; `strict_levels` records the
-  held columns that must classify every entity.
+  held columns that must classify every entity. A pairing population
+  (`AnchorPairing`) holds the populations of a keyed verb's two sides and the
+  keys it pairs them on.
 - `roots`: the `{spec_id, content_version}` pair of each root frame read, sorted.
 - `rule`: the name of the rule that chose the period.
 - `period`: the latest period.
@@ -37,8 +39,11 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     SerializerFunctionWrapHandler,
+    Tag,
+    TypeAdapter,
     model_serializer,
 )
 
@@ -78,6 +83,31 @@ class AnchorPopulation(BaseModel):
         return dumped
 
 
+class AnchorPairing(BaseModel):
+    """One pairing population of a record: the populations of a keyed verb's
+    two sides, left then right, and each left key column to the right column
+    it pairs with."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pair: tuple[tuple[AnchorEntry, ...], tuple[AnchorEntry, ...]]
+    keys: dict[str, str]
+
+
+def _entry_kind(value: object) -> str:
+    if isinstance(value, AnchorPairing) or (isinstance(value, dict) and "pair" in value):
+        return "pair"
+    return "root"
+
+
+# One population of a record, flat or pairing.
+type AnchorEntry = Annotated[
+    Annotated[AnchorPopulation, Tag("root")] | Annotated[AnchorPairing, Tag("pair")],
+    Discriminator(_entry_kind),
+]
+_ENTRIES: TypeAdapter[tuple[AnchorEntry, ...]] = TypeAdapter(tuple[AnchorEntry, ...])
+
+
 class LeftOutSeries(BaseModel):
     """A series that holds no value at the latest period. `root` indexes the
     record's `populations`."""
@@ -88,13 +118,11 @@ class LeftOutSeries(BaseModel):
     coordinates: dict[str, str]
 
 
-def _canonical_populations(
-    populations: tuple[AnchorPopulation, ...],
-) -> tuple[AnchorPopulation, ...]:
+def _canonical_populations(populations: tuple[AnchorEntry, ...]) -> tuple[AnchorEntry, ...]:
     canonical = canonical_populations(
         population.model_dump(mode="json") for population in populations
     )
-    return tuple(AnchorPopulation(**population) for population in canonical)
+    return _ENTRIES.validate_python(canonical)
 
 
 def _canonical_roots(roots: tuple[FrameRef, ...]) -> tuple[FrameRef, ...]:
@@ -113,7 +141,7 @@ class AnchorRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     populations: Annotated[
-        tuple[AnchorPopulation, ...], Field(min_length=1), AfterValidator(_canonical_populations)
+        tuple[AnchorEntry, ...], Field(min_length=1), AfterValidator(_canonical_populations)
     ]
     roots: Annotated[tuple[FrameRef, ...], Field(min_length=1), AfterValidator(_canonical_roots)]
     rule: str = Field(min_length=1)
@@ -153,6 +181,8 @@ def decode_anchor_record(data: bytes) -> AnchorRecord:
 
 __all__ = [
     "ANCHOR_KEY_PATTERN",
+    "AnchorEntry",
+    "AnchorPairing",
     "AnchorPopulation",
     "AnchorRecord",
     "AnchorRecordIntegrityError",

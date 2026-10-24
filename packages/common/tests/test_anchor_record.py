@@ -74,6 +74,27 @@ def test_a_record_encodes_to_one_set_of_bytes_however_its_members_were_listed() 
     assert decode_anchor_record(encode_anchor_record(_record())) == _record()
 
 
+def test_a_record_over_a_pairing_population_is_keyed_and_decoded_like_any_other() -> None:
+    other = "spec_" + "b" * 32
+    pairing = {
+        "pair": [[{"spec_id": _SPEC, "bindings": {}}], [{"spec_id": other}]],
+        "keys": {"recipient": "observationAbout"},
+    }
+    roots = [*_ROOTS, {"spec_id": other, "content_version": "cv_" + "3" * 32}]
+    record = AnchorRecord(
+        populations=[pairing, *_POPULATIONS], roots=roots, rule="half1", period="2023"
+    )
+
+    assert record.anchor_key == anchor_key(
+        populations=[*_POPULATIONS, pairing], roots=roots, rule="half1"
+    )
+    assert decode_anchor_record(encode_anchor_record(record)) == record
+    assert record.model_dump(mode="json")["populations"][1] == {
+        "pair": [[{"spec_id": _SPEC, "bindings": {}}], [{"spec_id": other, "bindings": {}}]],
+        "keys": {"recipient": "observationAbout"},
+    }
+
+
 def test_a_stored_record_with_a_member_this_process_never_declared_still_decodes() -> None:
     stored = encode_anchor_record(_record()).replace(b'{"left_out"', b'{"added":1,"left_out"', 1)
 
