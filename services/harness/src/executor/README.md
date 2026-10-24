@@ -166,6 +166,12 @@ column, through `data_mcp.series_statistics.fetch_series_statistics_table`; at
 held about 180 MiB. A caller whose tool surface allows no real
 upstream call, such as the scripted studio eval
 (`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. A
+series short of its period, or missing years, keeps its entities and its
+largest absolute value on the finding; the entities the approved source names none
+for, such as the donors of an open population, are named through
+`LabelRefs` (`executor.run.default_label_refs`, the graph's node batch
+route), at most `LABELLED_REFS` refs a check, the largest series' first. A
+lookup that fails or outruns `LABEL_ALLOWANCE_S` leaves them unnamed. A
 statistics fetch that times out or fails in transit (`StatisticsUnreachableError`)
 stops the run as `transport_failed`, and an artifact the run cannot trust or
 read (`StatisticsUnusableError`) as `step_result_unusable`: neither says anything

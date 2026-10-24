@@ -1050,10 +1050,12 @@ def _short(
     observations: tuple[int, int] | None = None,
     asked: tuple[int, int] = (2015, 2024),
     stat_var: str = "Aid",
+    size: float | None = None,
 ) -> EvidenceIssue:
     """The `window_short` finding on the `stat_var` series of the entities
     `names` label, `None` for one labelled none, reaching over `reach`, or
-    the `coverage_gaps` one counting `observations` across a span."""
+    the `coverage_gaps` one counting `observations` across a span. `size` is
+    the series' largest absolute value."""
     entities = tuple(
         SeriesEntity(role="recipient", ref=f"country/{name or index}", label=name)
         for index, name in enumerate(names)
@@ -1068,6 +1070,7 @@ def _short(
             required=Period(start=asked[0], end=asked[1]).model_dump(),
             stat_var=stat_var,
             entities=entities,
+            magnitude=size,
         )
     assert observations is not None
     return EvidenceIssue(
@@ -1079,6 +1082,7 @@ def _short(
         required=observations[1],
         stat_var=stat_var,
         entities=entities,
+        magnitude=size,
     )
 
 
@@ -1122,10 +1126,22 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
             ["Philippines' series ends in 2021."],
             id="name-ending-in-s",
         ),
+        # Series of no size stated are named in the order of their refs.
         pytest.param(
             [_short("Uganda", reach=(2015, 2021)), _short("Kenya", reach=(2015, 2019))],
-            ["Uganda's series ends in 2021 and Kenya's series ends in 2019."],
+            ["Kenya's series ends in 2019 and Uganda's series ends in 2021."],
             id="two",
+        ),
+        pytest.param(
+            [
+                _short(name, reach=(2015, 2020), size=size)
+                for name, size in (("A", 1.0), ("B", 4.0), ("C", None), ("D", 2.0), ("E", 4.0))
+            ],
+            [
+                "B's series ends in 2020, E's series ends in 2020, D's series ends in 2020, "
+                "and 2 other series end before 2024."
+            ],
+            id="the-largest-named-first",
         ),
         pytest.param(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")],
@@ -1146,13 +1162,28 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
         pytest.param(
             [
                 *(_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")),
-                _short("E", reach=(2017, 2024)),
+                *(_short(name, reach=(2017, 2024)) for name in ("E", "F")),
+                _short("G", reach=(2017, 2020)),
             ],
             [
                 "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
-                "and 2 other series cover only part of 2015 to 2024."
+                "2 other series start after 2015, 1 other series ends before 2024, "
+                "and 1 other series starts after 2015 and ends before 2024."
             ],
             id="counted-short-in-different-ways",
+        ),
+        pytest.param(
+            [
+                _short(None, reach=(2015, 2020)),
+                *(_short(None, reach=(2018, 2024), stat_var=f"Aid{n}") for n in range(2)),
+            ],
+            ["2 series start after 2015 and 1 series ends before 2024."],
+            id="counted-by-how-each-falls-short",
+        ),
+        pytest.param(
+            [_short(None, reach=(2017, 2021), stat_var=f"Aid{n}") for n in range(3)],
+            ["3 series start after 2015 and end before 2024."],
+            id="counted-short-at-both-ends",
         ),
         pytest.param(
             [_short("Uganda", observations=(8, 10)), _short("Kenya", reach=(2015, 2021))],
@@ -1251,7 +1282,7 @@ def test_a_series_is_held_to_the_window_the_model_wrote(
         pytest.param(2023, ["Kenya's series ends in 2021."], id="open-end-at-the-newest-year"),
         pytest.param(
             2024,
-            ["Uganda's series ends in 2023 and Kenya's series ends in 2021."],
+            ["Kenya's series ends in 2021 and Uganda's series ends in 2023."],
             id="open-end-a-year-on",
         ),
     ],
@@ -1328,23 +1359,35 @@ def test_an_anchor_after_the_stated_end_holds_a_series_to_it(
 
 
 @pytest.mark.parametrize(
-    ("left", "right", "stated"),
+    ("left", "right", "stated", "right_source"),
     [
         pytest.param(
             [_short("Kenya", reach=(2015, 2022))],
             [_short("Kenya", reach=(2015, 2019))],
             ["Kenya's series for grants ends in 2022 and Kenya's series for loans ends in 2019."],
+            "b",
             id="one-entity-in-two-datasets",
         ),
+        # The model wrote two requirements over one source, as a share's
+        # numerator and its total can be: each series is stated once.
+        pytest.param(
+            [_short("Kenya", reach=(2015, 2022))],
+            [_short("Kenya", reach=(2015, 2022))],
+            ["Kenya's series ends in 2022."],
+            "a",
+            id="one-source-under-two-requirements",
+        ),
         # A family read `StatVarReading.SEPARATE` holds a series per StatVar
-        # for Kenya; one name cannot tell them apart, so they are counted.
+        # for Kenya; one name cannot tell them apart, so they are counted as
+        # Kenya's indicators, the noun the plan counts the family in.
         pytest.param(
             [
                 _short("Kenya", reach=(2015, 2022), stat_var="Grants"),
                 _short("Kenya", reach=(2015, 2019), stat_var="Loans"),
             ],
             [],
-            ["2 series end before 2024."],
+            ["2 of Kenya's indicators end before 2024."],
+            "b",
             id="one-entity-in-each-statvar-of-a-separate-family",
         ),
     ],
@@ -1354,8 +1397,9 @@ async def test_each_series_of_one_entity_is_stated(
     left: list[EvidenceIssue],
     right: list[EvidenceIssue],
     stated: list[str],
+    right_source: str,
 ) -> None:
-    plan = _two_sided(schemas, "join", _family("a", "Grants"), _family("b", "Loans"))
+    plan = _two_sided(schemas, "join", _family("a", "Grants"), _family(right_source, "Loans"))
     _surface, outcome = _run(plan, summed={}, role_keys={})
     outcome = _with_gaps(outcome, "left_op", *left, window=_ASKED)
     outcome = _with_gaps(outcome, "right_op", *right, window=_ASKED)

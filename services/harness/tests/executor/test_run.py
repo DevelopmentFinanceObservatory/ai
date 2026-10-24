@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,6 +33,8 @@ from compiler.surface import (
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
+from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import NotHeldEntry, OrganisationNode
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
@@ -53,6 +55,7 @@ from executor.run import (
     EVIDENCE_ALLOWANCE_S,
     MAX_ATTEMPTS_PER_STEP,
     RunAbandonedError,
+    _series_labels,
     current_step_deadline,
     default_fetch_series_stats,
     execute_approved_plan,
@@ -1208,6 +1211,91 @@ async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(
     assert "coverage_gaps" in [gap.code.value for gap in lenient.evidence[0].gaps]
     assert isinstance(refused, Refused)
     assert refused.refusal is RefusalKind.REQUIREMENT_UNMET
+
+
+@pytest.mark.parametrize(
+    ("seam", "labels"),
+    [
+        pytest.param("graph", ["Kenya", "Germany", None], id="named-by-the-graph"),
+        # A lookup that fails or hangs leaves the donors unlabelled, and the
+        # step goes on, whatever seam was injected.
+        pytest.param("graph-fails", ["Kenya", None, None], id="graph-lookup-fails"),
+        pytest.param("raises", ["Kenya", None, None], id="injected-seam-raises"),
+        pytest.param("hangs", ["Kenya", None, None], id="injected-seam-hangs"),
+    ],
+)
+async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_graph(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    labels: list[str | None],
+) -> None:
+    """Kenya's series from two donors miss years. The approved source labels
+    Kenya, so the run asks for the donors' names alone, and keeps the name
+    the graph gives one and none for the one it does not hold."""
+    sparse = manifest()
+    (row,) = sparse["statistics"]
+    row["observations"] = 7
+    # The same list the statistics fetch reads, replaced in place.
+    sparse["statistics"][:] = [
+        {**row, "entities": [*row["entities"], {"role": "donor", "ref": donor}]}
+        for donor in ("donor/DEU", "donor/XYZ")
+    ]
+    sparse["series_count"] = 2
+    asked: list[list[str]] = []
+
+    async def describe(dcids: list[str]) -> dict[str, Any]:
+        asked.append(list(dcids))
+        if seam == "graph-fails":
+            raise UpstreamError(status=503, code="upstream_unavailable")
+        return {
+            "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
+            "donor/XYZ": NotHeldEntry(ref="donor/XYZ", status="not_held"),
+        }
+
+    async def injected(refs: Sequence[str]) -> Mapping[str, str]:
+        asked.append(list(refs))
+        if seam == "raises":
+            raise RuntimeError("a seam's own defect")
+        await asyncio.Event().wait()
+        return {}
+
+    monkeypatch.setattr("executor.run.describe_nodes", describe)
+    monkeypatch.setattr("executor.run.LABEL_ALLOWANCE_S", 0.05)
+    plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
+    chosen = {} if seam.startswith("graph") else {"label_refs": injected}
+
+    outcome = await asyncio.wait_for(
+        _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps(), **chosen), timeout=5
+    )
+
+    assert isinstance(outcome, Accepted), outcome
+    assert asked == [["donor/DEU", "donor/XYZ"]]
+    gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
+    assert [[entity.label for entity in gap.entities] for gap in gaps] == [
+        labels[:2],
+        [labels[0], labels[2]],
+    ]
+
+
+async def test_a_name_lookup_needs_more_step_budget_left_than_its_margin() -> None:
+    called: list[Sequence[str]] = []
+
+    async def names(refs: Sequence[str]) -> Mapping[str, str]:
+        called.append(refs)
+        return {"donor/DEU": "Germany"}
+
+    token = current_step_deadline.set(CallDeadline.after(0.5))
+    try:
+        labels = await _series_labels(names, ["donor/DEU"])
+    finally:
+        current_step_deadline.reset(token)
+
+    assert labels == {}
+    assert called == []
 
 
 async def test_a_retrieval_returning_no_rows_is_not_evidence(

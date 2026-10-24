@@ -60,7 +60,13 @@ from executor.ledger import (
     store_faults,
 )
 from executor.outcomes import Accepted
-from executor.run import FetchSeriesStats, UnreadableRunError, load_submission, resume_run
+from executor.run import (
+    FetchSeriesStats,
+    LabelRefs,
+    UnreadableRunError,
+    load_submission,
+    resume_run,
+)
 from google.adk import Context
 
 from harness.graph.answer import (
@@ -112,6 +118,7 @@ def run_resumer(
     tool_surface: ToolSurface | None,
     max_concurrent_steps: int,
     fetch_series_stats: FetchSeriesStats,
+    label_refs: LabelRefs,
 ) -> ResumeRuns:
     """Carry on every unfinished run of `run_ledger`, re-running computations
     against `tool_surface` and publishing through `publisher`, and describing
@@ -181,6 +188,7 @@ def run_resumer(
             publisher=publisher,
             max_concurrent_steps=max_concurrent_steps,
             fetch_series_stats=fetch_series_stats,
+            label_refs=label_refs,
         )
         async with store_faults(run.run_id):
             finished = await run_ledger.get(run.run_id)

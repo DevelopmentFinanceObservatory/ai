@@ -24,6 +24,7 @@ from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
 from common.rolling import flat_populations
+from compiler.evidence import series_rank
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -747,22 +748,23 @@ def _left_out_entity_sentences(
 # The most short series one note names; it counts the rest.
 _SHORT_SERIES_NAMED = 3
 
-# A series by the requirement the model wrote that reads it, its StatVar, and
-# its entities' roles and refs.
+# A series by the source the requirement the model wrote that reads it is
+# approved to retrieve, its StatVar, and its entities' roles and refs.
 type _SeriesKey = tuple[str, str | None, tuple[tuple[str, str], ...]]
 
 
 class _ShortSeries(NamedTuple):
-    """One series a note states: whose it is ("Kenya's"), `None` where the
-    approved source labels one of its entities none; the measure its
-    requirement reads; how it falls short ("ends in 2021"); and the verb
-    phrase, plural and singular, a count of series short the same way
-    takes."""
+    """One series a note states: whose it is ("Kenya's"), `None` where one
+    of its entities has no label; the measure its requirement reads; how it
+    falls short ("ends in 2021"); the verb phrase, plural and singular, a
+    count of series short the same way takes; and where it sorts among the
+    note's series, largest first (`compiler.evidence.series_rank`)."""
 
     owner: str | None
     measure: str
     shortfall: str
     counted: tuple[str, str]
+    rank: tuple[bool, float, str, tuple[str, ...]]
 
 
 def _short_series_sentences(
@@ -786,9 +788,10 @@ def _short_series_sentences(
     after it. Missing years are stated only where the retrieval's window
     (`EvidenceRecord.window`) lies inside the user's, since a finding counts
     them without saying which. A series is one StatVar's for one set
-    of entities under one requirement the model wrote, so a series two
-    retrievals of a requirement read is stated once (`_short_series_note`
-    words the notes).
+    of entities in the source a requirement the model wrote is approved to
+    retrieve (`EvidenceBinding.spec_id`), so a series two retrievals of a
+    requirement read, or two requirements over one source, is stated once
+    (`_short_series_note` words the notes).
     """
     written = {
         requirement.id: requirement
@@ -797,6 +800,9 @@ def _short_series_sentences(
     }
     origins = copy_origins(plan.rolling_copies)
     steps_by_id = {step.id: step for step in plan.workflow.steps} if plan.workflow else {}
+    sources: dict[str, str] = {}
+    for binding in plan.workflow.evidence_bindings if plan.workflow else ():
+        sources.setdefault(binding.requirement_id, binding.spec_id)
     anchors: dict[str, dict[str, _Anchoring]] = {}
     reaches: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
     holes: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
@@ -818,13 +824,17 @@ def _short_series_sentences(
                 continue
             if anchoring is not None and not anchoring.counts(gap.entities, spec_id=record.spec_id):
                 continue
-            key = (origin, gap.stat_var, tuple((one.role, one.ref) for one in gap.entities))
+            key = (
+                sources.get(origin, origin),
+                gap.stat_var,
+                tuple((one.role, one.ref) for one in gap.entities),
+            )
             owner = _owner_of(gap.entities)
             if gap.code is EvidenceIssueCode.WINDOW_SHORT and isinstance(gap.found, dict):
                 short = _short_reach(Period.model_validate(gap.found), window)
                 if short is not None:
                     reaches.setdefault(window, {}).setdefault(
-                        key, _ShortSeries(owner, requirement.measure, *short)
+                        key, _ShortSeries(owner, requirement.measure, *short, series_rank(gap))
                     )
             elif (
                 gap.code is EvidenceIssueCode.COVERAGE_GAPS
@@ -841,12 +851,11 @@ def _short_series_sentences(
                         requirement.measure,
                         f"has no data for {missing} of its {gap.required} years",
                         ("miss years", "misses years"),
+                        series_rank(gap),
                     ),
                 )
     return [
-        _short_series_note(by_series, window)
-        for notes in (reaches, holes)
-        for window, by_series in notes.items()
+        _short_series_note(by_series) for notes in (reaches, holes) for by_series in notes.values()
     ]
 
 
@@ -941,13 +950,10 @@ def _short_reach(reach: Period, window: Period) -> tuple[str, tuple[str, str]] |
             f"starts after {window.start}",
         )
     years = str(reach.start) if reach.start == reach.end else f"{reach.start} to {reach.end}"
-    return f"covers only {years}", _part_of(window)
-
-
-def _part_of(window: Period) -> tuple[str, str]:
-    """The verb phrase, plural and singular, for series covering only part of `window`."""
-    years = f"{window.start} to {window.end}"
-    return f"cover only part of {years}", f"covers only part of {years}"
+    return f"covers only {years}", (
+        f"start after {window.start} and end before {window.end}",
+        f"starts after {window.start} and ends before {window.end}",
+    )
 
 
 def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
@@ -960,41 +966,47 @@ def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
     return f"{name}'" if name.endswith("s") else f"{name}'s"
 
 
-def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries], window: Period) -> str:
+def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries]) -> str:
     """The note naming up to `_SHORT_SERIES_NAMED` of the series `short`
-    holds and counting the rest, by their shared shortfall or else as
-    covering part of `window`.
+    holds, the largest first (`_ShortSeries.rank`), and counting the rest by
+    how they fall short, the most common way first ("30 other series start
+    after 2015, and 20 other series end before 2023").
 
     A series is named by its owner, and by its measure as well where
-    `short` holds series of several requirements the model wrote. One with
-    no owner, or one whose name another series shares, as each StatVar's
-    series of one entity under one requirement does, is counted.
+    `short` holds series of several sources. One with no owner, or one whose
+    name another series shares, as each StatVar's series of one entity in
+    one source does, is counted. Where every series counted is one owner's
+    in one source, they differ by StatVar alone, so they are counted as
+    that owner's indicators ("2 of Kenya's indicators end before 2024"),
+    the noun the plan counts a family's StatVars in.
     """
-    several = len({origin for origin, _, _ in short}) > 1
+    several = len({source for source, _, _ in short}) > 1
+    ranked = sorted(short.items(), key=lambda item: item[1].rank)
     names = [
         None
         if one.owner is None
         else f"{one.owner} series for {one.measure}"
         if several
         else f"{one.owner} series"
-        for one in short.values()
+        for _, one in ranked
     ]
     shared = Counter(names)
     named: list[str] = []
-    rest: list[_ShortSeries] = []
-    for name, one in zip(names, short.values(), strict=True):
+    rest: dict[_SeriesKey, _ShortSeries] = {}
+    for name, (key, one) in zip(names, ranked, strict=True):
         if name is not None and shared[name] == 1 and len(named) < _SHORT_SERIES_NAMED:
             named.append(f"{name} {one.shortfall}")
         else:
-            rest.append(one)
+            rest[key] = one
+    owners = {one.owner for one in rest.values()}
+    sources = {source for source, _, _ in rest}
+    if len(owners) == 1 and len(sources) == 1 and None not in owners and len(rest) > 1:
+        counted = f"of {owners.pop()} indicators"
+    else:
+        counted = "other series" if named else "series"
     parts = list(named)
-    if rest:
-        phrases = {one.counted for one in rest}
-        plural, singular = phrases.pop() if len(phrases) == 1 else _part_of(window)
-        series = "other series" if named else "series"
-        parts.append(
-            f"1 {series} {singular}" if len(rest) == 1 else f"{len(rest)} {series} {plural}"
-        )
+    for (many, once), count in Counter(one.counted for one in rest.values()).most_common():
+        parts.append(f"1 {counted} {once}" if count == 1 else f"{count} {counted} {many}")
     if len(parts) < 3:
         return f"{' and '.join(parts)}."
     return f"{', '.join(parts[:-1])}, and {parts[-1]}."

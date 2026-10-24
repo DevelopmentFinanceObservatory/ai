@@ -48,6 +48,7 @@ from executor.run import (
     Submission,
     current_step_id,
     default_fetch_series_stats,
+    default_label_refs,
     execute_approved_plan,
     execute_authorised,
     load_submission,
@@ -699,6 +700,7 @@ async def test_a_carried_on_run_describes_its_frames_by_the_pair_dfo_apis_serves
         tool_surface=surface,
         max_concurrent_steps=4,
         fetch_series_stats=default_fetch_series_stats,
+        label_refs=default_label_refs,
     )
 
     ctx = _Context()
@@ -787,6 +789,7 @@ async def test_carrying_runs_on_records_each_that_cannot_be_and_never_raises(
         tool_surface=_Broken(schemas=real_schemas, responses={}),
         max_concurrent_steps=4,
         fetch_series_stats=default_fetch_series_stats,
+        label_refs=default_label_refs,
     )
 
     handed_back = await resume(_Context())  # type: ignore[arg-type] -- reads only `state`
@@ -904,6 +907,7 @@ async def test_a_transient_ledger_fault_leaves_the_run_unfinished_for_the_next_r
         tool_surface=_surface(real_schemas, manifest()),
         max_concurrent_steps=4,
         fetch_series_stats=default_fetch_series_stats,
+        label_refs=default_label_refs,
     )
 
     assert await resume(_Context()) is None  # type: ignore[arg-type] -- reads only `state`
@@ -1202,6 +1206,7 @@ async def test_the_next_turn_carries_on_a_stored_run_a_request_authorised(
         tool_surface=_surface(real_schemas, manifest()),
         max_concurrent_steps=4,
         fetch_series_stats=default_fetch_series_stats,
+        label_refs=default_label_refs,
     )
 
     handed_back = await resume(_Context())  # type: ignore[arg-type] -- reads only `state`

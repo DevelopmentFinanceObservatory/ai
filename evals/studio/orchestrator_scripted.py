@@ -39,6 +39,7 @@ from data_mcp.digest import render_answer
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from data_mcp.server import mcp as data_mcp
 from executor.ledger import InMemoryRunLedger
+from executor.run import no_label_refs
 from fastapi import FastAPI
 from google.adk import Context
 from google.adk.models.base_llm import BaseLlm
@@ -504,6 +505,7 @@ def build_studio(
             run_ledger=InMemoryRunLedger(),
             max_concurrent_steps=settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
+            label_refs=no_label_refs,
         )
 
     studio = StudioRunner(

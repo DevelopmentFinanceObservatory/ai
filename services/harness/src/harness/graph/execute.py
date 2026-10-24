@@ -40,6 +40,7 @@ from executor.outcomes import (
 )
 from executor.run import (
     FetchSeriesStats,
+    LabelRefs,
     StepProgressCallback,
     execute_approved_plan,
 )
@@ -359,6 +360,7 @@ def execute_node(
     publisher: ResultPublisher | None,
     max_concurrent_steps: int,
     fetch_series_stats: FetchSeriesStats,
+    label_refs: LabelRefs,
 ) -> Callable[[Context, Any], AsyncIterator[Any]]:
     """The `execute` node, running the approved plan against `tool_surface`
     as a run of `run_ledger`, its derived results published through
@@ -462,6 +464,7 @@ def execute_node(
                 conversation_id=conversation_of(ctx.session.id),
                 max_concurrent_steps=max_concurrent_steps,
                 fetch_series_stats=fetch_series_stats,
+                label_refs=label_refs,
                 on_progress=on_progress,
             )
         )

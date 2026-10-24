@@ -195,6 +195,8 @@ from compiler.evidence import (
     errors,
     evidence_from_manifest,
     left_out_entities,
+    unlabelled_series_refs,
+    with_series_labels,
 )
 from compiler.frame_columns import (
     FRAME_PARAMETER,
@@ -227,6 +229,7 @@ from compiler.surface import (
 from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest
+from data_mcp.node_lookup import describe_nodes
 from data_mcp.series_statistics import (
     SERIES_STATISTICS_ARROW_SCHEMA,
     SeriesStatisticsSchemaError,
@@ -440,6 +443,20 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
+# The names the graph gives each of some entity refs, keyed by ref; a ref it
+# names none for is absent. Injectable as `FetchSeriesStats` is. One that
+# raises or runs past its deadline names nothing (`_series_labels`).
+LabelRefs = Callable[[Sequence[str]], Awaitable[Mapping[str, str]]]
+
+# The most entity refs one evidence check asks names for: two requests of
+# `describe_nodes`' 50. The largest short series' come first
+# (`unlabelled_series_refs`), and an answer names three of them.
+LABELLED_REFS = 100
+
+# The most seconds that lookup may take. Past it the series stay unlabelled,
+# and an answer counts them as it would without the lookup.
+LABEL_ALLOWANCE_S = 5.0
+
 
 class StatisticsUnreachableError(Exception):
     """A manifest's statistics artifact could not be fetched this time.
@@ -567,6 +584,43 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
         raise StatisticsUnusableError(detail) from exc
 
 
+async def default_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`:
+    `execute_approved_plan`'s default `label_refs`."""
+    nodes = await describe_nodes(refs)
+    return {ref: label for ref, node in nodes.items() if (label := getattr(node, "label", None))}
+
+
+async def no_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+    """The `LabelRefs` that names nothing, for a read no answer is written from
+    (`read_anchors`) and a caller that makes no upstream call."""
+    del refs
+    return {}
+
+
+async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[str, str]:
+    """The names `label_refs` gives `refs`, or none where it fails or outruns its deadline.
+
+    A name labels a series in an answer's notes and nothing else, so the
+    step goes on without it, and its series are counted. The deadline is
+    what remains of the step's budget (`current_step_deadline`), less
+    `_EVIDENCE_DEADLINE_MARGIN_S`, capped at `LABEL_ALLOWANCE_S`, so the
+    lookup gives up before the step's own budget does.
+    """
+    allowance_s = LABEL_ALLOWANCE_S
+    if (step_deadline := current_step_deadline.get()) is not None:
+        allowance_s = min(step_deadline.remaining() - _EVIDENCE_DEADLINE_MARGIN_S, allowance_s)
+    if allowance_s <= 0:
+        return {}
+    # Whatever an injected seam raises, only the names go unread, so the catch is broad.
+    try:
+        async with asyncio.timeout(allowance_s):
+            return await label_refs(refs)
+    except Exception as exc:
+        logger.warning("executor: could not read names for %d entity refs: %r", len(refs), exc)
+        return {}
+
+
 class _Stopped(Exception):  # noqa: N818 -- a control-flow signal carrying an outcome, not an error
     """Carries the outcome that ends a run out of the step loop.
 
@@ -671,6 +725,7 @@ class _Runtime:
     jitter: Jitter
     max_concurrent_steps: int
     fetch_series_stats: FetchSeriesStats
+    label_refs: LabelRefs
     on_progress: StepProgressCallback | None
     publisher: ResultPublisher | None
 
@@ -688,6 +743,7 @@ async def execute_authorised(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
 ) -> RunOutcome:
     """Run `submission` under `authorisation`, a plan's approval, as one run of `ledger`.
@@ -705,9 +761,9 @@ async def execute_authorised(
     with its replay recipe through `publisher`
     (`executor.completion.publish_results`); a stopped one is recorded failed.
 
-    `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats` and
-    `on_progress` are `execute_approved_plan`'s own. With no `publisher`, a run
-    with a derived result stays `publishing`.
+    `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats`,
+    `label_refs` and `on_progress` are `execute_approved_plan`'s own. With no
+    `publisher`, a run with a derived result stays `publishing`.
 
     `authorisation` must approve the work `submission` is: its approved
     revision is `submission.revision`. One that names other work admits no run.
@@ -735,6 +791,7 @@ async def execute_authorised(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=on_progress,
         publisher=publisher,
     )
@@ -807,6 +864,7 @@ async def resume_run(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
@@ -818,6 +876,7 @@ async def resume_run(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=None,
         publisher=publisher,
     )
@@ -1022,6 +1081,7 @@ async def execute_approved_plan(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
 ) -> tuple[Plan, RunOutcome]:
     """Run an approved plan through `execute_authorised` and record the run in its status.
@@ -1054,9 +1114,12 @@ async def execute_approved_plan(
     checks coverage against; the real fetch by default, injectable for a
     caller whose `surface` is itself fully virtualised, which raises
     `StatisticsUnreachableError` or `StatisticsUnusableError` the way the real
-    one does. `on_progress` hears
-    every progress report a step's tool call sends, and a report naming the
-    next attempt each time a step is retried, tagged with the step's id.
+    one does. `label_refs` names the entities of the series a retrieval holds
+    short of its period that the approved source names none for, so an
+    answer can name the largest (`default_label_refs` by default).
+    `on_progress` hears every progress report a step's tool call sends, and
+    a report naming the next attempt each time a step is retried, tagged
+    with the step's id.
 
     Returns:
         The plan as the run left it, or unchanged when it could not start,
@@ -1120,6 +1183,7 @@ async def execute_approved_plan(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=on_progress,
     )
     run = None
@@ -1217,7 +1281,8 @@ async def read_anchors(
     evidence, and `resolve_anchor` for each group, over the same
     populations and frames. Nothing is admitted to a ledger and nothing is
     recorded, and no derived step runs. `revision` names the work in a stop's
-    outcome. The other arguments are `execute_approved_plan`'s.
+    outcome. The other arguments are `execute_approved_plan`'s. No answer is
+    written from the read, so it asks no names for its series (`no_label_refs`).
 
     Returns:
         Each group's `AnchorRead`, in the order its run resolves them, empty
@@ -1234,6 +1299,7 @@ async def read_anchors(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=no_label_refs,
         on_progress=None,
         publisher=None,
     )
@@ -1270,6 +1336,7 @@ class _Run:
         self.sleep = runtime.sleep
         self.jitter = runtime.jitter
         self.fetch_series_stats = runtime.fetch_series_stats
+        self.label_refs = runtime.label_refs
         self.on_progress = runtime.on_progress
         # Bounds how many steps of one wave may have their tool call in
         # flight at once, acquired in `_attempt` around `_run_step`; a wave
@@ -2520,6 +2587,8 @@ class _Run:
                 requirement_id=requirement.id,
                 issues=tuple(findings),
             )
+        if refs := unlabelled_series_refs(findings, limit=LABELLED_REFS):
+            findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
         self.left_out[step.id] = {
             (entity.role, entity.ref): issue
             for entity, issue in left_out_entities(requirement, findings, approved).items()

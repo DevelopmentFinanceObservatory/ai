@@ -124,6 +124,23 @@ def _no_graph_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_graph_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Name no entity through the graph unless a test says how.
+
+    A run asks the graph for the names of the entities of its short series
+    that the approved source labels none for (`executor.run.default_label_refs`),
+    which would otherwise reach whatever upstream the process holds. A test
+    that wants names patches `executor.run.describe_nodes` itself.
+    """
+
+    async def describe_nothing(dcids: Sequence[str]) -> dict[str, Any]:
+        del dcids
+        return {}
+
+    monkeypatch.setattr("executor.run.describe_nodes", describe_nothing)
+
+
+@pytest.fixture(autouse=True)
 def _reset_mcp_auth_gate() -> Any:
     """Give every test a known starting state for `common.auth`'s policy.
 
