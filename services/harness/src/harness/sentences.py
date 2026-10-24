@@ -611,7 +611,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "frame_integrity_failed",
             ExecutorCode.MALFORMED_REFUSAL,
             HarnessCode.UNKNOWN_TOOL,
-            HarnessCode.TOOL_ARGUMENTS_INVALID,
             HarnessCode.RUN_RECORD_UNREADABLE,
             HarnessCode.RESUME_FAILED,
             HarnessCode.FIGURES_UNREAD,
@@ -663,6 +662,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "step_refused",
             "unit_matches",
             HarnessCode.NO_SEARCH_PARTS,
+            HarnessCode.TOOL_ARGUMENTS_INVALID,
             HarnessCode.UNSPECIFIED,
             HarnessCode.CARD_NOT_FOUND,
             HarnessCode.RAISED,
@@ -753,6 +753,11 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME: FailureText(
         "The series now chosen have another latest period than this card was made for",
         "so ask for a new card",
+    ),
+    # The model writes a tool call's arguments, and a later try may write
+    # them well.
+    HarnessCode.TOOL_ARGUMENTS_INVALID: FailureText(
+        "This step was written in a form the system could not run", "and asking again may work"
     ),
     HarnessCode.NO_SEARCH_PARTS: FailureText(
         "The question could not be turned into a search", "so try wording it another way"

@@ -605,6 +605,45 @@ def _settled_failures(frames: list) -> list[ActivityStep]:
 
 
 _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
+# A hand-off whose ask lists donors one by one and totals across them, and
+# the orchestrator's refusal of it.
+_ASKED_TWICE = {"brief": "b", "asks": [{"by": ["donor"], "over": ["donor"], "across": "2022"}]}
+_ASK_SLIP = {
+    "error": "plan: asks.0: `by` lists donor and `over` totals across donor.",
+    "code": "tool_arguments_invalid",
+    "retry_mode": "correct_and_retry",
+}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        lambda: [
+            _call("c1", "plan", _ASKED_TWICE),
+            _response("c1", "plan", _ASK_SLIP),
+            _call("c2", "plan", {"brief": "b", "asks": [{"by": ["donor"], "across": "2022"}]}),
+            _response("c2", "plan", _PLANNED),
+        ],
+        # A skill read under a wrong name.
+        lambda: [
+            _call("c1", "get_skill", {"name": "wrong"}),
+            _response("c1", "get_skill", {**_SLIP, "code": "skill_not_found"}),
+            _call("c2", "get_skill", {"name": "right"}),
+            _response("c2", "get_skill", {"skill": "text"}),
+        ],
+    ],
+    ids=["hand-off", "skill-read"],
+)
+def test_a_quiet_call_the_model_corrects_shows_no_failed_step(events):
+    """A hand-off or a skill read shows only when it fails, and a refusal
+    the model corrects is no failure: a line stating one, even settled later,
+    reads as a fault in the system."""
+    translator = _translator()
+
+    frames = [*_frames(translator, *events()), *translator.finish()]
+
+    steps = [frame for frame in frames if frame.event == "activity.step"]
+    assert [frame for frame in steps if frame.status is StepStatus.FAILED] == []
 
 
 @pytest.mark.parametrize(
@@ -624,13 +663,6 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
             _call("c2", "search", _SEARCH),
             _response("c2", "search", {"parts": []}),
         ],
-        # The same for a quiet call: a skill read under a wrong name.
-        lambda: [
-            _call("c1", "get_skill", {"name": "wrong"}),
-            _response("c1", "get_skill", {**_SLIP, "code": "skill_not_found"}),
-            _call("c2", "get_skill", {"name": "right"}),
-            _response("c2", "get_skill", {"skill": "text"}),
-        ],
         # f6a: a hand-off that hit a fault, then one the planner took.
         lambda: [
             _call("c1", "plan", {"brief": "b", "asks": ["a"]}),
@@ -649,7 +681,6 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
     ids=[
         "search-retried",
         "search-corrected",
-        "skill-read-corrected",
         "hand-off-retried",
         "replanned",
     ],
@@ -691,12 +722,20 @@ def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
         ],
         # A failure no later step tried again: the turn ends on it.
         lambda: [_call("c1", "search", _SEARCH), _response("c1", "search", _FAULT)],
+        # A hand-off refused as one to correct, which the model never
+        # corrected: held to the segment's end, it shows then.
+        lambda: [
+            _call("c1", "plan", _ASKED_TWICE),
+            _response("c1", "plan", _ASK_SLIP),
+            _event(types.Part(text="Here is what I found.")),
+        ],
     ],
     ids=[
         "other-search",
         "answered-without-a-plan",
         "no-plan-after-hand-off",
         "terminal",
+        "hand-off-never-corrected",
     ],
 )
 def test_a_failure_no_later_try_made_good_stays_failed(events):

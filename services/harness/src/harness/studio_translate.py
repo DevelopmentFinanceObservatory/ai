@@ -1071,7 +1071,9 @@ class _Translator:
       moment the model makes it, completed when the tool returns. A
       hand-off to the planner and a skill read show only when they fail:
       the planner's own lines follow a hand-off, and a skill read is
-      background, not progress;
+      background, not progress. A refusal of one that asks the model to
+      correct the call is held until the segment ends, and shows then
+      only if no later call of the tool completed;
     - answer text, as `message.delta` chunks, the last model call's text
       being the turn's `message.complete`: text before a tool call is
       interim, and text after a hand-off to the user or the planner would
@@ -1121,6 +1123,10 @@ class _Translator:
         # with the number of calls made before it: a later call of the tool
         # that completes corrects them.
         self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # Quiet calls refused as ones to correct, by tool, each with the
+        # number of calls made before it and its failure sentence: shown at
+        # the segment's end unless a later call of the tool completes.
+        self._held: dict[str, list[tuple[int, str]]] = {}
         # The number of agent tool calls made so far, and each open call's
         # place among them, by call id.
         self._calls = 0
@@ -1714,13 +1720,11 @@ class _Translator:
         return frame
 
     def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
-        """The steps awaiting correction under `tool` that a completed call,
-        the `order`th made, corrects: those refused before it was made. A
-        call made beside a refused one, in the same batch, corrects nothing."""
-        queued = self._uncorrected.pop(tool, [])
-        if kept := [entry for entry in queued if entry[0] >= order]:
-            self._uncorrected[tool] = kept
-        return [step for before, step in queued if before < order]
+        """The shown steps awaiting correction under `tool` that a completed
+        call, the `order`th made, corrects (`_take_corrected`), and the held
+        refusals it corrects dropped."""
+        _take_corrected(self._held, tool, order)
+        return _take_corrected(self._uncorrected, tool, order)
 
     def _recover(
         self, *keys: tuple[str, str], corrected: Sequence[_FailedStep] = ()
@@ -1854,7 +1858,9 @@ class _Translator:
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
                 name, args = quiet
-                if failed:
+                if failed and _asks_correction(answer):
+                    self._held.setdefault(name, []).append((self._calls, _answer_failure(answer)))
+                elif failed:
                     frames.append(
                         self._failed_step(
                             _retry_key(name, args),
@@ -1865,7 +1871,6 @@ class _Translator:
                                 tool=name,
                                 detail=_answer_failure(answer),
                             ),
-                            correctable=_asks_correction(answer),
                         )
                     )
                 else:
@@ -2030,6 +2035,15 @@ class _Translator:
         `message.delta` so the deltas still add up to the `message.complete`
         text."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        # A held refusal no later call corrected is a failed step after all.
+        frames.extend(
+            self._step(
+                None, _tool_call_label(tool, {}), StepStatus.FAILED, tool=tool, detail=detail
+            )
+            for tool, held in self._held.items()
+            for _, detail in held
+        )
+        self._held.clear()
         if self.paused:
             return frames
         if self._final_text:
@@ -2080,6 +2094,17 @@ _PLAN_MADE = ("plan", "made")
 
 # A failed step a later try can recover: its wire step id, label and tool.
 type _FailedStep = tuple[str, str, str | None]
+
+
+def _take_corrected[T](queue: dict[str, list[tuple[int, T]]], tool: str, order: int) -> list[T]:
+    """The entries `queue` holds under `tool` that a completed call, the
+    `order`th made, corrects, taken out of it: those refused before it was
+    made. A call made beside a refused one, in the same batch, corrects
+    nothing."""
+    queued = queue.pop(tool, [])
+    if kept := [entry for entry in queued if entry[0] >= order]:
+        queue[tool] = kept
+    return [entry for before, entry in queued if before < order]
 
 
 def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
