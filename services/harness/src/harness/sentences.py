@@ -569,6 +569,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "period_unverified",
             "scope_entities_wider",
             "stat_var_unresolved",
+            "member_not_resolvable",
             "open_axis_unresolved",
             "statistics_unavailable",
             "authorisation_mismatch",
@@ -694,6 +695,9 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     "facet_not_available": FailureText(
         "The data is not broken down the way that was asked",
         "so ask for a breakdown it holds",
+    ),
+    "member_not_resolvable": FailureText(
+        "The data holds indicators the system cannot confirm", "so ask for it from another source"
     ),
     "growth_gap_year": FailureText(
         "The data has no figure in the first or the last year of that period",

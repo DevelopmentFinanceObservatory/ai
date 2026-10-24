@@ -780,7 +780,7 @@ async def test_a_studio_run_left_pending_is_carried_on_from_the_conversation_led
     names the conversation, not the turn, and the next turn, in a session of
     its own, completes it and hands the agent its frames and the notes read
     from the plan stored with the ledger."""
-    total = "The figures sum the family's 3 indicators."
+    total = "The figures are the sum of 3 indicators."
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [total])
     store = StudioStore(InMemorySessionService(), app_name=AGENT_NAME)
     ledger = StudioRunLedger(store)

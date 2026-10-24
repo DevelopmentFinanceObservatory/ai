@@ -182,10 +182,12 @@ STOP_CODES = frozenset(
         "default_facet_undefined",
         "over_ceiling",
         # The spec mints no dataset as posted: it describes a family with
-        # nothing to export, or the graph cannot resolve its StatVars.
-        # `do_not_retry` on the wire, and no scope edit reaches it: a
-        # different spec is a different plan.
+        # nothing to export (`spec_not_exportable`), or the graph cannot
+        # resolve its StatVars (`member_not_resolvable`). `do_not_retry` on
+        # the wire, and no scope edit reaches it: a different spec is a
+        # different plan.
         "spec_not_exportable",
+        "member_not_resolvable",
         "capability_unavailable",
         "entity_not_found",
         "node_not_held",

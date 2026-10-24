@@ -284,8 +284,8 @@ it with a scale word (billion, million, per cent). Do not give it as frame
 counts, ids, codes or step names. A count names what it counts: entities
 with data in the period (a ranking's ranked entities, the series a fetch
 retrieved), every entity the source holds in any year (a plan record's "all
-N donors the source holds"), or the indicators a family sums ("summed over
-its N StatVars"). Do not give one as another.
+N donors the source holds"), or the indicators a total sums ("summed over its N
+indicators"). Do not give one as another.
 
 Say plainly what of the user's question could not be answered: an ask
 declined, not computed in part, or left without data, a part refused or not

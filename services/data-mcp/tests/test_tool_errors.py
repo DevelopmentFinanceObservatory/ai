@@ -985,10 +985,13 @@ async def test_member_not_resolvable_from_the_graph_lists_the_unresolved_members
         issues=[{"member": "dcid:Count_Person_Odd"}],
     )
 
-    assert refusal.code == ToolErrorCode.SPEC_NOT_EXPORTABLE
-    assert refusal.fix == {"members": ["dcid:Count_Person_Odd"]}
-    assert "the graph could not resolve its StatVars (1 StatVar)" in refusal.message
+    assert refusal.code == ToolErrorCode.MEMBER_NOT_RESOLVABLE
+    assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
+    assert refusal.fix["members"] == ["dcid:Count_Person_Odd"]
+    assert "indicators the platform cannot confirm" in refusal.fix["remedy"]
+    assert "indicators the platform cannot confirm (1 the graph" in refusal.message
     assert "Count_Person_Odd" not in refusal.message
+    assert "StatVar" not in refusal.message
 
 
 async def test_member_not_resolvable_naming_the_spec_id_names_no_stat_var() -> None:
@@ -1001,9 +1004,9 @@ async def test_member_not_resolvable_naming_the_spec_id_names_no_stat_var() -> N
         issues=[{"member": spec_id, "pointer": "/input/spec_id"}],
     )
 
-    assert refusal.code == ToolErrorCode.SPEC_NOT_EXPORTABLE
-    assert refusal.fix == {"members": [spec_id]}
-    assert "the graph could not resolve its StatVars. Retrying" in refusal.message
+    assert refusal.code == ToolErrorCode.MEMBER_NOT_RESOLVABLE
+    assert refusal.fix["members"] == [spec_id]
+    assert "indicators the platform cannot confirm, so" in refusal.message
     assert spec_id not in refusal.message
 
 
@@ -1018,8 +1021,8 @@ async def test_a_failed_operation_caused_by_member_not_resolvable_names_no_stat_
         )
     )
 
-    assert refusal.code == ToolErrorCode.SPEC_NOT_EXPORTABLE
-    assert refusal.fix == {"members": []}
+    assert refusal.code == ToolErrorCode.MEMBER_NOT_RESOLVABLE
+    assert refusal.fix["members"] == []
     assert refusal.retry_mode == RetryMode.DO_NOT_RETRY
 
 

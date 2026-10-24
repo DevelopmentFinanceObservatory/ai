@@ -614,6 +614,11 @@ def stat_var_count(source: SelectedSource) -> int:
     return source.stat_var_member_count or 0
 
 
+def stat_var_count_is_floor(source: SelectedSource) -> bool:
+    """Whether `stat_var_count(source)` is a floor: no served count, and `search` states its confirmed members as one."""
+    return source.served_count is None and source.stat_var_member_count_exact is False
+
+
 def member_digest(dcids: Iterable[str]) -> str:
     """Lowercase SHA-256 hex of the RFC 8785 canonical JSON of the sorted `dcids`.
 

@@ -2027,8 +2027,8 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     """`execute` hands `plan_done` the sentences `_stat_var_totals` writes,
     and `plan_done` gives each to the agent under `totals`."""
     sentence = (
-        'By default, the figures for "OECD Creditor Reporting System (CRS)" sum the '
-        "family's 74 indicators."
+        'By default, the figures for "OECD Creditor Reporting System (CRS)" are the '
+        "sum of 74 indicators."
     )
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
     plan = _seam_plan(schemas=real_schemas)

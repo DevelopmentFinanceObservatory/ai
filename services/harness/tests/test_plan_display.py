@@ -2034,7 +2034,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its 1,554 StatVars by default",
+            "summed over its 1,554 indicators by default",
         ),
         (
             {
@@ -2042,7 +2042,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 StatVars",
+            "summed over its 3 indicators",
         ),
         (
             {
@@ -2050,7 +2050,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate StatVars",
+            "kept as 2 separate indicators",
         ),
         (
             {
@@ -2059,7 +2059,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its StatVars by default",
+            "summed over its indicators by default",
         ),
         (
             {
@@ -2067,7 +2067,17 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as separate StatVars",
+            "kept as separate indicators",
+        ),
+        (
+            {
+                "served_count": None,
+                "stat_var_member_count": 27,
+                "stat_var_member_count_exact": False,
+                "stat_var_reading": StatVarReading.SEPARATE,
+                "stat_var_reading_set_by": ReadingSetBy.RULE,
+            },
+            "kept as separate indicators by default",
         ),
     ],
     ids=[
@@ -2076,6 +2086,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         "separate-by-the-plan",
         "one-confirmed-summed",
         "uncounted-separate",
+        "floor-count-separate",
     ],
 )
 def test_the_dataset_sentence_states_how_a_family_is_read(

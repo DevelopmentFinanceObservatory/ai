@@ -1255,7 +1255,7 @@ def _total_sentence(
     is how the answer combines recipients the question did not name
     (`_totals_across_recipients`), `None` when it does not.
     """
-    sentence = f'the figures for "{name}" sum the family\'s {count:,} indicators.'
+    sentence = f'the figures for "{name}" are the sum of {count:,} indicators.'
     if set_by is ReadingSetBy.RULE:
         sentence = f"By default, {sentence}"
     elif set_by is ResolvedBy.USER:
