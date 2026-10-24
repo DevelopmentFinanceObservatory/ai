@@ -143,6 +143,27 @@ def source_constraint_matches(
     )
 
 
+def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """The refs Search bound for each entity text of `part`, by the text case-folded.
+
+    Search states, beside the part's `restatement`, one `entity_refs` row
+    per entity text it restates: the text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
+    bound to nothing, being ambiguous, not held or not found, states no
+    refs and is left out, and so is every text of a part without
+    `entity_refs`, from a Search that predates the field. Such a name is
+    matched by label or through the graph's resolve door. A text stated
+    twice binds every ref either row states.
+    """
+    refs: dict[str, tuple[str, ...]] = {}
+    for row in _sequence(part.get("entity_refs")):
+        text, bound = _text(row.get("text")), _strings(row.get("refs"))
+        if text is not None and bound:
+            key = text.casefold()
+            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
+    return refs
+
+
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
 
@@ -163,8 +184,10 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     warnings = _warnings(envelope, part)
     mentions = resolved_source_mentions(part)
 
+    bound = bound_refs(part)
+
     def constrained(source: SelectedSource) -> SelectedSource:
-        return source.model_copy(update={"resolved_sources": mentions})
+        return source.model_copy(update={"resolved_sources": mentions, "bound_refs": bound})
 
     if status is DiscoveryStatus.DEFINITE:
         spec = _mapping(part.get("spec"))
@@ -248,6 +271,11 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
+            bound_refs={
+                text: tuple(refs)
+                for text, raw in _mapping(block.get("_bound_refs")).items()
+                if (refs := _strings(raw))
+            },
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),

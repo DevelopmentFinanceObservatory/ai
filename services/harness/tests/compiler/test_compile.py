@@ -33,11 +33,13 @@ import pytest
 from common.unit_refs import PERCENT_UNIT
 from compiler.capabilities import CAPABILITIES, ToolCapability
 from compiler.compile import CompileIssueCode, CompileResult, compile_plan
-from compiler.sources import member_digest, source_from_spec_block
+from compiler.sources import member_digest, outcome_from_envelope, source_from_spec_block
 from compiler.surface import ToolSchema
 from data_mcp.definition_writes import windowed_identity
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, store_search
+from harness.tool_contracts import resolver_digest
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -1004,6 +1006,70 @@ def test_a_period_sum_over_groups_named_on_both_roles_is_not_wider_than_the_requ
     )
 
     assert result.ok, result.issues
+
+
+_G7_PART = json.loads(
+    (Path(__file__).parent.parent / "fixtures" / "search_part_g7_africa.json").read_text()
+)["envelope"]
+
+
+def _g7_part(*, refs: bool) -> dict[str, Any]:
+    """The G7 part, with the `entity_refs` apis states beside its restatement, or without them as an older Search answers."""
+    part = copy.deepcopy(_G7_PART)
+    if not refs:
+        del part["parts"][0]["entity_refs"]
+    return part
+
+
+def _stored_g7_source(*, refs: bool) -> SelectedSource:
+    """The G7 source as a pin of it reads it: the block `store_search` keeps from the digest."""
+    state: dict[str, Any] = {}
+    store_search(state, resolver_digest(_g7_part(refs=refs)))
+    (block,) = state[ORCHESTRATOR_SPECS_KEY].values()
+    return source_from_spec_block(block)
+
+
+def _discovered_g7_source(*, refs: bool) -> SelectedSource:
+    """The G7 source as discovery reads Search's part (`outcome_from_envelope`)."""
+    return outcome_from_envelope(_g7_part(refs=refs)).sources[0]
+
+
+@pytest.mark.parametrize("read", [_stored_g7_source, _discovered_g7_source])
+@pytest.mark.parametrize(
+    ("refs", "expected"),
+    [
+        (True, []),
+        # Without `entity_refs` the name is matched by label alone, and "G7" is not "Group of Seven".
+        (False, [EvidenceIssueCode.ENTITY_MISSING]),
+    ],
+)
+def test_a_set_search_labels_otherwise_is_named_by_the_ref_its_text_bound(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    read: Callable[..., SelectedSource],
+    refs: bool,
+    expected: list[EvidenceIssueCode],
+) -> None:
+    # Search answers the text "G7", asked as the giving side, with the set
+    # it labels "Group of Seven", and no graph resolve of "G7" finds it.
+    source = read(refs=refs)
+    oda = requirement(
+        measure="gross disbursements of ODA",
+        entities=[Entity(name="G7", role="donor"), Entity(name="Africa", role="recipient")],
+        period=Period(start=1965, end=2024),
+        unit=Unit(currency="USD", prices="constant", base_year=2024),
+    )
+    plan = _draft([decision()], [oda, derived_requirement()])
+
+    result = build(
+        plan,
+        _translation(_retrieve(spec_id=source.spec_id), _aggregate()),
+        discovered={"annual_debt_service": source},
+    )
+
+    assert [issue.finding for issue in result.issues] == expected
 
 
 def test_a_filter_naming_a_group_keeps_its_members(
