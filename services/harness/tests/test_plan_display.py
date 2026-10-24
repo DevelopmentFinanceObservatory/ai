@@ -2156,9 +2156,37 @@ def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
     assert _label(plan.requirement("ranked"), plan) == "Rank the top 10 sectors by the total of aid"
 
 
-def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
-    decision: DecisionFactory,
+# A source naming health (120) and population (130), which share social
+# infrastructure (100) at the top level.
+_HEALTH_AND_POPULATION: dict[str, Any] = {
+    "identity": {
+        "slots": [
+            {
+                "property": "crsPurpose",
+                "binding": {"state": "set", "refs": ["CRSPurposeCode120", "CRSPurposeCode130"]},
+            }
+        ]
+    },
+    "code_paths": {
+        "CRSPurposeCode120": ("CRSPurposeCode100", "CRSPurposeCode120"),
+        "CRSPurposeCode130": ("CRSPurposeCode100", "CRSPurposeCode130"),
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("named", "rolled_up_to"),
+    [
+        ({}, "the top level of its hierarchy"),
+        (_HEALTH_AND_POPULATION, "level 1 below the top of its hierarchy"),
+    ],
+    ids=["no-sector-named", "health-and-population"],
+)
+def test_a_breakdown_states_the_level_it_reads_and_no_reading_of_the_family(
+    decision: DecisionFactory, named: dict[str, Any], rolled_up_to: str
 ) -> None:
+    """The plan states level 0; a source naming two sectors that share their top-level
+    parent reads them where they part, and the card says so."""
     plan = _one_requirement_compiled_plan(
         decision,
         definition=None,
@@ -2167,13 +2195,13 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
         stat_var_member_count=705,
         stat_var_reading=StatVarReading.SEPARATE,
         stat_var_reading_set_by=ReadingSetBy.PLAN,
+        **named,
     )
 
     (dataset_row,) = [row for row in requirement_rows(plan) if row["id"] == "dataset_a"]
 
     assert dataset_row["sentence"] == (
-        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to the top level of "
-        "its hierarchy."
+        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to {rolled_up_to}."
     )
 
 

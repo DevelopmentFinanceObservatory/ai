@@ -138,6 +138,7 @@ from compiler.shapes import (
     BREAKDOWN_CODE_SYSTEMS,
     ResolvedRole,
     ResolvedShape,
+    breakdown_level,
     operation_inputs,
     rolls,
     shapes_for,
@@ -145,6 +146,7 @@ from compiler.shapes import (
 )
 from compiler.sources import (
     FamilyOverlap,
+    bound_codes,
     entity_scopes_disjoint,
     family_overlap,
     pinned_stat_var,
@@ -623,22 +625,38 @@ class _Build:
     def _check_breakdown(
         self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
     ) -> None:
-        """Report a breakdown by a code system the source's family does not vary along.
+        """Report a breakdown by a code system the source's family does not vary along,
+        or one whose level the named codes' paths do not settle.
 
         `get_data` sums the family within each code of the breakdown's code
         system, so a source whose members state no value on it has no codes
-        to break its total down by.
+        to break its total down by. The level read is set by the codes the
+        source names (`compiler.shapes.breakdown_level`), so a named code
+        the graph holds no path to leaves no level to retrieve at. A read
+        of the hierarchy that failed never reaches compile:
+        `propose_operations` answers it `surface_unavailable`.
         """
         if requirement.breakdown is None:
             return
         code_system = BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension]
-        if any(axis.property == code_system for axis in source.open_axes):
+        if not any(axis.property == code_system for axis in source.open_axes):
+            detail = (
+                f"its StatVars do not vary by {requirement.breakdown.dimension.value} "
+                f"({code_system}), so it has no breakdown by it"
+            )
+        elif breakdown_level(requirement.breakdown, source) is None:
+            unread = [
+                code for code in bound_codes(source, code_system) if not source.code_paths.get(code)
+            ]
+            detail = (
+                f"the {code_system} hierarchy holds no path to {', '.join(unread)}, "
+                "so no level of its breakdown is known"
+            )
+        else:
             return
         self._issue(
             CompileIssueCode.SOURCE_UNUSABLE,
-            f"source {source.spec_id} cannot serve requirement {requirement.id!r}: its "
-            f"StatVars do not vary by {requirement.breakdown.dimension.value} "
-            f"({code_system}), so it has no breakdown by it",
+            f"source {source.spec_id} cannot serve requirement {requirement.id!r}: {detail}",
             operation_id=operation.id,
             requirement_id=requirement.id,
         )
@@ -2132,9 +2150,10 @@ class _Build:
         per member. It sits outside the definition's identity, so it
         re-mints nothing.
 
-        `breakdown` is the requirement's, as its code system and level: apis
-        sums the family within each code rolled up to that level, so the frame
-        carries one series per code under the family's own ref.
+        `breakdown` is the requirement's code system at the level
+        `compiler.shapes.breakdown_level` sets from the codes the source
+        names: apis sums the family within each code rolled up to that level,
+        so the frame carries one series per code under the family's own ref.
 
         `place_types` is written for a retrieval a place-level filter reads
         (`_read_by_level_filter`): it adds the type column for the role that
@@ -2166,9 +2185,11 @@ class _Build:
             args["stat_vars"] = source.stat_var_reading.value
         requirement = self.requirements.get(operation.requirement_id)
         if isinstance(requirement, DatasetRequirement) and requirement.breakdown is not None:
+            # `_check_breakdown` refuses a source whose level is unknown.
+            level = breakdown_level(requirement.breakdown, source)
             args["breakdown"] = {
                 "code_system": BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension],
-                "level": requirement.breakdown.level,
+                "level": requirement.breakdown.level if level is None else level,
             }
         if self._read_by_level_filter(operation.id):
             args["place_types"] = True

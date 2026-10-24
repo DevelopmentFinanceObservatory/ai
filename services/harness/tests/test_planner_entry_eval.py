@@ -343,7 +343,12 @@ def test_stray_recordings_name_files_no_task_uses(tmp_path: Path) -> None:
 def test_a_translation_answer_is_stored_once_and_read_back(tmp_path: Path) -> None:
     call = 'search {"parts":[{"variable":"GDP"}]}'
     answer = {"is_error": False, "structured_content": {}, "text": "", "meta": {"envelope": 1}}
-    translation = {"calls": {call: answer}, "resolved": {"Kenya": None}}
+    node = {"ref": "CRSPurposeCode999", "status": "not_held"}
+    translation = {
+        "calls": {call: answer},
+        "resolved": {"Kenya": None},
+        "nodes": {"CRSPurposeCode999": node},
+    }
     task_ids = ("series-gdp-ghana", "aggregate-total-oda-kenya")
     for task_id in task_ids:
         recorded = {**entry.load_recording(task_id), "translation": translation}
@@ -352,7 +357,11 @@ def test_a_translation_answer_is_stored_once_and_read_back(tmp_path: Path) -> No
     body = json.loads(entry.recording_path(task_ids[0], tmp_path).read_text())
 
     name = entry.answer_id(call, answer)
-    assert body["translation"] == {"answers": [name], "resolved": {"Kenya": None}}
+    assert body["translation"] == {
+        "answers": [name],
+        "resolved": {"Kenya": None},
+        "nodes": {"CRSPurposeCode999": node},
+    }
     assert (tmp_path / "answers" / f"{name}.json").exists()
     assert entry.load_recording(task_ids[0], tmp_path)["translation"] == translation
     assert entry.stray_recordings(set(task_ids), tmp_path) == []

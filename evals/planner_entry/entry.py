@@ -50,6 +50,8 @@ from typing import Any, Protocol, cast
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp import resolution
 from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import NodesResponse
+from data_mcp.node_lookup import NodeOutcome
 from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -88,7 +90,7 @@ from planner.plan import (
 from planner.tool_results import ProblemCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
-from translator.discovery import DefinitionNotResolvedError, graph_resolve
+from translator.discovery import DefinitionNotResolvedError, graph_describe, graph_resolve
 from translator.tool import Translate, build_translate
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -297,7 +299,8 @@ def _named_answers(body: Mapping[str, Any]) -> list[str]:
 
 def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, Any]:
     """The recording of `task_id`, its tool answers read back in under `tools`, and its
-    translation's under `translation["calls"]`.
+    translation's under `translation["calls"]`. A translation recorded before the node
+    door was recorded holds no `nodes`, so a replay asking for one misses it.
 
     Refuses a recording written under another schema, one naming an answer the store
     lacks, and an answer whose content no longer matches its address.
@@ -310,6 +313,7 @@ def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, 
         recording["translation"] = {
             "calls": _read_answers(task_id, translation["answers"], directory),
             "resolved": translation["resolved"],
+            "nodes": translation.get("nodes") or {},
         }
     return {**recording, "tools": tools}
 
@@ -322,9 +326,13 @@ def save_recording(
     holds. A rerun that records the same answers writes the same files."""
     body = {key: value for key, value in recording.items() if key != "tools"}
     if (translation := recording.get("translation")) is not None:
+        # A translation that read no node keeps the form it had before nodes were
+        # recorded.
+        nodes = translation.get("nodes") or {}
         body["translation"] = {
             "answers": _store_answers(translation["calls"], directory),
             "resolved": translation["resolved"],
+            **({"nodes": nodes} if nodes else {}),
         }
     names = _store_answers(recording["tools"], directory)
     _write_json(recording_path(task_id, directory), {**body, "answers": names})
@@ -351,15 +359,17 @@ type LiveCall = Callable[[ToolId, Mapping[str, object]], Awaitable[dict[str, Any
 
 
 class TranslationCalls:
-    """The `ToolSurface` and resolve door production's translation reads, answered from
-    `held`, a recording's `translation`: tool answers under `calls`, by `surface_key`,
-    and each name the resolve door was asked under `resolved`, the graph entity it
-    resolved to or `None`.
+    """The `ToolSurface`, resolve door and node door production's translation reads,
+    answered from `held`, a recording's `translation`: tool answers under `calls`, by
+    `surface_key`, each name the resolve door was asked under `resolved`, the graph
+    entity it resolved to or `None`, and each dcid the node door was asked under
+    `nodes`, the envelope it answered.
 
     A call `held` lacks is answered as an unreachable server is and listed in `misses`,
     so a payload whose translation now asks anything its recording does not hold
     fails. With `live` (`record.py`), it is made instead: a tool call through `live`, a
-    name through the graph's own door (`translator.discovery.graph_resolve`), and kept.
+    name through the graph's own door (`translator.discovery.graph_resolve`), a dcid
+    through its node door (`translator.discovery.graph_describe`), and kept.
     A live call that raised, or answered a refusal to retry later
     (`retry_mode: retry_after_delay`), is kept out and listed in `failures`. `kept` is
     what a recording of the calls made so far holds. The tools listed are `schemas`,
@@ -375,6 +385,8 @@ class TranslationCalls:
     ) -> None:
         self._calls: dict[str, Any] = dict(held.get("calls") or {})
         self._resolved: dict[str, Any] = dict(held.get("resolved") or {})
+        self._nodes: dict[str, Any] = dict(held.get("nodes") or {})
+        self._dcids: set[str] = set()
         self._schemas = list(schemas)
         self._live = live
         self._used: set[str] = set()
@@ -439,18 +451,43 @@ class TranslationCalls:
             for role, role_names in scope.items()
         }
 
+    async def describe_nodes(self, dcids: Sequence[str]) -> dict[str, NodeOutcome]:
+        """The graph's node door over the recorded envelopes, as
+        `data_mcp.node_lookup.describe_nodes` answers them."""
+        asked = list(dict.fromkeys(dcids))
+        missing = [dcid for dcid in asked if dcid not in self._nodes]
+        if missing and self._live is None:
+            self.misses += [f"node {dcid}" for dcid in missing]
+            raise UpstreamError(status=None, code=None, detail="the recording holds no node")
+        if missing:
+            try:
+                found = await graph_describe(missing)
+            except BaseException as exc:
+                self.failures.append(f"node {missing}: {type(exc).__name__}: {exc}")
+                raise
+            self._nodes |= {
+                dcid: found[dcid].model_dump(mode="json", by_alias=True) for dcid in missing
+            }
+        self._dcids |= set(asked)
+        entries = NodesResponse.model_validate({"nodes": [self._nodes[dcid] for dcid in asked]})
+        return dict(zip(asked, entries.nodes, strict=True))
+
     def kept(self) -> dict[str, Any]:
-        """The calls and names asked so far, as a recording's `translation` holds them."""
+        """The calls, names and dcids asked so far, as a recording's `translation` holds
+        them."""
         return {
             "calls": {key: self._calls[key] for key in sorted(self._used)},
             "resolved": {name: self._resolved[name] for name in sorted(self._names)},
+            "nodes": {dcid: self._nodes[dcid] for dcid in sorted(self._dcids)},
         }
 
     def unasked(self) -> list[str]:
         """What `held` records that no call asked for so far."""
-        return sorted(set(self._calls) - self._used) + [
-            f"resolve {name}" for name in sorted(set(self._resolved) - self._names)
-        ]
+        return (
+            sorted(set(self._calls) - self._used)
+            + [f"resolve {name}" for name in sorted(set(self._resolved) - self._names)]
+            + [f"node {dcid}" for dcid in sorted(set(self._nodes) - self._dcids)]
+        )
 
 
 def _outcome(recorded: Mapping[str, Any] | None) -> resolution.ResolutionOutcome:
@@ -799,6 +836,7 @@ async def run_entry(
             surface=translation,
             resolve_entities=translation.resolve_entities,
             anchor_read=_no_anchor_read,
+            describe_nodes=translation.describe_nodes,
         )
     surface = RecordedSurface(recording.get("tools") or {})
     resolver = RecordedResolver(recording["searches"])

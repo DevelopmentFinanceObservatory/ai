@@ -62,7 +62,8 @@ import httpx2
 import pytest
 from common import auth as mcp_auth
 from compiler.sources import member_digest
-from data_mcp import resolution
+from data_mcp import node_lookup, resolution
+from data_mcp.graph_wire import NotHeldEntry
 from fastapi import FastAPI
 from fastmcp.client.transports import StreamableHttpTransport
 from google.adk.models.base_llm import BaseLlm
@@ -138,6 +139,23 @@ def _no_graph_names(monkeypatch: pytest.MonkeyPatch) -> None:
         return {}
 
     monkeypatch.setattr("executor.run.describe_nodes", describe_nothing)
+
+
+@pytest.fixture(autouse=True)
+def _no_graph_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Read no node through the graph unless a test says how.
+
+    The translator climbs a breakdown's named codes up their hierarchy through
+    the node door in process (`translator.discovery.fetch_code_paths`), which
+    would otherwise reach whatever upstream the process holds. Every dcid reads
+    as not held; a test that wants nodes passes `describe_nodes` or patches
+    `data_mcp.node_lookup.describe_nodes` itself.
+    """
+
+    async def hold_nothing(dcids: Sequence[str]) -> dict[str, node_lookup.NodeOutcome]:
+        return {dcid: NotHeldEntry(ref=dcid, status="not_held") for dcid in dcids}
+
+    monkeypatch.setattr(node_lookup, "describe_nodes", hold_nothing)
 
 
 @pytest.fixture(autouse=True)

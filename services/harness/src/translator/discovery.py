@@ -107,11 +107,13 @@ from weakref import WeakValueDictionary
 import rfc8785
 from common.hashed_fields import revision_content
 from compiler.evidence import named_members, open_axes_for, source_requirement_matches
+from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
     SOURCE_CODE_REFUSALS,
     DiscoveryStatus,
     PartWarning,
+    bound_codes,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
@@ -120,10 +122,11 @@ from compiler.sources import (
     wire_groups,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
-from data_mcp import resolution
+from data_mcp import node_lookup, resolution
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
@@ -287,12 +290,18 @@ class DiscoveryRecord(StrictModel):
     found are on that source's `entity_refs`. A resolve that failed, in
     transport or with an unreadable answer, is `transport_failed` too, with
     the error as its `detail`.
+
+    `tool == "code_paths"` records the read of the hierarchy above the codes
+    the requirement's one `spec_ids` source names on its breakdown's code
+    system (`fetch_code_paths`), which spends no budget either; the paths
+    found are on that source's `code_paths`, and a failed read is
+    `transport_failed` with the error as its `detail`.
     """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     sequence: int = 0
     revision: str
-    tool: Literal["search", "describe", "pin", "resolve"]
+    tool: Literal["search", "describe", "pin", "resolve", "code_paths"]
     requirement_id: Identifier | None = None
     requirement_key: str | None = None
     status: DiscoveryStatus | None = None
@@ -1605,6 +1614,136 @@ async def resolve_entity_refs(
             pairs.append((record, ()))
             continue
         updated = source.model_copy(update={"entity_refs": {**source.entity_refs, **found}})
+        pairs.append((record, (updated,)))
+    return tuple(pairs)
+
+
+# The graph's node door as `fetch_code_paths` calls it: dcids to node envelopes.
+type DescribeNodes = Callable[[Sequence[str]], Awaitable[Mapping[str, node_lookup.NodeOutcome]]]
+
+
+async def graph_describe(dcids: Sequence[str]) -> Mapping[str, node_lookup.NodeOutcome]:
+    """`data_mcp.node_lookup.describe_nodes`, the door the served translation reads codes through.
+
+    Looked up when called, so a patch of `data_mcp.node_lookup` reaches it.
+    """
+    return await node_lookup.describe_nodes(dcids)
+
+
+async def _paths_to_root(
+    codes: Collection[str], describe_nodes: DescribeNodes
+) -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
+    """Each of `codes`' path from its hierarchy's root down to itself, by `specializationOf`
+    parent, and those of `codes` with no children.
+
+    Reads one batch of nodes per level climbed, each node once. A code
+    whose climb meets a node that is no code, or that the graph does not
+    hold, has no path. A code is a leaf when its node states no `children`
+    link.
+    """
+    parents: dict[str, str | None] = {}
+    leaves: set[str] = set()
+    asked: set[str] = set()
+    frontier = set(codes)
+    while frontier:
+        nodes = await describe_nodes(sorted(frontier))
+        asked |= frontier
+        for dcid in frontier:
+            if isinstance(node := nodes.get(dcid), CodeNode):
+                parent = node.code.parent
+                parents[dcid] = None if parent is None else parent.ref
+                if "children" not in node.links:
+                    leaves.add(dcid)
+        frontier = {parent for parent in parents.values() if parent is not None} - asked
+    paths: dict[str, tuple[str, ...]] = {}
+    for code in codes:
+        path: list[str] = []
+        at: str | None = code
+        while at is not None and at in parents and at not in path:
+            path.append(at)
+            at = parents[at]
+        if at is None:
+            paths[code] = tuple(reversed(path))
+    return paths, frozenset(leaves & set(codes))
+
+
+async def fetch_code_paths(
+    *,
+    revision: str,
+    requirements: Sequence[DatasetRequirement],
+    requirement_keys: Mapping[str, str],
+    sources: Mapping[str, SelectedSource],
+    describe_nodes: DescribeNodes = graph_describe,
+) -> tuple[DescribedPair, ...]:
+    """Read the hierarchy above the codes each breakdown's source names, one pair per source.
+
+    A requirement stating a breakdown reads the level its source's named
+    codes set (`compiler.shapes.breakdown_level`), which needs each named
+    code's path to its root. The codes are those the source's identity
+    binds on the breakdown's code system (`compiler.sources.bound_codes`);
+    every source's codes are read together, through the graph's node door
+    (`describe_nodes`, `graph_describe` when served), and the paths, with
+    the codes found to have no children, are recorded on the source
+    (`SelectedSource.code_paths`, `leaf_codes`). A source that names no code
+    there, or holds every path already, is left out, so a source a fresh
+    search recorded again is read again.
+
+    A read that fails is logged, records the attempt as `transport_failed`
+    with the error as its `detail`, and adds no path; `propose_operations`
+    answers it `surface_unavailable` before compiling, and the next
+    translate reads again. A code the graph holds no path for adds none and
+    fails nothing, and compile refuses the breakdown. Like
+    `resolve_entity_refs`, this returns pairs for `apply_definitions` to
+    apply under `discovery_lock`.
+    """
+    pending = [
+        (requirement, requirement_keys[requirement.id], source, codes)
+        for requirement in requirements
+        if requirement.breakdown is not None
+        and requirement.id in requirement_keys
+        and (source := sources.get(requirement.id)) is not None
+        and (
+            codes := tuple(
+                code
+                for code in bound_codes(
+                    source, BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension]
+                )
+                if code not in source.code_paths
+            )
+        )
+    ]
+    if not pending:
+        return ()
+    asked = list(dict.fromkeys(code for *_, codes in pending for code in codes))
+    failure: str | None = None
+    paths: dict[str, tuple[str, ...]] = {}
+    leaves: frozenset[str] = frozenset()
+    try:
+        paths, leaves = await _paths_to_root(asked, describe_nodes)
+    except (UpstreamError, ValidationError, ValueError) as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+        logger.warning("the hierarchy above codes %s was unread: %s", asked, failure)
+    pairs: list[DescribedPair] = []
+    for requirement, key, source, codes in pending:
+        record = DiscoveryRecord(
+            revision=revision,
+            tool="code_paths",
+            requirement_id=requirement.id,
+            requirement_key=key,
+            spec_ids=(source.spec_id,),
+            detail=failure,
+            transport_failed=failure is not None,
+        )
+        found = {code: paths[code] for code in codes if code in paths}
+        if not found:
+            pairs.append((record, ()))
+            continue
+        updated = source.model_copy(
+            update={
+                "code_paths": {**source.code_paths, **found},
+                "leaf_codes": tuple(sorted({*source.leaf_codes, *(leaves & found.keys())})),
+            }
+        )
         pairs.append((record, (updated,)))
     return tuple(pairs)
 

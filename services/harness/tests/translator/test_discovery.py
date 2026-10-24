@@ -29,6 +29,7 @@ from data_mcp.definition_store import DefinitionStoreUnavailable, InMemoryDefini
 from data_mcp.definition_store import set_store as set_definition_store
 from data_mcp.definition_writes import windowed_identity
 from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import CodeNode
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from harness.turn_records import RecordedIdentity
@@ -53,7 +54,15 @@ from planner.plan import (
     save_pin_sources,
     save_windowed_pins,
 )
-from planner.records import Period, RelativePeriod, ResolvedSourceMention, RollingWindow
+from planner.records import (
+    Breakdown,
+    BreakdownDimension,
+    Period,
+    RelativePeriod,
+    ResolvedSourceMention,
+    RollingWindow,
+    StatVarReading,
+)
 from planner.tool_results import ProblemCode
 from planner.workflow import OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
 from translator.discovery import (
@@ -70,6 +79,7 @@ from translator.discovery import (
     compact_source,
     current_cut_calls,
     described_sources,
+    fetch_code_paths,
     fetch_definitions,
     load_log,
     requirement_revision,
@@ -2935,6 +2945,179 @@ async def test_a_failed_resolve_records_the_attempt_adds_no_ref_and_is_asked_aga
         sources={"oda": source},
     )
     assert len(calls) == 2
+
+
+# The CRS purpose hierarchy above basic health care (12220) and population policy
+# (13010), both leaves, by parent.
+_PURPOSE_PARENTS = {
+    "CRSPurposeCode12220": "CRSPurposeCode122",
+    "CRSPurposeCode13010": "CRSPurposeCode130",
+    "CRSPurposeCode122": "CRSPurposeCode120",
+    "CRSPurposeCode120": "CRSPurposeCode100",
+    "CRSPurposeCode130": "CRSPurposeCode100",
+    "CRSPurposeCode100": None,
+}
+
+
+def _code_node(dcid: str) -> CodeNode:
+    """`dcid` as the graph's node door answers a CRS purpose code, with its parent and,
+    for a code with children, its `children` link."""
+    parent = _PURPOSE_PARENTS[dcid]
+    children = dcid in _PURPOSE_PARENTS.values()
+    return CodeNode.model_validate(
+        {
+            "built_from": {},
+            "code": {
+                "code": dcid.removeprefix("CRSPurposeCode"),
+                "code_system": {"ref": "CRSPurposeCodeEnum", "label": "CRS Purpose"},
+                "parent": None if parent is None else {"ref": parent, "label": None},
+                "property": "crsPurpose",
+                "synonyms": [],
+            },
+            "description": None,
+            "gaps": [],
+            "kind": "code",
+            "label": None,
+            "links": {"children": f"/api/graph/node/{dcid}/children"} if children else {},
+            "ref": dcid,
+            "types": ["CRSPurposeCodeEnum"],
+        }
+    )
+
+
+def _sectors_requirement(rid: str, *, breakdown: Breakdown | None) -> DatasetRequirement:
+    return DatasetRequirement(
+        id=rid,
+        decision_ids=["measure"],
+        measure="health and population ODA",
+        entities=[Entity(name="Kenya", role="recipient")],
+        period=Period(start=2018, end=2022),
+        stat_vars=StatVarReading.SEPARATE if breakdown is not None else None,
+        breakdown=breakdown,
+    )
+
+
+def _health_and_population_source() -> SelectedSource:
+    """ODA to Kenya for health and population, its purpose slot bound as Search binds it."""
+    return SelectedSource(
+        spec_id="spec_" + "d" * 32,
+        sentence="ODA to Kenya for health and population",
+        has_data=True,
+        identity={
+            "slots": [
+                {
+                    "property": "crsPurpose",
+                    "binding": {
+                        "state": "set",
+                        "refs": ["CRSPurposeCode120", "CRSPurposeCode130"],
+                    },
+                }
+            ]
+        },
+    )
+
+
+async def test_a_breakdowns_named_codes_are_read_up_to_their_root_once() -> None:
+    """Health and population climb to social infrastructure (100) in two reads, and
+    the requirement with no breakdown asks for nothing."""
+    asked: list[list[str]] = []
+
+    async def describe_nodes(dcids: Any) -> dict[str, CodeNode]:
+        asked.append(list(dcids))
+        return {dcid: _code_node(dcid) for dcid in dcids}
+
+    by_sector = _sectors_requirement(
+        "by_sector", breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
+    )
+    total = _sectors_requirement("total", breakdown=None)
+    keys = {r.id: requirement_revision(r) for r in (by_sector, total)}
+    source = _health_and_population_source()
+
+    ((record, (updated,)),) = await fetch_code_paths(
+        revision="rev",
+        requirements=[by_sector, total],
+        requirement_keys=keys,
+        sources={"by_sector": source, "total": source},
+        describe_nodes=describe_nodes,
+    )
+
+    assert asked == [["CRSPurposeCode120", "CRSPurposeCode130"], ["CRSPurposeCode100"]]
+    assert (record.tool, record.requirement_id, record.transport_failed) == (
+        "code_paths",
+        "by_sector",
+        False,
+    )
+    assert updated.code_paths == {
+        "CRSPurposeCode120": ("CRSPurposeCode100", "CRSPurposeCode120"),
+        "CRSPurposeCode130": ("CRSPurposeCode100", "CRSPurposeCode130"),
+    }
+    assert updated.leaf_codes == ()
+    again = await fetch_code_paths(
+        revision="rev",
+        requirements=[by_sector],
+        requirement_keys=keys,
+        sources={"by_sector": updated},
+        describe_nodes=describe_nodes,
+    )
+    assert again == ()
+    assert len(asked) == 2
+
+
+async def test_a_named_code_with_no_children_link_reads_as_a_leaf() -> None:
+    """Basic health care (12220) states no `children` link and health (120) does, so
+    only basic health care is recorded as a leaf."""
+
+    async def describe_nodes(dcids: Any) -> dict[str, CodeNode]:
+        return {dcid: _code_node(dcid) for dcid in dcids}
+
+    by_sector = _sectors_requirement(
+        "by_sector", breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
+    )
+    named = _health_and_population_source().model_copy(
+        update={
+            "identity": {
+                "slots": [
+                    {
+                        "property": "crsPurpose",
+                        "binding": {
+                            "state": "set",
+                            "refs": ["CRSPurposeCode120", "CRSPurposeCode12220"],
+                        },
+                    }
+                ]
+            }
+        }
+    )
+
+    ((_, (updated,)),) = await fetch_code_paths(
+        revision="rev",
+        requirements=[by_sector],
+        requirement_keys={"by_sector": requirement_revision(by_sector)},
+        sources={"by_sector": named},
+        describe_nodes=describe_nodes,
+    )
+
+    assert updated.leaf_codes == ("CRSPurposeCode12220",)
+
+
+async def test_a_failed_code_read_records_the_attempt_and_adds_no_path() -> None:
+    async def describe_nodes(dcids: Any) -> dict[str, CodeNode]:
+        raise UpstreamError(status=None, code=None, detail="the graph door timed out")
+
+    by_sector = _sectors_requirement(
+        "by_sector", breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
+    )
+
+    ((record, sources),) = await fetch_code_paths(
+        revision="rev",
+        requirements=[by_sector],
+        requirement_keys={"by_sector": requirement_revision(by_sector)},
+        sources={"by_sector": _health_and_population_source()},
+        describe_nodes=describe_nodes,
+    )
+
+    assert record.transport_failed is True
+    assert sources == ()
 
 
 async def test_excluded_source_and_chosen_reference_reach_search(

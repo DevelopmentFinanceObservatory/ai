@@ -92,6 +92,7 @@ from planner.workflow import SelectedSource, Workflow
 from pydantic import JsonValue, ValidationError
 
 from translator.discovery import (
+    DescribeNodes,
     DiscoveryLog,
     ResolveEntities,
     apply_definitions,
@@ -101,7 +102,9 @@ from translator.discovery import (
     dataset_keys,
     described_sources,
     discovery_lock,
+    fetch_code_paths,
     fetch_definitions,
+    graph_describe,
     graph_resolve,
     load_log,
     name_pinned_groups,
@@ -859,6 +862,7 @@ def build_translator_core(
     surface: ToolSurface,
     resolve_entities: ResolveEntities = graph_resolve,
     anchor_read: AnchorReader = read_within_entry,
+    describe_nodes: DescribeNodes = graph_describe,
 ) -> TranslatorCore:
     """Build the translator's three core functions, for `build_translate` or a test to drive.
 
@@ -866,9 +870,11 @@ def build_translator_core(
     `translator.mechanical.run_translate`. They are built here so a test can
     exercise `propose_operations`'s and `return_to_planner`'s own logic
     without going through `build_translate`. `resolve_entities` is the
-    graph's resolve door `resolve_entity_refs` asks, and `anchor_read` the
-    newest-year read of a workflow's rolling steps; the served translation
-    takes the defaults, and `evals/planner_entry` replays both.
+    graph's resolve door `resolve_entity_refs` asks, `anchor_read` the
+    newest-year read of a workflow's rolling steps, and `describe_nodes`
+    the graph's node door `fetch_code_paths` climbs a breakdown's named
+    codes through; the served translation takes the defaults, and
+    `evals/planner_entry` replays all three.
     """
 
     async def stated_from_the_data(
@@ -972,19 +978,37 @@ def build_translator_core(
             )
             log = await apply_definitions(tool_context.state, pairs)
             discovered = settled(log)
+        datasets = [r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)]
         resolved = await resolve_entity_refs(
             log,
             resolve_entities=resolve_entities,
             revision=plan_revision(plan),
-            requirements=[
-                r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
-            ],
+            requirements=datasets,
             requirement_keys=requirement_keys,
             sources=discovered,
         )
         if resolved:
             log = await apply_definitions(tool_context.state, resolved)
             discovered = settled(log)
+        climbed = await fetch_code_paths(
+            revision=plan_revision(plan),
+            requirements=datasets,
+            requirement_keys=requirement_keys,
+            sources=discovered,
+            describe_nodes=describe_nodes,
+        )
+        if climbed:
+            log = await apply_definitions(tool_context.state, climbed)
+            discovered = settled(log)
+        # A node door that did not answer is transient, so the breakdown it
+        # leaves without a level is not refused as a source that cannot serve.
+        if unread := [record for record, _ in climbed if record.transport_failed]:
+            return problem(
+                ProblemCode.SURFACE_UNAVAILABLE,
+                f"the code hierarchy for requirement {unread[0].requirement_id!r} could not "
+                f"be read: {unread[0].detail}",
+                outcome=Outcome.REFUSED,
+            )
         by_name = {schema.name: schema for schema in schemas}
 
         def compiled(plan: Plan, translation: Translation) -> CompileResult:
@@ -1271,16 +1295,20 @@ def build_translate(
     surface: ToolSurface,
     resolve_entities: ResolveEntities = graph_resolve,
     anchor_read: AnchorReader = read_within_entry,
+    describe_nodes: DescribeNodes = graph_describe,
 ) -> Translate:
     """Build the translation `propose_plan` runs on every plan it records, closing over `surface`.
 
     The function takes the planner's tool context and reads the plan
     `propose_plan` just recorded from session state, so the model never calls
-    it and spends no generation on it. `resolve_entities` and `anchor_read`
-    are as `build_translator_core` takes them.
+    it and spends no generation on it. `resolve_entities`, `anchor_read` and
+    `describe_nodes` are as `build_translator_core` takes them.
     """
     core = build_translator_core(
-        surface=surface, resolve_entities=resolve_entities, anchor_read=anchor_read
+        surface=surface,
+        resolve_entities=resolve_entities,
+        anchor_read=anchor_read,
+        describe_nodes=describe_nodes,
     )
 
     async def translate(tool_context: ToolContext) -> dict[str, object]:
