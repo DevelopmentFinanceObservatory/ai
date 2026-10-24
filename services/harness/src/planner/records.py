@@ -659,7 +659,7 @@ class EvidenceIssue(StrictModel):
         default=None,
         description="What was required, when this finding compares an expectation to an observation.",
     )
-    # `stat_var` and `entities` are left out of a dump while unset, which
+    # `stat_var`, `entities` and `magnitude` are left out of a dump while unset, which
     # keeps the findings a model reads, and every stored one, unchanged.
     stat_var: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None,
@@ -675,6 +675,15 @@ class EvidenceIssue(StrictModel):
         description=(
             "The entities of the one retrieved series a `window_short` or `coverage_gaps` "
             "finding is about."
+        ),
+    )
+    magnitude: Annotated[float | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The largest absolute value the one retrieved series a `window_short` or "
+            "`coverage_gaps` finding is about holds in any period, which ranks the series "
+            "an answer names."
         ),
     )
 

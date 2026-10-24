@@ -111,6 +111,7 @@ class SeriesEvidence(StrictModel):
     first_year: int
     latest_year: int
     observations: int
+    magnitude: float
 
 
 class RetrievalEvidence(StrictModel):
@@ -2096,6 +2097,65 @@ def _membership_unverified(
     )
 
 
+# The findings that name one retrieved series (`EvidenceIssue.entities`).
+_SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
+
+
+def series_rank(finding: EvidenceIssue) -> tuple[bool, float, str, tuple[str, ...]]:
+    """Where the series `finding` is about sorts among others, largest first.
+
+    A series is as large as its largest absolute value in any period
+    (`EvidenceIssue.magnitude`), so a series of net repayments, negative
+    throughout, ranks by how far it reaches below zero, and a series that
+    stops early keeps the size it reached before. Series of equal size, or
+    of none stated, sort by StatVar and then by their entities' refs.
+    """
+    size = finding.magnitude
+    refs = tuple(entity.ref for entity in finding.entities)
+    return size is None, -(size or 0.0), finding.stat_var or "", refs
+
+
+def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> list[str]:
+    """The refs, at most `limit`, of the entities the series findings among
+    `findings` name with no label, the largest series' first (`series_rank`).
+
+    An answer names the largest series that fall short
+    (`harness.graph.answer`), so a lookup bounded this way still labels the
+    series it names.
+    """
+    refs: dict[str, None] = {}
+    for finding in sorted(
+        (one for one in findings if one.code in _SERIES_CODES and one.entities), key=series_rank
+    ):
+        for entity in finding.entities:
+            if len(refs) == limit:
+                return list(refs)
+            if entity.label is None:
+                refs.setdefault(entity.ref)
+    return list(refs)
+
+
+def with_series_labels(
+    findings: Iterable[EvidenceIssue], labels: Mapping[str, str]
+) -> list[EvidenceIssue]:
+    """`findings` with each series entity that has no label labelled by its ref in `labels`."""
+    return [
+        finding.model_copy(
+            update={
+                "entities": tuple(
+                    entity
+                    if entity.label is not None or entity.ref not in labels
+                    else entity.model_copy(update={"label": labels[entity.ref]})
+                    for entity in finding.entities
+                )
+            }
+        )
+        if finding.code in _SERIES_CODES
+        else finding
+        for finding in findings
+    ]
+
+
 def _series_issues(
     requirement: DatasetRequirement,
     evidence: RetrievalEvidence,
@@ -2128,7 +2188,10 @@ def _series_issues(
 
     A `window_short` or `coverage_gaps` finding carries its series'
     entities (`EvidenceIssue.entities`), each with the label `approved`
-    gives its ref, so an answer can say whose series falls short.
+    gives its ref, and its largest absolute value (`EvidenceIssue.magnitude`), so
+    an answer can say whose series falls short and name the largest. The
+    executor labels the entities `approved` names none for, such as the
+    members of an open population (`unlabelled_series_refs`).
     """
     if evidence.series is None or not evidence.series.num_rows:
         # `None` (the manifest carries no statistics at all) and a table with
@@ -2170,6 +2233,7 @@ def _series_issues(
                     required=held.model_dump(),
                     stat_var=one.stat_var,
                     entities=one.entities,
+                    magnitude=one.magnitude,
                 )
             )
         span = one.latest_year - one.first_year + 1
@@ -2187,6 +2251,7 @@ def _series_issues(
                     required=span,
                     stat_var=one.stat_var,
                     entities=one.entities,
+                    magnitude=one.magnitude,
                 )
             )
         elif one.observations > span:
@@ -2340,6 +2405,8 @@ def _series_off_period(
                 "first_year": _years(_column(series, "first_period")),
                 "latest_year": _years(_column(series, "latest_period")),
                 "observations": _column(series, "observations"),
+                "maximum_value": _column(series, "maximum_value"),
+                "minimum_value": _column(series, "minimum_value"),
             }
         )
         .group_by("series", use_threads=False)
@@ -2348,6 +2415,8 @@ def _series_off_period(
                 ("first_year", "min", unskipped),
                 ("latest_year", "max", unskipped),
                 ("observations", "sum"),
+                ("maximum_value", "max"),
+                ("minimum_value", "min"),
             ]
         )
         .sort_by("series")
@@ -2375,6 +2444,8 @@ def _series_off_period(
             "first_year": array_kernel("take", first, rows),
             "latest_year": array_kernel("take", latest, rows),
             "observations": array_kernel("take", observations, rows),
+            "maximum_value": array_kernel("take", _column(folded, "maximum_value_max"), rows),
+            "minimum_value": array_kernel("take", _column(folded, "minimum_value_min"), rows),
         }
     )
     for row in selected.to_pylist():
@@ -2389,4 +2460,5 @@ def _series_off_period(
             first_year=row["first_year"],
             latest_year=row["latest_year"],
             observations=row["observations"],
+            magnitude=max(abs(row["maximum_value"]), abs(row["minimum_value"])),
         )

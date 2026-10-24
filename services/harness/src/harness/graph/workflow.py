@@ -9,7 +9,9 @@ from executor.completion import ResultPublisher
 from executor.ledger import InMemoryRunLedger, RunLedger
 from executor.run import (
     FetchSeriesStats,
+    LabelRefs,
     default_fetch_series_stats,
+    default_label_refs,
 )
 from google.adk.agents import LlmAgent
 from google.adk.workflow import START, BaseNode, Edge, Workflow, node
@@ -75,6 +77,7 @@ def create_root_workflow(
     run_ledger: RunLedger | None = None,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
 ) -> Workflow:
     """Build the root workflow with its external seams injected.
 
@@ -99,9 +102,10 @@ def create_root_workflow(
     does not show. `max_concurrent_steps` bounds how many of one plan's
     wave's tool calls the `execute` node's run may hold in flight against
     `tool_surface` at once (`executor.run.execute_approved_plan`'s own
-    keyword of the same name). `fetch_series_stats` is that same call's own
-    keyword: the real signed-URL fetch by default, injectable for a caller
-    whose `tool_surface` is itself fully virtualised.
+    keyword of the same name). `fetch_series_stats` and `label_refs` are
+    that same call's own keywords: the real signed-URL fetch and graph name
+    lookup by default, injectable for a caller whose `tool_surface` is
+    itself fully virtualised.
     """
     ledger = (
         run_ledger
@@ -118,6 +122,7 @@ def create_root_workflow(
             tool_surface=tool_surface,
             max_concurrent_steps=max_concurrent_steps,
             fetch_series_stats=fetch_series_stats,
+            label_refs=label_refs,
         ),
     )
     orchestrate = orchestrate_node(orchestrator=orchestrator)
@@ -128,6 +133,7 @@ def create_root_workflow(
         publisher=publisher,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
     )
     plan_done = plan_done_node(executor=executor, run_ledger=ledger)
 

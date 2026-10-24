@@ -22,6 +22,8 @@ from compiler.evidence import (
     open_axes_for,
     opens_place_axis,
     resolve_entity,
+    unlabelled_series_refs,
+    with_series_labels,
 )
 from compiler.sources import member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
@@ -1391,11 +1393,12 @@ _PER_SERIES_CODES = {
     [
         # Ten reported years and two estimated ones span 2015-2026 as one series.
         pytest.param(10, _CONTINUED, [], id="continued-series-is-whole"),
-        # Its observations are summed across both rows: 8 + 2 across 12 years.
+        # Its observations are summed across both rows: 8 + 2 across 12 years,
+        # and its largest value is the estimates' 2.2.
         pytest.param(
             8,
             _CONTINUED,
-            [(EvidenceIssueCode.COVERAGE_GAPS, 10, 12)],
+            [(EvidenceIssueCode.COVERAGE_GAPS, 10, 12, 2.2)],
             id="continued-series-gaps-count-both-rows",
         ),
         # Without a continuation the estimates row is a series of its own, short
@@ -1408,6 +1411,7 @@ _PER_SERIES_CODES = {
                     EvidenceIssueCode.WINDOW_SHORT,
                     {"start": 2025, "end": 2026},
                     {"start": 2015, "end": 2024},
+                    2.2,
                 )
             ],
             id="uncontinued-estimates-are-their-own-series",
@@ -1419,7 +1423,7 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
     source: SourceFactory,
     reported_observations: int,
     continuations: dict[str, object],
-    found: list[tuple[EvidenceIssueCode, object, object]],
+    found: list[tuple[EvidenceIssueCode, object, object, float]],
 ) -> None:
     """A frame Datasets continued with its source's estimates (the Zambia IMF case) holds
     one series as a row per `measurementMethod`; the manifest counts it once."""
@@ -1435,7 +1439,7 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
     issues = check_evidence(requirement(), evidence, approved=source())
 
     assert [
-        (issue.code, issue.found, issue.required)
+        (issue.code, issue.found, issue.required, issue.magnitude)
         for issue in issues
         if issue.code in _PER_SERIES_CODES
     ] == found
@@ -1480,6 +1484,93 @@ def test_a_short_series_finding_names_its_entities(
         for issue in issues
         if issue.code in {EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS}
     ] == [(EvidenceIssueCode.WINDOW_SHORT, named), (EvidenceIssueCode.COVERAGE_GAPS, named)]
+
+
+def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> EvidenceIssue:
+    """A `window_short` finding on the series of `refs`, of largest absolute value `size`,
+    the ref `labelled` labelled by itself and the rest unlabelled."""
+    return EvidenceIssue(
+        code=EvidenceIssueCode.WINDOW_SHORT,
+        severity=Severity.WARNING,
+        requirement_id="debt",
+        detail="",
+        stat_var="Aid",
+        entities=tuple(
+            SeriesEntity(role="donor", ref=ref, label=ref if ref == labelled else None)
+            for ref in refs
+        ),
+        magnitude=size,
+    )
+
+
+@pytest.mark.parametrize(
+    ("limit", "refs"),
+    [
+        # Largest first, a size stated before none, ties by ref; a labelled ref
+        # and one repeated are asked once or not at all.
+        pytest.param(10, ["donor/C", "donor/A", "donor/B", "donor/D"], id="largest-first"),
+        pytest.param(2, ["donor/C", "donor/A"], id="bounded"),
+    ],
+)
+def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
+    limit: int, refs: list[str]
+) -> None:
+    findings = [
+        _short_of("donor/D", size=None),
+        _short_of("donor/B", size=5.0),
+        _short_of("donor/A", "donor/K", size=5.0, labelled="donor/K"),
+        _short_of("donor/C", "donor/A", size=9.0),
+        EvidenceIssue(
+            code=EvidenceIssueCode.UNIT_UNVERIFIED,
+            severity=Severity.WARNING,
+            requirement_id="debt",
+            detail="",
+        ),
+    ]
+
+    assert unlabelled_series_refs(findings, limit=limit) == refs
+
+
+def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
+    finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
+
+    (labelled,) = with_series_labels([finding], {"donor/A": "Austria", "donor/K": "Kenya"})
+
+    assert [entity.label for entity in labelled.entities] == ["Austria", None, "donor/K"]
+
+
+def test_a_series_negative_throughout_ranks_by_how_far_below_zero_it_reaches(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """Two donors' series to Kenya end in 2021: one of net repayments, -50 at
+    its lowest, and one of grants, 1 at its peak. The repayments are the
+    larger series, so their donor is asked for first."""
+
+    def ending_2021(donor: str, low: float, high: float) -> dict[str, object]:
+        return _stat(
+            "DebtServicePaid",
+            entities=[
+                {"role": "recipient", "ref": "country/KEN"},
+                {"role": "donor", "ref": donor},
+            ],
+            observations=7,
+            first={"value": high, "period": "2015"},
+            latest={"value": low, "period": "2021"},
+            minimum={"value": low, "period": "2021"},
+            maximum={"value": high, "period": "2015"},
+        )
+
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            ending_2021("donor/GRANTS", 0.5, 1.0), ending_2021("donor/REPAYS", -50.0, -10.0)
+        ),
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=source())
+
+    assert {issue.magnitude for issue in issues if issue.entities} == {1.0, 50.0}
+    assert unlabelled_series_refs(issues, limit=10) == ["donor/REPAYS", "donor/GRANTS"]
 
 
 @pytest.mark.parametrize(
