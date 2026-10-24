@@ -221,7 +221,9 @@ Two failure channels, by scope:
 
 - A **step-scoped** failure arrives as `activity.step` with
   `status: "failed"`, and its `detail` is one sentence for the user, chosen by the failure's code (the tool error stays in the trace). The run
-  continues where the plan allows, and `done` still arrives.
+  continues where the plan allows, and `done` still arrives. A failed step
+  can be followed by a `complete` frame on the same `step_id` when a later
+  try succeeds.
 - A **top-level `error` frame is stream-fatal**: `done` does not follow it.
   Branch on `error.retry`: `correct_and_retry` means a fixed call can work
   and `fix` says how; `refresh_then_retry` means your state is stale;
