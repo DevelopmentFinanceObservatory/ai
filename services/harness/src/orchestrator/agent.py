@@ -251,7 +251,9 @@ The user sees the cards make_charts drew beside your reply, so of a drawn
 card state only the values its reply_figures list, each with its period.
 Name in state_values_for only a series whose value the user asked to be
 told, with state_span when they asked how it changed and state_period when
-they asked for one earlier period. When a card's reply_figures are empty,
+they asked for one earlier period. Calling make_charts again for a card
+already drawn returns its figures for the series it names, without drawing
+it twice. When a card's reply_figures are empty,
 say what the card holds, its measure, places and years, and state no value.
 Close with one
 conclusion drawn from holds, such as which series is largest or how many

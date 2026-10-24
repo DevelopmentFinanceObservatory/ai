@@ -530,6 +530,14 @@ class ReplyCard:
     figures: tuple[Mapping[str, Any], ...]
     # False when `figures` are every point drawn, for want of the ones given.
     listed: bool = True
+    # True for a card on the canvas as the turn began that the turn neither
+    # drew nor revised. The stream does not say whether the turn read such a
+    # card again, so naming one of its series is no sign the reply reached
+    # past the figures it was given, and `series_outside_reply_figures`
+    # exempts it. The rule then misses a held card of more than four series
+    # that the turn did read again, whose series the reply names with no
+    # figure given.
+    held: bool = False
 
 
 def card_title(frame: Mapping[str, Any]) -> str:
@@ -544,6 +552,7 @@ def reply_card(
     returned: Mapping[str, Any] | None = None,
     on_canvas: Collection[str] = (),
     any_point: bool = False,
+    held: bool = False,
 ) -> ReplyCard:
     """The card a `component.created` frame drew, its series read from the
     drawn payload as `make_charts` reads them. Its figures are the first of:
@@ -556,6 +565,8 @@ def reply_card(
       series the model named: the latest value of a lone series, the largest
       and smallest of one period, and nothing for a card whose every series
       is `on_canvas`, the ids drawn in earlier turns.
+
+    `held` marks a card the turn neither drew nor revised (`ReplyCard.held`).
     """
     component = (frame.get("payload") or {}).get("component") or {}
     series = drawn_series(component, frame.get("fact_summary") or {})
@@ -570,6 +581,7 @@ def reply_card(
         series=tuple(series),
         figures=tuple(figures),
         listed=returned is not None or not any_point,
+        held=held,
     )
 
 
@@ -1185,7 +1197,7 @@ def _read(
         if found and not any(key(entry) in stated or key(entry) in maybe_stated for entry in found)
     ]
     for index, card in enumerate(cards):
-        if len(card.series) <= _NAMED_SERIES_CAP:
+        if card.held or len(card.series) <= _NAMED_SERIES_CAP:
             continue
         may = {figure["series"].casefold() for at, figure in allowed if at == index}
         outside = [one.label for one in card.series if one.label.casefold() in named_anywhere - may]
@@ -1225,7 +1237,8 @@ def check_reply(
       a value never passes by default. A figure of `states` that it writes
       is not reported missing, since it may be stated there.
     - `series_outside_reply_figures`: a card of more than four series, one of
-      which the message names though no figure of it may be stated.
+      which the message names though no figure of it may be stated. A held
+      card is exempt (`ReplyCard.held`).
     - `number_in_no_frame`: with `turns`, the conversation's frames by turn
       up to this one, a number `check_grounding` finds in no fact frame and
       among no figure the cards supplied (`stated_values`).

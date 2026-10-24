@@ -191,6 +191,7 @@ _TOOL_LABELS = {
     "join": "Joining data",
     "resolve_anchor": "Finding the latest year",
     "describe_frame": "Checking data",
+    "describe_component": "Reading a card",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
 }
@@ -1366,16 +1367,29 @@ class _Translator:
                 )
             )
             if isinstance(component, dict):
-                frames.extend(self._component_frames(component, step_id=step_id, land=record.land))
+                frames.extend(
+                    self._component_frames(
+                        component,
+                        step_id=step_id,
+                        land=record.land,
+                        intent=record.args.get("intent"),
+                    )
+                )
         return frames
 
     def _component_frames(
-        self, component: dict[str, Any], *, step_id: str, land: bool
+        self,
+        component: dict[str, Any],
+        *,
+        step_id: str,
+        land: bool,
+        intent: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Validate `component` against the `component.created` wire
         contract, then, only for a component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
         after the write returned), land it: append its block to the canvas
+        and keep the `intent` it was written from with it
         (`harness.studio_state.land_component`). A component that fails
         validation here never lands and produces no frame at all. For an
         unstamped record (`land=False`) this is the expected outcome:
@@ -1410,7 +1424,7 @@ class _Translator:
             return []
         if not land:
             return [created]
-        if state_land_component(self._conversation, component) != "created":
+        if state_land_component(self._conversation, component, intent=intent) != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
@@ -1724,7 +1738,8 @@ class _Translator:
     def _unshown(self, record: _ExecutorRecord) -> bool:
         """A successful call no plan step made, to a tool whose work an
         agent tool call's own line already stands for: the data a fetch
-        retrieved and checked, or a skill it read. Failures always show."""
+        retrieved and checked, a skill it read, or a card `make_charts` read
+        back. Failures always show."""
         return (
             record.step_id is None
             and record.tool in _UNSHOWN_RECORDED_TOOLS
@@ -2092,9 +2107,11 @@ _READING_CANVAS = "Going over your canvas"
 _READING_ABOUT_DFO = "Going over the notes on DFO"
 _WORKING_OUT_NEXT_STEP = "Working out the next step"
 # Recorded calls an agent tool makes on its own behalf (`fetch` retrieves
-# and checks its data, a skill read goes through the surface), shown only
-# when they fail.
-_UNSHOWN_RECORDED_TOOLS = frozenset({"get_data", "describe_frame", "get_skill", "get_skill_file"})
+# and checks its data, a skill read goes through the surface, `make_charts`
+# reads back a card on the canvas), shown only when they fail.
+_UNSHOWN_RECORDED_TOOLS = frozenset(
+    {"get_data", "describe_frame", "describe_component", "get_skill", "get_skill_file"}
+)
 
 _ORCHESTRATOR_TOOL_LABELS = {
     "search": "Searching for data",

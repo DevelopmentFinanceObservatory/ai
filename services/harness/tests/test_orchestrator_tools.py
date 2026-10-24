@@ -66,7 +66,14 @@ from harness.orchestrator_tools import (
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
-from harness.studio_state import ConversationState, land_component, remove_cards
+from harness.studio_edit import _revised_frames
+from harness.studio_state import (
+    ConversationState,
+    _apply_operations,
+    _next_manifest,
+    land_component,
+    remove_cards,
+)
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -75,6 +82,7 @@ from harness.tool_contracts import (
     resolver_digest,
 )
 from harness.turn_records import SearchReading, loose_match_notes, render_readings
+from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
@@ -157,7 +165,25 @@ class FakeExecutor:
             return {"outcome": "ok", "frame_refs": [REF], "summary": "64 observations"}
         if tool == "describe_frame":
             return {"outcome": "ok", "view": VIEW}
-        return {"outcome": "ok", "component": self.written}
+        return (
+            self.described()
+            if tool == "describe_component"
+            else {"outcome": "ok", "component": self.written}
+        )
+
+    def described(self) -> dict[str, Any]:
+        """The written card read back, as presentation-mcp's
+        `describe_component` gives its head revision."""
+        return {
+            "outcome": "ok",
+            "frame_refs": [],
+            "component_body": {
+                "component_id": self.written["component_id"],
+                "revision": self.written["revision"],
+                "fact_summary": self.written["fact_summary"],
+            },
+            "resolved_payload": self.written["payload"],
+        }
 
     def land_component(self, component: dict[str, Any]) -> None:
         self.landed.append(component)
@@ -187,6 +213,7 @@ def _tools(
     dfo_faq_surface=None,
     recall_part=None,
     canvas_series=None,
+    canvas_cards=None,
     remove_cards=None,
 ):
     tools = build_orchestrator_tools(
@@ -196,6 +223,7 @@ def _tools(
         dfo_faq_surface=dfo_faq_surface,
         recall_part=recall_part,
         canvas_series=canvas_series,
+        canvas_cards=canvas_cards,
         remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
@@ -2400,25 +2428,95 @@ async def test_make_charts_cut_title_carries_one_suffix(
     assert intent["title"] == cut
 
 
+class Landing:
+    """`executor`, each card it writes given an id of its own and landed on
+    `state`'s canvas with the intent it was written from, as the Studio
+    translator lands it. `describe_component` reads a card back as
+    presentation-mcp gives its head revision, or answers `described` when
+    set."""
+
+    def __init__(self, executor: FakeExecutor, state: ConversationState) -> None:
+        self.executor = executor
+        self.state = state
+        self.calls = executor.calls
+        self.cards: dict[str, dict[str, Any]] = {}
+        self.described: dict[str, Any] | Exception | None = None
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "describe_component":
+            self.calls.append((tool, args))
+            if isinstance(self.described, Exception):
+                raise self.described
+            card = self.cards[args["component_id"]]
+            return self.described or {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component_body": {
+                    "component_id": card["component_id"],
+                    "revision": card["revision"],
+                    "fact_summary": card["fact_summary"],
+                },
+                "resolved_payload": card["payload"],
+            }
+        written = await self.executor(tool=tool, args=args, on_progress=on_progress)
+        if tool != "write_component":
+            return written
+        component_id = f"cmp_{len(_intents(self.executor)):02d}"
+        component = written["component"] | {"component_id": component_id}
+        component["payload"] = component["payload"] | {"component_id": component_id}
+        self.cards[component_id] = component
+        return written | {"component": component}
+
+    def land_component(self, component: dict[str, Any]) -> None:
+        land_component(self.state, component, intent=_intents(self.executor)[-1])
+
+
+def _landing_tools(executor: FakeExecutor) -> tuple[Landing, dict[str, Any], SimpleNamespace]:
+    """The tools over `executor`, its cards landing on one conversation's
+    canvas, which the tools read through the Studio seams."""
+    state = ConversationState(conversation_id="c1")
+    landing = Landing(executor, state)
+    tools, ctx = _tools(
+        executor=landing,
+        canvas_series=state.canvas_series_ids,
+        canvas_cards=state.canvas_cards,
+        remove_cards=_remove_seam(state),
+    )
+    return landing, tools, ctx
+
+
 async def _draw_wide_twice(
-    monkeypatch: pytest.MonkeyPatch, first: dict[str, Any], second: dict[str, Any]
-) -> tuple[WideFrameExecutor, list[dict[str, Any]]]:
-    """Fetch the wide frame and draw `first` then `second` in two calls of one turn."""
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    later_turn: bool,
+) -> tuple[Landing, list[dict[str, Any]]]:
+    """Fetch the wide frame and draw `first` then `second`, in two calls of
+    one turn or, when `later_turn`, the second in the next turn."""
     monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
-    executor = WideFrameExecutor()
-    tools, ctx = _tools(executor=executor)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
     await tools["fetch"](SPEC_LIFE, ctx)
-    results = [await tools["make_charts"]([_wide_chart(**chart)], ctx) for chart in (first, second)]
+    results = [await tools["make_charts"]([_wide_chart(**first)], ctx)]
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+    results.append(await tools["make_charts"]([_wide_chart(**second)], ctx))
     return executor, results
 
 
+_TURNS = pytest.mark.parametrize("later_turn", [False, True], ids=["same_turn", "later_turn"])
+
+
+@_TURNS
+@pytest.mark.parametrize("asked", [{}, {"state_values_for": ["donor/03"], "state_span": True}])
 async def test_make_charts_does_not_draw_a_card_the_canvas_holds(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, asked: dict[str, Any]
 ) -> None:
-    """The same title, kind, frame, select and cut drawn again writes no
-    second component and returns the first card with a notice."""
+    """The same title, kind, frame, select and cut drawn again, in the same
+    turn or a later one and whatever figures it asks for, writes no second
+    component and returns the first card with a notice."""
     executor, (first, again) = await _draw_wide_twice(
-        monkeypatch, {"type": "table"}, {"type": "table"}
+        monkeypatch, {"type": "table"}, {"type": "table", **asked}, later_turn=later_turn
     )
 
     assert len(_intents(executor)) == 1
@@ -2427,43 +2525,121 @@ async def test_make_charts_does_not_draw_a_card_the_canvas_holds(
     assert "already_on_canvas" in card
 
 
-class LandingWideExecutor(WideFrameExecutor):
-    """The wide frame's executor, each write a card with an id of its own
-    that lands on `state`'s canvas."""
+@_TURNS
+async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A bar chart drawn again with a bar named reads that bar's value from
+    the series the card drew, past the twelve the platform's summary lists,
+    and writes nothing. In the same turn the largest and smallest come too;
+    a later turn began with the card's series on the canvas, so it states
+    only the bar named."""
+    values = {f"donor/{number:02d}": {"2023": 100.0 - number} for number in range(30)}
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(values))
+    executor, tools, ctx = _landing_tools(BarPlatform(values))
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
 
-    def __init__(self, state: ConversationState) -> None:
-        super().__init__()
-        self.state = state
+    again = await tools["make_charts"](
+        [_wide_chart(type="bar_chart", state_values_for=["donor/19"])], ctx
+    )
 
-    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
-        written = await super().__call__(tool=tool, args=args, on_progress=on_progress)
-        if tool != "write_component":
-            return written
-        component_id = f"cmp_{len(_intents(self)):02d}"
-        component = written["component"] | {"component_id": component_id}
-        component["payload"] = component["payload"] | {"component_id": component_id}
-        return written | {"component": component}
+    (card,) = again["charts"]
+    assert len(_intents(executor)) == 1
+    assert "already_on_canvas" in card
+    assert [args for tool, args in executor.calls if tool == "describe_component"] == [
+        {"component_id": "cmp_01"}
+    ]
+    # The turn keeps the card's id alone, none of its points.
+    assert [set(card) for card in ctx.state["orchestrator:drawn_cards"]["drawn"].values()] == [
+        {"component_id", "revision"}
+    ]
+    assert card["holds"]["series_count"] == 24
+    assert _figures(card) == [("Provider donor/19", 81.0, "2023")] + (
+        []
+        if later_turn
+        else [
+            ("Provider donor/00", 100.0, "2023", "largest"),
+            ("Provider donor/23", 77.0, "2023", "smallest"),
+        ]
+    )
 
-    def land_component(self, component: dict[str, Any]) -> None:
-        super().land_component(component)
-        land_component(self.state, component)
+
+@_TURNS
+@pytest.mark.parametrize(
+    "described",
+    [
+        {"outcome": "refusal", "refusal": {"code": "not_found", "message": "gone"}},
+        {"outcome": "ok", "frame_refs": [], "component_body": {}, "resolved_payload": None},
+        TimeoutError("describe_component timed out"),
+    ],
+    ids=["refused", "no_resolved_payload", "raised"],
+)
+async def test_make_charts_refuses_a_card_on_the_canvas_it_cannot_read_back(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, described: dict[str, Any] | Exception
+) -> None:
+    """A card on the canvas whose head revision cannot be read is refused
+    under `figures_unread`, with no figure and no second copy written, and
+    the call spends the failed budget."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+    executor.described = described
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    (card,) = again["charts"]
+    assert len(_intents(executor)) == 1
+    assert "reply_figures" not in card
+    assert _stated(card) == (HarnessCode.FIGURES_UNREAD, "do_not_retry")
+    calls = ctx.state["orchestrator:calls"]
+    assert (calls["make_charts"], calls["make_charts_failed"]) == (1, 1)
 
 
+async def test_make_charts_counts_a_call_that_read_a_card_as_one_that_drew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rereads give figures, so they spend the drawn budget, not the failed
+    one: after three of them a fifth call still draws."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+
+    for _ in range(3):
+        assert (
+            "already_on_canvas" in (await tools["make_charts"]([_wide_chart()], ctx))["charts"][0]
+        )
+    drawn = await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    assert "error" not in drawn["charts"][0]
+    assert [intent["type"] for intent in _intents(executor)] == ["table", "bar_chart"]
+    calls = ctx.state["orchestrator:calls"]
+    assert (calls["make_charts"], calls.get("make_charts_failed", 0)) == (5, 0)
+
+
+@_TURNS
 @pytest.mark.parametrize("all_cards", [False, True], ids=["named", "all_cards"])
 async def test_make_charts_draws_again_a_card_remove_cards_took_off(
-    monkeypatch: pytest.MonkeyPatch, all_cards: bool
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, all_cards: bool
 ) -> None:
     """A card taken off the canvas, by its id or with every card, is drawn
-    again by a later call of the turn, and the card left on is not."""
+    again by a later call of the turn or of a later turn, and the card left
+    on is not."""
     monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
-    state = ConversationState(conversation_id="c1")
-    executor = LandingWideExecutor(state)
-    tools, ctx = _tools(executor=executor, remove_cards=_remove_seam(state))
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
     await tools["fetch"](SPEC_LIFE, ctx)
     table, bars = _wide_chart(), _wide_chart(type="bar_chart")
     await tools["make_charts"]([table, bars], ctx)
 
     removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
     again = await tools["make_charts"]([table, bars], ctx)
 
     assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
@@ -2473,16 +2649,65 @@ async def test_make_charts_draws_again_a_card_remove_cards_took_off(
         else ["table", "bar_chart", "table"]
     )
     assert ["already_on_canvas" in card for card in again["charts"]] == [False, not all_cards]
-    assert state.composition is not None
-    assert len(state.composition.blocks) == 2
+    assert executor.state.composition is not None
+    assert len(executor.state.composition.blocks) == 2
 
 
-async def test_make_charts_draws_a_card_of_another_kind_again(
+async def test_make_charts_reads_a_card_the_user_added_back(
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card the model took off and the user added back unchanged is the
+    same card, so a later turn's ask for it reads it and writes nothing."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    await tools["remove_cards"](ctx, ["cmp_01"])
+    state = executor.state
+    applied = _apply_operations(
+        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
+    )
+    assert isinstance(applied, tuple)
+    state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
+    ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 1
+    assert "already_on_canvas" in again["charts"][0]
+
+
+@_TURNS
+async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A card the user revised through Edit Card no longer draws the intent
+    it was written from, so asking for that intent draws it anew."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
+    _revised_frames(
+        executor.state, component_id="cmp_01", component=revised, patch={"title": "Renamed"}
+    )
+    executor.cards["cmp_01"] = revised
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 2
+    assert "already_on_canvas" not in again["charts"][0]
+
+
+@_TURNS
+async def test_make_charts_draws_a_card_of_another_kind_again(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
 ) -> None:
     """A second chart of the same frame and select in another kind is drawn."""
     executor, (_, second) = await _draw_wide_twice(
-        monkeypatch, {"type": "table"}, {"type": "bar_chart"}
+        monkeypatch, {"type": "table"}, {"type": "bar_chart"}, later_turn=later_turn
     )
 
     assert len(_intents(executor)) == 2

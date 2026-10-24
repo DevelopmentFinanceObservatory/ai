@@ -260,11 +260,10 @@ async def _run_mutate_turn(
     return {"status": response.status_code, "manifest": manifest, "error_body": body}
 
 
-def _canvas_series(before: Sequence[dict[str, Any]]) -> set[str]:
-    """The ids of the series the cards on the canvas drew after the frames
-    `before`, as `make_charts` reads the canvas as a turn begins: every
-    series of each card the last `composition.updated` holds, read from that
-    card's newest frame with a payload."""
+def _canvas_cards(before: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The cards on the canvas after the frames `before`, as `make_charts`
+    reads the canvas: each card the last `composition.updated` holds, by its
+    id, as that card's newest frame with a payload."""
     drawn: dict[str, dict[str, Any]] = {}
     composed: list[str] = []
     for frame in before:
@@ -272,13 +271,27 @@ def _canvas_series(before: Sequence[dict[str, Any]]) -> set[str]:
             drawn[frame["component_id"]] = frame
         elif frame["event"] == "composition.updated":
             composed = [block["component_id"] for block in frame["manifest"]["blocks"]]
-    return {
-        one.id
-        for component_id in composed
-        if component_id in drawn
-        for one in checks.reply_card(drawn[component_id]).series
-        if one.id
-    }
+    return {component_id: drawn[component_id] for component_id in composed if component_id in drawn}
+
+
+def _turn_cards(frames: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cards a turn's `frames` created or revised, in the order first
+    seen, each as its newest frame with a payload, so a card revised in the
+    turn is read at the revision the reply sees."""
+    cards: list[dict[str, Any]] = []
+    at: dict[str, int] = {}
+    for frame in frames:
+        revised = frame["event"] == "component.revised" and "payload" in frame
+        if frame["event"] != "component.created" and not revised:
+            continue
+        component_id = frame.get("component_id")
+        if component_id in at:
+            cards[at[component_id]] = frame
+            continue
+        if component_id is not None:
+            at[component_id] = len(cards)
+        cards.append(frame)
+    return cards
 
 
 def _reply_faults(
@@ -288,8 +301,10 @@ def _reply_faults(
     before: Sequence[dict[str, Any]] = (),
 ) -> tuple[list[checks.ReplyFault], list[checks.ReplyCard], set[float]]:
     """The faults of the closing message of the last of `turns` against the
-    cards that turn drew (`checks.check_reply`), those cards, and the values
-    they gave the reply to state (`checks.stated_values`).
+    cards that turn drew or revised (`_turn_cards`) and the cards on the
+    canvas as it began (`checks.check_reply`), those cards, and the values
+    they gave the reply to state (`checks.stated_values`). A turn reads a card on the canvas
+    again by asking `make_charts` for it, which draws nothing.
 
     The stream carries no tool result, so a card's figures are read from
     the card. Under a `reply` expectation they are what a card gives unasked,
@@ -297,18 +312,25 @@ def _reply_faults(
     expectation they are any point the card draws, since nothing says which
     the model was given, and such a point grounds where the message states
     it beside its own series and year. A card whose every series was on the
-    canvas as the turn began (`_canvas_series` of `before`, the frames of
+    canvas as the turn began (`_canvas_cards` of `before`, the frames of
     the turns before and the canvas each mutation left) is a redraw, which
-    states nothing.
+    states nothing unasked.
     """
     expect = turn.get("expect", {}).get("reply")
     if expect is not None and checks.reply_expect_problems(expect):
         expect = None
-    on_canvas = _canvas_series(before)
+    held = _canvas_cards(before)
+    on_canvas = {
+        one.id for frame in held.values() for one in checks.reply_card(frame).series if one.id
+    }
+    drawn = _turn_cards(turns[-1])
+    ids = {frame.get("component_id") for frame in drawn}
     cards = [
-        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None)
-        for frame in turns[-1]
-        if frame["event"] == "component.created"
+        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None) for frame in drawn
+    ] + [
+        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None, held=True)
+        for component_id, frame in held.items()
+        if component_id not in ids
     ]
     message = "\n".join(f["text"] for f in turns[-1] if f["event"] == "message.complete")
     states = expect["states"] if expect else []
