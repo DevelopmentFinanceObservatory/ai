@@ -1688,8 +1688,11 @@ async def fetch_code_paths(
     there, or holds every path already, is left out, so a source a fresh
     search recorded again is read again.
 
-    A read that fails is logged, records the attempt as `transport_failed`
-    with the error as its `detail`, and adds no path; `propose_operations`
+    Inside a planner entry the whole climb may take
+    `planner.plan.discovery_time_left` seconds, as every discovery read may:
+    with no time left no node is asked for, and a climb that time cuts short
+    is a failed read. A read that fails is logged, records the attempt as
+    `transport_failed` with the error as its `detail`, and adds no path; `propose_operations`
     answers it `surface_unavailable` before compiling, and the next
     translate reads again. A code the graph holds no path for adds none and
     fails nothing, and compile refuses the breakdown. Like
@@ -1718,10 +1721,20 @@ async def fetch_code_paths(
     failure: str | None = None
     paths: dict[str, tuple[str, ...]] = {}
     leaves: frozenset[str] = frozenset()
+    time_left = discovery_time_left()
     try:
-        paths, leaves = await _paths_to_root(asked, describe_nodes)
+        if time_left is not None and time_left <= 0:
+            failure = "the node door was not read: the planner entry has no time left for it"
+        else:
+            async with asyncio.timeout(time_left):
+                paths, leaves = await _paths_to_root(asked, describe_nodes)
+    except TimeoutError:
+        failure = (
+            f"the node door did not answer in the {time_left:.0f} s the planner entry had left"
+        )
     except (UpstreamError, ValidationError, ValueError) as exc:
         failure = f"{type(exc).__name__}: {exc}"
+    if failure is not None:
         logger.warning("the hierarchy above codes %s was unread: %s", asked, failure)
     pairs: list[DescribedPair] = []
     for requirement, key, source, codes in pending:

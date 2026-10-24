@@ -3100,6 +3100,32 @@ async def test_a_named_code_with_no_children_link_reads_as_a_leaf() -> None:
     assert updated.leaf_codes == ("CRSPurposeCode12220",)
 
 
+async def test_a_code_read_with_no_time_left_asks_for_no_node() -> None:
+    asked: list[list[str]] = []
+
+    async def describe_nodes(dcids: Any) -> dict[str, CodeNode]:
+        asked.append(list(dcids))
+        return {dcid: _code_node(dcid) for dcid in dcids}
+
+    by_sector = _sectors_requirement(
+        "by_sector", breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0)
+    )
+    token = current_discovery_time_left.set(lambda: 0.0)
+    try:
+        ((record, sources),) = await fetch_code_paths(
+            revision="rev",
+            requirements=[by_sector],
+            requirement_keys={"by_sector": requirement_revision(by_sector)},
+            sources={"by_sector": _health_and_population_source()},
+            describe_nodes=describe_nodes,
+        )
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert asked == []
+    assert (record.transport_failed, sources) == (True, ())
+
+
 async def test_a_failed_code_read_records_the_attempt_and_adds_no_path() -> None:
     async def describe_nodes(dcids: Any) -> dict[str, CodeNode]:
         raise UpstreamError(status=None, code=None, detail="the graph door timed out")
