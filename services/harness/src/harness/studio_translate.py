@@ -939,12 +939,22 @@ def _refused_detail(record: _ExecutorRecord) -> str:
     return failure_detail(refusal if isinstance(refusal, Mapping) else {})
 
 
-def _answer_failure(answer: Mapping[str, Any]) -> str:
-    """The line of an agent tool's failed answer. A tool states its `code`
+def _answer_refusal(answer: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The refusal of an agent tool's failed answer. A tool states its `code`
     and `retry_mode` beside its `error` or `refusal` prose, or inside a
     `refusal` that is a refusal body."""
     refusal = answer.get("refusal")
-    return failure_detail(refusal if isinstance(refusal, Mapping) else answer)
+    return refusal if isinstance(refusal, Mapping) else answer
+
+
+def _answer_failure(answer: Mapping[str, Any]) -> str:
+    """The line of an agent tool's failed answer."""
+    return failure_detail(_answer_refusal(answer))
+
+
+def _asks_correction(answer: Mapping[str, Any]) -> bool:
+    """Whether a failed answer's refusal asks the model to correct its call."""
+    return _answer_refusal(answer).get("retry_mode") == RetryMode.CORRECT_AND_RETRY
 
 
 def _step_label(tool: str, plan_label: str | None = None) -> str:
@@ -1073,7 +1083,10 @@ class _Translator:
     - a `complete` frame on a failed step's own wire id once a later try of
       the same step succeeds (`_retry_key`): the same tool with the same
       arguments, a later hand-off the planner takes for a failed hand-off,
-      and a plan made, ready for approval, for either plan failure.
+      and a plan made, ready for approval, for either plan failure. A
+      refusal whose `retry_mode` is `correct_and_retry` asks the model to
+      change the call, so any later call of the tool that completes settles
+      that step whatever its arguments; one that fails leaves it waiting.
     """
 
     def __init__(
@@ -1102,7 +1115,15 @@ class _Translator:
         self._quiet_calls: dict[str, tuple[str, dict[str, Any]]] = {}
         # The failed steps a later try can still recover, by `_retry_key`:
         # each one's wire step id, label and tool.
-        self._failed: dict[tuple[str, str], list[tuple[str, str, str | None]]] = {}
+        self._failed: dict[tuple[str, str], list[_FailedStep]] = {}
+        # Failed steps whose refusal asked for a corrected call, by tool, each
+        # with the number of calls made before it: a later call of the tool
+        # that completes corrects them.
+        self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # The number of agent tool calls made so far, and each open call's
+        # place among them, by call id.
+        self._calls = 0
+        self._call_order: dict[str, int] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
         self._handed_off: str | None = None
         # The highest composition revision this stream has sent.
@@ -1665,19 +1686,39 @@ class _Translator:
             **extra,
         )
 
-    def _failed_step(self, key: tuple[str, str], frame: ActivityStep) -> ActivityStep:
-        """`frame`, a failed step, kept under `key` for a later try to recover."""
-        self._failed.setdefault(key, []).append((frame.step_id, frame.label, frame.tool))
+    def _failed_step(
+        self, key: tuple[str, str], frame: ActivityStep, *, correctable: bool = False
+    ) -> ActivityStep:
+        """`frame`, a failed step, kept under `key` for a later try to
+        recover, or under its tool for any later call of it when its refusal
+        asked the model to correct the call (`correctable`)."""
+        step = (frame.step_id, frame.label, frame.tool)
+        if correctable and frame.tool:
+            self._uncorrected.setdefault(frame.tool, []).append((self._calls, step))
+        else:
+            self._failed.setdefault(key, []).append(step)
         return frame
 
-    def _recover(self, *keys: tuple[str, str]) -> list[ActivityStep]:
-        """A `complete` frame on each failed step kept under `keys`, which a
-        later try just made good. Studio keeps a step's latest status, so the
-        failed line settles instead of standing beside the answer."""
+    def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
+        """The steps awaiting correction under `tool` that a completed call,
+        the `order`th made, corrects: those refused before it was made. A
+        call made beside a refused one, in the same batch, corrects nothing."""
+        queued = self._uncorrected.pop(tool, [])
+        if kept := [entry for entry in queued if entry[0] >= order]:
+            self._uncorrected[tool] = kept
+        return [step for before, step in queued if before < order]
+
+    def _recover(
+        self, *keys: tuple[str, str], corrected: Sequence[_FailedStep] = ()
+    ) -> list[ActivityStep]:
+        """A `complete` frame on each failed step kept under `keys`, and on
+        each in `corrected`, which a later try just made good. Studio keeps a
+        step's latest status, so the failed line settles instead of standing
+        beside the answer."""
+        steps = [*corrected, *(step for key in keys for step in self._failed.pop(key, []))]
         return [
             self._step(step_id, label, StepStatus.COMPLETE, tool=tool, detail=_RECOVERED)
-            for key in keys
-            for step_id, label, tool in self._failed.pop(key, [])
+            for step_id, label, tool in steps
         ]
 
     def _unshown(self, record: _ExecutorRecord) -> bool:
@@ -1764,6 +1805,8 @@ class _Translator:
         for call in event.get_function_calls():
             name = call.name or ""
             args = call.args or {}
+            self._calls += 1
+            self._call_order[call.id or ""] = self._calls
             if name in _QUIET_CALLS:
                 self._quiet_calls[call.id or ""] = (name, args)
                 continue
@@ -1792,6 +1835,7 @@ class _Translator:
             # A failure's reason is written for the model, so its line
             # shows the sentence for its code.
             failed = "error" in answer or "refusal" in answer
+            order = self._call_order.pop(response.id or "", 0)
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
                 name, args = quiet
@@ -1806,10 +1850,12 @@ class _Translator:
                                 tool=name,
                                 detail=_answer_failure(answer),
                             ),
+                            correctable=_asks_correction(answer),
                         )
                     )
                 else:
-                    frames.extend(self._recover(_retry_key(name, args)))
+                    corrected = self._corrected(name, order)
+                    frames.extend(self._recover(_retry_key(name, args), corrected=corrected))
                 continue
             opened = self._open_calls.get(response.id or "")
             if opened is None:
@@ -1829,11 +1875,12 @@ class _Translator:
             frame = self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
             key = _retry_key(response.name or "", args)
             if status is StepStatus.FAILED:
-                frames.append(self._failed_step(key, frame))
+                frames.append(self._failed_step(key, frame, correctable=_asks_correction(answer)))
             else:
                 frames.append(frame)
                 if status is StepStatus.COMPLETE:
-                    frames.extend(self._recover(key))
+                    corrected = self._corrected(response.name or "", order)
+                    frames.extend(self._recover(key, corrected=corrected))
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -2014,6 +2061,10 @@ _PLAN_FAILED = "No plan could be made"
 _RECOVERED = "This worked on a later try."
 # The key of a plan hand-back with no plan, which a later plan made recovers.
 _PLAN_MADE = ("plan", "made")
+
+
+# A failed step a later try can recover: its wire step id, label and tool.
+type _FailedStep = tuple[str, str, str | None]
 
 
 def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
