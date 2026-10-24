@@ -117,7 +117,10 @@ class FakeBigQuery:
     def query(self, sql: str) -> FakeQuery:
         self.queries.append(sql)
         if "COUNT(*)" in sql:
-            return FakeQuery([{"day": day, "row_count": n} for day, n in self.held.items()])
+            first = date.fromisoformat(sql.split("TIMESTAMP('")[1][:10])
+            return FakeQuery(
+                [{"day": day, "row_count": n} for day, n in self.held.items() if day >= first]
+            )
         return FakeQuery([{"day": self.latest}])
 
     def load_table_from_json(
@@ -178,6 +181,7 @@ def test_recorded_pages_map_to_rows_without_free_text():
         "latency_seconds": 5.798,
         "time_to_first_token_seconds": 4.33,
         "input_tokens": 17352,
+        "cached_input_tokens": 10319,
         "output_tokens": 238,
         "total_tokens": 17590,
         "input_cost_usd": 0.006048675,
@@ -187,6 +191,35 @@ def test_recorded_pages_map_to_rows_without_free_text():
     # Langfuse's empty strings land as NULL.
     tool = next(row for row in rows if row["type"] == "TOOL")
     assert tool["model"] is None
+
+
+@pytest.mark.parametrize(
+    ("usage", "cached"),
+    [
+        ({"usageDetails": {"input": 718, "input_cached_tokens": 10825}}, 10825),
+        # Spans carry `{}`.
+        ({"usageDetails": {}}, None),
+        ({"usageDetails": None}, None),
+        ({}, None),
+    ],
+)
+def test_cached_input_tokens_come_from_usage_details(usage, cached):
+    observation = {
+        key: value
+        for key, value in RECORDING["pages"][0]["answer"]["data"][0].items()
+        if key != "usageDetails"
+    }
+
+    row = langfuse_export.observation_row({**observation, **usage})
+
+    assert row["cached_input_tokens"] == cached
+
+
+def test_cached_input_tokens_follow_input_tokens():
+    names = [field.name for field in SCHEMA]
+
+    assert names[names.index("input_tokens") + 1] == "cached_input_tokens"
+    assert next(f for f in SCHEMA if f.name == "cached_input_tokens").field_type == "INT64"
 
 
 def test_mapping_drops_status_message_and_user_id():
@@ -248,6 +281,54 @@ def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added
 
 
 @pytest.mark.parametrize(
+    ("since", "first"),
+    [
+        (date(2026, 10, 5), date(2026, 10, 5)),
+        # A day inside the usual window adds nothing.
+        (date(2026, 11, 19), date(2026, 11, 17)),
+    ],
+)
+def test_from_widens_the_window_to_its_day(since, first):
+    today = date(2026, 11, 20)
+
+    days = export_days(
+        latest_loaded=date(2026, 11, 18), today=today, langfuse={}, held={}, since=since
+    )
+
+    assert days == [first + timedelta(days=offset) for offset in range((today - first).days + 1)]
+
+
+def test_from_reads_old_days_and_keeps_a_partition_that_reads_short(capsys):
+    """`--from` re-reads days before the usual window, and a day that reads fewer rows
+    than its partition holds keeps the partition."""
+    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS)
+    bq = FakeBigQuery(latest=today - timedelta(days=1), held={RECORDED_DAY: 5})
+    requests: list[httpx2.Request] = []
+
+    loaded = run_export(
+        reader=reader_for(recorded_langfuse(requests, {})),
+        bq=bq,
+        table_id=TABLE_ID,
+        today=today,
+        since=BACKFILL_FLOOR,
+    )
+
+    assert loaded == []
+    assert bq.loads == []
+    days_read = {
+        r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params
+    }
+    assert len(days_read) == (today - BACKFILL_FLOOR).days + 1
+    recorded_line = next(
+        line for line in capsys.readouterr().out.splitlines() if line.startswith("2026-10-20")
+    )
+    assert recorded_line == (
+        "2026-10-20: partition kept; read 4 rows, the partition holds 5, "
+        "older than Langfuse's access window"
+    )
+
+
+@pytest.mark.parametrize(
     ("today", "first"),
     [
         (date(2026, 11, 30), date(2026, 11, 1)),
@@ -290,9 +371,25 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert config.write_disposition == bigquery.WriteDisposition.WRITE_TRUNCATE
     assert config.source_format == bigquery.SourceFormat.NEWLINE_DELIMITED_JSON
     assert config.time_partitioning.field == "start_time"
-    assert config.schema_update_options == [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
     # 10-21 and 10-22 read empty, so their partitions are left as they are.
     assert bq.deleted == []
+
+
+def test_a_load_adds_cached_input_tokens_to_an_older_table():
+    """A table made before `cached_input_tokens` gains the column through the load of
+    one partition, which leaves the other partitions as they are."""
+    bq = FakeBigQuery(latest=date(2026, 10, 21))
+
+    run_export(
+        reader=reader_for(recorded_langfuse([])), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 21)
+    )
+
+    [(destination, rows, config)] = bq.loads
+    assert destination == f"{TABLE_ID}$20261020"
+    assert config.write_disposition == bigquery.WriteDisposition.WRITE_TRUNCATE
+    assert config.schema_update_options == [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
+    assert "cached_input_tokens" in [field.name for field in config.schema]
+    assert all("cached_input_tokens" in row for row in rows)
 
 
 def test_an_empty_window_fails_and_touches_no_partition():
@@ -476,28 +573,38 @@ def test_persistent_server_errors_raise():
 
 
 @pytest.mark.parametrize(
-    ("metrics", "matched"),
+    ("totals", "cached", "matched"),
     [
-        ({"count_count": 4, "sum_totalCost": 0.006941175}, True),
-        ({"count_count": 5, "sum_totalCost": 0.006941175}, False),
-        ({"count_count": 4, "sum_totalCost": 0.007}, False),
+        ({"count_count": 4, "sum_totalCost": 0.006941175}, 10319, True),
+        ({"count_count": 5, "sum_totalCost": 0.006941175}, 10319, False),
+        ({"count_count": 4, "sum_totalCost": 0.007}, 10319, False),
+        ({"count_count": 4, "sum_totalCost": 0.006941175}, 10320, False),
     ],
 )
-def test_check_day_compares_rows_with_metrics(metrics, matched):
+def test_check_day_compares_rows_with_metrics(totals, cached, matched):
     observations = recorded_langfuse([])
+    # The usage query answers one row per usage key of the day.
+    usage = [
+        {"usageType": "input", "sum_usageByType": 7033},
+        {"usageType": "input_cached_tokens", "sum_usageByType": cached},
+        {"usageType": "output", "sum_usageByType": 238},
+    ]
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/public/v2/metrics":
             query = json.loads(request.url.params["query"])
             assert query["fromTimestamp"] == "2026-10-20T00:00:00Z"
             assert query["filters"][0]["value"] == ["dfo-prod-ai"]
-            return httpx2.Response(200, json={"data": [metrics]})
+            if query["metrics"] == [{"measure": "usageByType", "aggregation": "sum"}]:
+                assert query["dimensions"] == [{"field": "usageType"}]
+                return httpx2.Response(200, json={"data": usage})
+            return httpx2.Response(200, json={"data": [totals]})
         return observations.handle_request(request)
 
     ok, line = check_day(reader=reader_for(httpx2.MockTransport(handle)), day=RECORDED_DAY)
 
     assert ok is matched
-    assert "rows 4 cost 0.006941175" in line
+    assert "rows 4 cost 0.006941175 cached input tokens 10319" in line
 
 
 def test_load_refuses_without_bigquery_settings(monkeypatch, tmp_path):
