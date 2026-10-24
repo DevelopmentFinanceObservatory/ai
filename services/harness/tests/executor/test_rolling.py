@@ -439,6 +439,7 @@ async def test_a_fixed_plan_resolves_no_period_and_its_records_are_unchanged(
             "role_keys",
             "stat_var_count",
             "dropped_key_count",
+            "right_dropped_key_count",
             "ranked_before_limit",
         }
 

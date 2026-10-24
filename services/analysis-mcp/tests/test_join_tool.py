@@ -251,6 +251,73 @@ async def test_right_keys_with_different_places_matches_nothing_and_reports_drop
     assert "0 matched key(s) (2 left-only, 2 right-only, dropped)" in result.content[0].text
 
 
+@pytest.mark.parametrize(
+    ("left_cells", "right_cells", "counts"),
+    [
+        # Kenya matches in 2020 only, so it keeps a row and is not counted,
+        # though each side holds a year of it the other lacks.
+        pytest.param(
+            (("KEN", "2019"), ("KEN", "2020"), ("UGA", "2020"), ("TZA", "2020")),
+            (("KEN", "2020"), ("KEN", "2021"), ("GHA", "2020")),
+            (2, 1),
+            id="one-sided",
+        ),
+        # Both sides hold Kenya, in years that never overlap, so it has no row
+        # and counts on each side.
+        pytest.param(
+            (("KEN", "2010"), ("KEN", "2011"), ("UGA", "2020")),
+            (("KEN", "2018"), ("UGA", "2020")),
+            (1, 1),
+            id="disjoint-years",
+        ),
+    ],
+)
+async def test_a_join_counts_each_sides_keys_it_matched_in_no_period(
+    seeded,
+    left_cells: tuple[tuple[str, str], ...],
+    right_cells: tuple[tuple[str, str], ...],
+    counts: tuple[int, int],
+) -> None:
+    store, _handles = seeded
+    who = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:WHO_MortalityUnder5",
+                "observationAbout": f"dcid:country/{place}",
+                "time_period": year,
+                "value": 1.0,
+            }
+            for place, year in left_cells
+        ],
+    )
+    crs = Frame.build(
+        role_keys=["destination"],
+        rows=[
+            {
+                "stat_var": "dcid:ODA_Health",
+                "destination": f"dcid:country/{place}",
+                "time_period": year,
+                "value": 2.0,
+            }
+            for place, year in right_cells
+        ],
+    )
+
+    result = await join(
+        frame_ref=await _seed_custom_frame(store, who),
+        right_frame_ref=await _seed_custom_frame(store, crs),
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert (
+        result.structured_content["dropped_key_count"],
+        result.structured_content["right_dropped_key_count"],
+    ) == counts
+
+
 async def test_right_keys_naming_a_column_the_right_frame_lacks_refuses_role_ambiguous(
     seeded,
 ) -> None:

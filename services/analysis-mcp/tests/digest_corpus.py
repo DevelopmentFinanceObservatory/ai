@@ -644,6 +644,8 @@ def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> J
         "right_key_columns": ("reporter",),
         "left_dropped_key_count": 0,
         "right_dropped_key_count": 0,
+        "left_unmatched_entity_count": 0,
+        "right_unmatched_entity_count": 0,
     }
     defaults.update(overrides)
     return JoinResult(matched_keys=matched_keys_of(matched_keys), **defaults)

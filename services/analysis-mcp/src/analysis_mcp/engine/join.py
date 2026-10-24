@@ -63,7 +63,7 @@ from dfo_frame_grammar.grammar import (
     UnitCell,
 )
 
-from analysis_mcp.engine.columnar import keys_unique, repeated
+from analysis_mcp.engine.columnar import group_rows, keys_unique, repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
@@ -250,7 +250,14 @@ class JoinResult:
     """Everything `join_tool.py` needs to mint identity, write the store,
     and render the digest -- the frame is here for the store write and
     replay; the digest itself renders from `matched_keys`, never
-    `frame.rows`."""
+    `frame.rows`.
+
+    `left_dropped_key_count` and `right_dropped_key_count` count each
+    side's (role columns, `time_period`) keys that matched nothing.
+    `left_unmatched_entity_count` and `right_unmatched_entity_count` count
+    each side's role-column values that matched in no period, the entities
+    the output holds no row for; 0 for a join on `time_period` alone.
+    """
 
     frame: Frame
     left_resolved_unit: UnitCell | None
@@ -263,6 +270,8 @@ class JoinResult:
     matched_keys: MatchedKeys
     left_dropped_key_count: int
     right_dropped_key_count: int
+    left_unmatched_entity_count: int
+    right_unmatched_entity_count: int
     exclusions: Exclusions = field(default_factory=Exclusions)
 
 
@@ -426,6 +435,16 @@ def run_join(
 
     left_dropped = _unmatched(left_table, left_rows)
     right_dropped = _unmatched(right_table, right_rows)
+    # Every matched entity is one value on both sides, so each side's
+    # entities less the matched ones are those that matched in no period.
+    if key_columns:
+        matched_entities = group_rows(matched, match_key[: len(key_columns)]).count
+        left_unmatched_entities = group_rows(left_table, key_columns).count - matched_entities
+        right_unmatched_entities = (
+            group_rows(right_table, right_key_columns).count - matched_entities
+        )
+    else:
+        left_unmatched_entities = right_unmatched_entities = 0
     exclusions = combine_exclusions(left_exclusions, right_exclusions)
     exclusions = record_exclusion(
         exclusions, frame=left_frame, reason="unmatched_key", dropped=left_dropped, side="left"
@@ -507,5 +526,7 @@ def run_join(
         ),
         left_dropped_key_count=left_dropped.num_rows,
         right_dropped_key_count=right_dropped.num_rows,
+        left_unmatched_entity_count=left_unmatched_entities,
+        right_unmatched_entity_count=right_unmatched_entities,
         exclusions=exclusions,
     )
