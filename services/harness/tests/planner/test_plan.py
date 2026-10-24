@@ -83,9 +83,12 @@ from planner.plan import (
     load_plan,
     period_window,
     plan_revision,
+    restated_to_anchors,
+    restated_translation,
     retrieves_period,
     rolls_from_its_start,
     settle_decisions,
+    split_of,
     windowed_pin,
 )
 from planner.proof import mismatches
@@ -127,6 +130,7 @@ from planner.workflow import (
 )
 from pydantic import TypeAdapter, ValidationError
 from submission.service import _Patch
+from translator.mechanical import build_translation
 
 from ..context_probe import field_limits_record, plan_record, record_chars, unbounded_paths
 
@@ -5752,6 +5756,164 @@ def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
     error = _rolling_error(raised.value)
     assert (error.issue, error.requirement_ids) == (RollingIssue.YEARS_DISAGREE, ("f", "growth"))
     assert "('f' [2023]; 'growth' [2024])" in str(error)
+
+
+def _draft(
+    decision: DecisionFactory, requirement: RequirementFactory, *steps: EvidenceRequirement
+) -> Plan:
+    """A draft reading 2015-2024, retrieved with no end year, through `steps`."""
+    return _plan(
+        decision(),
+        evidence_requirements=[requirement(period_end_open=True), *steps],
+        status=PlanStatus.DRAFT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stated", "anchor"), [(2024, 2023), (2022, 2023)], ids=["earlier", "later"]
+)
+def test_a_plans_rolling_years_are_restated_from_the_newest_year_its_run_reads(
+    decision: DecisionFactory, requirement: RequirementFactory, stated: int, anchor: int
+) -> None:
+    """Each rolling year moves by the newest year less the one the plan
+    states, and keeps its offset; a predicate on values stays. The
+    translation moves with it, to the one built from the restated plan."""
+    positive = ValueThreshold(op="gt", value=0)
+    plan = _draft(
+        decision,
+        requirement,
+        _rolling_growth(_DATASET, window_start=stated - 5, window_end=stated),
+        _years("recent", _DATASET, _gte(stated - 4, -4), positive),
+    )
+
+    anchors = {"growth": anchor, "recent": anchor}
+    restated = restated_to_anchors(plan, anchors=anchors)
+
+    growth = restated.requirement("growth")
+    recent = restated.requirement("recent")
+    assert isinstance(growth, GrowthRequirement)
+    assert isinstance(recent, FilterRequirement)
+    assert (growth.window_start, growth.window_end, growth.rolling) == (
+        anchor - 5,
+        anchor,
+        _LAST_FIVE,
+    )
+    assert recent.predicates == (_gte(anchor - 4, -4), positive)
+    assert restated.requirement(_DATASET) == plan.requirement(_DATASET)
+    assert plan_revision(restated) != plan_revision(plan)
+    discovered = {_DATASET: "spec_" + "a" * 32}
+    assert restated_translation(
+        build_translation(plan, discovered), plan=plan, anchors=anchors
+    ) == build_translation(restated, discovered)
+
+
+@pytest.mark.parametrize(
+    ("steps", "anchors"),
+    [
+        pytest.param([], {}, id="no-rolling-requirement"),
+        pytest.param([_rolling_growth(_DATASET)], {"growth": 2024}, id="on-the-stated-year"),
+    ],
+)
+def test_a_plan_whose_years_do_not_move_is_restated_as_itself(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    anchors: dict[str, int],
+) -> None:
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id=_DATASET,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    plan = _draft(decision, requirement, total, *steps)
+
+    assert restated_to_anchors(plan, anchors=anchors) is plan
+    translation = build_translation(plan, {_DATASET: "spec_" + "a" * 32})
+    assert restated_translation(translation, plan=plan, anchors=anchors) is translation
+
+
+def test_a_restatement_that_empties_a_growth_window_is_refused_as_the_planner_refuses_it(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """Growth from a fixed 2023 to the newest year, planned against 2024,
+    reads one year once the newest year is 2023."""
+    since = _rolling_growth(
+        _DATASET, window_start=2023, rolling=RollingWindow(window_end=_OFFSET[0])
+    )
+    plan = _draft(decision, requirement, since)
+
+    with pytest.raises(ValidationError) as restated:
+        restated_to_anchors(plan, anchors={"growth": 2023})
+    with pytest.raises(ValidationError) as proposed:
+        _rolling_growth(_DATASET, window_start=2023, window_end=2023, rolling=since.rolling)
+
+    def refusal(raised: ValidationError) -> list[Any]:
+        return raised.errors(include_url=False, include_context=False, include_input=False)
+
+    assert refusal(restated.value) == refusal(proposed.value)
+
+
+def test_a_copy_moves_with_the_requirement_it_copies(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """A total per year and a growth rolling from its start both read 'f', so
+    the growth reads a copy of 'f' over the dataset's whole history. The copy
+    and 'f' state one year, so they move together, and newest years that tear
+    them apart are refused."""
+    draft = _draft(
+        decision,
+        requirement,
+        _years("f", _DATASET, _lte(2024, 0)),
+        AggregateRequirement(
+            id="total",
+            decision_ids=["measure"],
+            input_id="f",
+            reduction=Reduction.SUM,
+            group_by=(GroupBy.PERIOD,),
+        ),
+        _rolling_growth("f"),
+    )
+    split = split_of(draft)
+    plan = Plan.model_validate(
+        {
+            **draft.model_dump(),
+            "evidence_requirements": split.requirements,
+            "rolling_copies": split.copies,
+        }
+    )
+    assert [(c.copy_id, c.origin_id) for c in plan.rolling_copies] == [
+        (f"{_DATASET}_history", _DATASET),
+        ("f_history", "f"),
+    ]
+
+    anchors = {"f": 2023, "f_history": 2023, "growth": 2023}
+    restated = restated_to_anchors(plan, anchors=anchors)
+
+    assert restated.rolling_copies == plan.rolling_copies
+    discovered = dict.fromkeys((_DATASET, f"{_DATASET}_history"), "spec_" + "a" * 32)
+    assert restated_translation(
+        build_translation(plan, discovered), plan=plan, anchors=anchors
+    ) == build_translation(restated, discovered)
+    for copy_id in ("f", "f_history"):
+        kept = restated.requirement(copy_id)
+        assert isinstance(kept, FilterRequirement)
+        assert kept.predicates == (_lte(2023, 0),)
+    with pytest.raises(RollingPlanError) as torn:
+        restated_to_anchors(plan, anchors={"f": 2024, "f_history": 2023, "growth": 2023})
+    assert (torn.value.issue, torn.value.requirement_ids) == (RollingIssue.YEARS_DISAGREE, ("f",))
+
+
+def test_newest_years_for_other_requirements_than_the_rolling_ones_are_a_fault(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    plan = _draft(decision, requirement, _rolling_growth(_DATASET))
+
+    with pytest.raises(KeyError):
+        restated_to_anchors(plan, anchors={})
+    with pytest.raises(KeyError):
+        restated_to_anchors(plan, anchors={"growth": 2024, _DATASET: 2024})
 
 
 def _sum(step_id: str, left: str, right: str) -> SumOfRequirement:

@@ -45,6 +45,7 @@ from planner.plan import (
     EvidenceRequirement,
     anchored_over,
     keeps_one_level,
+    retrieved_period,
     states_period_threshold,
 )
 from planner.records import (
@@ -457,7 +458,7 @@ def _retrieve_resolved(
     place-level filter may read any open role, a flow side included, which
     is the one role `compile` can ask `get_data` for the type column of. Its
     years run on past its period, and start at `first_year` for a read of the
-    dataset's whole history, as `planner.plan._dataset_shape` states them.
+    dataset's whole history (`planner.plan.retrieved_period`).
     """
     source = sources.get(operation.id)
     requirement = requirements.get(operation.requirement_id)
@@ -550,9 +551,7 @@ def _retrieve_resolved(
     shape = _retrieved(
         requirement_id=operation.requirement_id,
         roles=tuple(dims),
-        period=requirement.period
-        if first_year is None
-        else Period(start=first_year, end=requirement.period.end),
+        period=retrieved_period(requirement, first_year=first_year),
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
         end_open=requirement.period_end_open,

@@ -121,14 +121,23 @@ each group's answer in `anchors`: the key, the year, and the series that hold
 no value at it. The call takes the path a step's call takes, under the id of
 the group's first step to run, and `resolve_anchor` is part of the surface
 check, compared with its row of the capability table. A plan with no rolling
-step never calls it.
+step never calls it. The group's rolling years, less their offsets, state the
+newest year the plan was checked against, and the run reads them moved later
+only. An earlier newest year stops the run, and the user asks again to plan
+from the year the data holds. Translation reads the same newest years
+before approval (`read_anchors`, the run's own retrievals and `resolve_anchor`
+with no ledger and no derived step) and states the plan from them, so this stop
+fires when the data changed between approval and the run, when translation had
+no time to read them or met a method choice or a source to discover again, and
+for a plan translated before translation read them.
 
-| Stop                                                                                    | Reported as                                                                               |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `resolve_anchor` finds no year half of the series hold (`rolling_anchor_unresolved`)    | `step_refused` with the tool's code, a message for the user and a `fix.remedy`            |
-| `resolve_anchor` finds periods that are no calendar years (`rolling_grain_unsupported`) | the same                                                                                  |
-| A rolled start is before the first year its retrieval's evidence records                | `rolling_window_outside_dataset`, before the step's call, with a payload of the same code |
-| Any other `rolling_anchor_unresolved`, from `resolve_anchor` or a rolling verb          | `step_refused` with an `internal_error` payload; the refusal is logged and kept in `fix`  |
+| Stop                                                                                    | Reported as                                                                                  |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `resolve_anchor` finds no year half of the series hold (`rolling_anchor_unresolved`)    | `step_refused` with the tool's code, a message for the user and a `fix.remedy`               |
+| `resolve_anchor` finds periods that are no calendar years (`rolling_grain_unsupported`) | the same                                                                                     |
+| The newest year is before the one the group's rolling years, less their offsets, state  | `rolling_anchor_behind_plan`, before the group's first step, with a payload of the same code |
+| A rolled start is before the first year its retrieval's evidence records                | `rolling_window_outside_dataset`, before the step's call, with a payload of the same code    |
+| Any other `rolling_anchor_unresolved`, from `resolve_anchor` or a rolling verb          | `step_refused` with an `internal_error` payload; the refusal is logged and kept in `fix`     |
 
 Each of these carries a payload that classifies as a stop, so the turn closes
 on it and spends no replan.
@@ -156,8 +165,11 @@ column, through `data_mcp.series_statistics.fetch_series_statistics_table`; at
 25,000 series that table holds about 8 MiB where one pydantic model a series
 held about 180 MiB. A caller whose tool surface allows no real
 upstream call, such as the scripted studio eval
-(`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. An
-error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
+(`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. A
+statistics fetch that times out or fails in transit (`StatisticsUnreachableError`)
+stops the run as `transport_failed`, and an artifact the run cannot trust or
+read (`StatisticsUnusableError`) as `step_result_unusable`: neither says anything
+about the data. An error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
 on the evidence instead of stopping it.
 
 **No in-place refresh: what a tool says can be retried is retried, and what
@@ -191,9 +203,9 @@ calls at the full timeout, the longest delay before each retry, and a
 timeout is clipped to what remains. The evidence check's own statistics fetch
 runs under a deadline of its own -- what's left of the step budget once the
 check starts, capped at that 30-second allowance -- so a fetch that outruns
-it degrades the requirement to `statistics_unavailable` instead of spending
+it stops the step `transport_failed` with its own detail instead of spending
 the rest of the step's budget. A step that runs past its own budget is
-`transport_failed`.
+`transport_failed` too.
 
 A `correct_and_retry` refusal is never corrected here either, and
 `classify.py` places every code both servers can send. Fourteen whose `fix` is a

@@ -86,6 +86,7 @@ from planner.shapes import (
     pooling_remedy,
     role_named,
     roles_named,
+    window_outside,
 )
 from planner.workflow import (
     ArtifactKind,
@@ -181,6 +182,10 @@ class CompileIssueCode(StrEnum):
     WINDOW_OUTSIDE_PERIOD = "window_outside_period"
     ROLLING_NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
     ROLLING_POPULATION_UNUSABLE = "rolling_population_unusable"
+    # The newest year the data holds for a group of rolling steps is before the
+    # one the plan's rolling years state, and the plan stated from it is
+    # refused (`translator.tool`, which reads the newest year before approval).
+    ROLLING_ANCHOR_BEHIND = "rolling_anchor_behind"
     ENTITY_REQUIRED = "entity_required"
     UNKNOWN_ENTITY = "unknown_entity"
     ENTITY_AMBIGUOUS = "entity_ambiguous"
@@ -732,16 +737,22 @@ class _Build:
             )
 
     def _check_growth(self, operation: GrowthOperation) -> None:
+        """Report `WINDOW_OUTSIDE_PERIOD` for a window reaching past the years its input holds.
+
+        The input's shape holds them. A retrieval's years start at its
+        dataset's first year on record for a whole-history read, as the plan's
+        shape rule reads it (`planner.shapes.window_outside`).
+        """
         requirement = self._requirement_upstream(operation.input)
-        if requirement is None:
+        upstream = self.shapes.get(operation.input)
+        if requirement is None or upstream is None:
             return
         window = Period(start=operation.window_start, end=operation.window_end)
-        if not requirement.period.covers(window):
+        outside = window_outside(upstream.shape, window)
+        if outside is not None:
             self._issue(
                 CompileIssueCode.WINDOW_OUTSIDE_PERIOD,
-                f"operation {operation.id!r} takes growth over {window.start}-{window.end}, "
-                f"outside requirement {requirement.id!r}'s {requirement.period.start}-"
-                f"{requirement.period.end}",
+                f"operation {operation.id!r}'s {outside}",
                 operation_id=operation.id,
                 requirement_id=requirement.id,
             )

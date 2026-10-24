@@ -23,6 +23,9 @@ again cannot search, so retrying cannot succeed. `not_issued` marks a
 `discovery_unavailable` referral for a call the planner entry had no time
 left to issue (`translator.discovery.NoTimeLeftError`): the service was never
 asked, so the entry ran out of time rather than the service failing.
+`stop_code` is the run's own code for a stop found before approval, when
+reading the newest year a plan's rolling years count from stopped where the
+plan's run would (`translator.tool._run_would_stop`).
 
 Four kinds carry `candidates`, for different reasons. `SOURCE_AMBIGUOUS`
 always carries two or more: discovery found a real choice. The planner
@@ -310,6 +313,7 @@ class Referral(StrictModel):
     budget_spent: bool = False
     not_issued: bool = False
     source_mismatch: bool = False
+    stop_code: str | None = Field(default=None, min_length=1)
     stale_pins: tuple[StalePin, ...] = ()
     withheld: tuple[WithheldSource, ...] = ()
 

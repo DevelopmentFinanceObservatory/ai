@@ -927,6 +927,35 @@ async def test_a_transient_failure_proposed_again_is_retried_and_may_repeat_unma
     assert mechanical.COMPILE_FAILURES_STATE_KEY not in context.state
 
 
+async def test_a_read_of_the_newest_year_that_stopped_closes_on_the_referral_it_names(
+    draft: DraftFactory, core: TranslatorCore, context_holding: ContextHolding
+) -> None:
+    stopped = {
+        "outcome": "refused",
+        "code": ProblemCode.RUN_WOULD_STOP.value,
+        "message": "stopped where the run would",
+        "action": {
+            "call": "return_to_planner",
+            "arguments": {
+                "kind": "requirement_unmeetable",
+                "requirement_id": "annual_debt_service",
+                "reason": "no data",
+                "stop_code": "no_data_at_source",
+            },
+        },
+    }
+    core = _compile_failure_core(core, [stopped])
+
+    result = await run_translate(context_holding(draft()), core=core)
+
+    referral = result["referral"]
+    assert (referral["kind"], referral["requirement_id"], referral["stop_code"]) == (
+        "requirement_unmeetable",
+        "annual_debt_service",
+        "no_data_at_source",
+    )
+
+
 # --- _resolve_dataset_sources: a settled requirement is not re-spent -------
 
 

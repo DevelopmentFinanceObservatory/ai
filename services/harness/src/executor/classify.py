@@ -296,6 +296,11 @@ class ExecutorCode(StrEnum):
     # `do_not_retry`, since the same plan resolves the same start over the
     # same data.
     ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    # The newest period a group of rolling steps resolves is before the one
+    # the plan's rolling years state (`executor.run._Run._check_anchor_held`).
+    # It travels with `do_not_retry`, since the same plan resolves the same
+    # period over the same data, and the user asks again to plan from it.
+    ROLLING_ANCHOR_BEHIND_PLAN = "rolling_anchor_behind_plan"
     # A fault of the run itself, as both servers report their own.
     INTERNAL_ERROR = "internal_error"
     # The run was stopped before it finished.
@@ -312,6 +317,16 @@ class ExecutorCode(StrEnum):
     # progress (`executor.completion.unrecorded_hand_back`).
     RUN_NOT_STARTED = "run_not_started"
     LEDGER_UNAVAILABLE = "ledger_unavailable"
+
+
+# The codes that say the harness wrote a call wrong or a server failed of
+# itself, so nothing the user asked for is wrong. They are a compiler-provable
+# code, a payload that did not parse, and an internal error, the run's own
+# (`executor.run._Run._anchor_fault`) or a server's.
+HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
+    ExecutorCode.MALFORMED_REFUSAL,
+    ExecutorCode.INTERNAL_ERROR,
+}
 
 
 # analysis-mcp's code for a newest period that is not established, and the one
@@ -392,6 +407,11 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
         failure.code == ROLLING_ANCHOR_UNRESOLVED
         and failure.fix.get("detail") != _NO_QUALIFYING_PERIOD
     )
+
+
+def is_harness_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`, `is_anchor_fault`)."""
+    return failure.code in HARNESS_FAULT_CODES or is_anchor_fault(failure)
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:
