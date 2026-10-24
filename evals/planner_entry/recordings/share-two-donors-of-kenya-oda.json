@@ -1,20 +1,20 @@
 {
   "answers": [
-    "7b9ab0b7935329e7",
-    "a2961885cb99de5c",
+    "24543a3e73e806a6",
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
     "b4008ef5e33fcdde",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-11T20:32:24+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:44+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "1f6ed6307bea979d38cc35c4e38e0da896c431ad",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
@@ -22,14 +22,19 @@
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 2519
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 4
           },
-          "trace_id": "8249a4c3143c453ab3ec4b55afa2b0ff",
+          "trace_id": "e864668cdf9c4c939cf65a756dcace7c",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -216,7 +221,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -241,7 +246,7 @@
                     "start_year": 2015
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -317,6 +322,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -879,7 +885,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -922,6 +928,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2754,7 +2761,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -3004,14 +3011,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 19,
-                "bind": 109,
-                "materialise": 177,
-                "options": 14,
+                "answer": 11,
+                "bind": 812,
+                "materialise": 173,
+                "options": 13,
+                "phase_bind": 207,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 200,
+                "phase_place_bindings": 90,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 10,
                 "recall": 1,
-                "shape": 1411
+                "shape": 461,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 88,
+                "shape_labels": 0,
+                "shape_probe": 128,
+                "shape_probe_coverage": 13
               },
-              "total": 1731
+              "total": 1978
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -3023,7 +3046,14 @@
             ]
           },
           {
-            "departures": [],
+            "assumptions": [],
+            "departures": [
+              {
+                "binding_ref": "origin:",
+                "code": "whole_total_read",
+                "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -3045,6 +3075,9 @@
                   "entities": {
                     "destination": [
                       "country/KEN"
+                    ],
+                    "origin": [
+                      "DACOfficialDonors"
                     ]
                   },
                   "identity_version": "spec1",
@@ -3091,7 +3124,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_3f7b3554eab4eda5544d04deec5fd71a"
+                "spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3"
               },
               "resolved": {
                 "alternative_measures": [
@@ -3102,6 +3135,9 @@
                         "entities": {
                           "destination": [
                             "country/KEN"
+                          ],
+                          "origin": [
+                            "DACOfficialDonors"
                           ]
                         },
                         "identity_version": "spec1",
@@ -3148,7 +3184,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_bfe6929191bfd692f20fbefbce232b0f"
+                      "spec_id": "spec_0ed7b6cb38a3f59c67edc2b9d47ebca9"
                     },
                     "label": "net disbursements",
                     "measure_axis_values": [
@@ -3188,12 +3224,12 @@
                         }
                       }
                     ],
-                    "served_rows": 786,
+                    "served_rows": 8,
                     "served_rows_exact": true
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -3212,20 +3248,20 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 775,
+                  "observation_count": 8,
                   "window": {
                     "end_year": 2022,
                     "start_year": 2015
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 775,
+                  "rows": 8,
                   "rows_exact": true,
-                  "series": 133,
+                  "series": 1,
                   "window": {
                     "end_year": 2022,
                     "start_year": 2015
@@ -3237,16 +3273,29 @@
                     "label": "Kenya",
                     "ref": "country/KEN",
                     "role": "destination"
-                  }
-                ],
-                "entity_options": [
+                  },
                   {
-                    "options": [],
-                    "role": "origin",
-                    "source": "observed",
-                    "truncated": true
+                    "entity_type": "DACGroup",
+                    "label": "official donors (DAC)",
+                    "ref": "DACOfficialDonors",
+                    "role": "origin"
                   }
                 ],
+                "entity_groups": {
+                  "origin": {
+                    "label": "official donors (DAC)",
+                    "side_classes": [
+                      "official",
+                      "private",
+                      "residual"
+                    ],
+                    "total": "DACOfficialDonors",
+                    "whole_of": [
+                      "official"
+                    ]
+                  }
+                },
+                "entity_options": [],
                 "facet_options": [
                   {
                     "axis": "provenance",
@@ -3289,6 +3338,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -3308,41 +3358,41 @@
                     "end_year": 2022,
                     "start_year": 2015
                   },
-                  "observations": 111,
+                  "observations": 1,
                   "recent_years": [
                     {
-                      "observations": 111,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 111,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 111,
+                      "series": 1,
                       "year": 2022
                     },
                     {
-                      "observations": 115,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 115,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 115,
+                      "series": 1,
                       "year": 2021
                     },
                     {
-                      "observations": 110,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 110,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 110,
+                      "series": 1,
                       "year": 2020
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 111,
+                    "financingProvider": 1,
                     "financingRecipient": 1
                   },
-                  "series": 111,
+                  "series": 1,
                   "year": 2022,
                   "year_named": true
                 },
@@ -3395,14 +3445,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Gross disbursements to Kenya from 143 providers for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
-                "role_axis_facts": [
-                  {
-                    "member_count": 143,
-                    "members_available": true,
-                    "role": "origin"
-                  }
-                ],
+                "rendered_sentence": "Gross disbursements to Kenya from official donors (DAC) for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -3447,14 +3490,16 @@
                   },
                   {
                     "binding_ref": "origin:",
-                    "entity_refs": [],
+                    "entity_refs": [
+                      "DACOfficialDonors"
+                    ],
                     "kind": "slot",
                     "role": "origin",
                     "segment": "heading",
                     "states": [
                       "origin:"
                     ],
-                    "text": "143 providers"
+                    "text": "official donors (DAC)"
                   },
                   {
                     "entity_refs": [],
@@ -3668,7 +3713,7 @@
                         "member_count": 2,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 233,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3682,7 +3727,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 737,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3695,7 +3740,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 390,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3708,7 +3753,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 113,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3721,7 +3766,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 303,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3869,7 +3914,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -3896,6 +3941,10 @@
                     {
                       "label": "Kenya",
                       "ref": "country/KEN"
+                    },
+                    {
+                      "label": "official donors (DAC)",
+                      "ref": "DACOfficialDonors"
                     }
                   ],
                   "resolved_sources": [
@@ -3904,6 +3953,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -5736,7 +5786,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -5981,19 +6031,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_3f7b3554eab4eda5544d04deec5fd71a"
+              "spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 116,
-                "bind": 677,
-                "materialise": 75,
-                "options": 19,
+                "answer": 33,
+                "bind": 100,
+                "materialise": 125,
+                "options": 120,
+                "phase_bind": 310,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 153,
+                "phase_place_bindings": 67,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 12,
                 "recall": 0,
-                "shape": 1155
+                "shape": 988,
+                "shape_admission": 1,
+                "shape_arcs": 1,
+                "shape_groups": 96,
+                "shape_labels": 0,
+                "shape_probe": 90,
+                "shape_probe_coverage": 6
               },
-              "total": 2042
+              "total": 1908
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -6001,11 +6067,6 @@
                 "code": "retrieval_score_weak",
                 "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
                 "severity": "info"
-              },
-              {
-                "code": "role_scope_defaulted",
-                "message": "no provider was named; the answer was resolved across every provider with data.",
-                "severity": "warn"
               }
             ]
           }
@@ -6015,7 +6076,7 @@
           "extract_skipped": true,
           "raw_query": "What share of the ODA Kenya received between 2015 and 2022 came from the United States and the United Kingdom together?"
         },
-        "rendered_sentence": "Gross disbursements to Kenya from United Kingdom and United States for official development assistance, 2015 to 2022. Gross disbursements to Kenya from 143 providers for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
+        "rendered_sentence": "Gross disbursements to Kenya from United Kingdom and United States for official development assistance, 2015 to 2022. Gross disbursements to Kenya from official donors (DAC) for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a. No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor'].",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -6214,7 +6275,9 @@
           },
           {
             "binding_ref": "origin:",
-            "entity_refs": [],
+            "entity_refs": [
+              "DACOfficialDonors"
+            ],
             "kind": "slot",
             "part_index": 1,
             "role": "origin",
@@ -6222,7 +6285,7 @@
             "states": [
               "origin:"
             ],
-            "text": "143 providers"
+            "text": "official donors (DAC)"
           },
           {
             "entity_refs": [],
@@ -6348,11 +6411,27 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "departure",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "departure",
+            "states": [],
+            "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
           }
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -6396,5 +6475,14 @@
       "raw_text": false
     }
   ],
-  "task": "share-two-donors-of-kenya-oda"
+  "task": "share-two-donors-of-kenya-oda",
+  "translation": {
+    "answers": [
+      "446bf851eef31c1c",
+      "8dbd191f61c2a37a",
+      "e0d42a14d979601d",
+      "ff4ca6221f6e6319"
+    ],
+    "resolved": {}
+  }
 }

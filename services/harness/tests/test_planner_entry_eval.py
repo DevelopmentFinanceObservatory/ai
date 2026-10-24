@@ -180,6 +180,28 @@ async def test_a_translation_reads_only_the_search_recorded_under_the_arguments_
     assert calls.unasked() == [asked]
 
 
+async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements_period() -> None:
+    # `rank-top-donors-malawi` pins a search answered over every year, for a
+    # requirement over 1960 to 2025. `propose_plan` moves the pin to its copy over
+    # those years only when it reads the identity the search recorded, as a studio
+    # turn's conversation holds it; the translation then confirms the copy.
+    entry.quiet_logs()
+    task = _task("rank-top-donors-malawi")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    pinned = reference.body["evidence_requirements"][0]["source_spec_id"]
+    calls = entry.TranslationCalls(
+        recording.get("translation") or {}, schemas=await validate.tool_schemas()
+    )
+
+    run = await validate.accepted_run(task, recording, reference, calls)
+
+    assert run.probe.plan is not None
+    (oda,) = (item for item in run.probe.plan.evidence_requirements if item.id == "oda")
+    assert oda.source_spec_id not in {None, pinned}
+    assert validate.translation_faults(run, calls) == []
+
+
 class _LiveClient:
     """A data-mcp client whose every call `answer` answers, keeping what it was asked."""
 
@@ -239,7 +261,8 @@ async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
 ) -> None:
     entry.quiet_logs()
     task = _task("growth-gdp-kenya")
-    recording = entry.load_recording(task.id)
+    # The translation's own answers left out, so its search goes to the live client.
+    recording = {**entry.load_recording(task.id), "translation": {}}
     client = _LiveClient(answer)
 
     with pytest.raises(recorder.TranslationRecordError) as raised:
@@ -254,7 +277,7 @@ async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
 async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
     entry.quiet_logs()
     task = _task("growth-gdp-kenya")
-    recording = entry.load_recording(task.id)
+    recording = {**entry.load_recording(task.id), "translation": {}}
     client = _LiveClient(_searched(recording["searches"][0]["envelope"]))
 
     kept = await recorder._translation_calls(client, task, recording, wall_s=60.0)

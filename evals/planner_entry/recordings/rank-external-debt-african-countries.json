@@ -1,54 +1,66 @@
 {
   "answers": [
-    "01a0cc2a686fb9b0",
+    "0805a2cf18268d6a",
     "0dcee57a75c2a178",
-    "113743857111f7b3",
-    "2bf3af0dff4bd63c",
-    "423c66e9d2b6e10c",
-    "44c6eeabe0432440",
-    "6a950965ef89cc98",
-    "6df83b30586a166b",
+    "3380b6dde6e16fda",
+    "59ce072085933201",
+    "75a010966e21e212",
     "7647e72222d88a5b",
-    "a7983453c3dd78b3",
-    "bdde37b80866fb6b",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "87fc15ef8660862d",
+    "96b1576708c248bf",
+    "a25aed12b2ed890f",
+    "b1a733a51b31d92e",
+    "b433823d1c1e4234",
+    "c0412ae0536c314d",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:57:28+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:24+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 3198,
-            "output_tokens": 458
+            "input_tokens": 0,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1885
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 3
           },
-          "trace_id": "e6ca78c568e34abd9fee76b544c5b597",
+          "trace_id": "6f7f14a4d2794810be1f0c7c184e6a36",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every creditor"
+              }
+            ],
             "departures": [
               {
                 "asked": "Africa",
                 "binding_ref": "where:",
                 "code": "entity_unavailable",
-                "text": "The data holds no values for 9 of the 59 countries and territories in Africa."
+                "text": "The data holds no values for 4 of the 54 countries in Africa."
               },
               {
                 "asked": "Africa",
                 "binding_ref": "where:",
                 "code": "group_read_as_members",
-                "text": "You asked for Africa. This shows the countries and territories in it, each on its own."
+                "text": "You asked for Africa. This shows the countries in it, each on its own."
               }
             ],
             "operations": [],
@@ -70,7 +82,6 @@
                   "entities": {
                     "destination": [
                       "country/AGO",
-                      "country/ATF",
                       "country/BDI",
                       "country/BEN",
                       "country/BFA",
@@ -86,7 +97,6 @@
                       "country/DZA",
                       "country/EGY",
                       "country/ERI",
-                      "country/ESH",
                       "country/ETH",
                       "country/GAB",
                       "country/GHA",
@@ -105,15 +115,12 @@
                       "country/MRT",
                       "country/MUS",
                       "country/MWI",
-                      "country/MYT",
                       "country/NAM",
                       "country/NER",
                       "country/NGA",
-                      "country/REU",
                       "country/RWA",
                       "country/SDN",
                       "country/SEN",
-                      "country/SHN",
                       "country/SLE",
                       "country/SOM",
                       "country/SSD",
@@ -201,7 +208,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_3c5902437015dbfe3f85f736548d2ab9"
+                "spec_id": "spec_c028a8f36889c5d8d693a0a43c37c9be"
               },
               "resolved": {
                 "available_at_place": true,
@@ -230,7 +237,7 @@
                     "start_year": 2020
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "Creative Commons Attribution License"
@@ -248,12 +255,6 @@
                     "entity_type": "Country",
                     "label": "Angola",
                     "ref": "country/AGO",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "Country",
-                    "label": "French Southern Territories",
-                    "ref": "country/ATF",
                     "role": "destination"
                   },
                   {
@@ -344,12 +345,6 @@
                     "entity_type": "Country",
                     "label": "Eritrea",
                     "ref": "country/ERI",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "Country",
-                    "label": "Western Sahara",
-                    "ref": "country/ESH",
                     "role": "destination"
                   },
                   {
@@ -461,12 +456,6 @@
                     "role": "destination"
                   },
                   {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "Mayotte",
-                    "ref": "country/MYT",
-                    "role": "destination"
-                  },
-                  {
                     "entity_type": "Country",
                     "label": "Namibia",
                     "ref": "country/NAM",
@@ -485,12 +474,6 @@
                     "role": "destination"
                   },
                   {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "R\u00e9union",
-                    "ref": "country/REU",
-                    "role": "destination"
-                  },
-                  {
                     "entity_type": "Country",
                     "label": "Rwanda",
                     "ref": "country/RWA",
@@ -506,12 +489,6 @@
                     "entity_type": "Country",
                     "label": "Senegal",
                     "ref": "country/SEN",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "Saint Helena, Ascension and Tristan da Cunha",
-                    "ref": "country/SHN",
                     "role": "destination"
                   },
                   {
@@ -648,6 +625,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                     "label": "World Bank International Debt Statistics (IDS)",
                     "ref": "provenance/WorldBankInternationalDebtStatistics",
                     "source": {
@@ -702,13 +680,13 @@
                   "year_named": true
                 },
                 "inapplicable_slots": [
-                  "guaranteeStatus",
                   "financingResource",
-                  "idsCreditorType",
-                  "maturityBand",
+                  "guaranteeStatus",
                   "idsDebtorType",
-                  "interestRateVariability",
                   "includesIMFCredit",
+                  "maturityBand",
+                  "idsCreditorType",
+                  "interestRateVariability",
                   "idsConcessionality"
                 ],
                 "measure_axis_values": [],
@@ -734,7 +712,7 @@
                     "varies": false
                   }
                 ],
-                "rendered_sentence": "Outstanding external debt of the 59 countries and territories in Africa owed to all creditors, 2020 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+                "rendered_sentence": "Outstanding external debt of the 54 countries in Africa owed to all creditors, 2020 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -761,7 +739,6 @@
                     "binding_ref": "where:",
                     "entity_refs": [
                       "country/AGO",
-                      "country/ATF",
                       "country/BDI",
                       "country/BEN",
                       "country/BFA",
@@ -777,7 +754,6 @@
                       "country/DZA",
                       "country/EGY",
                       "country/ERI",
-                      "country/ESH",
                       "country/ETH",
                       "country/GAB",
                       "country/GHA",
@@ -796,15 +772,12 @@
                       "country/MRT",
                       "country/MUS",
                       "country/MWI",
-                      "country/MYT",
                       "country/NAM",
                       "country/NER",
                       "country/NGA",
-                      "country/REU",
                       "country/RWA",
                       "country/SDN",
                       "country/SEN",
-                      "country/SHN",
                       "country/SLE",
                       "country/SOM",
                       "country/SSD",
@@ -826,7 +799,7 @@
                     "states": [
                       "where:"
                     ],
-                    "text": "the 59 countries and territories in Africa"
+                    "text": "the 54 countries in Africa"
                   },
                   {
                     "entity_refs": [],
@@ -1012,7 +985,7 @@
                       "label": "Development Finance Observatory"
                     }
                   ],
-                  "label": "Outstanding external debt (current US$)",
+                  "label": "Outstanding external debt",
                   "measured_property": {
                     "label": "amount",
                     "ref": "amount"
@@ -1023,7 +996,7 @@
                     "ref": "Nominal"
                   },
                   "member_count": 80,
-                  "member_digest": "a11630107897847c45034a414110165b3fab873e2ac4441764a3ee795d79d6ed",
+                  "member_digest": "fb9237eac1f5cea5823f3e2361e4bad0ad648877dad3b04a002fc9d55a17d30f",
                   "population_type": {
                     "label": "financial position",
                     "ref": "FinancialPosition"
@@ -1041,14 +1014,6 @@
                     },
                     {
                       "axis": "how",
-                      "label": "guarantee status",
-                      "property": {
-                        "label": "guarantee status",
-                        "ref": "guaranteeStatus"
-                      }
-                    },
-                    {
-                      "axis": "how",
                       "label": "financing resource",
                       "property": {
                         "label": "financing resource",
@@ -1057,18 +1022,10 @@
                     },
                     {
                       "axis": "how",
-                      "label": "IDS creditor type",
+                      "label": "guarantee status",
                       "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
-                      }
-                    },
-                    {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
                       }
                     },
                     {
@@ -1081,18 +1038,34 @@
                     },
                     {
                       "axis": "how",
-                      "label": "interest rate variability",
-                      "property": {
-                        "label": "interest rate variability",
-                        "ref": "interestRateVariability"
-                      }
-                    },
-                    {
-                      "axis": "how",
                       "label": "includes IMF credit",
                       "property": {
                         "label": "includes IMF credit",
                         "ref": "includesIMFCredit"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
                       }
                     },
                     {
@@ -1158,6 +1131,28 @@
                           },
                           "value_kind": "enum_value"
                         }
+                      },
+                      {
+                        "served_rows": 711,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "interest arrears",
+                            "ref": "InterestArrears"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 711,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "principal arrears",
+                            "ref": "PrincipalArrears"
+                          },
+                          "value_kind": "enum_value"
+                        }
                       }
                     ],
                     "source": "observed",
@@ -1180,6 +1175,158 @@
                           "ref": {
                             "label": "public or publicly guaranteed",
                             "ref": "PublicOrPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 32,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "publicly guaranteed",
+                            "ref": "PubliclyGuaranteedClaim"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 152,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "not publicly guaranteed",
+                            "ref": "NotPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS debtor type",
+                      "property": {
+                        "label": "IDS debtor type",
+                        "ref": "idsDebtorType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 250,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "general government (IDS debtor type)",
+                            "ref": "IDSDebtorTypeGG"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 74,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "central bank (IDS debtor type)",
+                            "ref": "IDSDebtorTypeCB"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 250,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 346,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePrivateSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 179,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypeOPS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "includes IMF credit",
+                      "property": {
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 750,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "without IMF credit",
+                            "ref": "WithoutIMFCredit"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 1162,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "long-term maturity",
+                            "ref": "LongTermMaturity"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 250,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "short-term maturity",
+                            "ref": "ShortTermMaturity"
                           },
                           "value_kind": "enum_value"
                         }
@@ -1210,23 +1357,23 @@
                         }
                       },
                       {
-                        "served_rows": 824,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "private creditors (IDS creditor type)",
-                            "ref": "IDSCreditorTypePRVT"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
                         "served_rows": 180,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "commercial banks (IDS creditor type)",
                             "ref": "IDSCreditorTypePCBK"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 824,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePRVT"
                           },
                           "value_kind": "enum_value"
                         }
@@ -1243,6 +1390,28 @@
                         }
                       },
                       {
+                        "served_rows": 250,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeBLAT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 250,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "multilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeMLAT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
                         "served_rows": 111,
                         "served_rows_exact": true,
                         "value": {
@@ -1252,86 +1421,14 @@
                           },
                           "value_kind": "enum_value"
                         }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 250,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "short-term maturity",
-                            "ref": "ShortTermMaturity"
-                          },
-                          "value_kind": "enum_value"
-                        }
                       },
                       {
-                        "served_rows": 1162,
+                        "served_rows": 147,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
-                            "label": "long-term maturity",
-                            "ref": "LongTermMaturity"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "IDS debtor type",
-                      "property": {
-                        "label": "IDS debtor type",
-                        "ref": "idsDebtorType"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 1573,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "general government (IDS debtor type)",
-                            "ref": "IDSDebtorTypeGG"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 1858,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "public sector (IDS debtor type)",
-                            "ref": "IDSDebtorTypePS"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 835,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "other public sector (IDS debtor type)",
-                            "ref": "IDSDebtorTypeOPS"
+                            "label": "commercial banks or other private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePNGC"
                           },
                           "value_kind": "enum_value"
                         }
@@ -1357,31 +1454,6 @@
                           "ref": {
                             "label": "variable interest rate",
                             "ref": "VariableInterestRate"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "includes IMF credit",
-                      "property": {
-                        "label": "includes IMF credit",
-                        "ref": "includesIMFCredit"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 750,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "without IMF credit",
-                            "ref": "WithoutIMFCredit"
                           },
                           "value_kind": "enum_value"
                         }
@@ -1437,20 +1509,6 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "guarantee status",
-                      "property": {
-                        "label": "guarantee status",
-                        "ref": "guaranteeStatus"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "how",
                       "label": "financing resource",
                       "property": {
                         "label": "financing resource",
@@ -1465,24 +1523,10 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "IDS creditor type",
+                      "label": "guarantee status",
                       "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
                       }
                     },
                     "summable": false
@@ -1507,10 +1551,10 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "interest rate variability",
+                      "label": "includes IMF credit",
                       "property": {
-                        "label": "interest rate variability",
-                        "ref": "interestRateVariability"
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
                       }
                     },
                     "summable": false
@@ -1521,10 +1565,38 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "includes IMF credit",
+                      "label": "maturity band",
                       "property": {
-                        "label": "includes IMF credit",
-                        "ref": "includesIMFCredit"
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
                       }
                     },
                     "summable": false
@@ -1551,13 +1623,6 @@
                           "ref": {
                             "label": "Angola",
                             "ref": "country/AGO"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "French Southern Territories",
-                            "ref": "country/ATF"
                           },
                           "value_kind": "entity"
                         },
@@ -1663,13 +1728,6 @@
                           "ref": {
                             "label": "Eritrea",
                             "ref": "country/ERI"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "Western Sahara",
-                            "ref": "country/ESH"
                           },
                           "value_kind": "entity"
                         },
@@ -1801,13 +1859,6 @@
                         },
                         {
                           "ref": {
-                            "label": "Mayotte",
-                            "ref": "country/MYT"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
                             "label": "Namibia",
                             "ref": "country/NAM"
                           },
@@ -1829,13 +1880,6 @@
                         },
                         {
                           "ref": {
-                            "label": "R\u00e9union",
-                            "ref": "country/REU"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
                             "label": "Rwanda",
                             "ref": "country/RWA"
                           },
@@ -1852,13 +1896,6 @@
                           "ref": {
                             "label": "Senegal",
                             "ref": "country/SEN"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "Saint Helena, Ascension and Tristan da Cunha",
-                            "ref": "country/SHN"
                           },
                           "value_kind": "entity"
                         },
@@ -2003,10 +2040,17 @@
                   },
                   "member_count": 1,
                   "member_count_exact": false,
-                  "served_count": 1
+                  "served_count": 1,
+                  "source_codes": [
+                    {
+                      "code": "DT.DOD.DECT.CD",
+                      "exact": true,
+                      "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                    }
+                  ]
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -2020,10 +2064,6 @@
                     {
                       "label": "Angola",
                       "ref": "country/AGO"
-                    },
-                    {
-                      "label": "French Southern Territories",
-                      "ref": "country/ATF"
                     },
                     {
                       "label": "Burundi",
@@ -2084,10 +2124,6 @@
                     {
                       "label": "Eritrea",
                       "ref": "country/ERI"
-                    },
-                    {
-                      "label": "Western Sahara",
-                      "ref": "country/ESH"
                     },
                     {
                       "label": "Ethiopia",
@@ -2162,10 +2198,6 @@
                       "ref": "country/MWI"
                     },
                     {
-                      "label": "Mayotte",
-                      "ref": "country/MYT"
-                    },
-                    {
                       "label": "Namibia",
                       "ref": "country/NAM"
                     },
@@ -2178,10 +2210,6 @@
                       "ref": "country/NGA"
                     },
                     {
-                      "label": "R\u00e9union",
-                      "ref": "country/REU"
-                    },
-                    {
                       "label": "Rwanda",
                       "ref": "country/RWA"
                     },
@@ -2192,10 +2220,6 @@
                     {
                       "label": "Senegal",
                       "ref": "country/SEN"
-                    },
-                    {
-                      "label": "Saint Helena, Ascension and Tristan da Cunha",
-                      "ref": "country/SHN"
                     },
                     {
                       "label": "Sierra Leone",
@@ -2260,6 +2284,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                       "label": "World Bank International Debt Statistics (IDS)",
                       "ref": "provenance/WorldBankInternationalDebtStatistics",
                       "source": {
@@ -2286,19 +2311,6 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "guarantee status",
-                        "property": {
-                          "label": "guarantee status",
-                          "ref": "guaranteeStatus"
-                        }
-                      },
-                      "provenance": "binder",
-                      "refs": []
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "how",
                         "label": "financing resource",
                         "property": {
                           "label": "financing resource",
@@ -2312,23 +2324,10 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "IDS creditor type",
+                        "label": "guarantee status",
                         "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      "provenance": "binder",
-                      "refs": []
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "how",
-                        "label": "maturity band",
-                        "property": {
-                          "label": "maturity band",
-                          "ref": "maturityBand"
+                          "label": "guarantee status",
+                          "ref": "guaranteeStatus"
                         }
                       },
                       "provenance": "binder",
@@ -2351,10 +2350,10 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "interest rate variability",
+                        "label": "includes IMF credit",
                         "property": {
-                          "label": "interest rate variability",
-                          "ref": "interestRateVariability"
+                          "label": "includes IMF credit",
+                          "ref": "includesIMFCredit"
                         }
                       },
                       "provenance": "binder",
@@ -2364,10 +2363,36 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "includes IMF credit",
+                        "label": "maturity band",
                         "property": {
-                          "label": "includes IMF credit",
-                          "ref": "includesIMFCredit"
+                          "label": "maturity band",
+                          "ref": "maturityBand"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "IDS creditor type",
+                        "property": {
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "interest rate variability",
+                        "property": {
+                          "label": "interest rate variability",
+                          "ref": "interestRateVariability"
                         }
                       },
                       "provenance": "binder",
@@ -2397,10 +2422,6 @@
                         {
                           "label": "Angola",
                           "ref": "country/AGO"
-                        },
-                        {
-                          "label": "French Southern Territories",
-                          "ref": "country/ATF"
                         },
                         {
                           "label": "Burundi",
@@ -2461,10 +2482,6 @@
                         {
                           "label": "Eritrea",
                           "ref": "country/ERI"
-                        },
-                        {
-                          "label": "Western Sahara",
-                          "ref": "country/ESH"
                         },
                         {
                           "label": "Ethiopia",
@@ -2539,10 +2556,6 @@
                           "ref": "country/MWI"
                         },
                         {
-                          "label": "Mayotte",
-                          "ref": "country/MYT"
-                        },
-                        {
                           "label": "Namibia",
                           "ref": "country/NAM"
                         },
@@ -2555,10 +2568,6 @@
                           "ref": "country/NGA"
                         },
                         {
-                          "label": "R\u00e9union",
-                          "ref": "country/REU"
-                        },
-                        {
                           "label": "Rwanda",
                           "ref": "country/RWA"
                         },
@@ -2569,10 +2578,6 @@
                         {
                           "label": "Senegal",
                           "ref": "country/SEN"
-                        },
-                        {
-                          "label": "Saint Helena, Ascension and Tristan da Cunha",
-                          "ref": "country/SHN"
                         },
                         {
                           "label": "Sierra Leone",
@@ -2654,19 +2659,34 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_3c5902437015dbfe3f85f736548d2ab9"
+              "spec_id": "spec_c028a8f36889c5d8d693a0a43c37c9be"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 13,
-                "bind": 1553,
-                "materialise": 42,
-                "options": 26,
-                "recall": 0,
-                "shape": 150
+                "answer": 9,
+                "bind": 132,
+                "materialise": 20,
+                "options": 36,
+                "phase_bind": 33,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 15,
+                "phase_place_bindings": 14,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 22,
+                "phase_settle": 31,
+                "recall": 315,
+                "shape": 228,
+                "shape_admission": 0,
+                "shape_arcs": 2,
+                "shape_groups": 7,
+                "shape_labels": 1,
+                "shape_probe": 0
               },
-              "total": 1784
+              "total": 855
             },
             "variable_text": "external debt",
             "warnings": []
@@ -2677,7 +2697,7 @@
           "extract_skipped": true,
           "raw_query": "Compare external debt across every African country, all at once, 2020 to 2024"
         },
-        "rendered_sentence": "Outstanding external debt of the 59 countries and territories in Africa owed to all creditors, 2020 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS). The data holds no values for 9 of the 59 countries and territories in Africa. You asked for Africa. This shows the countries and territories in it, each on its own.",
+        "rendered_sentence": "Outstanding external debt of the 54 countries in Africa owed to all creditors, 2020 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS). The data holds no values for 4 of the 54 countries in Africa. You asked for Africa. This shows the countries in it, each on its own. Assumed: every creditor.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -2805,7 +2825,6 @@
             "binding_ref": "where:",
             "entity_refs": [
               "country/AGO",
-              "country/ATF",
               "country/BDI",
               "country/BEN",
               "country/BFA",
@@ -2821,7 +2840,6 @@
               "country/DZA",
               "country/EGY",
               "country/ERI",
-              "country/ESH",
               "country/ETH",
               "country/GAB",
               "country/GHA",
@@ -2840,15 +2858,12 @@
               "country/MRT",
               "country/MUS",
               "country/MWI",
-              "country/MYT",
               "country/NAM",
               "country/NER",
               "country/NGA",
-              "country/REU",
               "country/RWA",
               "country/SDN",
               "country/SEN",
-              "country/SHN",
               "country/SLE",
               "country/SOM",
               "country/SSD",
@@ -2870,7 +2885,7 @@
             "states": [
               "where:"
             ],
-            "text": "the 59 countries and territories in Africa"
+            "text": "the 54 countries in Africa"
           },
           {
             "entity_refs": [],
@@ -2972,7 +2987,7 @@
             "part_index": 0,
             "segment": "departure",
             "states": [],
-            "text": "The data holds no values for 9 of the 59 countries and territories in Africa."
+            "text": "The data holds no values for 4 of the 54 countries in Africa."
           },
           {
             "entity_refs": [],
@@ -2988,24 +3003,56 @@
             "part_index": 0,
             "segment": "departure",
             "states": [],
-            "text": "You asked for Africa. This shows the countries and territories in it, each on its own."
+            "text": "You asked for Africa. This shows the countries in it, each on its own."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "every creditor"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "debt-ids": {
-            "content_version": "sha256:f937d0aa236f65365f738709e13d4d5f4b97a4a5dc82e90e5b613f2d90e07116",
+            "content_version": "sha256:80754856ac73dcb10bcd37b958cfd7cbb6782f276d2ce1da64dbfeadb45d56f6",
             "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
             "id": "debt-ids",
             "name": "debt-ids"
           },
           "debt-profile": {
-            "content_version": "sha256:17795d00b244871293864f0df3ac39e9b491fe4dafe44b1ef9c23a1d6f8d4c9c",
+            "content_version": "sha256:bfc64969fb95497bfbfe65fefcde1628ae7b83ad5d61f12a5bc9eb7292fcdb7b",
             "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
             "id": "debt-profile",
             "name": "debt-profile"
           },
           "debt-sustainability": {
-            "content_version": "sha256:2268e9638b27fd5aadde4c4d36ff05283e44fdd61fd547e9dfb34d200f0a16d8",
+            "content_version": "sha256:fc0168e253a3390966eb9b48bb33d317233ffcfb063eb47bf66dc85efaa82052",
             "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
             "id": "debt-sustainability",
             "name": "debt-sustainability"
@@ -3029,5 +3076,9 @@
       "raw_text": false
     }
   ],
-  "task": "rank-external-debt-african-countries"
+  "task": "rank-external-debt-african-countries",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

@@ -62,16 +62,17 @@
           {
             "name": "Uganda",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_e252e254ec3c99261cd035db0f5db327"
       },
       {
         "kind": "aggregate",
@@ -125,16 +126,17 @@
               {
                 "name": "Uganda",
                 "role": "recipient"
+              },
+              {
+                "name": "official donors (DAC)",
+                "role": "donor"
               }
             ],
             "period": {
               "start": 2015,
               "end": 2022
             },
-            "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
-            "across": [
-              "donor"
-            ]
+            "source_spec_id": "spec_e252e254ec3c99261cd035db0f5db327"
           },
           {
             "kind": "aggregate",

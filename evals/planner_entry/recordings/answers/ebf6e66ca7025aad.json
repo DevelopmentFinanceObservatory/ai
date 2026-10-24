@@ -1,0 +1,22 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "frontmatter": {
+        "description": "Context for choosing the dataset that answers an ODA or development finance question. Summarises what each dataset covers, which breakdowns each supports, and how their totals relate.",
+        "license": "CC-BY-4.0",
+        "name": "oda-dataset-selection"
+      },
+      "resources": [
+        {
+          "digest": "sha256:d2504dfafdbf281bd000dc12bc3101cc475ad9ba0ca2de058fd753e53d2a73f1",
+          "size": 2957,
+          "uri": "skill://oda-dataset-selection/SKILL.md"
+        }
+      ],
+      "uri": "skill://oda-dataset-selection/SKILL.md"
+    },
+    "text": "---\nname: oda-dataset-selection\ndescription: >-\n  Context for choosing the dataset that answers an ODA or development finance question. Summarises what each dataset covers, which breakdowns each supports, and how their totals relate.\nlicense: CC-BY-4.0\n---\n\n# Choosing an ODA dataset\n\n## What each dataset answers\n\n- DAC1 answers how much a donor or donor group gives in total: official headline ODA, ODA/GNI, the bilateral and multilateral split, core contributions by agency family, and spending that goes to no recipient, such as in-donor refugee costs. Skill: oda-dac1.\n- DAC2A answers how much ODA a country or region receives and from whom, including multilateral agencies' disbursements and the OECD's attribution of core multilateral contributions to recipients. Skill: oda-dac2a.\n- DAC2B answers how much non-concessional official lending and export credit a recipient or region receives. Skill: oda-dac2b.\n- The CRS answers any question that needs a sector or subsector, a channel, an agency, a project, or a donor, recipient, and sector together, and contains multilateral organisations' own spending by sector. It includes grant-equivalent values from 2018 alongside flows. Skill: oda-crs.\n- ONE's imputed multilateral sectors dataset answers how much of a provider's core multilateral contributions reaches each sector and recipient. Skill: oda-imputed-multilateral-sectors.\n\n## Breakdowns by dataset\n\n| Required breakdown | Dataset |\n| --- | --- |\n| Total ODA by donor, ODA/GNI, in-donor costs | DAC1 |\n| Grant-equivalent totals by donor | DAC1 |\n| Core contributions to multilaterals | DAC1 |\n| ODA by donor and recipient country or region | DAC2A |\n| Imputed multilateral ODA by recipient | DAC2A or ONE imputed multilateral sectors |\n| Imputed multilateral ODA by sector or purpose | ONE imputed multilateral sectors |\n| OOF or export credits by recipient | DAC2B |\n| ODA by donor, recipient and sector together | CRS |\n| ODA by channel of delivery, agency or project | CRS |\n| Grant-equivalent figures at activity level | CRS |\n| A donor's sector spending including its multilateral share | CRS bilateral sector ODA plus ONE imputed multilateral sectors |\n\n## How totals relate\n\nThe datasets describe the same flows at different levels of detail, and their totals rarely match, so one question is best answered from one dataset. The exception is the combination in the last row of the table above.\n\nDAC1 is the official total, and recipient- and sector-level datasets come close to it without matching. From 2018 the gap also reflects DAC1's grant-equivalent headline against their cash-basis flows.\n\n## Regions across datasets\n\n\"Africa\" differs by dataset. The OECD DAC tables' Africa region includes North Africa. The World Bank's debt data report Sub-Saharan Africa without it. ONE's debt analysis uses every African country except high-income ones. A question that combines aid and debt for Africa needs one country set on both sides.\n"
+  },
+  "call": "get_skill {\"skill_id\":\"oda-dataset-selection\"}"
+}

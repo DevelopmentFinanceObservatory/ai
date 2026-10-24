@@ -1,41 +1,47 @@
 {
   "answers": [
-    "01a0cc2a686fb9b0",
+    "0805a2cf18268d6a",
     "0dcee57a75c2a178",
-    "113743857111f7b3",
-    "2bf3af0dff4bd63c",
-    "423c66e9d2b6e10c",
-    "44c6eeabe0432440",
-    "6df83b30586a166b",
+    "3380b6dde6e16fda",
+    "59ce072085933201",
     "7647e72222d88a5b",
-    "a7983453c3dd78b3",
-    "bdde37b80866fb6b",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "87fc15ef8660862d",
+    "96b1576708c248bf",
+    "a25aed12b2ed890f",
+    "b1a733a51b31d92e",
+    "b433823d1c1e4234",
+    "c0412ae0536c314d",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:33+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:33:33+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 4835,
-            "output_tokens": 576
+            "input_tokens": 0,
+            "jev_input_tokens": 15170,
+            "jev_output_tokens": 3526,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 3900
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 1284
           },
-          "trace_id": "8b38f384ff0049afa41218817ef35ba9",
+          "trace_id": "ea845db1ef78442db0535a9bfec43b0f",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "no_data": {
               "ambiguous_entities": [],
@@ -68,7 +74,8 @@
                     "slots": [
                       {
                         "binding": {
-                          "state": "unbound"
+                          "ref": "Disbursement",
+                          "state": "value"
                         },
                         "property": "financialFlowType"
                       },
@@ -130,7 +137,7 @@
                     ]
                   },
                   "schema_version": 1,
-                  "spec_id": "spec_558a0a0187afec132cf1ade86244f345"
+                  "spec_id": "spec_e6bd3b4da126bdbba821db7e7a818c65"
                 },
                 "resolved": {
                   "available_at_place": true,
@@ -159,7 +166,7 @@
                       "start_year": 2024
                     }
                   },
-                  "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                  "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                   "download": {
                     "licence": {
                       "label": "Creative Commons Attribution License"
@@ -195,6 +202,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                       "label": "World Bank International Debt Statistics (IDS)",
                       "ref": "provenance/WorldBankInternationalDebtStatistics",
                       "source": {
@@ -254,31 +262,12 @@
                     "guaranteeStatus",
                     "financingResource",
                     "idsConcessionality",
-                    "idsCreditorType",
-                    "idsDebtorType"
+                    "idsDebtorType",
+                    "idsCreditorType"
                   ],
                   "measure_axis_values": [],
                   "measure_label_axes": [],
                   "open_axis_facts": [
-                    {
-                      "distinct_count": 1,
-                      "property": "financialFlowType",
-                      "undeclared_count": 0,
-                      "value": {
-                        "label": "disbursement",
-                        "ref": "Disbursement"
-                      },
-                      "values": [
-                        {
-                          "count": 2,
-                          "value": {
-                            "label": "disbursement",
-                            "ref": "Disbursement"
-                          }
-                        }
-                      ],
-                      "varies": false
-                    },
                     {
                       "distinct_count": 2,
                       "property": "netOf",
@@ -302,7 +291,7 @@
                       "varies": true
                     }
                   ],
-                  "rendered_sentence": "Kenya's financial flow from China for net for disbursement in 2024. Latest year with data \u00b7 Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+                  "rendered_sentence": "Kenya's financial flow from China for disbursement for net in 2024. Latest year with data \u00b7 Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
                   "sentence_plan": [
                     {
                       "axis": "where",
@@ -369,15 +358,15 @@
                     },
                     {
                       "axis": "how",
-                      "binding_ref": "how:nettingBasis",
+                      "binding_ref": "how:financialFlowType",
                       "entity_refs": [],
                       "kind": "slot",
-                      "property_dcid": "nettingBasis",
+                      "property_dcid": "financialFlowType",
                       "segment": "heading",
                       "states": [
-                        "how:nettingBasis"
+                        "how:financialFlowType"
                       ],
-                      "text": "net"
+                      "text": "disbursement"
                     },
                     {
                       "entity_refs": [],
@@ -388,15 +377,15 @@
                     },
                     {
                       "axis": "how",
-                      "binding_ref": "how:financialFlowType",
+                      "binding_ref": "how:nettingBasis",
                       "entity_refs": [],
                       "kind": "slot",
-                      "property_dcid": "financialFlowType",
+                      "property_dcid": "nettingBasis",
                       "segment": "heading",
                       "states": [
-                        "how:financialFlowType"
+                        "how:nettingBasis"
                       ],
-                      "text": "disbursement"
+                      "text": "net"
                     },
                     {
                       "axis": "how",
@@ -568,7 +557,7 @@
                         "label": "Development Finance Observatory"
                       }
                     ],
-                    "label": "Net flows on external debt, by creditor (current US$)",
+                    "label": "Net flows on external debt, by creditor",
                     "measured_property": {
                       "label": "amount",
                       "ref": "amount"
@@ -579,7 +568,7 @@
                       "ref": "Nominal"
                     },
                     "member_count": 139,
-                    "member_digest": "fbcaf907680bfec3e98218852aaf330406709b1d74a111fcd2c944478fae140f",
+                    "member_digest": "972e9c0a8e89f6bcbedaf9c6380b2bdbf017ec602040839b79a019b73680ea53",
                     "population_type": {
                       "label": "financial flow",
                       "ref": "FinancialFlow"
@@ -653,18 +642,18 @@
                       },
                       {
                         "axis": "how",
-                        "label": "IDS creditor type",
-                        "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      {
-                        "axis": "how",
                         "label": "IDS debtor type",
                         "property": {
                           "label": "IDS debtor type",
                           "ref": "idsDebtorType"
+                        }
+                      },
+                      {
+                        "axis": "how",
+                        "label": "IDS creditor type",
+                        "property": {
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
                         }
                       },
                       {
@@ -702,8 +691,6 @@
                       },
                       "options": [
                         {
-                          "served_rows": 2,
-                          "served_rows_exact": true,
                           "value": {
                             "ref": {
                               "label": "disbursement",
@@ -876,6 +863,56 @@
                     {
                       "key": {
                         "axis": "how",
+                        "label": "IDS concessionality",
+                        "property": {
+                          "label": "IDS concessionality",
+                          "ref": "idsConcessionality"
+                        }
+                      },
+                      "options": [
+                        {
+                          "served_rows": 2,
+                          "served_rows_exact": true,
+                          "value": {
+                            "ref": {
+                              "label": "concessional (IDS concessionality)",
+                              "ref": "IDSConcessional"
+                            },
+                            "value_kind": "enum_value"
+                          }
+                        }
+                      ],
+                      "source": "observed",
+                      "truncated": true
+                    },
+                    {
+                      "key": {
+                        "axis": "how",
+                        "label": "IDS debtor type",
+                        "property": {
+                          "label": "IDS debtor type",
+                          "ref": "idsDebtorType"
+                        }
+                      },
+                      "options": [
+                        {
+                          "served_rows": 2,
+                          "served_rows_exact": true,
+                          "value": {
+                            "ref": {
+                              "label": "general government (IDS debtor type)",
+                              "ref": "IDSDebtorTypeGG"
+                            },
+                            "value_kind": "enum_value"
+                          }
+                        }
+                      ],
+                      "source": "observed",
+                      "truncated": true
+                    },
+                    {
+                      "key": {
+                        "axis": "how",
                         "label": "IDS creditor type",
                         "property": {
                           "label": "IDS creditor type",
@@ -899,6 +936,17 @@
                           "served_rows_exact": true,
                           "value": {
                             "ref": {
+                              "label": "private creditors (IDS creditor type)",
+                              "ref": "IDSCreditorTypePRVT"
+                            },
+                            "value_kind": "enum_value"
+                          }
+                        },
+                        {
+                          "served_rows": 2,
+                          "served_rows_exact": true,
+                          "value": {
+                            "ref": {
                               "label": "other private creditors (IDS creditor type)",
                               "ref": "IDSCreditorTypePROP"
                             },
@@ -910,33 +958,8 @@
                           "served_rows_exact": true,
                           "value": {
                             "ref": {
-                              "label": "private creditors (IDS creditor type)",
-                              "ref": "IDSCreditorTypePRVT"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS debtor type",
-                        "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
-                        }
-                      },
-                      "options": [
-                        {
-                          "served_rows": 10,
-                          "served_rows_exact": true,
-                          "value": {
-                            "ref": {
-                              "label": "general government (IDS debtor type)",
-                              "ref": "IDSDebtorTypeGG"
+                              "label": "bilateral (IDS creditor type)",
+                              "ref": "IDSCreditorTypeBLAT"
                             },
                             "value_kind": "enum_value"
                           }
@@ -949,7 +972,14 @@
                   "slots": [
                     {
                       "binding": {
-                        "kind": "unbound"
+                        "kind": "value",
+                        "value": {
+                          "ref": {
+                            "label": "disbursement",
+                            "ref": "Disbursement"
+                          },
+                          "value_kind": "enum_value"
+                        }
                       },
                       "key": {
                         "axis": "how",
@@ -1072,10 +1102,10 @@
                       },
                       "key": {
                         "axis": "how",
-                        "label": "IDS creditor type",
+                        "label": "IDS debtor type",
                         "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
+                          "label": "IDS debtor type",
+                          "ref": "idsDebtorType"
                         }
                       },
                       "summable": false
@@ -1086,10 +1116,10 @@
                       },
                       "key": {
                         "axis": "how",
-                        "label": "IDS debtor type",
+                        "label": "IDS creditor type",
                         "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
                         }
                       },
                       "summable": false
@@ -1146,10 +1176,20 @@
                     },
                     "member_count": 2,
                     "member_count_exact": false,
-                    "served_count": 2
+                    "served_count": 2,
+                    "source_codes": [
+                      {
+                        "code": "DT.NFL.DECT.CD",
+                        "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                      },
+                      {
+                        "code": "DT.NTR.DECT.CD",
+                        "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                      }
+                    ]
                   },
                   "trace": {
-                    "capability_version": "cap_daf889452657d56d",
+                    "capability_version": "cap_94e25737d859392c",
                     "default_reading": {
                       "applied": true,
                       "removed_stat_vars": []
@@ -1157,8 +1197,11 @@
                     "query_qualifiers": [
                       {
                         "disposition": "no_vocabulary",
+                        "end": 10,
+                        "evidence": "uncovered",
                         "named": [],
                         "selected": [],
+                        "start": 0,
                         "text": "cumulative"
                       }
                     ],
@@ -1179,6 +1222,7 @@
                           "id": "dfo",
                           "label": "Development Finance Observatory"
                         },
+                        "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                         "label": "World Bank International Debt Statistics (IDS)",
                         "ref": "provenance/WorldBankInternationalDebtStatistics",
                         "source": {
@@ -1189,7 +1233,7 @@
                     ],
                     "slot_filters": [
                       {
-                        "binding_kind": "unbound",
+                        "binding_kind": "value",
                         "key": {
                           "axis": "how",
                           "label": "financial flow type",
@@ -1199,7 +1243,12 @@
                           }
                         },
                         "provenance": "binder",
-                        "refs": []
+                        "refs": [
+                          {
+                            "label": "disbursement",
+                            "ref": "Disbursement"
+                          }
+                        ]
                       },
                       {
                         "binding_kind": "unbound",
@@ -1301,10 +1350,10 @@
                         "binding_kind": "unbound",
                         "key": {
                           "axis": "how",
-                          "label": "IDS creditor type",
+                          "label": "IDS debtor type",
                           "property": {
-                            "label": "IDS creditor type",
-                            "ref": "idsCreditorType"
+                            "label": "IDS debtor type",
+                            "ref": "idsDebtorType"
                           }
                         },
                         "provenance": "binder",
@@ -1314,10 +1363,10 @@
                         "binding_kind": "unbound",
                         "key": {
                           "axis": "how",
-                          "label": "IDS debtor type",
+                          "label": "IDS creditor type",
                           "property": {
-                            "label": "IDS debtor type",
-                            "ref": "idsDebtorType"
+                            "label": "IDS creditor type",
+                            "ref": "idsCreditorType"
                           }
                         },
                         "provenance": "binder",
@@ -2323,7 +2372,7 @@
                         "noun": "Lebanese pounds"
                       },
                       {
-                        "base_year_max": 2024,
+                        "base_year_max": 2025,
                         "base_year_min": 1980,
                         "code": "LKR",
                         "constant_years": {
@@ -3322,16 +3371,20 @@
                   },
                   "unresolved_slots": []
                 },
-                "spec_id": "spec_558a0a0187afec132cf1ade86244f345"
+                "spec_id": "spec_e6bd3b4da126bdbba821db7e7a818c65"
               },
               "message": "\"cumulative\" is not a distinction this data records. Try the question without it.",
+              "options": [],
               "reason": "qualifier_not_bound",
               "source_terms": [],
               "unbound_qualifiers": [
                 {
                   "disposition": "no_vocabulary",
+                  "end": 10,
+                  "evidence": "uncovered",
                   "named": [],
                   "selected": [],
+                  "start": 0,
                   "text": "cumulative"
                 }
               ]
@@ -3366,14 +3419,30 @@
             "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "answer": 107,
-                "bind": 2317,
-                "materialise": 23,
-                "options": 32,
-                "recall": 482,
-                "shape": 608
+                "answer": 3,
+                "bind": 345,
+                "materialise": 20,
+                "options": 51,
+                "phase_bind": 22,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 48,
+                "phase_place_bindings": 23,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 97,
+                "recall": 359,
+                "shape": 315,
+                "shape_admission": 1,
+                "shape_arcs": 3,
+                "shape_groups": 3,
+                "shape_labels": 1,
+                "shape_probe": 144,
+                "shape_probe_coverage": 7
               },
-              "total": 3569
+              "total": 1283
             },
             "variable_text": "cumulative net flow of external debt",
             "warnings": [
@@ -3404,19 +3473,19 @@
         ],
         "skills": {
           "debt-ids": {
-            "content_version": "sha256:f937d0aa236f65365f738709e13d4d5f4b97a4a5dc82e90e5b613f2d90e07116",
+            "content_version": "sha256:80754856ac73dcb10bcd37b958cfd7cbb6782f276d2ce1da64dbfeadb45d56f6",
             "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
             "id": "debt-ids",
             "name": "debt-ids"
           },
           "debt-profile": {
-            "content_version": "sha256:17795d00b244871293864f0df3ac39e9b491fe4dafe44b1ef9c23a1d6f8d4c9c",
+            "content_version": "sha256:bfc64969fb95497bfbfe65fefcde1628ae7b83ad5d61f12a5bc9eb7292fcdb7b",
             "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
             "id": "debt-profile",
             "name": "debt-profile"
           },
           "debt-sustainability": {
-            "content_version": "sha256:2268e9638b27fd5aadde4c4d36ff05283e44fdd61fd547e9dfb34d200f0a16d8",
+            "content_version": "sha256:fc0168e253a3390966eb9b48bb33d317233ffcfb063eb47bf66dc85efaa82052",
             "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
             "id": "debt-sustainability",
             "name": "debt-sustainability"
@@ -3446,2498 +3515,42 @@
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 5037,
-            "output_tokens": 584
+            "input_tokens": 0,
+            "jev_input_tokens": 10583,
+            "jev_output_tokens": 2267,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 4314
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 984
           },
-          "trace_id": "282fade5f7304548877cc99615beed9e",
+          "trace_id": "b9af63f73b6744bb97504520f89a0dcd",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "no_data": {
               "ambiguous_entities": [],
               "ambiguous_sources": [],
-              "category": "absent",
-              "elected_count": 1,
+              "category": "unresolved",
               "entity_terms": [],
-              "flagged_match": {
-                "definition": {
-                  "identity": {
-                    "entities": {
-                      "destination": [
-                        "country/KEN"
-                      ],
-                      "origin": [
-                        "country/CHN"
-                      ]
-                    },
-                    "identity_version": "spec1",
-                    "requested_window": {
-                      "kind": "all"
-                    },
-                    "shape": {
-                      "kind": "statvar_schema",
-                      "measured_property": "amount",
-                      "measurement_qualifier": "Nominal",
-                      "population_type": "FinancialFlow",
-                      "stat_type": "measuredValue"
-                    },
-                    "slots": [
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "financialFlowType"
-                      },
-                      {
-                        "binding": {
-                          "ref": "DebtInstrument",
-                          "state": "value"
-                        },
-                        "property": "financingResource"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "guaranteeStatus"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "idsConcessionality"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "idsCreditorType"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "idsDebtorType"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "includesIMFCredit"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "maturityBand"
-                      },
-                      {
-                        "binding": {
-                          "state": "unbound"
-                        },
-                        "property": "netOf"
-                      },
-                      {
-                        "binding": {
-                          "ref": "Net",
-                          "state": "value"
-                        },
-                        "property": "nettingBasis"
-                      }
-                    ]
-                  },
-                  "schema_version": 1,
-                  "spec_id": "spec_e79b9b2001a06be5f0ba28b4260ef066"
-                },
-                "resolved": {
-                  "available_at_place": false,
-                  "confidence": "low",
-                  "coverage": {
-                    "has_data": false,
-                    "kind": "bare"
-                  },
-                  "entities": [
-                    {
-                      "entity_type": "Country",
-                      "label": "Kenya",
-                      "ref": "country/KEN",
-                      "role": "destination"
-                    },
-                    {
-                      "entity_type": "Country",
-                      "label": "China",
-                      "ref": "country/CHN",
-                      "role": "origin"
-                    }
-                  ],
-                  "entity_options": [],
-                  "facet_options": [],
-                  "facets": {},
-                  "inapplicable_slots": [
-                    "maturityBand",
-                    "guaranteeStatus",
-                    "includesIMFCredit",
-                    "idsCreditorType",
-                    "idsDebtorType"
-                  ],
-                  "measure_axis_values": [],
-                  "measure_label_axes": [],
-                  "open_axis_facts": [
-                    {
-                      "distinct_count": 1,
-                      "property": "financialFlowType",
-                      "undeclared_count": 0,
-                      "value": {
-                        "label": "disbursement",
-                        "ref": "Disbursement"
-                      },
-                      "values": [
-                        {
-                          "count": 1,
-                          "value": {
-                            "label": "disbursement",
-                            "ref": "Disbursement"
-                          }
-                        }
-                      ],
-                      "varies": false
-                    },
-                    {
-                      "distinct_count": 1,
-                      "property": "idsConcessionality",
-                      "undeclared_count": 0,
-                      "value": {
-                        "label": "non-concessional (IDS concessionality)",
-                        "ref": "IDSNonConcessional"
-                      },
-                      "values": [
-                        {
-                          "count": 1,
-                          "value": {
-                            "label": "non-concessional (IDS concessionality)",
-                            "ref": "IDSNonConcessional"
-                          }
-                        }
-                      ],
-                      "varies": false
-                    },
-                    {
-                      "distinct_count": 1,
-                      "property": "netOf",
-                      "undeclared_count": 0,
-                      "value": {
-                        "label": "principal repayment",
-                        "ref": "PrincipalRepayment"
-                      },
-                      "values": [
-                        {
-                          "count": 1,
-                          "value": {
-                            "label": "principal repayment",
-                            "ref": "PrincipalRepayment"
-                          }
-                        }
-                      ],
-                      "varies": false
-                    }
-                  ],
-                  "rendered_sentence": "Kenya's net flows on external debt from China for debt instrument.",
-                  "sentence_plan": [
-                    {
-                      "axis": "where",
-                      "binding_ref": "where:",
-                      "entity_refs": [
-                        "country/KEN"
-                      ],
-                      "kind": "slot",
-                      "role": "destination",
-                      "segment": "heading",
-                      "states": [
-                        "where:"
-                      ],
-                      "text": "Kenya"
-                    },
-                    {
-                      "entity_refs": [],
-                      "kind": "text",
-                      "segment": "heading",
-                      "states": [],
-                      "text": "'s"
-                    },
-                    {
-                      "entity_refs": [],
-                      "kind": "text",
-                      "segment": "heading",
-                      "states": [],
-                      "text": " "
-                    },
-                    {
-                      "axis": "what",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "segment": "heading",
-                      "states": [
-                        "how:idsConcessionality",
-                        "how:financialFlowType",
-                        "how:netOf",
-                        "how:nettingBasis",
-                        "axis:populationType",
-                        "axis:measuredProperty",
-                        "axis:statType"
-                      ],
-                      "text": "net flows on external debt"
-                    },
-                    {
-                      "entity_refs": [],
-                      "kind": "text",
-                      "segment": "heading",
-                      "states": [],
-                      "text": " from "
-                    },
-                    {
-                      "binding_ref": "origin:",
-                      "entity_refs": [
-                        "country/CHN"
-                      ],
-                      "kind": "slot",
-                      "role": "origin",
-                      "segment": "heading",
-                      "states": [
-                        "origin:"
-                      ],
-                      "text": "China"
-                    },
-                    {
-                      "entity_refs": [],
-                      "kind": "text",
-                      "segment": "heading",
-                      "states": [],
-                      "text": " for "
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:financingResource",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "financingResource",
-                      "segment": "heading",
-                      "states": [
-                        "how:financingResource"
-                      ],
-                      "text": "debt instrument"
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:guaranteeStatus",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "guaranteeStatus",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:idsConcessionality",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "idsConcessionality",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:idsCreditorType",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "idsCreditorType",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:idsDebtorType",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "idsDebtorType",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:includesIMFCredit",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "includesIMFCredit",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:maturityBand",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "maturityBand",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:financialFlowType",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "financialFlowType",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:netOf",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "netOf",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "how",
-                      "binding_ref": "how:nettingBasis",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "property_dcid": "nettingBasis",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "axis": "when",
-                      "binding_ref": "when:",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "segment": "heading",
-                      "states": [],
-                      "text": ""
-                    },
-                    {
-                      "entity_refs": [],
-                      "kind": "text",
-                      "segment": "heading",
-                      "states": [],
-                      "text": "."
-                    },
-                    {
-                      "axis": "source",
-                      "binding_ref": "source:",
-                      "entity_refs": [],
-                      "kind": "slot",
-                      "segment": "byline",
-                      "states": [],
-                      "text": ""
-                    }
-                  ],
-                  "shape": {
-                    "data_commons": [
-                      {
-                        "id": "dfo",
-                        "label": "Development Finance Observatory"
-                      }
-                    ],
-                    "label": "Net flows on concessional external debt (debt instrument) (current US$)",
-                    "measured_property": {
-                      "label": "amount",
-                      "ref": "amount"
-                    },
-                    "measurement_denominator_unresolved": false,
-                    "measurement_qualifier": {
-                      "label": "Nominal",
-                      "ref": "Nominal"
-                    },
-                    "member_count": 8,
-                    "member_digest": "22544dd2d837b9a61126b5411e35f570127afd2714000574ed93f11e2167332f",
-                    "population_type": {
-                      "label": "financial flow",
-                      "ref": "FinancialFlow"
-                    },
-                    "refine_supported": true,
-                    "shape_id": "financialflow_amount_measuredvalue_nominal_by_role",
-                    "slot_keys": [
-                      {
-                        "axis": "how",
-                        "label": "financial flow type",
-                        "property": {
-                          "label": "financial flow type",
-                          "ref": "financialFlowType"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "net of",
-                        "property": {
-                          "label": "net of",
-                          "ref": "netOf"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "netting basis",
-                        "property": {
-                          "label": "netting basis",
-                          "ref": "nettingBasis"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "maturity band",
-                        "property": {
-                          "label": "maturity band",
-                          "ref": "maturityBand"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "guarantee status",
-                        "property": {
-                          "label": "guarantee status",
-                          "ref": "guaranteeStatus"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "includes IMF credit",
-                        "property": {
-                          "label": "includes IMF credit",
-                          "ref": "includesIMFCredit"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "financing resource",
-                        "property": {
-                          "label": "financing resource",
-                          "ref": "financingResource"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "IDS concessionality",
-                        "property": {
-                          "label": "IDS concessionality",
-                          "ref": "idsConcessionality"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "IDS creditor type",
-                        "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      {
-                        "axis": "how",
-                        "label": "IDS debtor type",
-                        "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
-                        }
-                      },
-                      {
-                        "axis": "where",
-                        "label": "place"
-                      },
-                      {
-                        "axis": "when",
-                        "label": "time window"
-                      },
-                      {
-                        "axis": "source",
-                        "label": "data source"
-                      }
-                    ],
-                    "stat_type": {
-                      "label": "measuredValue",
-                      "ref": "measuredValue"
-                    }
-                  },
-                  "skills": [],
-                  "slot_options": [
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "financial flow type",
-                        "property": {
-                          "label": "financial flow type",
-                          "ref": "financialFlowType"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "disbursement",
-                              "ref": "Disbursement"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "interest payment",
-                              "ref": "InterestPayment"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "net of",
-                        "property": {
-                          "label": "net of",
-                          "ref": "netOf"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "principal repayment",
-                              "ref": "PrincipalRepayment"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "servicing payment",
-                              "ref": "ServicingPayment"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "netting basis",
-                        "property": {
-                          "label": "netting basis",
-                          "ref": "nettingBasis"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "net",
-                              "ref": "Net"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "maturity band",
-                        "property": {
-                          "label": "maturity band",
-                          "ref": "maturityBand"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "short-term maturity",
-                              "ref": "ShortTermMaturity"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "long-term maturity",
-                              "ref": "LongTermMaturity"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "guarantee status",
-                        "property": {
-                          "label": "guarantee status",
-                          "ref": "guaranteeStatus"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "public or publicly guaranteed",
-                              "ref": "PublicOrPubliclyGuaranteed"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "includes IMF credit",
-                        "property": {
-                          "label": "includes IMF credit",
-                          "ref": "includesIMFCredit"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "without IMF credit",
-                              "ref": "WithoutIMFCredit"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "financing resource",
-                        "property": {
-                          "label": "financing resource",
-                          "ref": "financingResource"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "debt instrument",
-                              "ref": "DebtInstrument"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS creditor type",
-                        "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "other private creditors (IDS creditor type)",
-                              "ref": "IDSCreditorTypePROP"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "bondholders (IDS creditor type)",
-                              "ref": "IDSCreditorTypePBND"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "official creditors (IDS creditor type)",
-                              "ref": "IDSCreditorTypeOFFT"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "commercial banks (IDS creditor type)",
-                              "ref": "IDSCreditorTypePCBK"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "private creditors (IDS creditor type)",
-                              "ref": "IDSCreditorTypePRVT"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "bilateral (IDS creditor type)",
-                              "ref": "IDSCreditorTypeBLAT"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "other multilateral (IDS creditor type)",
-                              "ref": "IDSCreditorTypeMOTH"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    },
-                    {
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS debtor type",
-                        "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
-                        }
-                      },
-                      "options": [
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "general government (IDS debtor type)",
-                              "ref": "IDSDebtorTypeGG"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "public sector (IDS debtor type)",
-                              "ref": "IDSDebtorTypePS"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        {
-                          "value": {
-                            "ref": {
-                              "label": "central bank (IDS debtor type)",
-                              "ref": "IDSDebtorTypeCB"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        }
-                      ],
-                      "source": "observed",
-                      "truncated": true
-                    }
-                  ],
-                  "slots": [
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "financial flow type",
-                        "property": {
-                          "label": "financial flow type",
-                          "ref": "financialFlowType"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "net of",
-                        "property": {
-                          "label": "net of",
-                          "ref": "netOf"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "value",
-                        "value": {
-                          "ref": {
-                            "label": "net",
-                            "ref": "Net"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "netting basis",
-                        "property": {
-                          "label": "netting basis",
-                          "ref": "nettingBasis"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "maturity band",
-                        "property": {
-                          "label": "maturity band",
-                          "ref": "maturityBand"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "guarantee status",
-                        "property": {
-                          "label": "guarantee status",
-                          "ref": "guaranteeStatus"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "includes IMF credit",
-                        "property": {
-                          "label": "includes IMF credit",
-                          "ref": "includesIMFCredit"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "value",
-                        "value": {
-                          "ref": {
-                            "label": "debt instrument",
-                            "ref": "DebtInstrument"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "financing resource",
-                        "property": {
-                          "label": "financing resource",
-                          "ref": "financingResource"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS concessionality",
-                        "property": {
-                          "label": "IDS concessionality",
-                          "ref": "idsConcessionality"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS creditor type",
-                        "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS debtor type",
-                        "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
-                        }
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "value",
-                        "value": {
-                          "ref": {
-                            "label": "Kenya",
-                            "ref": "country/KEN"
-                          },
-                          "value_kind": "entity"
-                        }
-                      },
-                      "key": {
-                        "axis": "where",
-                        "label": "place"
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "when",
-                        "label": "time window"
-                      },
-                      "summable": false
-                    },
-                    {
-                      "binding": {
-                        "kind": "unbound"
-                      },
-                      "key": {
-                        "axis": "source",
-                        "label": "data source"
-                      },
-                      "summable": false
-                    }
-                  ],
-                  "stat_vars": {
-                    "member_count": 0,
-                    "member_count_exact": false,
-                    "served_count": 6
-                  },
-                  "trace": {
-                    "capability_version": "cap_daf889452657d56d",
-                    "default_reading": {
-                      "applied": true,
-                      "removed_stat_vars": []
-                    },
-                    "query_qualifiers": [],
-                    "resolved_entities": [
-                      {
-                        "label": "Kenya",
-                        "ref": "country/KEN"
-                      },
-                      {
-                        "label": "China",
-                        "ref": "country/CHN"
-                      }
-                    ],
-                    "resolved_sources": [],
-                    "slot_filters": [
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "financial flow type",
-                          "property": {
-                            "label": "financial flow type",
-                            "ref": "financialFlowType"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "net of",
-                          "property": {
-                            "label": "net of",
-                            "ref": "netOf"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "value",
-                        "key": {
-                          "axis": "how",
-                          "label": "netting basis",
-                          "property": {
-                            "label": "netting basis",
-                            "ref": "nettingBasis"
-                          }
-                        },
-                        "provenance": "text_recognized",
-                        "refs": [
-                          {
-                            "label": "net",
-                            "ref": "Net"
-                          }
-                        ]
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "maturity band",
-                          "property": {
-                            "label": "maturity band",
-                            "ref": "maturityBand"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "guarantee status",
-                          "property": {
-                            "label": "guarantee status",
-                            "ref": "guaranteeStatus"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "includes IMF credit",
-                          "property": {
-                            "label": "includes IMF credit",
-                            "ref": "includesIMFCredit"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "value",
-                        "key": {
-                          "axis": "how",
-                          "label": "financing resource",
-                          "property": {
-                            "label": "financing resource",
-                            "ref": "financingResource"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": [
-                          {
-                            "label": "debt instrument",
-                            "ref": "DebtInstrument"
-                          }
-                        ]
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS concessionality",
-                          "property": {
-                            "label": "IDS concessionality",
-                            "ref": "idsConcessionality"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS creditor type",
-                          "property": {
-                            "label": "IDS creditor type",
-                            "ref": "idsCreditorType"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS debtor type",
-                          "property": {
-                            "label": "IDS debtor type",
-                            "ref": "idsDebtorType"
-                          }
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "value",
-                        "key": {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        "provenance": "binder",
-                        "refs": [
-                          {
-                            "label": "Kenya",
-                            "ref": "country/KEN"
-                          }
-                        ]
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      },
-                      {
-                        "binding_kind": "unbound",
-                        "key": {
-                          "axis": "source",
-                          "label": "data source"
-                        },
-                        "provenance": "binder",
-                        "refs": []
-                      }
-                    ]
-                  },
-                  "unresolved_slots": []
-                },
-                "spec_id": "spec_e79b9b2001a06be5f0ba28b4260ef066"
-              },
-              "gate": "no_member_has_data_at_place",
-              "message": "No data for net flows on non-concessional external debt (debt instrument) (current US$). Try a different place, time period, or indicator.",
-              "nearest_real": [
-                {
-                  "definition": {
-                    "identity": {
-                      "entities": {
-                        "destination": [
-                          "country/KEN"
-                        ],
-                        "origin": [
-                          "country/CHN"
-                        ]
-                      },
-                      "identity_version": "spec1",
-                      "requested_window": {
-                        "kind": "all"
-                      },
-                      "shape": {
-                        "kind": "statvar_schema",
-                        "measured_property": "amount",
-                        "measurement_qualifier": "Nominal",
-                        "population_type": "FinancialFlow",
-                        "stat_type": "measuredValue"
-                      },
-                      "slots": [
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "financialFlowType"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "financingResource"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "guaranteeStatus"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "idsConcessionality"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "idsCreditorType"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "idsDebtorType"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "includesIMFCredit"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "maturityBand"
-                        },
-                        {
-                          "binding": {
-                            "state": "unbound"
-                          },
-                          "property": "netOf"
-                        },
-                        {
-                          "binding": {
-                            "ref": "Net",
-                            "state": "value"
-                          },
-                          "property": "nettingBasis"
-                        }
-                      ]
-                    },
-                    "schema_version": 1,
-                    "spec_id": "spec_4a2f0e2f4ec1f26794379626d3ee75c0"
-                  },
-                  "relaxation": {
-                    "axis": "how",
-                    "dropped_value_dcids": [
-                      "DebtInstrument"
-                    ],
-                    "property_dcid": "financingResource"
-                  },
-                  "resolved": {
-                    "available_at_place": true,
-                    "confidence": "high",
-                    "coverage": {
-                      "dimensions": [
-                        {
-                          "count": 1,
-                          "label": "sources"
-                        },
-                        {
-                          "count": 42,
-                          "label": "observations"
-                        },
-                        {
-                          "count": 2,
-                          "label": "variables"
-                        }
-                      ],
-                      "evidence": "facet_metadata",
-                      "has_data": true,
-                      "kind": "exact",
-                      "observation_count": 84
-                    },
-                    "download": {
-                      "licence": {
-                        "label": "Creative Commons Attribution License"
-                      },
-                      "rows": 84,
-                      "rows_exact": true,
-                      "series": 2,
-                      "window": {
-                        "end_year": 2024,
-                        "start_year": 1983
-                      }
-                    },
-                    "entities": [
-                      {
-                        "entity_type": "Country",
-                        "label": "Kenya",
-                        "ref": "country/KEN",
-                        "role": "destination"
-                      },
-                      {
-                        "entity_type": "Country",
-                        "label": "China",
-                        "ref": "country/CHN",
-                        "role": "origin"
-                      }
-                    ],
-                    "entity_options": [],
-                    "facet_options": [],
-                    "facets": {
-                      "provenance": {
-                        "basis": "fallback",
-                        "data_commons": {
-                          "id": "dfo",
-                          "label": "Development Finance Observatory"
-                        },
-                        "label": "World Bank International Debt Statistics (IDS)",
-                        "ref": "provenance/WorldBankInternationalDebtStatistics",
-                        "source": {
-                          "label": "World Bank",
-                          "ref": "dc/s/WorldBank"
-                        }
-                      },
-                      "unit": {
-                        "basis": "fallback",
-                        "currency": "USD",
-                        "label": "US Dollar",
-                        "ref": "CurrencyUSD"
-                      }
-                    },
-                    "inapplicable_slots": [
-                      "maturityBand",
-                      "guaranteeStatus",
-                      "includesIMFCredit",
-                      "financingResource",
-                      "idsConcessionality",
-                      "idsCreditorType",
-                      "idsDebtorType"
-                    ],
-                    "measure_axis_values": [],
-                    "measure_label_axes": [],
-                    "rendered_sentence": "China's financial flow to Kenya for net, 1983 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
-                    "sentence_plan": [
-                      {
-                        "binding_ref": "origin:",
-                        "entity_refs": [
-                          "country/CHN"
-                        ],
-                        "kind": "slot",
-                        "role": "origin",
-                        "segment": "heading",
-                        "states": [
-                          "origin:"
-                        ],
-                        "text": "China"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "'s"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "what",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "financial flow"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": " to "
-                      },
-                      {
-                        "axis": "where",
-                        "binding_ref": "where:",
-                        "entity_refs": [
-                          "country/KEN"
-                        ],
-                        "kind": "slot",
-                        "role": "destination",
-                        "segment": "heading",
-                        "states": [
-                          "where:"
-                        ],
-                        "text": "Kenya"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": " for "
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:nettingBasis",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "nettingBasis",
-                        "segment": "heading",
-                        "states": [
-                          "how:nettingBasis"
-                        ],
-                        "text": "net"
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:financialFlowType",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "financialFlowType",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:financingResource",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "financingResource",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:guaranteeStatus",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "guaranteeStatus",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:idsConcessionality",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "idsConcessionality",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:idsCreditorType",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "idsCreditorType",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:idsDebtorType",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "idsDebtorType",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:includesIMFCredit",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "includesIMFCredit",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:maturityBand",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "maturityBand",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "axis": "how",
-                        "binding_ref": "how:netOf",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "property_dcid": "netOf",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ""
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ", "
-                      },
-                      {
-                        "axis": "when",
-                        "binding_ref": "when:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [
-                          "when:"
-                        ],
-                        "text": "1983 to 2024"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "."
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "unit",
-                        "binding_ref": "unit:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "byline",
-                        "states": [
-                          "unit:",
-                          "axis:measurementQualifier"
-                        ],
-                        "text": "Current US dollars"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": " \u00b7 "
-                      },
-                      {
-                        "axis": "source",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "byline",
-                        "states": [
-                          "source:"
-                        ],
-                        "text": "World Bank International Debt Statistics (IDS)"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": "."
-                      }
-                    ],
-                    "shape": {
-                      "data_commons": [
-                        {
-                          "id": "dfo",
-                          "label": "Development Finance Observatory"
-                        }
-                      ],
-                      "label": "Net flows on external debt, by creditor (current US$)",
-                      "measured_property": {
-                        "label": "amount",
-                        "ref": "amount"
-                      },
-                      "measurement_denominator_unresolved": false,
-                      "measurement_qualifier": {
-                        "label": "Nominal",
-                        "ref": "Nominal"
-                      },
-                      "member_count": 139,
-                      "member_digest": "fbcaf907680bfec3e98218852aaf330406709b1d74a111fcd2c944478fae140f",
-                      "population_type": {
-                        "label": "financial flow",
-                        "ref": "FinancialFlow"
-                      },
-                      "refine_supported": true,
-                      "shape_id": "financialflow_amount_measuredvalue_nominal_by_role",
-                      "slot_keys": [
-                        {
-                          "axis": "how",
-                          "label": "financial flow type",
-                          "property": {
-                            "label": "financial flow type",
-                            "ref": "financialFlowType"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "net of",
-                          "property": {
-                            "label": "net of",
-                            "ref": "netOf"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "netting basis",
-                          "property": {
-                            "label": "netting basis",
-                            "ref": "nettingBasis"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "maturity band",
-                          "property": {
-                            "label": "maturity band",
-                            "ref": "maturityBand"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "guarantee status",
-                          "property": {
-                            "label": "guarantee status",
-                            "ref": "guaranteeStatus"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "includes IMF credit",
-                          "property": {
-                            "label": "includes IMF credit",
-                            "ref": "includesIMFCredit"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "financing resource",
-                          "property": {
-                            "label": "financing resource",
-                            "ref": "financingResource"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "IDS concessionality",
-                          "property": {
-                            "label": "IDS concessionality",
-                            "ref": "idsConcessionality"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "IDS creditor type",
-                          "property": {
-                            "label": "IDS creditor type",
-                            "ref": "idsCreditorType"
-                          }
-                        },
-                        {
-                          "axis": "how",
-                          "label": "IDS debtor type",
-                          "property": {
-                            "label": "IDS debtor type",
-                            "ref": "idsDebtorType"
-                          }
-                        },
-                        {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        {
-                          "axis": "source",
-                          "label": "data source"
-                        }
-                      ],
-                      "stat_type": {
-                        "label": "measuredValue",
-                        "ref": "measuredValue"
-                      }
-                    },
-                    "skills": [
-                      "debt-ids",
-                      "debt-profile",
-                      "debt-sustainability"
-                    ],
-                    "slot_options": [
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "financial flow type",
-                          "property": {
-                            "label": "financial flow type",
-                            "ref": "financialFlowType"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "disbursement",
-                                "ref": "Disbursement"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "interest payment",
-                                "ref": "InterestPayment"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "net of",
-                          "property": {
-                            "label": "net of",
-                            "ref": "netOf"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "principal repayment",
-                                "ref": "PrincipalRepayment"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "servicing payment",
-                                "ref": "ServicingPayment"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "netting basis",
-                          "property": {
-                            "label": "netting basis",
-                            "ref": "nettingBasis"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "net",
-                                "ref": "Net"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "maturity band",
-                          "property": {
-                            "label": "maturity band",
-                            "ref": "maturityBand"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "short-term maturity",
-                                "ref": "ShortTermMaturity"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "long-term maturity",
-                                "ref": "LongTermMaturity"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "guarantee status",
-                          "property": {
-                            "label": "guarantee status",
-                            "ref": "guaranteeStatus"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "public or publicly guaranteed",
-                                "ref": "PublicOrPubliclyGuaranteed"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "includes IMF credit",
-                          "property": {
-                            "label": "includes IMF credit",
-                            "ref": "includesIMFCredit"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "without IMF credit",
-                                "ref": "WithoutIMFCredit"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "financing resource",
-                          "property": {
-                            "label": "financing resource",
-                            "ref": "financingResource"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "debt instrument",
-                                "ref": "DebtInstrument"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS creditor type",
-                          "property": {
-                            "label": "IDS creditor type",
-                            "ref": "idsCreditorType"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "other private creditors (IDS creditor type)",
-                                "ref": "IDSCreditorTypePROP"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "bondholders (IDS creditor type)",
-                                "ref": "IDSCreditorTypePBND"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "official creditors (IDS creditor type)",
-                                "ref": "IDSCreditorTypeOFFT"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "commercial banks (IDS creditor type)",
-                                "ref": "IDSCreditorTypePCBK"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "private creditors (IDS creditor type)",
-                                "ref": "IDSCreditorTypePRVT"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "bilateral (IDS creditor type)",
-                                "ref": "IDSCreditorTypeBLAT"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "other multilateral (IDS creditor type)",
-                                "ref": "IDSCreditorTypeMOTH"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      },
-                      {
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS debtor type",
-                          "property": {
-                            "label": "IDS debtor type",
-                            "ref": "idsDebtorType"
-                          }
-                        },
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "general government (IDS debtor type)",
-                                "ref": "IDSDebtorTypeGG"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "public sector (IDS debtor type)",
-                                "ref": "IDSDebtorTypePS"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          },
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "central bank (IDS debtor type)",
-                                "ref": "IDSDebtorTypeCB"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": true
-                      }
-                    ],
-                    "slots": [
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "financial flow type",
-                          "property": {
-                            "label": "financial flow type",
-                            "ref": "financialFlowType"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "net of",
-                          "property": {
-                            "label": "net of",
-                            "ref": "netOf"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "ref": {
-                              "label": "net",
-                              "ref": "Net"
-                            },
-                            "value_kind": "enum_value"
-                          }
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "netting basis",
-                          "property": {
-                            "label": "netting basis",
-                            "ref": "nettingBasis"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "maturity band",
-                          "property": {
-                            "label": "maturity band",
-                            "ref": "maturityBand"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "guarantee status",
-                          "property": {
-                            "label": "guarantee status",
-                            "ref": "guaranteeStatus"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "includes IMF credit",
-                          "property": {
-                            "label": "includes IMF credit",
-                            "ref": "includesIMFCredit"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "financing resource",
-                          "property": {
-                            "label": "financing resource",
-                            "ref": "financingResource"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS concessionality",
-                          "property": {
-                            "label": "IDS concessionality",
-                            "ref": "idsConcessionality"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS creditor type",
-                          "property": {
-                            "label": "IDS creditor type",
-                            "ref": "idsCreditorType"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "how",
-                          "label": "IDS debtor type",
-                          "property": {
-                            "label": "IDS debtor type",
-                            "ref": "idsDebtorType"
-                          }
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "ref": {
-                              "label": "Kenya",
-                              "ref": "country/KEN"
-                            },
-                            "value_kind": "entity"
-                          }
-                        },
-                        "key": {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "source",
-                          "label": "data source"
-                        },
-                        "summable": false
-                      }
-                    ],
-                    "stat_vars": {
-                      "data_date_range": {
-                        "end": "2024",
-                        "start": "1983"
-                      },
-                      "member_count": 2,
-                      "member_count_exact": false,
-                      "served_count": 2
-                    },
-                    "trace": {
-                      "capability_version": "cap_daf889452657d56d",
-                      "query_qualifiers": [],
-                      "resolved_entities": [
-                        {
-                          "label": "Kenya",
-                          "ref": "country/KEN"
-                        },
-                        {
-                          "label": "China",
-                          "ref": "country/CHN"
-                        }
-                      ],
-                      "resolved_sources": [
-                        {
-                          "data_commons": {
-                            "id": "dfo",
-                            "label": "Development Finance Observatory"
-                          },
-                          "label": "World Bank International Debt Statistics (IDS)",
-                          "ref": "provenance/WorldBankInternationalDebtStatistics",
-                          "source": {
-                            "label": "World Bank",
-                            "ref": "dc/s/WorldBank"
-                          }
-                        }
-                      ],
-                      "slot_filters": [
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "financial flow type",
-                            "property": {
-                              "label": "financial flow type",
-                              "ref": "financialFlowType"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "net of",
-                            "property": {
-                              "label": "net of",
-                              "ref": "netOf"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "how",
-                            "label": "netting basis",
-                            "property": {
-                              "label": "netting basis",
-                              "ref": "nettingBasis"
-                            }
-                          },
-                          "provenance": "text_recognized",
-                          "refs": [
-                            {
-                              "label": "net",
-                              "ref": "Net"
-                            }
-                          ]
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "maturity band",
-                            "property": {
-                              "label": "maturity band",
-                              "ref": "maturityBand"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "guarantee status",
-                            "property": {
-                              "label": "guarantee status",
-                              "ref": "guaranteeStatus"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "includes IMF credit",
-                            "property": {
-                              "label": "includes IMF credit",
-                              "ref": "includesIMFCredit"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "financing resource",
-                            "property": {
-                              "label": "financing resource",
-                              "ref": "financingResource"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "IDS concessionality",
-                            "property": {
-                              "label": "IDS concessionality",
-                              "ref": "idsConcessionality"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "IDS creditor type",
-                            "property": {
-                              "label": "IDS creditor type",
-                              "ref": "idsCreditorType"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "how",
-                            "label": "IDS debtor type",
-                            "property": {
-                              "label": "IDS debtor type",
-                              "ref": "idsDebtorType"
-                            }
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "where",
-                            "label": "place"
-                          },
-                          "provenance": "binder",
-                          "refs": [
-                            {
-                              "label": "Kenya",
-                              "ref": "country/KEN"
-                            }
-                          ]
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "when",
-                            "label": "time window"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "source",
-                            "label": "data source"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        }
-                      ]
-                    },
-                    "unresolved_slots": []
-                  },
-                  "spec_id": "spec_4a2f0e2f4ec1f26794379626d3ee75c0"
-                }
-              ],
-              "reason": "no_observations",
+              "message": "Could not match \"net financial flows on external debt\" to a supported indicator. Try a different wording or a related indicator.",
+              "options": [],
+              "reason": "variable_not_resolved",
               "source_terms": [],
               "unbound_qualifiers": []
             },
             "operations": [],
-            "rendered_sentence": "No data for Kenya's net flows on external debt from China for debt instrument.",
+            "rendered_sentence": "Could not match \"net financial flows on external debt\" to a supported indicator. Try a different wording or a related indicator.",
             "restatement": {
               "entities": [
                 {
@@ -5959,83 +3572,28 @@
                 "kind": "text",
                 "segment": "heading",
                 "states": [],
-                "text": "No data for "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "Kenya"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "'s"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "net flows on external debt"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " from "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "China"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " for "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "debt instrument"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "."
+                "text": "Could not match \"net financial flows on external debt\" to a supported indicator. Try a different wording or a related indicator."
               }
             ],
             "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "answer": 66,
-                "bind": 2587,
-                "materialise": 3,
-                "options": 0,
-                "recall": 1,
-                "shape": 1006
+                "bind": 196,
+                "phase_bind": 12,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "recall": 480,
+                "shape": 293,
+                "shape_admission": 0,
+                "shape_arcs": 3,
+                "shape_groups": 3,
+                "shape_labels": 4,
+                "shape_probe": 100,
+                "shape_probe_coverage": 10
               },
-              "total": 3663
+              "total": 981
             },
             "variable_text": "net financial flows on external debt",
             "warnings": [
@@ -6057,7 +3615,7 @@
           "extract_skipped": true,
           "raw_query": "net financial flows on external debt from China to Kenya"
         },
-        "rendered_sentence": "No data for Kenya's net flows on external debt from China for debt instrument.",
+        "rendered_sentence": "Could not match \"net financial flows on external debt\" to a supported indicator. Try a different wording or a related indicator.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -6066,101 +3624,10 @@
             "part_index": 0,
             "segment": "heading",
             "states": [],
-            "text": "No data for "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "Kenya"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "'s"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "net flows on external debt"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " from "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "China"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " for "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "debt instrument"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "."
+            "text": "Could not match \"net financial flows on external debt\" to a supported indicator. Try a different wording or a related indicator."
           }
         ],
-        "skills": {
-          "debt-ids": {
-            "content_version": "sha256:f937d0aa236f65365f738709e13d4d5f4b97a4a5dc82e90e5b613f2d90e07116",
-            "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
-            "id": "debt-ids",
-            "name": "debt-ids"
-          },
-          "debt-profile": {
-            "content_version": "sha256:17795d00b244871293864f0df3ac39e9b491fe4dafe44b1ef9c23a1d6f8d4c9c",
-            "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
-            "id": "debt-profile",
-            "name": "debt-profile"
-          },
-          "debt-sustainability": {
-            "content_version": "sha256:2268e9638b27fd5aadde4c4d36ff05283e44fdd61fd547e9dfb34d200f0a16d8",
-            "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
-            "id": "debt-sustainability",
-            "name": "debt-sustainability"
-          }
-        },
+        "skills": {},
         "status": "no_data"
       },
       "parts": [
@@ -6182,5 +3649,11 @@
       "raw_text": false
     }
   ],
-  "task": "aggregate-cumulative-debt-flows-china-kenya"
+  "task": "aggregate-cumulative-debt-flows-china-kenya",
+  "translation": {
+    "answers": [
+      "a6d28f1bcbb9ef4d"
+    ],
+    "resolved": {}
+  }
 }

@@ -1,0 +1,160 @@
+{
+  "id": "sum-oda-oof-ethiopia",
+  "kind": "sum_of",
+  "origin": "authored",
+  "question": "Add up the ODA Ethiopia received and the other official flows it received in each year from 2015 to 2022.",
+  "searches": [
+    {
+      "query": "Add up the ODA Ethiopia received and the other official flows it received in each year from 2015 to 2022.",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Ethiopia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        },
+        {
+          "variable": "other official flows",
+          "entities": [
+            {
+              "text": "Ethiopia",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2022",
+          "separate": true
+        }
+      ]
+    }
+  ],
+  "brief": "Add up the ODA Ethiopia received and the other official flows it received in each year from 2015 to 2022.",
+  "asks": [
+    "ODA plus other official flows received by Ethiopia, each year 2015 to 2022"
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "sum_of"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "sum_of, not join: the two flows are added into one total each year, not set side by side"
+  },
+  "unit_asked": false,
+  "first_proposal_refusal": "combination_unasked",
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "Add up the ODA Ethiopia received and the other official flows it received in each year from 2015 to 2022.",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "combine",
+        "description": "Whether the two flows are added into one total.",
+        "options": [
+          "add them",
+          "show them separately"
+        ],
+        "chosen": "add them",
+        "resolved_by": "user",
+        "rationale": "The user chose to add them."
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ],
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
+      },
+      {
+        "kind": "aggregate",
+        "id": "oda_total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "dataset",
+        "id": "oof",
+        "measure": "other official flows",
+        "entities": [
+          {
+            "name": "Ethiopia",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2022
+        },
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "oof_total",
+        "input_id": "oof",
+        "reduction": "sum",
+        "group_by": [
+          "entity",
+          "period"
+        ]
+      },
+      {
+        "kind": "sum_of",
+        "id": "total",
+        "left": {
+          "input_id": "oda_total"
+        },
+        "right": {
+          "input_id": "oof_total"
+        },
+        "decision_ids": [
+          "combine"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

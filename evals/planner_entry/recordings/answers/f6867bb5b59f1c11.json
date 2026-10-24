@@ -1,0 +1,1775 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.0.10"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
+          "llm_usage": {
+            "cached_tokens": 0,
+            "input_tokens": 0,
+            "jev_input_tokens": 11460,
+            "jev_output_tokens": 2333,
+            "output_tokens": 0
+          },
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 514
+          },
+          "trace_id": "099eed45902740b5ad931917a273d6a6",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every creditor"
+              }
+            ],
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "role_text": "debtor",
+                  "text": "Ghana"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "time_text": "2015 to 2022",
+              "unit_text": "current USD",
+              "variable_text": "external debt stock"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "destination": [
+                      "country/GHA"
+                    ]
+                  },
+                  "facets": {
+                    "unit": {
+                      "request": {
+                        "currency": "USD",
+                        "prices": "current"
+                      },
+                      "state": "value"
+                    }
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2022,
+                    "kind": "range",
+                    "start_year": 2015
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "amount",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "FinancialPosition",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "ref": "AmountOutstanding",
+                        "state": "value"
+                      },
+                      "property": "financialPositionType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "financingResource"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "guaranteeStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "idsConcessionality"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "idsCreditorType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "idsDebtorType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "includesIMFCredit"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "interestRateVariability"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maturityBand"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_eaab5566fee055be76d735c81039ab49"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "medium",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 8,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 8,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  }
+                },
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 8,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Ghana",
+                    "ref": "country/GHA",
+                    "role": "destination"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Bank International Debt Statistics (IDS)",
+                            "ref": "provenance/WorldBankInternationalDebtStatistics"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "US Dollar",
+                            "ref": "CurrencyUSD"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
+                    "label": "World Bank International Debt Statistics (IDS)",
+                    "ref": "provenance/WorldBankInternationalDebtStatistics",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  },
+                  "unit": {
+                    "basis": "bound",
+                    "currency": "USD",
+                    "label": "US Dollar",
+                    "ref": "CurrencyUSD",
+                    "request_basis": {
+                      "currency": "bound",
+                      "prices": "bound"
+                    }
+                  }
+                },
+                "headline": {
+                  "named_window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  },
+                  "observations": 1,
+                  "recent_years": [
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingRecipient": 1
+                      },
+                      "series": 1,
+                      "year": 2022
+                    },
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingRecipient": 1
+                      },
+                      "series": 1,
+                      "year": 2021
+                    },
+                    {
+                      "observations": 1,
+                      "role_counts": {
+                        "financingRecipient": 1
+                      },
+                      "series": 1,
+                      "year": 2020
+                    }
+                  ],
+                  "role_counts": {
+                    "financingRecipient": 1
+                  },
+                  "series": 1,
+                  "year": 2022,
+                  "year_named": true
+                },
+                "inapplicable_slots": [
+                  "maturityBand",
+                  "financingResource",
+                  "guaranteeStatus",
+                  "idsCreditorType",
+                  "interestRateVariability",
+                  "includesIMFCredit",
+                  "idsDebtorType",
+                  "idsConcessionality"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "rendered_sentence": "Ghana's outstanding external debt owed to all creditors, 2015 to 2022. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [
+                      "country/GHA"
+                    ],
+                    "kind": "slot",
+                    "role": "destination",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Ghana"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:financialPositionType",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "outstanding external debt"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " owed to "
+                  },
+                  {
+                    "binding_ref": "origin:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "role": "origin",
+                    "segment": "heading",
+                    "states": [
+                      "origin:"
+                    ],
+                    "text": "all creditors"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:financingResource",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "financingResource",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:guaranteeStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "guaranteeStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:idsConcessionality",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "idsConcessionality",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:idsCreditorType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "idsCreditorType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:idsDebtorType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "idsDebtorType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:includesIMFCredit",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "includesIMFCredit",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:interestRateVariability",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "interestRateVariability",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maturityBand",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maturityBand",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:financialPositionType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "financialPositionType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2015 to 2022"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Current US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Bank International Debt Statistics (IDS)"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    }
+                  ],
+                  "label": "Outstanding external debt",
+                  "measured_property": {
+                    "label": "amount",
+                    "ref": "amount"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 71,
+                  "member_digest": "828d307245f321b0ee7633320ace59c51864d5d68d721cdbe8336751f05377c8",
+                  "population_type": {
+                    "label": "financial position",
+                    "ref": "FinancialPosition"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "financialposition_amount_measuredvalue_nominal_by_role",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "financial position type",
+                      "property": {
+                        "label": "financial position type",
+                        "ref": "financialPositionType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "financing resource",
+                      "property": {
+                        "label": "financing resource",
+                        "ref": "financingResource"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "guarantee status",
+                      "property": {
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "includes IMF credit",
+                      "property": {
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "IDS debtor type",
+                      "property": {
+                        "label": "IDS debtor type",
+                        "ref": "idsDebtorType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "IDS concessionality",
+                      "property": {
+                        "label": "IDS concessionality",
+                        "ref": "idsConcessionality"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [
+                  "debt-ids",
+                  "debt-profile",
+                  "debt-sustainability"
+                ],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "financial position type",
+                      "property": {
+                        "label": "financial position type",
+                        "ref": "financialPositionType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "amount outstanding",
+                            "ref": "AmountOutstanding"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "amount undisbursed",
+                            "ref": "AmountUndisbursed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "interest arrears",
+                            "ref": "InterestArrears"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "principal arrears",
+                            "ref": "PrincipalArrears"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "short-term maturity",
+                            "ref": "ShortTermMaturity"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 24,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "long-term maturity",
+                            "ref": "LongTermMaturity"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "guarantee status",
+                      "property": {
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "public or publicly guaranteed",
+                            "ref": "PublicOrPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "not publicly guaranteed",
+                            "ref": "NotPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "commercial banks (IDS creditor type)",
+                            "ref": "IDSCreditorTypePCBK"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePROP"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bondholders (IDS creditor type)",
+                            "ref": "IDSCreditorTypePBND"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePRVT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeBLAT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "multilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeMLAT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "official creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypeOFFT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "commercial banks or other private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePNGC"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "variable interest rate",
+                            "ref": "VariableInterestRate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "includes IMF credit",
+                      "property": {
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "without IMF credit",
+                            "ref": "WithoutIMFCredit"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS debtor type",
+                      "property": {
+                        "label": "IDS debtor type",
+                        "ref": "idsDebtorType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "general government (IDS debtor type)",
+                            "ref": "IDSDebtorTypeGG"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "central bank (IDS debtor type)",
+                            "ref": "IDSDebtorTypeCB"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 16,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePrivateSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypeOPS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS concessionality",
+                      "property": {
+                        "label": "IDS concessionality",
+                        "ref": "idsConcessionality"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 8,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "concessional (IDS concessionality)",
+                            "ref": "IDSConcessional"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "amount outstanding",
+                          "ref": "AmountOutstanding"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "financial position type",
+                      "property": {
+                        "label": "financial position type",
+                        "ref": "financialPositionType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "financing resource",
+                      "property": {
+                        "label": "financing resource",
+                        "ref": "financingResource"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "guarantee status",
+                      "property": {
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "includes IMF credit",
+                      "property": {
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS debtor type",
+                      "property": {
+                        "label": "IDS debtor type",
+                        "ref": "idsDebtorType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS concessionality",
+                      "property": {
+                        "label": "IDS concessionality",
+                        "ref": "idsConcessionality"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Ghana",
+                          "ref": "country/GHA"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2022,
+                          "start_year": 2015
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2022",
+                    "start": "2015"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": false,
+                  "served_count": 1,
+                  "source_codes": [
+                    {
+                      "code": "DT.DOD.DECT.CD",
+                      "exact": true,
+                      "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                    }
+                  ]
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Ghana",
+                      "ref": "country/GHA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "dfo",
+                        "label": "Development Finance Observatory"
+                      },
+                      "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
+                      "label": "World Bank International Debt Statistics (IDS)",
+                      "ref": "provenance/WorldBankInternationalDebtStatistics",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "financial position type",
+                        "property": {
+                          "label": "financial position type",
+                          "ref": "financialPositionType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "amount outstanding",
+                          "ref": "AmountOutstanding"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "maturity band",
+                        "property": {
+                          "label": "maturity band",
+                          "ref": "maturityBand"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "financing resource",
+                        "property": {
+                          "label": "financing resource",
+                          "ref": "financingResource"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "guarantee status",
+                        "property": {
+                          "label": "guarantee status",
+                          "ref": "guaranteeStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "IDS creditor type",
+                        "property": {
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "interest rate variability",
+                        "property": {
+                          "label": "interest rate variability",
+                          "ref": "interestRateVariability"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "includes IMF credit",
+                        "property": {
+                          "label": "includes IMF credit",
+                          "ref": "includesIMFCredit"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "IDS debtor type",
+                        "property": {
+                          "label": "IDS debtor type",
+                          "ref": "idsDebtorType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "IDS concessionality",
+                        "property": {
+                          "label": "IDS concessionality",
+                          "ref": "idsConcessionality"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Ghana",
+                          "ref": "country/GHA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_eaab5566fee055be76d735c81039ab49"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 6,
+                "bind": 133,
+                "materialise": 10,
+                "options": 8,
+                "phase_bind": 27,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 88,
+                "phase_place_bindings": 13,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 33,
+                "recall": 1,
+                "shape": 192,
+                "shape_admission": 0,
+                "shape_arcs": 2,
+                "shape_groups": 5,
+                "shape_labels": 0,
+                "shape_probe": 97,
+                "shape_probe_coverage": 12
+              },
+              "total": 511
+            },
+            "variable_text": "external debt stock",
+            "warnings": [
+              {
+                "code": "retrieval_score_weak",
+                "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
+                "severity": "info"
+              }
+            ]
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "Ghana's outstanding external debt owed to all creditors, 2015 to 2022. Current US dollars \u00b7 World Bank International Debt Statistics (IDS). Assumed: every creditor.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [
+              "country/GHA"
+            ],
+            "kind": "slot",
+            "part_index": 0,
+            "role": "destination",
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Ghana"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "how:financialPositionType",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "outstanding external debt"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:financingResource",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "financingResource",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:guaranteeStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "guaranteeStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:idsConcessionality",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "idsConcessionality",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:idsCreditorType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "idsCreditorType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:idsDebtorType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "idsDebtorType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:includesIMFCredit",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "includesIMFCredit",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:interestRateVariability",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "interestRateVariability",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:maturityBand",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "maturityBand",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:financialPositionType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "financialPositionType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " owed to "
+          },
+          {
+            "binding_ref": "origin:",
+            "entity_refs": [],
+            "kind": "slot",
+            "role": "origin",
+            "segment": "heading",
+            "states": [
+              "origin:"
+            ],
+            "text": "all creditors"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2015 to 2022"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Current US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Bank International Debt Statistics (IDS)"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "every creditor"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "skills": {
+          "debt-ids": {
+            "content_version": "sha256:80754856ac73dcb10bcd37b958cfd7cbb6782f276d2ce1da64dbfeadb45d56f6",
+            "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
+            "id": "debt-ids",
+            "name": "debt-ids"
+          },
+          "debt-profile": {
+            "content_version": "sha256:bfc64969fb95497bfbfe65fefcde1628ae7b83ad5d61f12a5bc9eb7292fcdb7b",
+            "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
+            "id": "debt-profile",
+            "name": "debt-profile"
+          },
+          "debt-sustainability": {
+            "content_version": "sha256:fc0168e253a3390966eb9b48bb33d317233ffcfb063eb47bf66dc85efaa82052",
+            "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
+            "id": "debt-sustainability",
+            "name": "debt-sustainability"
+          }
+        },
+        "status": "definite"
+      }
+    },
+    "structured_content": {
+      "kind": "resolution",
+      "parts": [
+        {
+          "label": "external debt stock",
+          "specs": [
+            {
+              "label": "Ghana's outstanding external debt owed to all creditors, 2015 to 2022. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+              "measure": "Outstanding external debt",
+              "member_count": 1,
+              "member_count_exact": false,
+              "source_codes": [
+                {
+                  "code": "DT.DOD.DECT.CD",
+                  "source": "World Bank International Debt Statistics (IDS)"
+                }
+              ],
+              "spec_id": "spec_eaab5566fee055be76d735c81039ab49"
+            }
+          ],
+          "status": "definite",
+          "warnings": [
+            {
+              "code": "retrieval_score_weak",
+              "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match."
+            }
+          ]
+        }
+      ],
+      "skills": [
+        "debt-ids",
+        "debt-profile",
+        "debt-sustainability"
+      ],
+      "status": "definite"
+    },
+    "text": "\"Ghana's outstanding external debt owed to all creditors, 2015 to 2022. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).\"  [spec_eaab5566fee055be76d735c81039ab49]\nconfidence medium \u00b7 8 observations, 2015-2022 \u00b7 has data\nMeasure: Outstanding external debt \u00b7 at least 1 StatVars \u00b7 Source codes: World Bank International Debt Statistics (IDS) DT.DOD.DECT.CD.\ndestination Ghana (country/GHA)\nsource World Bank International Debt Statistics (IDS) (fallback) \u00b7 unit US Dollar (bound)\nprovenance options for get_data: provenance/WorldBankInternationalDebtStatistics (World Bank International Debt Statistics (IDS)).\nunit options for get_data: CurrencyUSD (US Dollar).\n\nthe chosen reading's match to the query is weak; treat it with less confidence than a strong match.\n\nSkills for these results; get_skill loads one by id:\n- debt-ids: Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowe\u2026\n- debt-profile: Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, d\u2026\n- debt-sustainability: Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers\u2026"
+  },
+  "call": "search {\"parts\":[{\"entities\":[{\"role\":\"debtor\",\"text\":\"Ghana\"}],\"time\":\"2015 to 2022\",\"unit\":\"current USD\",\"variable\":\"external debt stock\"}]}"
+}

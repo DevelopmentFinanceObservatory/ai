@@ -1,59 +1,451 @@
 {
   "answers": [
-    "01a0cc2a686fb9b0",
+    "0805a2cf18268d6a",
     "0dcee57a75c2a178",
-    "113743857111f7b3",
-    "2bf3af0dff4bd63c",
-    "423c66e9d2b6e10c",
-    "44c6eeabe0432440",
-    "6c3fcaba6b65d3a6",
-    "6df83b30586a166b",
+    "3380b6dde6e16fda",
+    "39149a99a478841c",
+    "501c0155d2e5392d",
+    "59ce072085933201",
     "7647e72222d88a5b",
-    "a7983453c3dd78b3",
-    "bdde37b80866fb6b",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692",
-    "f7368e5f13734aba"
+    "87fc15ef8660862d",
+    "96b1576708c248bf",
+    "a25aed12b2ed890f",
+    "b1a733a51b31d92e",
+    "b433823d1c1e4234",
+    "c0412ae0536c314d",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:57:18+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:49+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 6923,
-            "output_tokens": 157
+            "input_tokens": 0,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 2474
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 1
           },
-          "trace_id": "e877b5416ae14536bc419738bd20f735",
+          "trace_id": "9744c7e38f1846a98f827da01f96e917",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "no_data": {
               "ambiguous_entities": [],
               "ambiguous_sources": [],
-              "category": "unresolved",
-              "entity_terms": [
-                "Kenya",
-                "Nigeria"
-              ],
-              "message": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
-              "reason": "role_not_resolved",
+              "category": "absent",
+              "elected_count": 1,
+              "entity_terms": [],
+              "flagged_match": {
+                "definition": {
+                  "identity": {
+                    "entities": {
+                      "observationAbout": [
+                        "country/KEN",
+                        "country/NGA"
+                      ]
+                    },
+                    "identity_version": "spec1",
+                    "requested_window": {
+                      "kind": "all"
+                    },
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "measured_property": "amount",
+                      "measurement_denominator": {
+                        "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                      },
+                      "population_type": "Stock",
+                      "stat_type": "measuredValue"
+                    },
+                    "slots": []
+                  },
+                  "schema_version": 1,
+                  "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+                },
+                "resolved": {
+                  "available_at_place": true,
+                  "confidence": "medium",
+                  "coverage": {
+                    "dimensions": [
+                      {
+                        "count": 2,
+                        "label": "countries"
+                      },
+                      {
+                        "count": 30,
+                        "label": "observations"
+                      },
+                      {
+                        "count": 1,
+                        "label": "variables"
+                      }
+                    ],
+                    "evidence": "facet_metadata",
+                    "has_data": true,
+                    "kind": "exact",
+                    "observation_count": 55
+                  },
+                  "download": {
+                    "licence": {
+                      "label": "Creative Commons Attribution License"
+                    },
+                    "rows": 55,
+                    "rows_exact": true,
+                    "series": 2,
+                    "window": {
+                      "end_year": 2025,
+                      "start_year": 1993
+                    }
+                  },
+                  "entities": [
+                    {
+                      "entity_type": "Country",
+                      "label": "Kenya",
+                      "ref": "country/KEN",
+                      "role": "observationAbout"
+                    },
+                    {
+                      "entity_type": "Country",
+                      "label": "Nigeria",
+                      "ref": "country/NGA",
+                      "role": "observationAbout"
+                    }
+                  ],
+                  "entity_options": [],
+                  "facet_options": [],
+                  "facets": {
+                    "provenance": {
+                      "basis": "fallback",
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    },
+                    "unit": {
+                      "basis": "fallback",
+                      "label": "Percent",
+                      "ref": "Percent"
+                    }
+                  },
+                  "inapplicable_slots": [],
+                  "measure_axis_values": [],
+                  "measure_label_axes": [],
+                  "rendered_sentence": "Stock value as a percentage of nominal GDP in Kenya and Nigeria, 1993 to 2025. World Development Indicators.",
+                  "sentence_plan": [
+                    {
+                      "axis": "what",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "Stock value as a percentage of nominal GDP"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": " in "
+                    },
+                    {
+                      "axis": "where",
+                      "binding_ref": "where:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "where:"
+                      ],
+                      "text": "Kenya and Nigeria"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": ", "
+                    },
+                    {
+                      "axis": "when",
+                      "binding_ref": "when:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "when:"
+                      ],
+                      "text": "1993 to 2025"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "."
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": " "
+                    },
+                    {
+                      "axis": "source",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "byline",
+                      "states": [
+                        "source:"
+                      ],
+                      "text": "World Development Indicators"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": "."
+                    }
+                  ],
+                  "shape": {
+                    "data_commons": [
+                      {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      }
+                    ],
+                    "label": "Stock Value as a Percentage of Nominal GDP",
+                    "measured_property": {
+                      "label": "amount",
+                      "ref": "amount"
+                    },
+                    "measurement_denominator": {
+                      "label": "Nominal gross domestic product",
+                      "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                    },
+                    "measurement_denominator_unresolved": false,
+                    "member_count": 1,
+                    "member_digest": "a4109616b41e7c7e79dbc962c98e972d362e16ef0350b4ece8d7444a3ba75460",
+                    "population_type": {
+                      "label": "Stock",
+                      "ref": "Stock"
+                    },
+                    "refine_supported": true,
+                    "shape_id": "stock_amount_measuredvalue_per_amount_economicactivity_grossdomesticproduction_nominal",
+                    "slot_keys": [
+                      {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      {
+                        "axis": "source",
+                        "label": "data source"
+                      }
+                    ],
+                    "stat_type": {
+                      "label": "measuredValue",
+                      "ref": "measuredValue"
+                    },
+                    "upstream": {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  },
+                  "skills": [],
+                  "slot_options": [],
+                  "slots": [
+                    {
+                      "binding": {
+                        "kind": "set",
+                        "values": [
+                          {
+                            "ref": {
+                              "label": "Kenya",
+                              "ref": "country/KEN"
+                            },
+                            "value_kind": "entity"
+                          },
+                          {
+                            "ref": {
+                              "label": "Nigeria",
+                              "ref": "country/NGA"
+                            },
+                            "value_kind": "entity"
+                          }
+                        ]
+                      },
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "summable": false
+                    }
+                  ],
+                  "stat_vars": {
+                    "data_date_range": {
+                      "end": "2025",
+                      "start": "1993"
+                    },
+                    "member_count": 1,
+                    "member_count_exact": false,
+                    "served_count": 1
+                  },
+                  "trace": {
+                    "capability_version": "cap_94e25737d859392c",
+                    "default_reading": {
+                      "applied": true,
+                      "removed_stat_vars": []
+                    },
+                    "query_qualifiers": [
+                      {
+                        "disposition": "no_vocabulary",
+                        "end": 13,
+                        "evidence": "uncovered",
+                        "named": [],
+                        "selected": [],
+                        "start": 0,
+                        "text": "external debt"
+                      }
+                    ],
+                    "resolved_entities": [
+                      {
+                        "label": "Kenya",
+                        "ref": "country/KEN"
+                      },
+                      {
+                        "label": "Nigeria",
+                        "ref": "country/NGA"
+                      }
+                    ],
+                    "resolved_sources": [
+                      {
+                        "data_commons": {
+                          "id": "base",
+                          "label": "Data Commons by Google"
+                        },
+                        "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                        "label": "World Development Indicators",
+                        "ref": "dc/base/WorldDevelopmentIndicators",
+                        "source": {
+                          "label": "World Bank",
+                          "ref": "dc/s/WorldBank"
+                        }
+                      }
+                    ],
+                    "slot_filters": [
+                      {
+                        "binding_kind": "set",
+                        "key": {
+                          "axis": "where",
+                          "label": "place"
+                        },
+                        "provenance": "binder",
+                        "refs": [
+                          {
+                            "label": "Kenya",
+                            "ref": "country/KEN"
+                          },
+                          {
+                            "label": "Nigeria",
+                            "ref": "country/NGA"
+                          }
+                        ]
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "when",
+                          "label": "time window"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "source",
+                          "label": "data source"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      }
+                    ]
+                  },
+                  "unresolved_slots": []
+                },
+                "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+              },
+              "message": "\"external debt\" is not a distinction this data records. Try the question without it.",
+              "options": [],
+              "reason": "qualifier_not_bound",
               "source_terms": [],
-              "unbound_qualifiers": []
+              "unbound_qualifiers": [
+                {
+                  "disposition": "no_vocabulary",
+                  "end": 13,
+                  "evidence": "uncovered",
+                  "named": [],
+                  "selected": [],
+                  "start": 0,
+                  "text": "external debt"
+                }
+              ]
             },
             "operations": [],
-            "rendered_sentence": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
+            "rendered_sentence": "\"external debt\" is not a distinction this data records. Try the question without it.",
             "restatement": {
               "entities": [
                 {
@@ -73,20 +465,44 @@
                 "kind": "text",
                 "segment": "heading",
                 "states": [],
-                "text": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name."
+                "text": "\"external debt\" is not a distinction this data records. Try the question without it."
               }
             ],
             "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "bind": 1565,
-                "recall": 357,
-                "shape": 545
+                "answer": 80,
+                "bind": 227,
+                "materialise": 1,
+                "options": 0,
+                "phase_bind": 13,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 1,
+                "phase_place_bindings": 89,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 9,
+                "recall": 423,
+                "shape": 366,
+                "shape_admission": 0,
+                "shape_arcs": 2,
+                "shape_groups": 6,
+                "shape_labels": 0,
+                "shape_probe": 176,
+                "shape_probe_coverage": 61
               },
-              "total": 2467
+              "total": 1209
             },
             "variable_text": "external debt as a share of GDP",
             "warnings": [
+              {
+                "code": "retrieval_score_weak",
+                "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
+                "severity": "info"
+              },
               {
                 "code": "time_window_defaulted",
                 "message": "no time_text was given; the answer was resolved across every period with data.",
@@ -105,7 +521,7 @@
           "extract_skipped": true,
           "raw_query": "Show Kenya's and Nigeria's external debt as a share of GDP over time"
         },
-        "rendered_sentence": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
+        "rendered_sentence": "\"external debt\" is not a distinction this data records. Try the question without it.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -114,7 +530,7 @@
             "part_index": 0,
             "segment": "heading",
             "states": [],
-            "text": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name."
+            "text": "\"external debt\" is not a distinction this data records. Try the question without it."
           }
         ],
         "skills": {},
@@ -139,38 +555,431 @@
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 9153,
-            "output_tokens": 598
+            "input_tokens": 0,
+            "jev_input_tokens": 38004,
+            "jev_output_tokens": 7774,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 2582
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 934
           },
-          "trace_id": "559ee012783e497e89fd7b8f046bf908",
+          "trace_id": "8308f643352741868827e86b8bda07fa",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "no_data": {
               "ambiguous_entities": [],
               "ambiguous_sources": [],
-              "category": "unresolved",
-              "entity_terms": [
-                "Kenya",
-                "Nigeria"
-              ],
-              "message": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
-              "reason": "role_not_resolved",
+              "category": "absent",
+              "elected_count": 1,
+              "entity_terms": [],
+              "flagged_match": {
+                "definition": {
+                  "identity": {
+                    "entities": {
+                      "observationAbout": [
+                        "country/KEN",
+                        "country/NGA"
+                      ]
+                    },
+                    "identity_version": "spec1",
+                    "requested_window": {
+                      "kind": "all"
+                    },
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "measured_property": "amount",
+                      "measurement_denominator": {
+                        "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                      },
+                      "population_type": "Stock",
+                      "stat_type": "measuredValue"
+                    },
+                    "slots": []
+                  },
+                  "schema_version": 1,
+                  "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+                },
+                "resolved": {
+                  "available_at_place": true,
+                  "confidence": "high",
+                  "coverage": {
+                    "dimensions": [
+                      {
+                        "count": 2,
+                        "label": "countries"
+                      },
+                      {
+                        "count": 30,
+                        "label": "observations"
+                      },
+                      {
+                        "count": 1,
+                        "label": "variables"
+                      }
+                    ],
+                    "evidence": "facet_metadata",
+                    "has_data": true,
+                    "kind": "exact",
+                    "observation_count": 55
+                  },
+                  "download": {
+                    "licence": {
+                      "label": "Creative Commons Attribution License"
+                    },
+                    "rows": 55,
+                    "rows_exact": true,
+                    "series": 2,
+                    "window": {
+                      "end_year": 2025,
+                      "start_year": 1993
+                    }
+                  },
+                  "entities": [
+                    {
+                      "entity_type": "Country",
+                      "label": "Kenya",
+                      "ref": "country/KEN",
+                      "role": "observationAbout"
+                    },
+                    {
+                      "entity_type": "Country",
+                      "label": "Nigeria",
+                      "ref": "country/NGA",
+                      "role": "observationAbout"
+                    }
+                  ],
+                  "entity_options": [],
+                  "facet_options": [],
+                  "facets": {
+                    "provenance": {
+                      "basis": "fallback",
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    },
+                    "unit": {
+                      "basis": "fallback",
+                      "label": "Percent",
+                      "ref": "Percent"
+                    }
+                  },
+                  "inapplicable_slots": [],
+                  "measure_axis_values": [],
+                  "measure_label_axes": [],
+                  "rendered_sentence": "Stock value as a percentage of nominal GDP in Kenya and Nigeria, 1993 to 2025. World Development Indicators.",
+                  "sentence_plan": [
+                    {
+                      "axis": "what",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "Stock value as a percentage of nominal GDP"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": " in "
+                    },
+                    {
+                      "axis": "where",
+                      "binding_ref": "where:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "where:"
+                      ],
+                      "text": "Kenya and Nigeria"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": ", "
+                    },
+                    {
+                      "axis": "when",
+                      "binding_ref": "when:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "when:"
+                      ],
+                      "text": "1993 to 2025"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "."
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": " "
+                    },
+                    {
+                      "axis": "source",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "byline",
+                      "states": [
+                        "source:"
+                      ],
+                      "text": "World Development Indicators"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": "."
+                    }
+                  ],
+                  "shape": {
+                    "data_commons": [
+                      {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      }
+                    ],
+                    "label": "Stock Value as a Percentage of Nominal GDP",
+                    "measured_property": {
+                      "label": "amount",
+                      "ref": "amount"
+                    },
+                    "measurement_denominator": {
+                      "label": "Nominal gross domestic product",
+                      "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                    },
+                    "measurement_denominator_unresolved": false,
+                    "member_count": 1,
+                    "member_digest": "a4109616b41e7c7e79dbc962c98e972d362e16ef0350b4ece8d7444a3ba75460",
+                    "population_type": {
+                      "label": "Stock",
+                      "ref": "Stock"
+                    },
+                    "refine_supported": true,
+                    "shape_id": "stock_amount_measuredvalue_per_amount_economicactivity_grossdomesticproduction_nominal",
+                    "slot_keys": [
+                      {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      {
+                        "axis": "source",
+                        "label": "data source"
+                      }
+                    ],
+                    "stat_type": {
+                      "label": "measuredValue",
+                      "ref": "measuredValue"
+                    },
+                    "upstream": {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  },
+                  "skills": [],
+                  "slot_options": [],
+                  "slots": [
+                    {
+                      "binding": {
+                        "kind": "set",
+                        "values": [
+                          {
+                            "ref": {
+                              "label": "Kenya",
+                              "ref": "country/KEN"
+                            },
+                            "value_kind": "entity"
+                          },
+                          {
+                            "ref": {
+                              "label": "Nigeria",
+                              "ref": "country/NGA"
+                            },
+                            "value_kind": "entity"
+                          }
+                        ]
+                      },
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "summable": false
+                    }
+                  ],
+                  "stat_vars": {
+                    "data_date_range": {
+                      "end": "2025",
+                      "start": "1993"
+                    },
+                    "member_count": 1,
+                    "member_count_exact": false,
+                    "served_count": 1
+                  },
+                  "trace": {
+                    "capability_version": "cap_94e25737d859392c",
+                    "default_reading": {
+                      "applied": true,
+                      "removed_stat_vars": []
+                    },
+                    "query_qualifiers": [
+                      {
+                        "disposition": "no_vocabulary",
+                        "end": 8,
+                        "evidence": "uncovered",
+                        "named": [],
+                        "selected": [],
+                        "start": 0,
+                        "text": "external"
+                      }
+                    ],
+                    "resolved_entities": [
+                      {
+                        "label": "Kenya",
+                        "ref": "country/KEN"
+                      },
+                      {
+                        "label": "Nigeria",
+                        "ref": "country/NGA"
+                      }
+                    ],
+                    "resolved_sources": [
+                      {
+                        "data_commons": {
+                          "id": "base",
+                          "label": "Data Commons by Google"
+                        },
+                        "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                        "label": "World Development Indicators",
+                        "ref": "dc/base/WorldDevelopmentIndicators",
+                        "source": {
+                          "label": "World Bank",
+                          "ref": "dc/s/WorldBank"
+                        }
+                      }
+                    ],
+                    "slot_filters": [
+                      {
+                        "binding_kind": "set",
+                        "key": {
+                          "axis": "where",
+                          "label": "place"
+                        },
+                        "provenance": "binder",
+                        "refs": [
+                          {
+                            "label": "Kenya",
+                            "ref": "country/KEN"
+                          },
+                          {
+                            "label": "Nigeria",
+                            "ref": "country/NGA"
+                          }
+                        ]
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "when",
+                          "label": "time window"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "source",
+                          "label": "data source"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      }
+                    ]
+                  },
+                  "unresolved_slots": []
+                },
+                "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+              },
+              "message": "\"external\" is not a distinction this data records. Try the question without it.",
+              "options": [],
+              "reason": "qualifier_not_bound",
               "source_terms": [],
-              "unbound_qualifiers": []
+              "unbound_qualifiers": [
+                {
+                  "disposition": "no_vocabulary",
+                  "end": 8,
+                  "evidence": "uncovered",
+                  "named": [],
+                  "selected": [],
+                  "start": 0,
+                  "text": "external"
+                }
+              ]
             },
             "operations": [],
-            "rendered_sentence": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
+            "rendered_sentence": "\"external\" is not a distinction this data records. Try the question without it.",
             "restatement": {
               "entities": [
                 {
@@ -190,20 +999,36 @@
                 "kind": "text",
                 "segment": "heading",
                 "states": [],
-                "text": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name."
+                "text": "\"external\" is not a distinction this data records. Try the question without it."
               }
             ],
             "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "answer": 1,
-                "bind": 1537,
+                "answer": 2,
+                "bind": 229,
                 "materialise": 1,
                 "options": 0,
-                "recall": 577,
-                "shape": 456
+                "phase_bind": 7,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 1,
+                "phase_place_bindings": 8,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 18,
+                "recall": 318,
+                "shape": 306,
+                "shape_admission": 1,
+                "shape_arcs": 2,
+                "shape_groups": 3,
+                "shape_labels": 1,
+                "shape_probe": 138,
+                "shape_probe_coverage": 4
               },
-              "total": 2572
+              "total": 890
             },
             "variable_text": "external debt stocks as a share of GDP",
             "warnings": [
@@ -220,6 +1045,7 @@
             ]
           },
           {
+            "assumptions": [],
             "departures": [],
             "no_data": {
               "ambiguous_entities": [],
@@ -230,6 +1056,62 @@
                 "Nigeria"
               ],
               "message": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name.",
+              "options": [
+                {
+                  "data_query": {
+                    "kind": "parsed",
+                    "parts": [
+                      {
+                        "entities": [
+                          {
+                            "role_text": "from",
+                            "text": "Kenya"
+                          },
+                          {
+                            "role_text": "to",
+                            "text": "Nigeria"
+                          }
+                        ],
+                        "operations": [],
+                        "sources": [],
+                        "variable_text": "external debt"
+                      }
+                    ]
+                  },
+                  "label": "Kenya to Nigeria",
+                  "mentions": [
+                    "Kenya",
+                    "Nigeria"
+                  ]
+                },
+                {
+                  "data_query": {
+                    "kind": "parsed",
+                    "parts": [
+                      {
+                        "entities": [
+                          {
+                            "role_text": "to",
+                            "text": "Kenya"
+                          },
+                          {
+                            "role_text": "from",
+                            "text": "Nigeria"
+                          }
+                        ],
+                        "operations": [],
+                        "sources": [],
+                        "variable_text": "external debt"
+                      }
+                    ]
+                  },
+                  "label": "Nigeria to Kenya",
+                  "mentions": [
+                    "Kenya",
+                    "Nigeria"
+                  ]
+                }
+              ],
               "reason": "role_not_resolved",
               "source_terms": [],
               "unbound_qualifiers": []
@@ -261,11 +1143,24 @@
             "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "bind": 1490,
+                "bind": 131,
+                "phase_bind": 12,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_place_bindings": 0,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 30,
                 "recall": 2,
-                "shape": 382
+                "shape": 280,
+                "shape_admission": 1,
+                "shape_arcs": 2,
+                "shape_groups": 3,
+                "shape_labels": 1,
+                "shape_probe": 167,
+                "shape_probe_coverage": 13
               },
-              "total": 1874
+              "total": 455
             },
             "variable_text": "external debt",
             "warnings": [
@@ -282,6 +1177,7 @@
             ]
           },
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -330,11 +1226,23 @@
                         "state": "unbound"
                       },
                       "property": "economicSector"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "naics"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "schoolGradeLevel"
                     }
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_7c65660e43f2418f209a844a76aeef4a"
+                "spec_id": "spec_79795ca354db2139ac4a1bf3a83b2872"
               },
               "resolved": {
                 "available_at_place": true,
@@ -416,6 +1324,12 @@
                         "slots": [
                           {
                             "binding": {
+                              "state": "unbound"
+                            },
+                            "property": "currencyConversionBasis"
+                          },
+                          {
+                            "binding": {
                               "ref": "GrossOfFixedCapitalConsumption",
                               "state": "value"
                             },
@@ -431,7 +1345,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_9a16268907b29b9f64bd66fc9071565b"
+                      "spec_id": "spec_62a1ea6f2c80d0e234f016b19eb0a003"
                     },
                     "resolved": {
                       "available_at_place": true,
@@ -443,7 +1357,7 @@
                             "label": "countries"
                           },
                           {
-                            "count": 45,
+                            "count": 46,
                             "label": "observations"
                           },
                           {
@@ -454,17 +1368,17 @@
                         "evidence": "facet_metadata",
                         "has_data": true,
                         "kind": "exact",
-                        "observation_count": 80
+                        "observation_count": 82
                       },
                       "download": {
                         "licence": {
                           "label": "IMF Copyright and Usage"
                         },
-                        "rows": 80,
+                        "rows": 82,
                         "rows_exact": true,
                         "series": 2,
                         "window": {
-                          "end_year": 2024,
+                          "end_year": 2025,
                           "start_year": 1980
                         }
                       },
@@ -491,6 +1405,7 @@
                             "id": "dfo",
                             "label": "Development Finance Observatory"
                           },
+                          "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
                           "label": "IMF World Economic Outlook (WEO)",
                           "ref": "provenance/IMFWorldEconomicOutlook",
                           "source": {
@@ -505,7 +1420,9 @@
                           "ref": "CurrencyUSD"
                         }
                       },
-                      "inapplicable_slots": [],
+                      "inapplicable_slots": [
+                        "currencyConversionBasis"
+                      ],
                       "measure_axis_values": [],
                       "measure_label_axes": [],
                       "shape": {
@@ -515,7 +1432,7 @@
                             "label": "Development Finance Observatory"
                           }
                         ],
-                        "label": "Gross domestic product (GDP), Current prices",
+                        "label": "Gross domestic product (GDP)",
                         "measured_property": {
                           "label": "value added",
                           "ref": "valueAdded"
@@ -525,8 +1442,8 @@
                           "label": "Nominal",
                           "ref": "Nominal"
                         },
-                        "member_count": 1,
-                        "member_digest": "5183d7a4f4c8471dee107680b8ce8b8a830d580f61723e9aa649255787800663",
+                        "member_count": 2,
+                        "member_digest": "ef9c4356618ed98aab762248e68799d78c74ad249a6041dad0e8a345c85ee02f",
                         "population_type": {
                           "label": "economic production",
                           "ref": "EconomicProduction"
@@ -548,6 +1465,14 @@
                             "property": {
                               "label": "product tax basis",
                               "ref": "productTaxBasis"
+                            }
+                          },
+                          {
+                            "axis": "how",
+                            "label": "currency conversion basis",
+                            "property": {
+                              "label": "currency conversion basis",
+                              "ref": "currencyConversionBasis"
                             }
                           },
                           {
@@ -617,6 +1542,29 @@
                           ],
                           "source": "observed",
                           "truncated": true
+                        },
+                        {
+                          "key": {
+                            "axis": "how",
+                            "label": "currency conversion basis",
+                            "property": {
+                              "label": "currency conversion basis",
+                              "ref": "currencyConversionBasis"
+                            }
+                          },
+                          "options": [
+                            {
+                              "value": {
+                                "ref": {
+                                  "label": "purchasing power parity rate",
+                                  "ref": "PurchasingPowerParityRate"
+                                },
+                                "value_kind": "enum_value"
+                              }
+                            }
+                          ],
+                          "source": "observed",
+                          "truncated": true
                         }
                       ],
                       "slots": [
@@ -658,6 +1606,20 @@
                             "property": {
                               "label": "product tax basis",
                               "ref": "productTaxBasis"
+                            }
+                          },
+                          "summable": false
+                        },
+                        {
+                          "binding": {
+                            "kind": "unbound"
+                          },
+                          "key": {
+                            "axis": "how",
+                            "label": "currency conversion basis",
+                            "property": {
+                              "label": "currency conversion basis",
+                              "ref": "currencyConversionBasis"
                             }
                           },
                           "summable": false
@@ -711,18 +1673,31 @@
                       ],
                       "stat_vars": {
                         "data_date_range": {
-                          "end": "2024",
+                          "end": "2025",
                           "start": "1980"
                         },
-                        "member_count": 1,
+                        "member_count": 2,
                         "member_count_exact": false,
                         "served_count": 1
                       },
                       "trace": {
-                        "capability_version": "cap_daf889452657d56d",
+                        "capability_version": "cap_94e25737d859392c",
                         "default_reading": {
                           "applied": true,
                           "removed_stat_vars": [
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSAccommodationFoodServices_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSAgricultureForestryFishingHunting_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSArtsEntertainmentRecreation_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSConstruction_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSEducationalServices_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSFinanceInsurance_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSInformation_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSManagementOfCompaniesEnterprises_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSMiningQuarryingOilGasExtraction_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSProfessionalScientificTechnicalServices_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSRealEstateRentalLeasing_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSUtilities_RealValue",
+                            "Amount_EconomicActivity_GrossDomesticProduction_NAICSWholesaleTrade_RealValue",
                             "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
                             "InflationAdjustedGDP",
                             "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
@@ -733,7 +1708,12 @@
                             "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
                             "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
                             "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
-                            "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector"
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSectorOrTransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                            "RealValue_Amount_EconomicActivity_GrossValueAdded_TransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                            "RealValue_GrowthRate_Amount_EconomicActivity_GrossDomesticProduction",
+                            "dc/qt7ewllmt3826",
+                            "dc/zz6gwv838v9w"
                           ]
                         },
                         "query_qualifiers": [],
@@ -753,6 +1733,7 @@
                               "id": "dfo",
                               "label": "Development Finance Observatory"
                             },
+                            "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
                             "label": "IMF World Economic Outlook (WEO)",
                             "ref": "provenance/IMFWorldEconomicOutlook",
                             "source": {
@@ -799,6 +1780,19 @@
                             ]
                           },
                           {
+                            "binding_kind": "unbound",
+                            "key": {
+                              "axis": "how",
+                              "label": "currency conversion basis",
+                              "property": {
+                                "label": "currency conversion basis",
+                                "ref": "currencyConversionBasis"
+                              }
+                            },
+                            "provenance": "binder",
+                            "refs": []
+                          },
+                          {
                             "binding_kind": "set",
                             "key": {
                               "axis": "where",
@@ -838,7 +1832,7 @@
                       },
                       "unresolved_slots": []
                     },
-                    "spec_id": "spec_9a16268907b29b9f64bd66fc9071565b"
+                    "spec_id": "spec_62a1ea6f2c80d0e234f016b19eb0a003"
                   }
                 ],
                 "facet_options": [
@@ -882,6 +1876,7 @@
                       "id": "base",
                       "label": "Data Commons by Google"
                     },
+                    "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
                     "label": "World Development Indicators",
                     "ref": "dc/base/WorldDevelopmentIndicators",
                     "source": {
@@ -897,7 +1892,9 @@
                   }
                 },
                 "inapplicable_slots": [
-                  "economicSector"
+                  "economicSector",
+                  "naics",
+                  "schoolGradeLevel"
                 ],
                 "measure_axis_values": [],
                 "measure_label_axes": [],
@@ -965,6 +1962,26 @@
                     "entity_refs": [],
                     "kind": "slot",
                     "property_dcid": "economicSector",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:naics",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "naics",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:schoolGradeLevel",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "schoolGradeLevel",
                     "segment": "heading",
                     "states": [],
                     "text": ""
@@ -1083,8 +2100,8 @@
                     "label": "Nominal",
                     "ref": "Nominal"
                   },
-                  "member_count": 38,
-                  "member_digest": "1ae8522ab52505085339d62a68eaa593526913a493dc36be6240e8712b0dfff3",
+                  "member_count": 65,
+                  "member_digest": "73519eeb75639bdae33042fc844830cd46becc08e4f9122dfcd0886e9875f657",
                   "population_type": {
                     "label": "EconomicActivity",
                     "ref": "EconomicActivity"
@@ -1106,6 +2123,22 @@
                       "property": {
                         "label": "economicSector",
                         "ref": "economicSector"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
                       }
                     },
                     {
@@ -1141,8 +2174,716 @@
                       {
                         "value": {
                           "ref": {
+                            "label": "GrossValueAdded",
+                            "ref": "GrossValueAdded"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
                             "label": "GrossDomesticProduction",
                             "ref": "GrossDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Net Domestic Production",
+                            "ref": "NetDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Net Value Added",
+                            "ref": "NetValueAdded"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture,Forestry and Fishing Sector",
+                            "ref": "AgricultureForestryFishingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Construction Sector",
+                            "ref": "ConstructionSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electric Gas Steam Air Condition Supply",
+                            "ref": "ElectricityGasSteamAirConditionSupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Finance Service",
+                            "ref": "FinanceService"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "MOSPI Other Service",
+                            "ref": "MOSPI_OtherService"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing Sector",
+                            "ref": "ManufacturingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Mining quarrying",
+                            "ref": "MiningQuarrying"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Trade Sector",
+                            "ref": "TradeSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Accommodation and food sector",
+                            "ref": "AccommodationAndFoodSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Administrative and support services",
+                            "ref": "AdministrativeAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agricultural support activities",
+                            "ref": "AgriculturalSupportActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture",
+                            "ref": "Agriculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Air transport and support services",
+                            "ref": "AirTransportAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "All economic activities",
+                            "ref": "AllEconomicActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Animal production",
+                            "ref": "AnimalProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Arts entertainment recreation",
+                            "ref": "ArtsEntertainmentRecreation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Education",
+                            "ref": "Education"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electricity supply",
+                            "ref": "ElectricitySupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employer household activities",
+                            "ref": "EmployerHouseholdActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "FinancialActivities",
+                            "ref": "FinancialActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial and insurance activities",
+                            "ref": "FinancialAndInsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial intermediation services indirectly measured",
+                            "ref": "FinancialIntermediationServicesIndirectlyMeasured"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Fishing aquaculture",
+                            "ref": "FishingAquaculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Food beverages tobacco manufacture",
+                            "ref": "FoodBeveragesTobaccoManufacture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Forestry logging",
+                            "ref": "ForestryLogging"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Human health and social work",
+                            "ref": "HumanHealthAndSocialWork"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Information and communication",
+                            "ref": "InformationAndCommunication"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Insurance activities",
+                            "ref": "InsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Land transport",
+                            "ref": "LandTransport"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other manufacturing and repair",
+                            "ref": "OtherManufacturingAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other service sector",
+                            "ref": "OtherServiceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other transport postal courier activities",
+                            "ref": "OtherTransportPostalCourierActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Product taxes",
+                            "ref": "ProductTaxes"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Professional scientific technical activities",
+                            "ref": "ProfessionalScientificTechnicalActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Public administration and defence",
+                            "ref": "PublicAdministrationAndDefence"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Publishing Broadcasting Information Activities",
+                            "ref": "PublishingBroadcastingInformationActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Real estate",
+                            "ref": "RealEstate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Telecommunications",
+                            "ref": "Telecommunications"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Transport and Storage",
+                            "ref": "TransportStorageSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Water supply sewerage waste management",
+                            "ref": "WaterSupplySewerageWasteManagement"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Wholesale retail trade and repair",
+                            "ref": "WholesaleRetailTradeAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Banking And Insurance Sector",
+                            "ref": "BankingAndInsuranceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing",
+                            "ref": "Construction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial Services",
+                            "ref": "FinancialServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Industry",
+                            "ref": "Industry"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Services",
+                            "ref": "Services"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Construction",
+                            "ref": "NAICS/23"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Retail trade",
+                            "ref": "NAICS/44-45"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Real estate and rental and leasing",
+                            "ref": "NAICS/53"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Utilities",
+                            "ref": "NAICS/22"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Management of companies and enterprises",
+                            "ref": "NAICS/55"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Transportation and warehousing",
+                            "ref": "NAICS/48-49"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Educational services",
+                            "ref": "NAICS/61"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Information",
+                            "ref": "NAICS/51"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Wholesale trade",
+                            "ref": "NAICS/42"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Mining, quarrying, and oil and gas extraction",
+                            "ref": "NAICS/21"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture, forestry, fishing and hunting",
+                            "ref": "NAICS/11"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Accommodation and food services",
+                            "ref": "NAICS/72"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Finance and insurance",
+                            "ref": "NAICS/52"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Professional, Scientific, and Technical Services",
+                            "ref": "NAICS/54"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Arts, entertainment, and recreation",
+                            "ref": "NAICS/71"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Durable Goods Manufacturing",
+                            "ref": "NAICS/311-316_322-326"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing",
+                            "ref": "NAICS/31-33"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Durable Goods Manufacturing",
+                            "ref": "NAICS/321_327-339"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Administrative and Support and Waste Management Services",
+                            "ref": "NAICS/56"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Health care and social assistance",
+                            "ref": "NAICS/62"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other services, except public administration",
+                            "ref": "NAICS/81"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Public administration",
+                            "ref": "NAICS/92"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Higher Secondary Education",
+                            "ref": "HigherSecondaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "PrePrimary and Primary",
+                            "ref": "PrePrimaryAndPrimaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "SecondaryEducation",
+                            "ref": "SecondaryEducation"
                           },
                           "value_kind": "enum_value"
                         }
@@ -1184,6 +2925,34 @@
                       "property": {
                         "label": "economicSector",
                         "ref": "economicSector"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
                       }
                     },
                     "summable": false
@@ -1240,15 +3009,28 @@
                     "end": "2025",
                     "start": "1960"
                   },
-                  "member_count": 38,
+                  "member_count": 41,
                   "member_count_exact": false,
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": [
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAccommodationFoodServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAgricultureForestryFishingHunting_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSArtsEntertainmentRecreation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSConstruction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSEducationalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSFinanceInsurance_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSInformation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSManagementOfCompaniesEnterprises_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSMiningQuarryingOilGasExtraction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSProfessionalScientificTechnicalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSRealEstateRentalLeasing_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSUtilities_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSWholesaleTrade_RealValue",
                       "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
                       "InflationAdjustedGDP",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
@@ -1259,7 +3041,12 @@
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
-                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector"
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSectorOrTransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_GrowthRate_Amount_EconomicActivity_GrossDomesticProduction",
+                      "dc/qt7ewllmt3826",
+                      "dc/zz6gwv838v9w"
                     ]
                   },
                   "query_qualifiers": [],
@@ -1279,6 +3066,7 @@
                         "id": "base",
                         "label": "Data Commons by Google"
                       },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
                       "label": "World Development Indicators",
                       "ref": "dc/base/WorldDevelopmentIndicators",
                       "source": {
@@ -1314,6 +3102,32 @@
                         "property": {
                           "label": "economicSector",
                           "ref": "economicSector"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "naics",
+                        "property": {
+                          "label": "naics",
+                          "ref": "naics"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "school grade level",
+                        "property": {
+                          "label": "schoolGradeLevel",
+                          "ref": "schoolGradeLevel"
                         }
                       },
                       "provenance": "binder",
@@ -1359,19 +3173,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_7c65660e43f2418f209a844a76aeef4a"
+              "spec_id": "spec_79795ca354db2139ac4a1bf3a83b2872"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 5,
-                "bind": 2,
-                "materialise": 99,
-                "options": 85,
+                "answer": 18,
+                "bind": 249,
+                "materialise": 90,
+                "options": 86,
+                "phase_bind": 10,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 15,
+                "phase_place_bindings": 7,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 21,
                 "recall": 2,
-                "shape": 315
+                "shape": 300,
+                "shape_admission": 1,
+                "shape_arcs": 4,
+                "shape_groups": 62,
+                "shape_labels": 10,
+                "shape_probe": 120,
+                "shape_probe_coverage": 5
               },
-              "total": 508
+              "total": 798
             },
             "variable_text": "GDP",
             "warnings": [
@@ -1388,12 +3218,42 @@
           "extract_skipped": true,
           "raw_query": "Kenya and Nigeria external debt and GDP"
         },
-        "rendered_sentence": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name. GDP in Kenya and Nigeria, 1960 to 2025. Current US dollars \u00b7 World Development Indicators.",
+        "rendered_sentence": "Answered 1 of 3 parts. \"external\" is not a distinction this data records. Try the question without it. Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name. GDP in Kenya and Nigeria, 1960 to 2025. Current US dollars \u00b7 World Development Indicators.",
         "schema_version": 1,
         "sentence_plan": [
           {
             "entity_refs": [],
             "kind": "text",
+            "segment": "coverage",
+            "states": [],
+            "text": "Answered 1 of 3 parts."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "coverage",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "\"external\" is not a distinction this data records. Try the question without it."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
             "segment": "heading",
             "states": [],
             "text": "Could not tell who is giving and who is receiving among \"Kenya\" and \"Nigeria\". Put \"from\" or \"to\" before a name."
@@ -1426,6 +3286,28 @@
             "kind": "slot",
             "part_index": 2,
             "property_dcid": "economicSector",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:naics",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "naics",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:schoolGradeLevel",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 2,
+            "property_dcid": "schoolGradeLevel",
             "segment": "heading",
             "states": [],
             "text": ""
@@ -1540,8 +3422,8 @@
         ],
         "skills": {
           "imf-weo": {
-            "content_version": "sha256:fed443d0e2523e4ebba2ae66b0faa930642ca94ec54af332a7a25e06fc44fdbf",
-            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
+            "content_version": "sha256:a6276160a435adad67df2d4122f60d6c35d9139f2a76f899829c12fc6eb5a404",
+            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. The DFO holds the WEO's national accounts series only. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
             "id": "imf-weo",
             "name": "imf-weo"
           }
@@ -1589,24 +3471,444 @@
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 24041,
+            "jev_output_tokens": 4904,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 242
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 507
           },
-          "trace_id": "b99e065b26f7495c9b90101d0d47f3c4",
+          "trace_id": "884340edf41b496f9cbf50610896d92c",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
-            "departures": [],
+            "assumptions": [],
+            "departures": [
+              {
+                "asked": "Kenya",
+                "binding_ref": "where:",
+                "code": "direction_discarded",
+                "text": "You named Kenya as a recipient, but this measure has no recipients, so this checked Kenya itself."
+              },
+              {
+                "asked": "Nigeria",
+                "binding_ref": "where:",
+                "code": "direction_discarded",
+                "text": "You named Nigeria as a recipient, but this measure has no recipients, so this checked Nigeria itself."
+              }
+            ],
+            "no_data": {
+              "ambiguous_entities": [],
+              "ambiguous_sources": [],
+              "category": "absent",
+              "elected_count": 1,
+              "entity_terms": [],
+              "flagged_match": {
+                "definition": {
+                  "identity": {
+                    "entities": {
+                      "observationAbout": [
+                        "country/KEN",
+                        "country/NGA"
+                      ]
+                    },
+                    "identity_version": "spec1",
+                    "requested_window": {
+                      "kind": "all"
+                    },
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "measured_property": "amount",
+                      "measurement_denominator": {
+                        "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                      },
+                      "population_type": "Stock",
+                      "stat_type": "measuredValue"
+                    },
+                    "slots": []
+                  },
+                  "schema_version": 1,
+                  "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+                },
+                "resolved": {
+                  "available_at_place": true,
+                  "confidence": "high",
+                  "coverage": {
+                    "dimensions": [
+                      {
+                        "count": 2,
+                        "label": "countries"
+                      },
+                      {
+                        "count": 30,
+                        "label": "observations"
+                      },
+                      {
+                        "count": 1,
+                        "label": "variables"
+                      }
+                    ],
+                    "evidence": "facet_metadata",
+                    "has_data": true,
+                    "kind": "exact",
+                    "observation_count": 55
+                  },
+                  "download": {
+                    "licence": {
+                      "label": "Creative Commons Attribution License"
+                    },
+                    "rows": 55,
+                    "rows_exact": true,
+                    "series": 2,
+                    "window": {
+                      "end_year": 2025,
+                      "start_year": 1993
+                    }
+                  },
+                  "entities": [
+                    {
+                      "entity_type": "Country",
+                      "label": "Kenya",
+                      "ref": "country/KEN",
+                      "role": "observationAbout"
+                    },
+                    {
+                      "entity_type": "Country",
+                      "label": "Nigeria",
+                      "ref": "country/NGA",
+                      "role": "observationAbout"
+                    }
+                  ],
+                  "entity_options": [],
+                  "facet_options": [],
+                  "facets": {
+                    "provenance": {
+                      "basis": "fallback",
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    },
+                    "unit": {
+                      "basis": "fallback",
+                      "label": "Percent",
+                      "ref": "Percent"
+                    }
+                  },
+                  "inapplicable_slots": [],
+                  "measure_axis_values": [],
+                  "measure_label_axes": [],
+                  "rendered_sentence": "Stock value as a percentage of nominal GDP in Kenya and Nigeria, 1993 to 2025. World Development Indicators.",
+                  "sentence_plan": [
+                    {
+                      "axis": "what",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "Stock value as a percentage of nominal GDP"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": " in "
+                    },
+                    {
+                      "axis": "where",
+                      "binding_ref": "where:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "where:"
+                      ],
+                      "text": "Kenya and Nigeria"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": ", "
+                    },
+                    {
+                      "axis": "when",
+                      "binding_ref": "when:",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "heading",
+                      "states": [
+                        "when:"
+                      ],
+                      "text": "1993 to 2025"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "heading",
+                      "states": [],
+                      "text": "."
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": " "
+                    },
+                    {
+                      "axis": "source",
+                      "entity_refs": [],
+                      "kind": "slot",
+                      "segment": "byline",
+                      "states": [
+                        "source:"
+                      ],
+                      "text": "World Development Indicators"
+                    },
+                    {
+                      "entity_refs": [],
+                      "kind": "text",
+                      "segment": "byline",
+                      "states": [],
+                      "text": "."
+                    }
+                  ],
+                  "shape": {
+                    "data_commons": [
+                      {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      }
+                    ],
+                    "label": "Stock Value as a Percentage of Nominal GDP",
+                    "measured_property": {
+                      "label": "amount",
+                      "ref": "amount"
+                    },
+                    "measurement_denominator": {
+                      "label": "Nominal gross domestic product",
+                      "ref": "Amount_EconomicActivity_GrossDomesticProduction_Nominal"
+                    },
+                    "measurement_denominator_unresolved": false,
+                    "member_count": 1,
+                    "member_digest": "a4109616b41e7c7e79dbc962c98e972d362e16ef0350b4ece8d7444a3ba75460",
+                    "population_type": {
+                      "label": "Stock",
+                      "ref": "Stock"
+                    },
+                    "refine_supported": true,
+                    "shape_id": "stock_amount_measuredvalue_per_amount_economicactivity_grossdomesticproduction_nominal",
+                    "slot_keys": [
+                      {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      {
+                        "axis": "source",
+                        "label": "data source"
+                      }
+                    ],
+                    "stat_type": {
+                      "label": "measuredValue",
+                      "ref": "measuredValue"
+                    },
+                    "upstream": {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  },
+                  "skills": [],
+                  "slot_options": [],
+                  "slots": [
+                    {
+                      "binding": {
+                        "kind": "set",
+                        "values": [
+                          {
+                            "ref": {
+                              "label": "Kenya",
+                              "ref": "country/KEN"
+                            },
+                            "value_kind": "entity"
+                          },
+                          {
+                            "ref": {
+                              "label": "Nigeria",
+                              "ref": "country/NGA"
+                            },
+                            "value_kind": "entity"
+                          }
+                        ]
+                      },
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "summable": false
+                    },
+                    {
+                      "binding": {
+                        "kind": "unbound"
+                      },
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "summable": false
+                    }
+                  ],
+                  "stat_vars": {
+                    "data_date_range": {
+                      "end": "2025",
+                      "start": "1993"
+                    },
+                    "member_count": 1,
+                    "member_count_exact": false,
+                    "served_count": 1
+                  },
+                  "trace": {
+                    "capability_version": "cap_94e25737d859392c",
+                    "default_reading": {
+                      "applied": true,
+                      "removed_stat_vars": []
+                    },
+                    "query_qualifiers": [
+                      {
+                        "disposition": "no_vocabulary",
+                        "end": 8,
+                        "evidence": "uncovered",
+                        "named": [],
+                        "selected": [],
+                        "start": 0,
+                        "text": "external"
+                      }
+                    ],
+                    "resolved_entities": [
+                      {
+                        "label": "Kenya",
+                        "ref": "country/KEN"
+                      },
+                      {
+                        "label": "Nigeria",
+                        "ref": "country/NGA"
+                      }
+                    ],
+                    "resolved_sources": [
+                      {
+                        "data_commons": {
+                          "id": "base",
+                          "label": "Data Commons by Google"
+                        },
+                        "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                        "label": "World Development Indicators",
+                        "ref": "dc/base/WorldDevelopmentIndicators",
+                        "source": {
+                          "label": "World Bank",
+                          "ref": "dc/s/WorldBank"
+                        }
+                      }
+                    ],
+                    "slot_filters": [
+                      {
+                        "binding_kind": "set",
+                        "key": {
+                          "axis": "where",
+                          "label": "place"
+                        },
+                        "provenance": "binder",
+                        "refs": [
+                          {
+                            "label": "Kenya",
+                            "ref": "country/KEN"
+                          },
+                          {
+                            "label": "Nigeria",
+                            "ref": "country/NGA"
+                          }
+                        ]
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "when",
+                          "label": "time window"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      },
+                      {
+                        "binding_kind": "unbound",
+                        "key": {
+                          "axis": "source",
+                          "label": "data source"
+                        },
+                        "provenance": "binder",
+                        "refs": []
+                      }
+                    ]
+                  },
+                  "unresolved_slots": []
+                },
+                "spec_id": "spec_ebf3befc3c17909a85b77c0d5c60568e"
+              },
+              "message": "\"external\" is not a distinction this data records. Try the question without it.",
+              "options": [],
+              "reason": "qualifier_not_bound",
+              "source_terms": [],
+              "unbound_qualifiers": [
+                {
+                  "disposition": "no_vocabulary",
+                  "end": 8,
+                  "evidence": "uncovered",
+                  "named": [],
+                  "selected": [],
+                  "start": 0,
+                  "text": "external"
+                }
+              ]
+            },
             "operations": [],
+            "rendered_sentence": "\"external\" is not a distinction this data records. Try the question without it. You named Kenya as a recipient, but this measure has no recipients, so this checked Kenya itself. You named Nigeria as a recipient, but this measure has no recipients, so this checked Nigeria itself.",
             "restatement": {
               "entities": [
                 {
@@ -1622,591 +3924,112 @@
               "sources": [],
               "variable_text": "external debt stocks as a share of GDP"
             },
-            "spec": {
-              "definition": {
-                "identity": {
-                  "entities": {
-                    "destination": [
-                      "country/KEN",
-                      "country/NGA"
-                    ]
-                  },
-                  "identity_version": "spec1",
-                  "requested_window": {
-                    "kind": "all"
-                  },
-                  "shape": {
-                    "kind": "statvar_schema",
-                    "measured_property": "amount",
-                    "measurement_denominator": {
-                      "ref": "PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal"
-                    },
-                    "population_type": "FinancialPosition",
-                    "stat_type": "measuredValue"
-                  },
-                  "slots": [
-                    {
-                      "binding": {
-                        "ref": "AmountOutstanding",
-                        "state": "value"
-                      },
-                      "property": "financialPositionType"
-                    }
-                  ]
-                },
-                "schema_version": 1,
-                "spec_id": "spec_a0dca891a02dc69c1ea4c186f37eebdf"
+            "sentence_plan": [
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": "\"external\" is not a distinction this data records. Try the question without it."
               },
-              "resolved": {
-                "available_at_place": true,
-                "confidence": "high",
-                "coverage": {
-                  "dimensions": [
-                    {
-                      "count": 1,
-                      "label": "sources"
-                    },
-                    {
-                      "count": 55,
-                      "label": "observations"
-                    },
-                    {
-                      "count": 1,
-                      "label": "variables"
-                    }
-                  ],
-                  "evidence": "facet_metadata",
-                  "has_data": true,
-                  "kind": "exact",
-                  "observation_count": 72
-                },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
-                "download": {
-                  "licence": {
-                    "label": "Creative Commons Attribution License"
-                  },
-                  "rows": 72,
-                  "rows_exact": true,
-                  "series": 2,
-                  "window": {
-                    "end_year": 2024,
-                    "start_year": 1970
-                  }
-                },
-                "entities": [
-                  {
-                    "entity_type": "Country",
-                    "label": "Kenya",
-                    "ref": "country/KEN",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "Country",
-                    "label": "Nigeria",
-                    "ref": "country/NGA",
-                    "role": "destination"
-                  }
-                ],
-                "entity_options": [],
-                "facet_options": [
-                  {
-                    "axis": "provenance",
-                    "options": [
-                      {
-                        "value": {
-                          "ref": {
-                            "label": "World Bank International Debt Statistics (IDS)",
-                            "ref": "provenance/WorldBankInternationalDebtStatistics"
-                          },
-                          "value_kind": "source"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": false
-                  },
-                  {
-                    "axis": "unit",
-                    "options": [
-                      {
-                        "value": {
-                          "ref": {
-                            "label": "Percent",
-                            "ref": "Percent"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": false
-                  }
-                ],
-                "facets": {
-                  "provenance": {
-                    "basis": "fallback",
-                    "data_commons": {
-                      "id": "dfo",
-                      "label": "Development Finance Observatory"
-                    },
-                    "label": "World Bank International Debt Statistics (IDS)",
-                    "ref": "provenance/WorldBankInternationalDebtStatistics",
-                    "source": {
-                      "label": "World Bank",
-                      "ref": "dc/s/WorldBank"
-                    }
-                  },
-                  "unit": {
-                    "basis": "fallback",
-                    "label": "Percent",
-                    "ref": "Percent"
-                  }
-                },
-                "headline": {
-                  "observations": 2,
-                  "recent_years": [
-                    {
-                      "observations": 2,
-                      "role_counts": {
-                        "financingRecipient": 2
-                      },
-                      "series": 2,
-                      "year": 2024
-                    },
-                    {
-                      "observations": 2,
-                      "role_counts": {
-                        "financingRecipient": 2
-                      },
-                      "series": 2,
-                      "year": 2023
-                    },
-                    {
-                      "observations": 2,
-                      "role_counts": {
-                        "financingRecipient": 2
-                      },
-                      "series": 2,
-                      "year": 2022
-                    }
-                  ],
-                  "role_counts": {
-                    "financingRecipient": 2
-                  },
-                  "series": 2,
-                  "year": 2024,
-                  "year_named": false
-                },
-                "inapplicable_slots": [],
-                "measure_axis_values": [],
-                "measure_label_axes": [],
-                "rendered_sentence": "Outstanding external debt as a share of GNI of Kenya and Nigeria owed to all creditors, 1970 to 2024. World Bank International Debt Statistics (IDS).",
-                "sentence_plan": [
-                  {
-                    "axis": "what",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "segment": "heading",
-                    "states": [
-                      "how:financialPositionType",
-                      "axis:populationType",
-                      "axis:measuredProperty",
-                      "axis:statType"
-                    ],
-                    "text": "Outstanding external debt"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": " "
-                  },
-                  {
-                    "axis": "unit",
-                    "binding_ref": "unit:",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "segment": "heading",
-                    "states": [
-                      "unit:"
-                    ],
-                    "text": "as a share of GNI"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": " of "
-                  },
-                  {
-                    "axis": "where",
-                    "binding_ref": "where:",
-                    "entity_refs": [
-                      "country/KEN",
-                      "country/NGA"
-                    ],
-                    "kind": "slot",
-                    "role": "destination",
-                    "segment": "heading",
-                    "states": [
-                      "where:"
-                    ],
-                    "text": "Kenya and Nigeria"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": " owed to "
-                  },
-                  {
-                    "binding_ref": "origin:",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "role": "origin",
-                    "segment": "heading",
-                    "states": [
-                      "origin:"
-                    ],
-                    "text": "all creditors"
-                  },
-                  {
-                    "axis": "how",
-                    "binding_ref": "how:financialPositionType",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "property_dcid": "financialPositionType",
-                    "segment": "heading",
-                    "states": [],
-                    "text": ""
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": ", "
-                  },
-                  {
-                    "axis": "when",
-                    "binding_ref": "when:",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "segment": "heading",
-                    "states": [
-                      "when:"
-                    ],
-                    "text": "1970 to 2024"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": "."
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "byline",
-                    "states": [],
-                    "text": " "
-                  },
-                  {
-                    "axis": "source",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "segment": "byline",
-                    "states": [
-                      "source:"
-                    ],
-                    "text": "World Bank International Debt Statistics (IDS)"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "byline",
-                    "states": [],
-                    "text": "."
-                  }
-                ],
-                "shape": {
-                  "data_commons": [
-                    {
-                      "id": "dfo",
-                      "label": "Development Finance Observatory"
-                    }
-                  ],
-                  "label": "Outstanding external debt (% of GNI)",
-                  "measured_property": {
-                    "label": "amount",
-                    "ref": "amount"
-                  },
-                  "measurement_denominator": {
-                    "label": "Gross national income (current US$)",
-                    "ref": "PrimaryIncome_EconomicUnit_GrossOfFixedCapitalConsumption_Nominal"
-                  },
-                  "measurement_denominator_unresolved": false,
-                  "member_count": 1,
-                  "member_digest": "ee68cece3535cf5567690223b530496894b2972e0cb90eb30b0c3bdad471a218",
-                  "population_type": {
-                    "label": "financial position",
-                    "ref": "FinancialPosition"
-                  },
-                  "refine_supported": false,
-                  "shape_id": "financialposition_amount_measuredvalue_per_primaryincome_economicunit_grossoffixedcapitalconsumption_nominal_by_role",
-                  "slot_keys": [
-                    {
-                      "axis": "how",
-                      "label": "financial position type",
-                      "property": {
-                        "label": "financial position type",
-                        "ref": "financialPositionType"
-                      }
-                    },
-                    {
-                      "axis": "where",
-                      "label": "place"
-                    },
-                    {
-                      "axis": "when",
-                      "label": "time window"
-                    },
-                    {
-                      "axis": "source",
-                      "label": "data source"
-                    }
-                  ],
-                  "stat_type": {
-                    "label": "measuredValue",
-                    "ref": "measuredValue"
-                  }
-                },
-                "skills": [
-                  "debt-ids",
-                  "debt-profile",
-                  "debt-sustainability"
-                ],
-                "slot_options": [
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "financial position type",
-                      "property": {
-                        "label": "financial position type",
-                        "ref": "financialPositionType"
-                      }
-                    },
-                    "options": [
-                      {
-                        "value": {
-                          "ref": {
-                            "label": "amount outstanding",
-                            "ref": "AmountOutstanding"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  }
-                ],
-                "slots": [
-                  {
-                    "binding": {
-                      "kind": "value",
-                      "value": {
-                        "ref": {
-                          "label": "amount outstanding",
-                          "ref": "AmountOutstanding"
-                        },
-                        "value_kind": "enum_value"
-                      }
-                    },
-                    "key": {
-                      "axis": "how",
-                      "label": "financial position type",
-                      "property": {
-                        "label": "financial position type",
-                        "ref": "financialPositionType"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "set",
-                      "values": [
-                        {
-                          "ref": {
-                            "label": "Kenya",
-                            "ref": "country/KEN"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "Nigeria",
-                            "ref": "country/NGA"
-                          },
-                          "value_kind": "entity"
-                        }
-                      ]
-                    },
-                    "key": {
-                      "axis": "where",
-                      "label": "place"
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "when",
-                      "label": "time window"
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "source",
-                      "label": "data source"
-                    },
-                    "summable": false
-                  }
-                ],
-                "stat_vars": {
-                  "data_date_range": {
-                    "end": "2024",
-                    "start": "1970"
-                  },
-                  "member_count": 1,
-                  "member_count_exact": false,
-                  "served_count": 1
-                },
-                "trace": {
-                  "capability_version": "cap_daf889452657d56d",
-                  "default_reading": {
-                    "applied": true,
-                    "removed_stat_vars": []
-                  },
-                  "query_qualifiers": [],
-                  "resolved_entities": [
-                    {
-                      "label": "Kenya",
-                      "ref": "country/KEN"
-                    },
-                    {
-                      "label": "Nigeria",
-                      "ref": "country/NGA"
-                    }
-                  ],
-                  "resolved_sources": [
-                    {
-                      "data_commons": {
-                        "id": "dfo",
-                        "label": "Development Finance Observatory"
-                      },
-                      "label": "World Bank International Debt Statistics (IDS)",
-                      "ref": "provenance/WorldBankInternationalDebtStatistics",
-                      "source": {
-                        "label": "World Bank",
-                        "ref": "dc/s/WorldBank"
-                      }
-                    }
-                  ],
-                  "slot_filters": [
-                    {
-                      "binding_kind": "value",
-                      "key": {
-                        "axis": "how",
-                        "label": "financial position type",
-                        "property": {
-                          "label": "financial position type",
-                          "ref": "financialPositionType"
-                        }
-                      },
-                      "provenance": "binder",
-                      "refs": [
-                        {
-                          "label": "amount outstanding",
-                          "ref": "AmountOutstanding"
-                        }
-                      ]
-                    },
-                    {
-                      "binding_kind": "set",
-                      "key": {
-                        "axis": "where",
-                        "label": "place"
-                      },
-                      "provenance": "binder",
-                      "refs": [
-                        {
-                          "label": "Kenya",
-                          "ref": "country/KEN"
-                        },
-                        {
-                          "label": "Nigeria",
-                          "ref": "country/NGA"
-                        }
-                      ]
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "when",
-                        "label": "time window"
-                      },
-                      "provenance": "binder",
-                      "refs": []
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "source",
-                        "label": "data source"
-                      },
-                      "provenance": "binder",
-                      "refs": []
-                    }
-                  ]
-                },
-                "unresolved_slots": []
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "departure",
+                "states": [],
+                "text": " "
               },
-              "spec_id": "spec_a0dca891a02dc69c1ea4c186f37eebdf"
-            },
-            "status": "definite",
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "departure",
+                "states": [],
+                "text": "You named Kenya as a recipient, but this measure has no recipients, so this checked Kenya itself."
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "departure",
+                "states": [],
+                "text": " "
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "departure",
+                "states": [],
+                "text": "You named Nigeria as a recipient, but this measure has no recipients, so this checked Nigeria itself."
+              }
+            ],
+            "status": "no_data",
             "timing_ms": {
               "by_step": {
-                "answer": 2,
-                "bind": 7,
-                "materialise": 36,
-                "options": 5,
-                "recall": 2,
-                "shape": 159
+                "answer": 12,
+                "bind": 264,
+                "materialise": 1,
+                "options": 1,
+                "phase_bind": 18,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 4,
+                "phase_place_bindings": 8,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 13,
+                "recall": 1,
+                "shape": 173,
+                "shape_admission": 1,
+                "shape_arcs": 2,
+                "shape_groups": 3,
+                "shape_labels": 1,
+                "shape_probe": 25,
+                "shape_probe_coverage": 23
               },
-              "total": 211
+              "total": 495
             },
             "variable_text": "external debt stocks as a share of GDP",
             "warnings": [
               {
+                "code": "direction_discarded",
+                "message": "Kenya was named as the recipient; this shape reports the place as its own subject, so the direction was dropped.",
+                "severity": "warn"
+              },
+              {
+                "code": "direction_discarded",
+                "message": "Nigeria was named as the recipient; this shape reports the place as its own subject, so the direction was dropped.",
+                "severity": "warn"
+              },
+              {
                 "code": "time_window_defaulted",
                 "message": "no time_text was given; the answer was resolved across every period with data.",
+                "severity": "warn"
+              },
+              {
+                "code": "skills_not_matchable",
+                "message": "Skills were requested, but this part resolved to no spec, so it binds no graph nodes to match a skill against.",
                 "severity": "warn"
               }
             ]
           },
           {
+            "assumptions": [
+              {
+                "binding_ref": "how:financialPositionType",
+                "kind": "declared_default",
+                "refs": [
+                  "AmountOutstanding"
+                ],
+                "text": "amount outstanding"
+              },
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every creditor"
+              }
+            ],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -2247,7 +4070,8 @@
                   "slots": [
                     {
                       "binding": {
-                        "state": "unbound"
+                        "ref": "AmountOutstanding",
+                        "state": "value"
                       },
                       "property": "financialPositionType"
                     },
@@ -2302,7 +4126,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_73da03ce27f249bdeb35e7d4cf1b363d"
+                "spec_id": "spec_f4e114277b9cfbd5505e334cb870856f"
               },
               "resolved": {
                 "available_at_place": true,
@@ -2327,7 +4151,7 @@
                   "kind": "exact",
                   "observation_count": 110
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "Creative Commons Attribution License"
@@ -2396,6 +4220,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                     "label": "World Bank International Debt Statistics (IDS)",
                     "ref": "provenance/WorldBankInternationalDebtStatistics",
                     "source": {
@@ -2446,38 +4271,17 @@
                   "year_named": false
                 },
                 "inapplicable_slots": [
-                  "guaranteeStatus",
                   "financingResource",
-                  "idsCreditorType",
-                  "maturityBand",
+                  "guaranteeStatus",
                   "idsDebtorType",
-                  "interestRateVariability",
                   "includesIMFCredit",
+                  "maturityBand",
+                  "idsCreditorType",
+                  "interestRateVariability",
                   "idsConcessionality"
                 ],
                 "measure_axis_values": [],
                 "measure_label_axes": [],
-                "open_axis_facts": [
-                  {
-                    "distinct_count": 1,
-                    "property": "financialPositionType",
-                    "undeclared_count": 0,
-                    "value": {
-                      "label": "amount outstanding",
-                      "ref": "AmountOutstanding"
-                    },
-                    "values": [
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "amount outstanding",
-                          "ref": "AmountOutstanding"
-                        }
-                      }
-                    ],
-                    "varies": false
-                  }
-                ],
                 "rendered_sentence": "Outstanding external debt of Kenya and Nigeria owed to all creditors, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
                 "sentence_plan": [
                   {
@@ -2699,7 +4503,7 @@
                       "label": "Development Finance Observatory"
                     }
                   ],
-                  "label": "Outstanding external debt (current US$)",
+                  "label": "Outstanding external debt",
                   "measured_property": {
                     "label": "amount",
                     "ref": "amount"
@@ -2709,8 +4513,8 @@
                     "label": "Nominal",
                     "ref": "Nominal"
                   },
-                  "member_count": 80,
-                  "member_digest": "a11630107897847c45034a414110165b3fab873e2ac4441764a3ee795d79d6ed",
+                  "member_count": 71,
+                  "member_digest": "828d307245f321b0ee7633320ace59c51864d5d68d721cdbe8336751f05377c8",
                   "population_type": {
                     "label": "financial position",
                     "ref": "FinancialPosition"
@@ -2728,14 +4532,6 @@
                     },
                     {
                       "axis": "how",
-                      "label": "guarantee status",
-                      "property": {
-                        "label": "guarantee status",
-                        "ref": "guaranteeStatus"
-                      }
-                    },
-                    {
-                      "axis": "how",
                       "label": "financing resource",
                       "property": {
                         "label": "financing resource",
@@ -2744,18 +4540,10 @@
                     },
                     {
                       "axis": "how",
-                      "label": "IDS creditor type",
+                      "label": "guarantee status",
                       "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
-                      }
-                    },
-                    {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
                       }
                     },
                     {
@@ -2768,18 +4556,34 @@
                     },
                     {
                       "axis": "how",
-                      "label": "interest rate variability",
-                      "property": {
-                        "label": "interest rate variability",
-                        "ref": "interestRateVariability"
-                      }
-                    },
-                    {
-                      "axis": "how",
                       "label": "includes IMF credit",
                       "property": {
                         "label": "includes IMF credit",
                         "ref": "includesIMFCredit"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
                       }
                     },
                     {
@@ -2825,8 +4629,6 @@
                     },
                     "options": [
                       {
-                        "served_rows": 110,
-                        "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "amount outstanding",
@@ -2836,12 +4638,28 @@
                         }
                       },
                       {
-                        "served_rows": 330,
-                        "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "amount undisbursed",
                             "ref": "AmountUndisbursed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "interest arrears",
+                            "ref": "InterestArrears"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "principal arrears",
+                            "ref": "PrincipalArrears"
                           },
                           "value_kind": "enum_value"
                         }
@@ -2861,12 +4679,164 @@
                     },
                     "options": [
                       {
-                        "served_rows": 220,
+                        "served_rows": 110,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "public or publicly guaranteed",
                             "ref": "PublicOrPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 34,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "publicly guaranteed",
+                            "ref": "PubliclyGuaranteedClaim"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 103,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "not publicly guaranteed",
+                            "ref": "NotPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS debtor type",
+                      "property": {
+                        "label": "IDS debtor type",
+                        "ref": "idsDebtorType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "general government (IDS debtor type)",
+                            "ref": "IDSDebtorTypeGG"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 7,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "central bank (IDS debtor type)",
+                            "ref": "IDSDebtorTypeCB"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 240,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypePrivateSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 108,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypeOPS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "includes IMF credit",
+                      "property": {
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "without IMF credit",
+                            "ref": "WithoutIMFCredit"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "maturity band",
+                      "property": {
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 323,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "long-term maturity",
+                            "ref": "LongTermMaturity"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "short-term maturity",
+                            "ref": "ShortTermMaturity"
                           },
                           "value_kind": "enum_value"
                         }
@@ -2897,17 +4867,6 @@
                         }
                       },
                       {
-                        "served_rows": 437,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "private creditors (IDS creditor type)",
-                            "ref": "IDSCreditorTypePRVT"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
                         "served_rows": 91,
                         "served_rows_exact": true,
                         "value": {
@@ -2919,12 +4878,45 @@
                         }
                       },
                       {
-                        "served_rows": 440,
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePRVT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "official creditors (IDS creditor type)",
                             "ref": "IDSCreditorTypeOFFT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeBLAT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "multilateral (IDS creditor type)",
+                            "ref": "IDSCreditorTypeMLAT"
                           },
                           "value_kind": "enum_value"
                         }
@@ -2939,86 +4931,14 @@
                           },
                           "value_kind": "enum_value"
                         }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 110,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "short-term maturity",
-                            "ref": "ShortTermMaturity"
-                          },
-                          "value_kind": "enum_value"
-                        }
                       },
                       {
-                        "served_rows": 543,
+                        "served_rows": 103,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
-                            "label": "long-term maturity",
-                            "ref": "LongTermMaturity"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "IDS debtor type",
-                      "property": {
-                        "label": "IDS debtor type",
-                        "ref": "idsDebtorType"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 788,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "general government (IDS debtor type)",
-                            "ref": "IDSDebtorTypeGG"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 899,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "public sector (IDS debtor type)",
-                            "ref": "IDSDebtorTypePS"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 630,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "other public sector (IDS debtor type)",
-                            "ref": "IDSDebtorTypeOPS"
+                            "label": "commercial banks or other private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePNGC"
                           },
                           "value_kind": "enum_value"
                         }
@@ -3044,31 +4964,6 @@
                           "ref": {
                             "label": "variable interest rate",
                             "ref": "VariableInterestRate"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
-                      "label": "includes IMF credit",
-                      "property": {
-                        "label": "includes IMF credit",
-                        "ref": "includesIMFCredit"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 330,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "without IMF credit",
-                            "ref": "WithoutIMFCredit"
                           },
                           "value_kind": "enum_value"
                         }
@@ -3106,7 +5001,14 @@
                 "slots": [
                   {
                     "binding": {
-                      "kind": "unbound"
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "amount outstanding",
+                          "ref": "AmountOutstanding"
+                        },
+                        "value_kind": "enum_value"
+                      }
                     },
                     "key": {
                       "axis": "how",
@@ -3114,20 +5016,6 @@
                       "property": {
                         "label": "financial position type",
                         "ref": "financialPositionType"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "how",
-                      "label": "guarantee status",
-                      "property": {
-                        "label": "guarantee status",
-                        "ref": "guaranteeStatus"
                       }
                     },
                     "summable": false
@@ -3152,24 +5040,10 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "IDS creditor type",
+                      "label": "guarantee status",
                       "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "how",
-                      "label": "maturity band",
-                      "property": {
-                        "label": "maturity band",
-                        "ref": "maturityBand"
+                        "label": "guarantee status",
+                        "ref": "guaranteeStatus"
                       }
                     },
                     "summable": false
@@ -3194,10 +5068,10 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "interest rate variability",
+                      "label": "includes IMF credit",
                       "property": {
-                        "label": "interest rate variability",
-                        "ref": "interestRateVariability"
+                        "label": "includes IMF credit",
+                        "ref": "includesIMFCredit"
                       }
                     },
                     "summable": false
@@ -3208,10 +5082,38 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "includes IMF credit",
+                      "label": "maturity band",
                       "property": {
-                        "label": "includes IMF credit",
-                        "ref": "includesIMFCredit"
+                        "label": "maturity band",
+                        "ref": "maturityBand"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "interest rate variability",
+                      "property": {
+                        "label": "interest rate variability",
+                        "ref": "interestRateVariability"
                       }
                     },
                     "summable": false
@@ -3284,10 +5186,17 @@
                   },
                   "member_count": 1,
                   "member_count_exact": false,
-                  "served_count": 1
+                  "served_count": 1,
+                  "source_codes": [
+                    {
+                      "code": "DT.DOD.DECT.CD",
+                      "exact": true,
+                      "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                    }
+                  ]
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -3309,6 +5218,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                       "label": "World Bank International Debt Statistics (IDS)",
                       "ref": "provenance/WorldBankInternationalDebtStatistics",
                       "source": {
@@ -3319,13 +5229,31 @@
                   ],
                   "slot_filters": [
                     {
-                      "binding_kind": "unbound",
+                      "binding_kind": "value",
                       "key": {
                         "axis": "how",
                         "label": "financial position type",
                         "property": {
                           "label": "financial position type",
                           "ref": "financialPositionType"
+                        }
+                      },
+                      "provenance": "declared_default",
+                      "refs": [
+                        {
+                          "label": "amount outstanding",
+                          "ref": "AmountOutstanding"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "financing resource",
+                        "property": {
+                          "label": "financing resource",
+                          "ref": "financingResource"
                         }
                       },
                       "provenance": "binder",
@@ -3348,10 +5276,10 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "financing resource",
+                        "label": "IDS debtor type",
                         "property": {
-                          "label": "financing resource",
-                          "ref": "financingResource"
+                          "label": "IDS debtor type",
+                          "ref": "idsDebtorType"
                         }
                       },
                       "provenance": "binder",
@@ -3361,10 +5289,10 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "IDS creditor type",
+                        "label": "includes IMF credit",
                         "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
+                          "label": "includes IMF credit",
+                          "ref": "includesIMFCredit"
                         }
                       },
                       "provenance": "binder",
@@ -3387,10 +5315,10 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "IDS debtor type",
+                        "label": "IDS creditor type",
                         "property": {
-                          "label": "IDS debtor type",
-                          "ref": "idsDebtorType"
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
                         }
                       },
                       "provenance": "binder",
@@ -3404,19 +5332,6 @@
                         "property": {
                           "label": "interest rate variability",
                           "ref": "interestRateVariability"
-                        }
-                      },
-                      "provenance": "binder",
-                      "refs": []
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "how",
-                        "label": "includes IMF credit",
-                        "property": {
-                          "label": "includes IMF credit",
-                          "ref": "includesIMFCredit"
                         }
                       },
                       "provenance": "binder",
@@ -3475,19 +5390,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_73da03ce27f249bdeb35e7d4cf1b363d"
+              "spec_id": "spec_f4e114277b9cfbd5505e334cb870856f"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
                 "answer": 3,
-                "bind": 7,
-                "materialise": 21,
-                "options": 17,
+                "bind": 110,
+                "materialise": 41,
+                "options": 7,
+                "phase_bind": 25,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 8,
+                "phase_place_bindings": 25,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 30,
                 "recall": 1,
-                "shape": 165
+                "shape": 119,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 2,
+                "shape_labels": 1,
+                "shape_probe": 15,
+                "shape_probe_coverage": 13
               },
-              "total": 214
+              "total": 369
             },
             "variable_text": "external debt",
             "warnings": [
@@ -3504,152 +5435,62 @@
           "extract_skipped": true,
           "raw_query": "external debt of Kenya and Nigeria"
         },
-        "rendered_sentence": "Outstanding external debt as a share of GNI of Kenya and Nigeria owed to all creditors, 1970 to 2024. World Bank International Debt Statistics (IDS). Outstanding external debt of Kenya and Nigeria owed to all creditors, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+        "rendered_sentence": "Answered 1 of 2 parts. \"external\" is not a distinction this data records. Try the question without it. You named Kenya as a recipient, but this measure has no recipients, so this checked Kenya itself. You named Nigeria as a recipient, but this measure has no recipients, so this checked Nigeria itself. Outstanding external debt of Kenya and Nigeria owed to all creditors, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS). Assumed: amount outstanding; every creditor.",
         "schema_version": 1,
         "sentence_plan": [
           {
-            "axis": "what",
             "entity_refs": [],
-            "kind": "slot",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [
-              "how:financialPositionType",
-              "axis:populationType",
-              "axis:measuredProperty",
-              "axis:statType"
-            ],
-            "text": "Outstanding external debt"
+            "kind": "text",
+            "segment": "coverage",
+            "states": [],
+            "text": "Answered 1 of 2 parts."
           },
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
+            "segment": "coverage",
             "states": [],
             "text": " "
           },
           {
-            "axis": "unit",
-            "binding_ref": "unit:",
-            "entity_refs": [],
-            "kind": "slot",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [
-              "unit:"
-            ],
-            "text": "as a share of GNI"
-          },
-          {
             "entity_refs": [],
             "kind": "text",
             "part_index": 0,
             "segment": "heading",
             "states": [],
-            "text": " of "
-          },
-          {
-            "axis": "where",
-            "binding_ref": "where:",
-            "entity_refs": [
-              "country/KEN",
-              "country/NGA"
-            ],
-            "kind": "slot",
-            "part_index": 0,
-            "role": "destination",
-            "segment": "heading",
-            "states": [
-              "where:"
-            ],
-            "text": "Kenya and Nigeria"
+            "text": "\"external\" is not a distinction this data records. Try the question without it."
           },
           {
             "entity_refs": [],
             "kind": "text",
             "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " owed to "
-          },
-          {
-            "binding_ref": "origin:",
-            "entity_refs": [],
-            "kind": "slot",
-            "part_index": 0,
-            "role": "origin",
-            "segment": "heading",
-            "states": [
-              "origin:"
-            ],
-            "text": "all creditors"
-          },
-          {
-            "axis": "how",
-            "binding_ref": "how:financialPositionType",
-            "entity_refs": [],
-            "kind": "slot",
-            "part_index": 0,
-            "property_dcid": "financialPositionType",
-            "segment": "heading",
-            "states": [],
-            "text": ""
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": ", "
-          },
-          {
-            "axis": "when",
-            "binding_ref": "when:",
-            "entity_refs": [],
-            "kind": "slot",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [
-              "when:"
-            ],
-            "text": "1970 to 2024"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "."
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
+            "segment": "departure",
             "states": [],
             "text": " "
           },
           {
-            "axis": "source",
             "entity_refs": [],
-            "kind": "slot",
+            "kind": "text",
             "part_index": 0,
-            "segment": "byline",
-            "states": [
-              "source:"
-            ],
-            "text": "World Bank International Debt Statistics (IDS)"
+            "segment": "departure",
+            "states": [],
+            "text": "You named Kenya as a recipient, but this measure has no recipients, so this checked Kenya itself."
           },
           {
             "entity_refs": [],
             "kind": "text",
             "part_index": 0,
-            "segment": "byline",
+            "segment": "departure",
             "states": [],
-            "text": "."
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": "You named Nigeria as a recipient, but this measure has no recipients, so this checked Nigeria itself."
           },
           {
             "entity_refs": [],
@@ -3890,29 +5731,77 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "amount outstanding"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "; "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "every creditor"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "debt-ids": {
-            "content_version": "sha256:f937d0aa236f65365f738709e13d4d5f4b97a4a5dc82e90e5b613f2d90e07116",
+            "content_version": "sha256:80754856ac73dcb10bcd37b958cfd7cbb6782f276d2ce1da64dbfeadb45d56f6",
             "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
             "id": "debt-ids",
             "name": "debt-ids"
           },
           "debt-profile": {
-            "content_version": "sha256:17795d00b244871293864f0df3ac39e9b491fe4dafe44b1ef9c23a1d6f8d4c9c",
+            "content_version": "sha256:bfc64969fb95497bfbfe65fefcde1628ae7b83ad5d61f12a5bc9eb7292fcdb7b",
             "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
             "id": "debt-profile",
             "name": "debt-profile"
           },
           "debt-sustainability": {
-            "content_version": "sha256:2268e9638b27fd5aadde4c4d36ff05283e44fdd61fd547e9dfb34d200f0a16d8",
+            "content_version": "sha256:fc0168e253a3390966eb9b48bb33d317233ffcfb063eb47bf66dc85efaa82052",
             "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
             "id": "debt-sustainability",
             "name": "debt-sustainability"
           }
         },
-        "status": "definite"
+        "status": "mixed"
       },
       "parts": [
         {
@@ -3946,5 +5835,12 @@
       "raw_text": false
     }
   ],
-  "task": "quotient-external-debt-gdp-kenya-nigeria"
+  "task": "quotient-external-debt-gdp-kenya-nigeria",
+  "translation": {
+    "answers": [
+      "88557a8119af5d3b",
+      "a837a7d5b7800231"
+    ],
+    "resolved": {}
+  }
 }

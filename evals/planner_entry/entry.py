@@ -12,7 +12,9 @@ each of the task's payloads makes. `run_entry` replays them through production c
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
 - the graph's `route`, `plan_start` and `planner` nodes, wired as the served workflow
-  wires them (`harness.graph.workflow.planner_entry`), hand the brief to the real
+  wires them (`harness.graph.workflow.planner_entry`), run inside a conversation that
+  holds those spec blocks as `harness.studio` holds a turn's
+  (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerSeam`, which renders the planner's first message from that state and runs
   the planner with production's instruction, tools and callbacks, each request
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
@@ -64,18 +66,25 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from harness.graph.seams import PlannerModel
-from harness.graph.state import GraphState
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import HANDED_OFF, AskedOutput, build_orchestrator_tools
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
+from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history
-from planner.plan import Plan, SessionState, load_plan, unstated_period_reductions
+from planner.plan import (
+    Plan,
+    SessionState,
+    current_recorded_identity,
+    load_plan,
+    unstated_period_reductions,
+)
 from planner.tool_results import ProblemCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
@@ -805,6 +814,11 @@ async def run_entry(
     planner = handing_back_planner_failures(probe.watch(seam))
     runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
     message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
+    # The conversation a studio turn runs in, holding the spec blocks the orchestrator's
+    # searches returned, as `harness.studio` keeps them, so `propose_plan` and the
+    # translation read a pin's identity on record (`planner.plan.recorded_identity`).
+    conversation = ConversationState(conversation_id=session.id)
+    conversation.turn_specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
     error: str | None = None
     timed_out = False
@@ -818,6 +832,7 @@ async def run_entry(
         while content is not None:
             budgets.append(TurnBudget.from_settings(settings))
             token = current_turn_budget.set(budgets[-1])
+            identities = current_recorded_identity.set(conversation.recorded_identity)
             try:
                 async for _event in runner.run_async(
                     user_id=_USER,
@@ -827,6 +842,7 @@ async def run_entry(
                 ):
                     pass
             finally:
+                current_recorded_identity.reset(identities)
                 current_turn_budget.reset(token)
             content = None
             if probe.plan is None and pending:

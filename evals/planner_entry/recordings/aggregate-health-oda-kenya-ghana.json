@@ -1,34 +1,47 @@
 {
   "answers": [
+    "2be2794ec74054a8",
+    "5f3a48ab0060c649",
+    "a25aed12b2ed890f",
     "bfd2ae1bf05dfded",
-    "d111db0c8228baaf",
-    "d9e260beb1d73801",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:54+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:33:39+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 2870,
-            "output_tokens": 263
+            "input_tokens": 0,
+            "jev_input_tokens": 6422,
+            "jev_output_tokens": 1896,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 5694
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 6181
           },
-          "trace_id": "2fb69de630484992a6a4549429912ec4",
+          "trace_id": "58cfb3a0ec9f49f4aab229a1d2ce307d",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every provider"
+              }
+            ],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -399,7 +412,7 @@
                     "start_year": 2020
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -476,6 +489,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
                     "label": "OECD Creditor Reporting System (CRS)",
                     "ref": "provenance/OECDCreditorReportingSystem",
                     "source": {
@@ -665,15 +679,15 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "contribution to multi-donor and multi-entity funding mechanism",
-                          "ref": "CRSCooperationModalityB031"
+                          "label": "basket fund and pooled funding",
+                          "ref": "CRSCooperationModalityB04"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "basket fund and pooled funding",
-                          "ref": "CRSCooperationModalityB04"
+                          "label": "contribution to multi-donor and multi-entity funding mechanism",
+                          "ref": "CRSCooperationModalityB031"
                         }
                       },
                       {
@@ -708,15 +722,15 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "interest subsidy",
-                          "ref": "CRSTypeOfFinance210"
+                          "label": "common equity",
+                          "ref": "CRSTypeOfFinance510"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "common equity",
-                          "ref": "CRSTypeOfFinance510"
+                          "label": "interest subsidy",
+                          "ref": "CRSTypeOfFinance210"
                         }
                       }
                     ],
@@ -1774,7 +1788,7 @@
                   "served_count": 288
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -1825,6 +1839,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
                       "label": "OECD Creditor Reporting System (CRS)",
                       "ref": "provenance/OECDCreditorReportingSystem",
                       "source": {
@@ -3694,7 +3709,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -3942,14 +3957,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 490,
-                "bind": 1094,
-                "materialise": 328,
-                "options": 823,
-                "recall": 433,
-                "shape": 1292
+                "answer": 671,
+                "bind": 206,
+                "materialise": 182,
+                "options": 375,
+                "phase_bind": 422,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 1,
+                "phase_materialise": 0,
+                "phase_outcome": 3450,
+                "phase_place_bindings": 19,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 1,
+                "phase_settle": 127,
+                "recall": 463,
+                "shape": 254,
+                "shape_admission": 0,
+                "shape_arcs": 2,
+                "shape_groups": 55,
+                "shape_labels": 11,
+                "shape_probe": 106,
+                "shape_probe_coverage": 1
               },
-              "total": 4460
+              "total": 6171
             },
             "variable_text": "gross ODA disbursements for health",
             "warnings": [
@@ -3966,7 +3997,7 @@
           "extract_skipped": true,
           "raw_query": "show a table of gross ODA disbursements for health to Kenya and Ghana, 2020 to 2024"
         },
-        "rendered_sentence": "Gross ODA disbursements to Ghana and Kenya from 53 providers for health, 2020 to 2024. Constant 2023 US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+        "rendered_sentence": "Gross ODA disbursements to Ghana and Kenya from 53 providers for health, 2020 to 2024. Constant 2023 US dollars \u00b7 OECD Creditor Reporting System (CRS). Assumed: every provider.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -4172,11 +4203,43 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "every provider"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "oda-crs": {
-            "content_version": "sha256:e05bb92fbdaa0ed11aab39392867f0636937bae00282eb80bc9d187948ec2b5b",
+            "content_version": "sha256:fda2592588fe4cbe6e47ceb6f47db9be26fe8886cb337f240285456690607927",
             "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-crs",
             "name": "oda-crs"
@@ -4211,5 +4274,9 @@
       "raw_text": false
     }
   ],
-  "task": "aggregate-health-oda-kenya-ghana"
+  "task": "aggregate-health-oda-kenya-ghana",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }
