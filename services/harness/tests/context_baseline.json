@@ -4,13 +4,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 149553,
+      "total_chars": 149865,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -49,13 +49,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 183125,
+      "total_chars": 183437,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -104,13 +104,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 184445,
+      "total_chars": 184757,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -169,13 +169,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 67682,
+      "total_chars": 67994,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -214,13 +214,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 101254,
+      "total_chars": 101566,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -269,13 +269,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 103115,
+      "total_chars": 103427,
       "system_instruction_chars": 18721,
-      "declaration_total_chars": 38813,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 34760
+          "chars": 35072
         },
         {
           "name": "adk_request_input",

@@ -1323,13 +1323,26 @@ class _Build:
         `keyed` is the role phrase each side is keyed by (`_keyed_axes`),
         `None` for a side read whole. `any_units` is for a verb that pairs
         sides in any two units, which skips `_check_frame_units`.
+
+        Two sides over the same rows set a series against itself, unless
+        exactly one is keyed and its key holds other than one member
+        (`_key_members`, empty for an open column): the keyed side then
+        keeps each member apart and the other pools them. One side read both
+        ways is each member's share of their total
+        (`planner.plan.ShareOfRequirement.pools_its_own_axis`), whose pooled
+        reading sums exactly the members the keyed reading keeps, so that
+        side is checked once, as the keyed side.
         """
-        requirements = [
-            self._check_side(op_id, side, keyed=axis)
-            for side, axis in zip((left, right), keyed, strict=True)
-        ]
+        left_req = self._check_side(op_id, left, keyed=keyed[0])
+        right_req = left_req if left == right else self._check_side(op_id, right, keyed=keyed[1])
         left_identity, right_identity = (self._side_identity(side) for side in (left, right))
-        if left_identity == right_identity:
+        keyed_sides = [
+            (side, axis)
+            for side, axis in zip((left, right), keyed, strict=True)
+            if axis is not None
+        ]
+        pools_apart = len(keyed_sides) == 1 and len(self._key_members(*keyed_sides[0])) != 1
+        if left_identity == right_identity and not pools_apart:
             frame, by_role = left_identity
             names = sorted({name for _, kept in by_role for name in kept})
             kept = repr(names[0]) if len(names) == 1 else repr(names)
@@ -1343,7 +1356,6 @@ class _Build:
         if left.input == right.input:
             # One requirement behind both sides: its period overlaps itself.
             return
-        left_req, right_req = requirements
         if (
             left_req is not None
             and right_req is not None

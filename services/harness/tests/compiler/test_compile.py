@@ -6186,6 +6186,135 @@ def test_a_keyed_share_over_an_open_axis_divides_member_by_member(
     assert share_step.expected_role_keys == _frame_role_columns(["origin"])
 
 
+@pytest.mark.parametrize(
+    ("scope", "degenerate"),
+    [
+        pytest.param(DenominatorScope.POOLED, False, id="pooled"),
+        pytest.param(DenominatorScope.PER_AXIS, True, id="per-axis"),
+    ],
+)
+def test_each_member_share_of_their_pooled_total_compiles_from_one_retrieval(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    scope: DenominatorScope,
+    degenerate: bool,
+) -> None:
+    # "What share of all ODA to Kenya did each donor provide?" One side keyed
+    # by donor and pooled across it: one retrieval, each donor's rows over
+    # every donor's total. The same side divided per axis is each donor over
+    # itself, built here past the plan's own refusal.
+    aid = _kenya_from_every_donor()
+    pooled = decision(slot="pooled", fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure", "pooled"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="aid"),
+        axis="donor",
+        denominator_scope=DenominatorScope.POOLED,
+    )
+    plan = _draft([decision(), pooled], [aid, share])
+    translation = build_translation(plan, {"aid": SPEC_KENYA})
+    if scope is not DenominatorScope.POOLED:
+        operations = [
+            operation.model_copy(update={"denominator_scope": scope})
+            if isinstance(operation, ShareOfOperation)
+            else operation
+            for operation in translation.operations
+        ]
+        translation = translation.model_copy(update={"operations": operations})
+
+    result = build(
+        plan,
+        translation,
+        discovered={
+            "aid": source(
+                entities=(ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),),
+                open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
+                coverage_window=Period(start=2015, end=2023),
+            )
+        },
+    )
+
+    assert (Code.DEGENERATE_SIDES in _codes(result)) is degenerate, result.issues
+    if degenerate:
+        return
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    retrieve, share_step = result.workflow.steps
+    assert share_step.tool.name == "share_of"
+    assert share_step.args == {"numerator_by": ["origin"]}
+    assert share_step.bindings == {
+        "frame_ref": Binding(from_step=retrieve.id, output=ArtifactKind.FRAME_REF)
+    }
+
+
+@pytest.mark.parametrize("verb", [ShareOfRequirement, QuotientRequirement])
+@pytest.mark.parametrize(
+    ("donors", "degenerate"),
+    [
+        pytest.param(("GBR", "DEU"), False, id="two-donors"),
+        pytest.param(("DEU",), True, id="one-donor"),
+    ],
+)
+def test_a_keyed_side_over_its_own_period_total_needs_more_than_one_member(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    source: SourceFactory,
+    verb: type[ShareOfRequirement | QuotientRequirement],
+    donors: tuple[str, ...],
+    degenerate: bool,
+) -> None:
+    # Each named donor's ODA to Kenya over every named donor's total, read
+    # from the one retrieval. One donor is the whole of that total, so it
+    # divides itself.
+    resolved = tuple(
+        ResolvedEntity(role="origin", ref=f"country/{code}", label=code) for code in donors
+    )
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[
+            *(Entity(name=code, role="donor") for code in donors),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2015, end=2023),
+    )
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    pooled = decision(slot="pooled", fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+    keys = (
+        {"denominator_scope": DenominatorScope.POOLED, "decision_ids": ["measure", "pooled"]}
+        if verb is ShareOfRequirement
+        else {"decision_ids": ["measure"]}
+    )
+    divided = verb(
+        id="divided",
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="total"),
+        axis="donor",
+        **keys,
+    )
+    decisions = [decision(), pooled] if verb is ShareOfRequirement else [decision()]
+    plan = _draft(decisions, [aid, total, divided])
+    translation = build_translation(plan, {"aid": SPEC_KENYA})
+
+    result = build(
+        plan,
+        translation,
+        discovered={"aid": source(entities=(*resolved, _KENYA), **_pinned("Oda"))},
+    )
+
+    assert _codes(result) == ([Code.DEGENERATE_SIDES] if degenerate else []), result.issues
+
+
 # --- An aggregate over an open axis -------------------------------------------------
 
 # The two CRS sources the recorded DRC plans pin (`propose_plan_drc_aid.json`),

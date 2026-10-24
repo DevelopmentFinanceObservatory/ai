@@ -1,0 +1,111 @@
+{
+  "id": "share-each-donor-of-uganda-oda",
+  "kind": "share_of",
+  "origin": "authored",
+  "question": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
+  "searches": [
+    {
+      "query": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Uganda",
+              "role": "to"
+            }
+          ],
+          "time": "2015 to 2023",
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
+  "asks": [
+    {
+      "text": "Each donor's share of all ODA to Uganda in each year 2015 to 2023",
+      "by": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "rank",
+    "distinction": "each donor's share of the total is a share_of of one side keyed by donor and pooled across donors; a rank orders the donors' amounts and gives no share"
+  },
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "What share of all ODA to Uganda did each donor provide from 2015 to 2023?",
+    "answer_mode": "computed",
+    "decisions": [
+      {
+        "slot": "all_donors_total",
+        "description": "What each donor's ODA is a share of.",
+        "options": [
+          "the total from every donor",
+          "each donor's own total"
+        ],
+        "chosen": "the total from every donor",
+        "resolved_by": "planner_default",
+        "rationale": "The question asks for a share of all ODA to Uganda, the total across every donor.",
+        "fixes": [
+          "denominator_scope"
+        ]
+      }
+    ],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Uganda",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2015,
+          "end": 2023
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "donor_share",
+        "numerator": {
+          "input_id": "oda"
+        },
+        "denominator": {
+          "input_id": "oda"
+        },
+        "axis": "donor",
+        "denominator_scope": "pooled",
+        "decision_ids": [
+          "all_donors_total"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "donor_share"
+        ]
+      }
+    ]
+  }
+}

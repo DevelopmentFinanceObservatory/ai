@@ -1219,7 +1219,11 @@ class ShareOfRequirement(TaggedModel):
     """The share `numerator` holds of `denominator`, at each period.
 
     Both sides cover the same years, because a period only one side covers
-    has no defined share.
+    has no defined share. Each member's share of all of them, as each donor's
+    share of all ODA to one recipient, reads one side as both, keyed by `axis`
+    and 'pooled', from a frame keeping that role open, which an aggregate by
+    entity sums away. One named member's share divides that member's series
+    by every member's total per period.
     """
 
     kind: Literal["share_of"] = Field(
@@ -1249,13 +1253,21 @@ class ShareOfRequirement(TaggedModel):
         ),
     )
 
+    @property
+    def pools_its_own_axis(self) -> bool:
+        """Whether one side is both numerator and denominator, each `axis` member's share of their total."""
+        return self.numerator == self.denominator
+
     @model_validator(mode="after")
     def _sides_differ(self) -> ShareOfRequirement:
-        if (self.numerator.input_id, self.numerator.entity) == (
-            self.denominator.input_id,
-            self.denominator.entity,
-        ):
-            raise ValueError("a share_of's numerator and denominator must differ")
+        # Keyed by `axis` and pooled across it, one side divides each member by
+        # the members' total; read any other way it divides a series by itself.
+        if self.pools_its_own_axis and self.denominator_scope is not DenominatorScope.POOLED:
+            raise ValueError(
+                "a share_of's numerator and denominator must differ, unless it keys that one "
+                "side by `axis` with denominator_scope 'pooled', each member's share of the "
+                "total across them"
+            )
         return self
 
     @model_validator(mode="after")
@@ -3028,6 +3040,37 @@ def _check_side_entity_is_named(
         )
 
 
+def _pools_one_member(
+    requirement: ShareOfRequirement,
+    shape: FrameShape,
+    requirements_by_id: dict[str, EvidenceRequirement],
+) -> str | None:
+    """Why a share pooling its own axis divides one member by itself, or `None` when it does not.
+
+    Its key holds every member of an open dimension, or the entities its
+    requirement names on that dimension less any the side narrows to. One
+    member is the whole of its own total, 100% every period.
+    """
+    assert requirement.axis is not None
+    role = role_named(shape.roles, requirement.axis)
+    if role is None or role.open:
+        return None
+    dataset = requirements_by_id[role.requirement_id]
+    assert isinstance(dataset, DatasetRequirement)
+    members = [entity.name for entity in dataset.entities if entity.role == role.role]
+    if requirement.numerator.entity in members:
+        held = f"narrows to {requirement.numerator.entity!r} on {requirement.axis!r}"
+    elif len(members) < 2:
+        held = f"names {members!r} alone on {requirement.axis!r}"
+    else:
+        return None
+    return (
+        f"{requirement.id!r} reads one side as both numerator and denominator, and that side "
+        f"{held}, so the share divides the member by itself; for a named member's share, "
+        "divide that member's series by every member's total per period"
+    )
+
+
 def _share_of_shape(
     requirement: ShareOfRequirement,
     shapes_by_id: dict[str, FrameShape],
@@ -3036,7 +3079,11 @@ def _share_of_shape(
     numerator_shape = shapes_by_id[requirement.numerator.input_id]
     denominator_shape = shapes_by_id[requirement.denominator.input_id]
     one_figure = requirement.axis is None
-    per_axis = requirement.denominator_scope is DenominatorScope.PER_AXIS
+    # A per-axis denominator reads one series per member, and one pooling its
+    # own axis sums exactly the members its numerator keeps apart.
+    keys_denominator = (
+        requirement.denominator_scope is DenominatorScope.PER_AXIS or requirement.pools_its_own_axis
+    )
     _check_side_entity_is_named(
         requirement.id,
         "numerator",
@@ -3053,9 +3100,13 @@ def _share_of_shape(
         requirement.denominator,
         denominator_shape,
         requirements_by_id,
-        keyed=requirement.axis if per_axis else None,
+        keyed=requirement.axis if keys_denominator else None,
         one_figure=one_figure,
     )
+    if requirement.pools_its_own_axis:
+        reason = _pools_one_member(requirement, numerator_shape, requirements_by_id)
+        if reason is not None:
+            raise ValueError(reason)
     # The denominator's own *in* rule (measures, time, not ordinal) is
     # checked with no axis: the numerator's side alone gives the output its
     # role lineage, so only the numerator's call states the real axis, with

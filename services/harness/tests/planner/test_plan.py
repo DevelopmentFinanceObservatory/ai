@@ -2412,6 +2412,95 @@ def test_a_rank_reading_a_share_of_validates(
     assert plan.requirement("ranked").input_id == "share"
 
 
+@pytest.mark.parametrize(
+    ("axis", "scope", "allowed"),
+    [
+        pytest.param("donor", DenominatorScope.POOLED, True, id="pooled"),
+        pytest.param("donor", DenominatorScope.PER_AXIS, False, id="per-axis"),
+        pytest.param(None, None, False, id="unkeyed"),
+    ],
+)
+def test_a_share_of_reads_one_side_twice_only_pooled_across_its_axis(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    axis: str | None,
+    scope: DenominatorScope | None,
+    allowed: bool,
+) -> None:
+    # Each donor's share of all ODA to Uganda: one dataset keeping donor open,
+    # each donor over every donor's total.
+    dataset = requirement(
+        id="oda_uganda",
+        measure="ODA",
+        entities=[Entity(name="Uganda", role="recipient")],
+        across=("donor",),
+    )
+    side = RequirementSide(input_id=dataset.id)
+
+    def share() -> ShareOfRequirement:
+        return ShareOfRequirement(
+            id="share",
+            decision_ids=["measure"],
+            numerator=side,
+            denominator=side,
+            axis=axis,
+            denominator_scope=scope,
+        )
+
+    if not allowed:
+        with pytest.raises(ValidationError, match="numerator and denominator must differ"):
+            share()
+        return
+    fixed = decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+    plan = _plan(fixed, evidence_requirements=[dataset, share()])
+
+    assert [role.role for role in frame_shapes(plan)["share"].roles] == ["donor"]
+
+
+_UGANDA_RECIPIENT = Entity(name="Uganda", role="recipient")
+
+
+@pytest.mark.parametrize(
+    ("donors", "entity", "refused"),
+    [
+        pytest.param(("France", "Germany"), None, False, id="two-named"),
+        pytest.param(("France", "Germany"), "Uganda", False, id="entity-off-the-axis"),
+        pytest.param(("France",), None, True, id="one-named"),
+        pytest.param(("France", "Germany"), "France", True, id="entity-on-the-axis"),
+    ],
+)
+def test_a_share_pooling_its_own_axis_refuses_a_key_of_one_member(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    donors: tuple[str, ...],
+    entity: str | None,
+    refused: bool,
+) -> None:
+    # One donor over the donors' total is that donor over itself, 100% each year.
+    dataset = requirement(
+        id="oda_uganda",
+        measure="ODA",
+        entities=[*(Entity(name=name, role="donor") for name in donors), _UGANDA_RECIPIENT],
+    )
+    side = RequirementSide(input_id=dataset.id, entity=entity)
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=side,
+        denominator=side,
+        axis="donor",
+        denominator_scope=DenominatorScope.POOLED,
+    )
+    fixed = decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+
+    if refused:
+        with pytest.raises(ValidationError, match="divides the member by itself"):
+            _plan(fixed, evidence_requirements=[dataset, share])
+        return
+    plan = _plan(fixed, evidence_requirements=[dataset, share])
+    assert [role.role for role in frame_shapes(plan)["share"].roles] == ["donor"]
+
+
 def test_an_axis_naming_a_role_the_input_does_not_carry_fails(
     decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
