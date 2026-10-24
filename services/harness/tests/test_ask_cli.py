@@ -18,7 +18,7 @@ from types import ModuleType
 
 import httpx2
 import pytest
-from harness.wire import ElicitationRequest, InterruptDecision
+from harness.wire import ActivityStep, ElicitationRequest, InterruptDecision, StepStatus
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ASK_PATH = REPO_ROOT / "scripts" / "ask.py"
@@ -193,3 +193,30 @@ async def test_yes_answers_every_question_with_its_recommended_or_first_option()
         "q1": {"kind": "option", "option_id": "spec_3c4d5e6f22222222"},
         "q2": {"kind": "option", "option_id": "o2"},
     }
+
+
+def test_a_complete_frame_on_a_failed_step_prints_its_detail_under_the_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The CLI cannot redraw the failed line it printed, so a later try's
+    `complete` frame on the same step prints its own line and detail after it."""
+    console = ask.Console(color=False)
+    state = ask.RenderState()
+    for seq, status, detail in [
+        (1, StepStatus.FAILED, "This step could not be completed."),
+        (2, StepStatus.COMPLETE, "This worked on a later try."),
+    ]:
+        frame = ActivityStep(
+            event="activity.step",
+            seq=seq,
+            step_id="s1",
+            label="Searching for data",
+            status=status,
+            detail=detail,
+        )
+        ask.render_frame(frame, console, state)
+
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        "  ✓ Searching for data",
+        "      This worked on a later try.",
+    ]

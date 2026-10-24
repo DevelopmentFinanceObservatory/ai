@@ -18,10 +18,12 @@ from executor.run import current_step_id
 from google.adk.events import Event
 from google.adk.events.event import NodeInfo
 from google.adk.sessions import InMemorySessionService
+from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from harness.chart_binding import TopMembers
 from harness.conversation import current_conversation_id
 from harness.graph.state import (
+    APPROVE_INTERRUPT,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
     ORCHESTRATOR_STATUS_FAILURE_KEY,
@@ -31,6 +33,7 @@ from harness.graph.state import (
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import ProvenanceStore
 from harness.reply_figures import DrawnSeries, card_holds
+from harness.scripted_plan import scripted_plan
 from harness.sentences import (
     TERMINAL_PROPOSE_CODES,
     SeamCode,
@@ -54,6 +57,7 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.wire import ActivityStep, CompositionActor, CompositionManifest, StepStatus
+from planner.plan import plan_revision
 from planner.workflow import ToolId
 
 from .failure_text import classed_sentence, is_user_sentence
@@ -546,6 +550,131 @@ def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
     assert (failed.label, failed.status) == ("Reading background notes", StepStatus.FAILED)
     assert is_user_sentence(failed.detail)
     assert "nope" not in failed.detail
+
+
+_FAULT = {"error": "boom", "code": "internal_error"}
+_SEARCH = {"query": "ODA to Kenya"}
+
+
+def _call(call_id: str, name: str, args: dict[str, Any]) -> Event:
+    return _event(types.Part(function_call=types.FunctionCall(id=call_id, name=name, args=args)))
+
+
+def _response(call_id: str, name: str, answer: dict[str, Any]) -> Event:
+    return _event(
+        types.Part(function_response=types.FunctionResponse(id=call_id, name=name, response=answer))
+    )
+
+
+def _plan_card() -> Event:
+    """The approval interrupt a planner that made a plan pauses on."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    call = types.FunctionCall(
+        id=APPROVE_INTERRUPT, name=REQUEST_INPUT_FUNCTION_CALL_NAME, args={"payload": payload}
+    )
+    return Event(
+        author="dfo_analyst_graph", content=types.Content(parts=[types.Part(function_call=call)])
+    )
+
+
+def _no_plan() -> Event:
+    return Event(
+        author="t",
+        custom_metadata={
+            ORCHESTRATOR_STATUS_KEY: ORCHESTRATOR_PLAN_FAILED_STATUS,
+            ORCHESTRATOR_STATUS_FAILURE_KEY: {"code": "internal_error"},
+        },
+    )
+
+
+def _settled_failures(frames: list) -> list[ActivityStep]:
+    """The latest frame of each step that failed, as Studio's Activity record
+    keeps it: the latest frame on a step_id wins."""
+    steps = [frame for frame in frames if frame.event == "activity.step"]
+    failed = {frame.step_id for frame in steps if frame.status is StepStatus.FAILED}
+    latest = {frame.step_id: frame for frame in steps if frame.step_id in failed}
+    assert latest, "no step failed"
+    return list(latest.values())
+
+
+_PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        # f7b: the same search, tried again.
+        lambda: [
+            _call("c1", "search", _SEARCH),
+            _response("c1", "search", _FAULT),
+            _call("c2", "search", _SEARCH),
+            _response("c2", "search", {"parts": []}),
+        ],
+        # f6a: a hand-off that hit a fault, then one the planner took.
+        lambda: [
+            _call("c1", "plan", {"brief": "b", "asks": ["a"]}),
+            _response("c1", "plan", _FAULT),
+            _call("c2", "plan", {"brief": "b again", "asks": ["a"]}),
+            _response("c2", "plan", _PLANNED),
+        ],
+        # A planner that made no plan, then a plan made on a second hand-off.
+        lambda: [
+            _no_plan(),
+            _call("c2", "plan", {"brief": "b"}),
+            _response("c2", "plan", _PLANNED),
+            _plan_card(),
+        ],
+    ],
+    ids=["search-retried", "hand-off-retried", "replanned"],
+)
+def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
+    """A failed line standing beside an answer reads as a failure the user
+    must weigh, so a later try of the same step settles it on its own id."""
+    translator = _translator()
+
+    frames = _frames(translator, *events())
+
+    (settled,) = _settled_failures([*frames, *translator.finish()])
+    assert settled.status is StepStatus.COMPLETE
+    assert is_user_sentence(settled.detail)
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        # A different search is another step, not a retry.
+        lambda: [
+            _call("c1", "search", _SEARCH),
+            _response("c1", "search", _FAULT),
+            _call("c2", "search", {"query": "FDI to Kenya"}),
+            _response("c2", "search", {"parts": []}),
+        ],
+        # f5b: no plan, then an answer from separate fetches.
+        lambda: [
+            _no_plan(),
+            _call("c2", "fetch", {"spec_id": "spec_x"}),
+            _response("c2", "fetch", {"summary": "12 observations"}),
+            _event(types.Part(text="Here are both figures.")),
+        ],
+        # A hand-off the planner took, which then made no plan.
+        lambda: [
+            _call("c1", "plan", {"brief": "b"}),
+            _response("c1", "plan", _PLANNED),
+            _no_plan(),
+        ],
+        # A failure no later step tried again: the turn ends on it.
+        lambda: [_call("c1", "search", _SEARCH), _response("c1", "search", _FAULT)],
+    ],
+    ids=["other-search", "answered-without-a-plan", "no-plan-after-hand-off", "terminal"],
+)
+def test_a_failure_no_later_try_made_good_stays_failed(events):
+    translator = _translator()
+
+    frames = _frames(translator, *events())
+
+    settled = _settled_failures([*frames, *translator.finish()])
+    assert [frame.status for frame in settled] == [StepStatus.FAILED] * len(settled)
 
 
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():

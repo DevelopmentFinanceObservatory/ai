@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -1068,7 +1069,11 @@ class _Translator:
       running step until the next thing happens; a plan hand-back shows a
       failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
-      opened at the execute node's result so it covers `plan_done` too.
+      opened at the execute node's result so it covers `plan_done` too;
+    - a `complete` frame on a failed step's own wire id once a later try of
+      the same step succeeds (`_retry_key`): the same tool with the same
+      arguments, a later hand-off the planner takes for a failed hand-off,
+      and a plan made, ready for approval, for either plan failure.
     """
 
     def __init__(
@@ -1092,8 +1097,12 @@ class _Translator:
         # Each open call's wire step id, label, arguments and monotonic
         # start, by call id.
         self._open_calls: dict[str, tuple[str, str, dict[str, Any], float]] = {}
-        # Calls that show only if they fail, by call id: the tool's name.
-        self._quiet_calls: dict[str, str] = {}
+        # Calls that show only if they fail, by call id: the tool's name and
+        # arguments.
+        self._quiet_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The failed steps a later try can still recover, by `_retry_key`:
+        # each one's wire step id, label and tool.
+        self._failed: dict[tuple[str, str], list[tuple[str, str, str | None]]] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
         self._handed_off: str | None = None
         # The highest composition revision this stream has sent.
@@ -1118,6 +1127,8 @@ class _Translator:
         if interrupt is not None:
             adk_id, args = interrupt
             frames.extend(self._close_status())
+            if adk_id == APPROVE_INTERRUPT:
+                frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._interrupt_frames(adk_id, args))
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
@@ -1139,6 +1150,7 @@ class _Translator:
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
+            frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
             frames.extend(self._close_status())
@@ -1653,6 +1665,21 @@ class _Translator:
             **extra,
         )
 
+    def _failed_step(self, key: tuple[str, str], frame: ActivityStep) -> ActivityStep:
+        """`frame`, a failed step, kept under `key` for a later try to recover."""
+        self._failed.setdefault(key, []).append((frame.step_id, frame.label, frame.tool))
+        return frame
+
+    def _recover(self, *keys: tuple[str, str]) -> list[ActivityStep]:
+        """A `complete` frame on each failed step kept under `keys`, which a
+        later try just made good. Studio keeps a step's latest status, so the
+        failed line settles instead of standing beside the answer."""
+        return [
+            self._step(step_id, label, StepStatus.COMPLETE, tool=tool, detail=_RECOVERED)
+            for key in keys
+            for step_id, label, tool in self._failed.pop(key, [])
+        ]
+
     def _unshown(self, record: _ExecutorRecord) -> bool:
         """A successful call no plan step made, to a tool whose work an
         agent tool call's own line already stands for: the data a fetch
@@ -1681,7 +1708,11 @@ class _Translator:
                 failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
                 code = failure.get("code") if isinstance(failure, Mapping) else None
                 detail = failure_detail({"code": code})
-                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail))
+                frames.append(
+                    self._failed_step(
+                        _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
+                    )
+                )
                 # The agent reads the planner's answer under its own line.
                 frames.extend(self._open_status(status))
             else:
@@ -1734,7 +1765,7 @@ class _Translator:
             name = call.name or ""
             args = call.args or {}
             if name in _QUIET_CALLS:
-                self._quiet_calls[call.id or ""] = name
+                self._quiet_calls[call.id or ""] = (name, args)
                 continue
             measure = self._measure(args.get("spec_id")) if name == "fetch" else None
             label = _tool_call_label(name, args, measure)
@@ -1763,16 +1794,22 @@ class _Translator:
             failed = "error" in answer or "refusal" in answer
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
+                name, args = quiet
                 if failed:
                     frames.append(
-                        self._step(
-                            None,
-                            _tool_call_label(quiet, {}),
-                            StepStatus.FAILED,
-                            tool=quiet,
-                            detail=_answer_failure(answer),
+                        self._failed_step(
+                            _retry_key(name, args),
+                            self._step(
+                                None,
+                                _tool_call_label(name, {}),
+                                StepStatus.FAILED,
+                                tool=name,
+                                detail=_answer_failure(answer),
+                            ),
                         )
                     )
+                else:
+                    frames.extend(self._recover(_retry_key(name, args)))
                 continue
             opened = self._open_calls.get(response.id or "")
             if opened is None:
@@ -1789,9 +1826,14 @@ class _Translator:
                 if status is StepStatus.PENDING
                 else {}
             )
-            frames.append(
-                self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
-            )
+            frame = self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
+            key = _retry_key(response.name or "", args)
+            if status is StepStatus.FAILED:
+                frames.append(self._failed_step(key, frame))
+            else:
+                frames.append(frame)
+                if status is StepStatus.COMPLETE:
+                    frames.extend(self._recover(key))
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -1967,6 +2009,20 @@ class _Translator:
 # failure table has for the refusal's code. The closing message says what
 # could not be calculated.
 _PLAN_FAILED = "No plan could be made"
+
+# The `detail` of a failed step a later try of the same step made good.
+_RECOVERED = "This worked on a later try."
+# The key of a plan hand-back with no plan, which a later plan made recovers.
+_PLAN_MADE = ("plan", "made")
+
+
+def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
+    """What makes a later call the same step tried again: the same tool with
+    the same arguments. A plan hand-off is keyed by its tool alone, since a
+    turn plans one question and the agent rewords its brief on a retry."""
+    if name == "plan":
+        return (name, "")
+    return (name, json.dumps(args, sort_keys=True, default=str))
 
 
 # Agent tools whose calls show only when they fail.
