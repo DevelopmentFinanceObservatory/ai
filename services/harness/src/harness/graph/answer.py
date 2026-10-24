@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
+from common.rolling import flat_populations
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -675,6 +676,17 @@ def _answer_evidence(
     """The evidence of each retrieval under an answer frame (`answer_frames`),
     or only under those of `terminals`, listed per answer frame in the plan's
     step order, so a retrieval under two frames comes twice."""
+    return [record for _, record in _terminal_evidence(outcome, plan=plan, terminals=terminals)]
+
+
+def _terminal_evidence(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[tuple[str, EvidenceRecord]]:
+    """`_answer_evidence`, each record beside the answer frame's step id it
+    is listed under."""
     workflow = plan.workflow
     if workflow is None:
         return []
@@ -683,7 +695,7 @@ def _answer_evidence(
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     memo: dict[str, frozenset[str]] = {}
-    records: list[EvidenceRecord] = []
+    records: list[tuple[str, EvidenceRecord]] = []
     for terminal_id in answer_frames(outcome):
         if terminals is not None and terminal_id not in terminals:
             continue
@@ -691,7 +703,7 @@ def _answer_evidence(
             terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
         )
         records.extend(
-            record
+            (terminal_id, record)
             for retrieval_id in sorted(under, key=step_order.__getitem__)
             if (record := evidence_by_step.get(retrieval_id)) is not None
         )
@@ -765,11 +777,15 @@ def _short_series_sentences(
 
     A series is read from the `WINDOW_SHORT` and `COVERAGE_GAPS` findings
     among its retrieval's `EvidenceRecord.gaps` and held to the user's
-    window (`_users_window`). A series reaching across that window is not
-    stated, even where its retrieval reads from the first year on record and
-    the series starts after it. Missing years are stated only where the retrieval's
-    window (`EvidenceRecord.window`) lies inside the user's, since a finding
-    counts them without saying which. A series is one StatVar's for one set
+    window (`_users_window`) as the answer frame it is under reads it
+    (`_answer_anchors`). Under rolling steps of the frame's, only a series
+    their newest period was taken over is stated, so a sibling answer over
+    the same retrieval changes neither the window nor the series stated. A
+    series reaching across that window is not stated, even where its
+    retrieval reads from the first year on record and the series starts
+    after it. Missing years are stated only where the retrieval's window
+    (`EvidenceRecord.window`) lies inside the user's, since a finding counts
+    them without saying which. A series is one StatVar's for one set
     of entities under one requirement the model wrote, so a series two
     retrievals of a requirement read is stated once (`_short_series_note`
     words the notes).
@@ -780,17 +796,27 @@ def _short_series_sentences(
         if isinstance(requirement, DatasetRequirement)
     }
     origins = copy_origins(plan.rolling_copies)
-    anchors = _anchor_years(outcome)
+    steps_by_id = {step.id: step for step in plan.workflow.steps} if plan.workflow else {}
+    anchors: dict[str, dict[str, _Anchoring]] = {}
     reaches: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
     holes: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
-    for record in _answer_evidence(outcome, plan=plan, terminals=terminals):
+    for terminal_id, record in _terminal_evidence(outcome, plan=plan, terminals=terminals):
         origin = origins.get(record.requirement_id, record.requirement_id)
         requirement = written.get(origin)
         if requirement is None:
             continue
-        window = _users_window(requirement, record, anchor=anchors.get(record.step_id))
+        if terminal_id not in anchors:
+            anchors[terminal_id] = _answer_anchors(
+                outcome, terminal_id=terminal_id, steps_by_id=steps_by_id
+            )
+        anchoring = anchors[terminal_id].get(record.step_id)
+        window = _users_window(
+            requirement, record, anchor=anchoring.year if anchoring is not None else None
+        )
         for gap in record.gaps:
             if not gap.entities:
+                continue
+            if anchoring is not None and not anchoring.counts(gap.entities, spec_id=record.spec_id):
                 continue
             key = (origin, gap.stat_var, tuple((one.role, one.ref) for one in gap.entities))
             owner = _owner_of(gap.entities)
@@ -824,18 +850,61 @@ def _short_series_sentences(
     ]
 
 
-def _anchor_years(outcome: RunOutcome) -> dict[str, int]:
-    """The year of the newest period each retrieval rooting a group of
-    rolling steps stands on (`AnchorResult.roots`), the earliest where it
-    roots several."""
-    years: dict[str, int] = {}
+class _Anchoring(NamedTuple):
+    """How an answer frame's rolling steps read one retrieval: the year of
+    the newest period they stand on, and the flat populations it was taken
+    over (`AnchorResult.populations`)."""
+
+    year: int
+    populations: tuple[Mapping[str, Any], ...]
+
+    def counts(self, entities: Sequence[SeriesEntity], *, spec_id: str) -> bool:
+        """Whether the series of `entities` in the retrieval approved for
+        `spec_id` is one the newest period was taken over.
+
+        A population keeps the series of its dataset whose entity on each
+        column it binds is one of the values bound. A column the series
+        holds no entity on, such as a StatVar's own dimension, keeps it,
+        since its entities cannot say otherwise."""
+        refs = {entity.role: entity.ref for entity in entities}
+        for population in self.populations:
+            bindings = population.get("bindings")
+            if population.get("spec_id") != spec_id or not isinstance(bindings, Mapping):
+                continue
+            if all(refs[column] in values for column, values in bindings.items() if column in refs):
+                return True
+        return False
+
+
+def _answer_anchors(
+    outcome: RunOutcome, *, terminal_id: str, steps_by_id: dict[str, WorkflowStep]
+) -> dict[str, _Anchoring]:
+    """How the rolling steps the answer frame `terminal_id` rests on
+    (`_upstream_steps`, `AnchorResult.steps`) read each retrieval they root
+    (`AnchorResult.roots`), by its step id: at the earliest of their years
+    where groups of them root it, over every population of those groups.
+
+    A retrieval no rolling step of the frame's roots is absent, whatever a
+    sibling answer's rolling steps read of it."""
+    under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
+    anchorings: dict[str, _Anchoring] = {}
     for anchor in outcome.anchors:
         head = anchor.period[:4]
-        if not head.isdigit():
+        if not head.isdigit() or under.isdisjoint(anchor.steps):
             continue
+        populations = tuple(
+            flat_populations(
+                population for population in anchor.populations if isinstance(population, dict)
+            )
+        )
         for root in anchor.roots:
-            years[root] = min(years.get(root, int(head)), int(head))
-    return years
+            held = anchorings.get(root)
+            anchorings[root] = (
+                _Anchoring(int(head), populations)
+                if held is None
+                else _Anchoring(min(held.year, int(head)), (*held.populations, *populations))
+            )
+    return anchorings
 
 
 def _users_window(
@@ -844,8 +913,8 @@ def _users_window(
     """The years `requirement` asks of `record`'s retrieval: its period as
     the model wrote it, ending, where that end is open (`period_end_open`),
     at the newest year the run read. That is the `anchor` year of the
-    rolling steps the retrieval roots, where it roots any, and otherwise the
-    newest year the retrieval holds (`EvidenceRecord.window`)."""
+    answer's rolling steps the retrieval roots, where it roots any, and
+    otherwise the newest year the retrieval holds (`EvidenceRecord.window`)."""
     period = requirement.period
     if not requirement.period_end_open:
         return period

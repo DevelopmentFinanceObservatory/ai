@@ -382,8 +382,11 @@ async def test_a_rolling_steps_years_are_written_from_the_newest_period(
             anchor_key=ANCHOR_KEY,
             period=newest,
             left_out=(LeftOutSeries.model_validate(LEFT_OUT),),
-            # The run writes the retrievals the group rests on.
+            # The run writes the group's steps, the retrievals it rests on
+            # and the populations it sent.
+            steps=("change", "newest"),
             roots=("debt",),
+            populations=tuple(sent["populations"]),
         ),
     )
 

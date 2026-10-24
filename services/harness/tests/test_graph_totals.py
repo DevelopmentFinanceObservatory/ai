@@ -104,7 +104,7 @@ from planner.workflow import (
     WorkflowStep,
 )
 
-from .split_plan import FIRST_YEAR, stored_split_plan
+from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, stored_split_plan
 
 _BLOCKS: dict[str, Any] = json.loads(
     (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
@@ -1270,9 +1270,15 @@ def test_a_period_open_to_the_newest_data_ends_at_the_newest_year_read(
     assert _short_series_sentences(outcome, plan=plan, terminals=["total"]) == stated
 
 
-def _anchored(outcome: Accepted, year: int, *roots: str) -> Accepted:
-    """`outcome` with one group of rolling steps over `roots` standing on `year`."""
-    anchor = AnchorResult(anchor_key="rak_" + "7" * 32, period=str(year), roots=roots)
+def _anchored(outcome: Accepted, year: int) -> Accepted:
+    """`outcome` with `last_five` over every series of `debt_history` standing on `year`."""
+    anchor = AnchorResult(
+        anchor_key="rak_" + "7" * 32,
+        period=str(year),
+        steps=("last_five",),
+        roots=("debt_history",),
+        populations=({"spec_id": SPEC_DEBT_HISTORY, "bindings": {}},),
+    )
     return outcome.model_copy(update={"anchors": (anchor,)})
 
 
@@ -1300,7 +1306,7 @@ def test_an_open_period_under_rolling_steps_ends_at_their_anchor(
     gaps = [_short(name, reach=(FIRST_YEAR, 2023)) for name in "ABCDEFG"]
     outcome = _with_gaps(outcome, "debt_history", *gaps, window=Period(start=FIRST_YEAR, end=2024))
     if anchor is not None:
-        outcome = _anchored(outcome, anchor, "debt_history")
+        outcome = _anchored(outcome, anchor)
 
     assert _short_series_sentences(outcome, plan=plan, terminals=["last_five"]) == stated
 
@@ -1314,7 +1320,7 @@ def test_an_anchor_after_the_stated_end_holds_a_series_to_it(
     _surface, outcome = _run(plan, summed={}, role_keys={})
     gap = _short("Kenya", reach=(FIRST_YEAR, 2024), asked=(2015, 2025))
     outcome = _with_gaps(outcome, "debt_history", gap, window=Period(start=FIRST_YEAR, end=2025))
-    outcome = _anchored(outcome, 2025, "debt_history")
+    outcome = _anchored(outcome, 2025)
 
     assert _short_series_sentences(outcome, plan=plan, terminals=["last_five"]) == [
         "Kenya's series ends in 2024."
