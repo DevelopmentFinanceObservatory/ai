@@ -478,6 +478,61 @@ def test_each_role_that_lost_totals_is_named_with_at_most_ten_of_them() -> None:
     assert "GroupOfSeven" not in lines["financingRecipient"]
 
 
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        pytest.param(
+            [
+                {"role": "financingProvider", "provenance": "OECD_DAC2A", "entities": ["A"]},
+                {"role": "financingProvider", "provenance": "OECD_CRS", "entities": ["B"]},
+            ],
+            [
+                "1 group total on financingProvider in OECD_DAC2A (A);",
+                "1 group total on financingProvider in OECD_CRS (B);",
+            ],
+            id="two provenances on one role",
+        ),
+        pytest.param(
+            [{"role": "financingProvider", "provenance": None, "entities": ["A"]}],
+            ["1 group total on financingProvider in the rows that carry no dataset (A);"],
+            id="null provenance",
+        ),
+        pytest.param(
+            [{"role": "financingProvider", "entities": ["A"]}],
+            ["1 group total on financingProvider (A);"],
+            id="trace recorded without a provenance key",
+        ),
+        pytest.param(
+            [
+                {"role": "financingProvider", "provenance": None, "entities": ["A"]},
+                {"role": "financingProvider", "provenance": "OECD_CRS", "entities": ["B"]},
+            ],
+            [
+                "1 group total on financingProvider in the rows that carry no dataset (A);",
+                "1 group total on financingProvider in OECD_CRS (B);",
+            ],
+            id="null and set provenance on one role",
+        ),
+    ],
+)
+def test_a_role_left_out_in_several_datasets_gets_a_line_for_each(
+    entries: list[dict[str, object]], expected: list[str]
+) -> None:
+    manifest = strip_manifest(_manifest_payload() | {"trace": {"party_totals_left_out": entries}})
+
+    digest = render_get_data_digest(
+        manifest=manifest, frame_ref=_frame_ref(manifest), entity_labels={}, dropped_roles=[]
+    )
+
+    lines = [line for line in digest.split("\n\n") if line.startswith("Left out of the frame")]
+    assert len(lines) == len(expected)
+    for line, text in zip(lines, expected, strict=True):
+        assert text in line
+    # The search advice for the whole side closes the role's last line, and appears once.
+    assert digest.count("search again naming the population") == 1
+    assert '("all donors")' in lines[-1]
+
+
 def test_no_left_out_line_when_no_totals_were_left_out() -> None:
     manifest = strip_manifest(_manifest_payload())
 
