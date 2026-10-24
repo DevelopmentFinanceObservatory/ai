@@ -134,9 +134,11 @@ detail says the run's own populations, roots, key or periods do not fit
 (`executor.classify.is_anchor_fault`) and stops it as an `internal_error`.
 
 A keyed `quotient_of` or `share_of` leaves out each numerator key it finds
-nothing to divide by, and its result declares how many
-(`dropped_key_count`). The step's `StepRecord` carries that count, so an
-answer resting on the step can say its population lost members.
+nothing to divide by, and a `join` each entity of either side that matches
+in no period. The result declares how many (`dropped_key_count`, and
+`right_dropped_key_count` for a join's right side). The step's `StepRecord`
+carries both counts, so an answer resting on the step can say its
+population lost members.
 
 Three checks run on what a step's own result declares, in `structured_content`
 rather than the digest prose, which the executor never reads for anything
@@ -247,7 +249,7 @@ from pydantic import JsonValue, ValidationError
 
 from executor.artifacts import (
     ArtifactError,
-    declared_dropped_key_count,
+    declared_dropped_key_counts,
     declared_ranked_before_limit,
     declared_shape,
     extract_frame_ref,
@@ -1291,7 +1293,7 @@ class _Run:
         self.frames: dict[str, FrameRef] = {}
         self.row_counts: dict[str, int | None] = {}
         self.stat_var_counts: dict[str, int | None] = {}
-        self.dropped_key_counts: dict[str, int] = {}
+        self.dropped_key_counts: dict[str, tuple[int, int]] = {}
         self.ranked_before_limit: dict[str, int | None] = {}
         # Per step that produced a frame: the role keys its result declared,
         # and the columns of the retrieval it rests on, which the plan's role
@@ -1966,7 +1968,8 @@ class _Run:
                         row_count=self.row_counts[step.id],
                         role_keys=self.role_keys[step.id],
                         stat_var_count=self.stat_var_counts[step.id],
-                        dropped_key_count=self.dropped_key_counts[step.id],
+                        dropped_key_count=self.dropped_key_counts[step.id][0],
+                        right_dropped_key_count=self.dropped_key_counts[step.id][1],
                         ranked_before_limit=self.ranked_before_limit[step.id],
                     )
                     evidence = (
@@ -2007,7 +2010,7 @@ class _Run:
         produce, refusing `SHAPE_MISMATCH` on a difference, and record the
         declared row count, role keys and StatVar count for `_answer_refusal`,
         the steps reading this one and the step's `StepRecord`, with the keys
-        the result declares it left out (`declared_dropped_key_count`).
+        the result declares it left out (`declared_dropped_key_counts`).
 
         `expected_role_keys` is `None` for a retrieval: the role keys and
         StatVar count its result declares are the frame's own, and stand as
@@ -2028,7 +2031,7 @@ class _Run:
             ) from exc
         self.row_counts[step.id] = row_count
         self.stat_var_counts[step.id] = stat_var_count
-        self.dropped_key_counts[step.id] = declared_dropped_key_count(result.structured_content)
+        self.dropped_key_counts[step.id] = declared_dropped_key_counts(result.structured_content)
         self.ranked_before_limit[step.id] = declared_ranked_before_limit(result.structured_content)
         self.role_keys[step.id] = role_keys
         binding = step.bindings.get(FRAME_PARAMETER)

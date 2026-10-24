@@ -424,4 +424,6 @@ async def join(
             exclusions=output_trace.exclusions,
             time=output_trace.time,
         ),
+        dropped_key_count=result.left_unmatched_entity_count,
+        right_dropped_key_count=result.right_unmatched_entity_count,
     )

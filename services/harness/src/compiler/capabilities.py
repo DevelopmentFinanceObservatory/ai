@@ -197,7 +197,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("growth"),
@@ -208,7 +208,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `change`, `rolling` and `anchor_key` parameters.
         input_schema_hash="ce3741a71620b49f5752bb80201216cbdadd647c64b30e859419d91071acd52d",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("compare"),
@@ -218,7 +218,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="da9ed37fe1dad12d15928195c44f7b06d1cdbb45d2fd859b9c03f86b94a30ba1",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("rank"),
@@ -229,7 +229,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `per_period`, `limit`, `rolling` and `anchor_key` parameters.
         input_schema_hash="0d5dc6e362ba1d79e2e34a7ca6d104844b86fa7aa3f7d7a509bbe8a8575fd719",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("share_of"),
@@ -243,7 +243,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         implementation_version="1",
         # Pins the `numerator_by`/`denominator_by` parameters.
         input_schema_hash="43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("quotient_of"),
@@ -256,7 +256,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="47d9a33d100c3666504e3eaafd6c95d214772a8b420b598bf6c90a0343819734",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("join"),
@@ -266,7 +266,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="119fd25aa6664ddde858cd2f6a8d9438e871834abc19daea030697d8beb656d4",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     ToolCapability(
         tool=_analysis("filter"),
@@ -278,7 +278,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         # Pins the `place_level` predicate, the 21-character period operand, a
         # threshold's `rolling`, and the `rolling` and `anchor_key` parameters.
         input_schema_hash="f073d8fa509274608f80e829348bd28d941b020db1ffb21f31b7e968aab92859",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
         empty_is_an_answer=True,
     ),
     ToolCapability(
@@ -289,7 +289,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
         outputs=(_FRAME_OUT,),
         implementation_version="1",
         input_schema_hash="34835d1f9f2caea89d276d3532fcf293c6fded1559addcad7bd37c292ac3e8c1",
-        output_schema_hash="52732d52862c821dc24a88ce5151b6e899fd800497518d580f2a2cfc328f7fab",
+        output_schema_hash="acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
     ),
     # Finds the latest period a workflow's rolling steps follow. It implements no
     # operation and returns no frame. It takes every root frame at once, in `roots`,

@@ -83,13 +83,15 @@ class StepRecord(StrictModel):
     declared in its own `structured_content`, or `None` when it declared
     none. `get_data`, whose structured result is a `Manifest`, declares no
     `rows`, and declares `role_keys` and `stat_var_count` whenever it read
-    the frame. `dropped_key_count` is how many keys the call declared it left
-    out of its result (`executor.artifacts.declared_dropped_key_count`), 0
-    for every call but a keyed `quotient_of` or `share_of` that found some
-    numerator keys nothing to divide by. `ranked_before_limit` is how many
-    entries a `rank` call ranked before its `limit` cut them
-    (`executor.artifacts.declared_ranked_before_limit`), `None` when the call
-    set no limit.
+    the frame. `dropped_key_count` and `right_dropped_key_count` are how many
+    keys of its first and second input the call declared it left out of its
+    result (`executor.artifacts.declared_dropped_key_counts`): the numerator
+    keys a keyed `quotient_of` or `share_of` found nothing to divide by, and
+    each side's entities a `join` matched in no period. Both are 0 for every
+    other call, and `right_dropped_key_count` for every call but a `join`.
+    `ranked_before_limit` is how many entries a `rank` call ranked before its
+    `limit` cut them (`executor.artifacts.declared_ranked_before_limit`),
+    `None` when the call set no limit.
 
     `frame_ref` is the pair later steps read the frame by. `manifest_ref` is
     the manifest's own pair for a `get_data` step whose `frame_ref` differs
@@ -107,6 +109,7 @@ class StepRecord(StrictModel):
     role_keys: tuple[str, ...] | None = None
     stat_var_count: int | None = None
     dropped_key_count: int = Field(default=0, ge=0)
+    right_dropped_key_count: int = Field(default=0, ge=0)
     ranked_before_limit: int | None = Field(default=None, ge=0)
 
     @property

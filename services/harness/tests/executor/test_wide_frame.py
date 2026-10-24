@@ -35,6 +35,7 @@ from executor.outcomes import (
     Refused,
 )
 from executor.run import AnchorRead, execute_approved_plan, read_anchors
+from harness.graph.answer import answer_notes
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -1542,7 +1543,60 @@ async def test_a_join_key_the_two_frames_spell_differently_is_sent_in_each_frame
     }
 
 
+@pytest.mark.parametrize("health_side", ["right", "left"])
+async def test_a_join_that_matched_a_donor_in_no_year_says_which_sides_data_it_lacked(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    health_side: str,
+) -> None:
+    # Health ODA comes from Germany alone, so France's ODA to Kenya matches in
+    # no year and its rows are left out, on whichever side ODA is joined.
+    health = _requirement(id="oda_health", donors=("Germany",)).model_copy(
+        update={"measure": "health ODA"}
+    )
+    sides = ("oda", "oda_health") if health_side == "right" else ("oda_health", "oda")
+    operations = ("crs", "crs_health") if health_side == "right" else ("crs_health", "crs")
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id=sides[0], right_id=sides[1]
+    )
+    health_source = _source(spec_id=SPEC_CRS_HEALTH, entities=(GERMANY, KENYA))
+    plan = plan_for(
+        [_requirement(), health, joined],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left=operations[0], right=operations[1]
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"oda": _source(), "oda_health": health_source},
+    )
+    results = {
+        SPEC_CRS: await retrieved(_source()),
+        SPEC_CRS_HEALTH: await retrieved(
+            health_source, frame=_family_frame(stat_vars=("OdaHealth",), providers=(GERMANY,))
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    join = outcome.steps[-1]
+    assert (join.dropped_key_count, join.right_dropped_key_count) == (
+        (1, 0) if health_side == "right" else (0, 1)
+    )
+    # The two sides join on donor and on recipient, so a key is one pair.
+    assert answer_notes(None, outcome, plan=plan) == [
+        "1 donor and recipient pair had no health ODA figure for the same year as its "
+        "bilateral ODA and was left out."
+    ]
+
+
 _WHO_KENYA = ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya")
+_WHO_UGANDA = ResolvedEntity(role="observationAbout", ref="country/UGA", label="Uganda")
 
 
 async def test_a_place_series_joins_the_aid_its_place_receives_by_value(
@@ -1645,6 +1699,138 @@ async def test_a_place_series_joins_the_aid_its_place_receives_by_value(
     held, _trace = await frame_store.get(outcome.results["joined_op"])
     assert held.num_rows == 48
     assert dropped == []
+
+
+@pytest.mark.parametrize(
+    ("kenya_spending_from", "aid_recipients", "kenya_aid_to", "notes"),
+    [
+        # Health spending for Kenya and Uganda beside the aid Kenya alone
+        # receives: Uganda matches in no year.
+        pytest.param(
+            2000,
+            (KENYA,),
+            2023,
+            [
+                "1 country had no bilateral ODA figure for the same year as its domestic "
+                "health spending and was left out."
+            ],
+            id="one-sided",
+        ),
+        # Kenya's aid ends in 2009 and its spending starts in 2010, so Kenya
+        # is on both sides in years that never overlap. Uganda matches.
+        pytest.param(
+            2010,
+            (KENYA, UGANDA),
+            2009,
+            [
+                "1 country had no bilateral ODA figure for the same year as its domestic "
+                "health spending and was left out.",
+                "1 country had no domestic health spending figure for the same year as its "
+                "bilateral ODA and was left out.",
+            ],
+            id="disjoint-years",
+        ),
+    ],
+)
+async def test_a_place_series_joined_to_aid_names_the_place_the_aid_missed_as_a_country(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    kenya_spending_from: int,
+    aid_recipients: tuple[ResolvedEntity, ...],
+    kenya_aid_to: int,
+    notes: list[str],
+) -> None:
+    # The one key pair is the place.
+    places = (_WHO_KENYA, _WHO_UGANDA)
+    spending = DatasetRequirement(
+        id="spending",
+        decision_ids=["measure"],
+        measure="domestic health spending",
+        entities=[Entity(name=place.label) for place in places],
+        period=Period(start=2000, end=2023),
+    )
+    oda = _requirement(donors=(), recipients=[entity.label for entity in aid_recipients])
+    total = AggregateRequirement(
+        id="oda_total",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="oda_total"
+    )
+    spending_source = _source(spec_id=SPEC_CRS_HEALTH, entities=places).model_copy(
+        update={"identity": _pinning("HealthSpending", SPEC_CRS_HEALTH)}
+    )
+    plan = plan_for(
+        [spending, oda, total, joined],
+        [
+            RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
+            _RETRIEVE,
+            AggregateOperation(
+                id="oda_total_op",
+                requirement_id="oda_total",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+            ),
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left="who", right="oda_total_op"
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"spending": spending_source, "oda": _source(entities=aid_recipients)},
+    )
+    place_frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:HealthSpending",
+                "observationAbout": place.ref,
+                "time_period": str(year),
+                "value": 10.0 + year,
+                "unit": "usd",
+            }
+            for place in places
+            for year in range(kenya_spending_from if place is _WHO_KENYA else 2000, 2024)
+        ],
+    )
+    results = {
+        SPEC_CRS_HEALTH: await retrieved(
+            spending_source,
+            frame=place_frame,
+            dimensions=[{"label": "observationAbout", "count": len(places)}, DIMENSIONS[-1]],
+            statistics=[
+                {
+                    "stat_var": "dcid:HealthSpending",
+                    "entities": [{"role": "observationAbout", "ref": place.ref}],
+                    "facet": {"unit": "usd"},
+                    "observations": 24,
+                    "first": {"value": 2010.0, "period": "2000"},
+                    "latest": {"value": 2033.0, "period": "2023"},
+                    "minimum": {"value": 2010.0, "period": "2000"},
+                    "maximum": {"value": 2033.0, "period": "2023"},
+                }
+                for place in places
+            ],
+        ),
+        SPEC_CRS: await retrieved(
+            _source(entities=aid_recipients),
+            providers=(GERMANY, FRANCE),
+            recipients=aid_recipients,
+            frame=_family_frame(
+                kinds=True, recipients=aid_recipients, last_years={KENYA: kenya_aid_to}
+            ),
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert answer_notes(None, outcome, plan=plan) == notes
 
 
 async def test_a_role_the_frame_has_no_column_for_refuses_before_the_call(

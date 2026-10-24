@@ -32,17 +32,22 @@ from executor.outcomes import (
     RunOutcome,
     StepRecord,
 )
+from planner.parties import singular
+from planner.phrasing import pluralize
 from planner.plan import (
     DatasetRequirement,
     Decision,
     EvidenceRequirement,
+    JoinRequirement,
     QuotientRequirement,
     ResolvedBy,
     ShareOfRequirement,
+    frame_shapes,
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
 from planner.records import Reduction
+from planner.shapes import PLACE_PHRASE, join_key_pairs
 from planner.workflow import ReadingSetBy, ResolvedGroup, SelectedSource, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
 
@@ -658,24 +663,26 @@ def _dropped_key_sentences(
     plan: PlannerPlan,
     terminals: Collection[str] | None = None,
 ) -> list[str]:
-    """One sentence per step under an answer frame that left keys out of its
-    result (`StepRecord.dropped_key_count`), over every answer frame
+    """The sentences for each step under an answer frame that left keys out
+    of its result (`StepRecord.dropped_key_count`,
+    `StepRecord.right_dropped_key_count`), over every answer frame
     (`answer_frames`) or only those of `terminals`.
 
     A keyed `quotient_of` or `share_of` drops each numerator key it has
-    nothing to divide by, and every step reading its frame, a `rank` among
-    them, works over the keys that remain. So the walk covers every step
-    an answer frame rests on (`_upstream_steps`), in the plan's step order.
+    nothing to divide by, a `join` each entity of either side that matches
+    in no period, and every step reading such a frame, a `rank` among them,
+    works over the keys that remain. So the walk covers every step an
+    answer frame rests on (`_upstream_steps`), in the plan's step order.
     Identical sentences are stated once.
     """
     workflow = plan.workflow
     if workflow is None:
         return []
-    dropped = {
-        record.step_id: record.dropped_key_count
+    dropped = [
+        record
         for record in _ran(outcome)
-        if record.dropped_key_count
-    }
+        if record.dropped_key_count or record.right_dropped_key_count
+    ]
     if not dropped:
         return []
     steps_by_id = {step.id: step for step in workflow.steps}
@@ -684,12 +691,12 @@ def _dropped_key_sentences(
         if terminals is not None and terminal_id not in terminals:
             continue
         under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
-        for step_id, count in dropped.items():
-            if step_id not in under:
+        for record in dropped:
+            if record.step_id not in under:
                 continue
-            sentence = _dropped_key_sentence(count, *_dropped_key_nouns(step_id, plan))
-            if sentence not in sentences:
-                sentences.append(sentence)
+            for sentence in _step_dropped_key_sentences(record, plan):
+                if sentence not in sentences:
+                    sentences.append(sentence)
     return sentences
 
 
@@ -707,29 +714,57 @@ def _upstream_steps(step_id: str, *, steps_by_id: dict[str, WorkflowStep]) -> fr
     return frozenset(found)
 
 
-def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str | None]:
-    """The plan's own words for the keys step `step_id` divides and for what
-    it divides them by: the quotient or share requirement's `axis`, and the
-    measure of the dataset requirement under its denominator. `None` for
-    either the plan does not state.
+def _step_dropped_key_sentences(record: StepRecord, plan: PlannerPlan) -> list[str]:
+    """The sentences for the keys step `record` left out, in the plan's own
+    words where the step's requirement gives them.
 
     A step carries out the operation it is named for (`WorkflowStep.id`),
-    and that operation names its requirement.
+    and that operation names its requirement. A join's sentences name its
+    keys by their roles (`_join_key_noun`) and each side by its measure,
+    with one sentence for the left side's entities and one for the right's.
+    A quotient or
+    share names its keys by its `axis` and what it divides by by its
+    denominator's measure.
     """
     operations = plan.translation.operations if plan.translation is not None else ()
     requirement_id = next(
-        (operation.requirement_id for operation in operations if operation.id == step_id), None
+        (operation.requirement_id for operation in operations if operation.id == record.step_id),
+        None,
     )
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
     requirement = requirements.get(requirement_id or "")
-    if not isinstance(requirement, QuotientRequirement | ShareOfRequirement):
-        return None, None
-    divisor = requirements.get(requirement.denominator.input_id)
-    # A denominator read through a filter or an aggregate keeps its
-    # dataset's measure.
-    while divisor is not None and not isinstance(divisor, DatasetRequirement):
-        divisor = requirements.get(getattr(divisor, "input_id", None) or "")
-    return requirement.axis, divisor.measure if divisor is not None else None
+    if isinstance(requirement, JoinRequirement):
+        left = _measure_under(requirement.left_id, requirements)
+        right = _measure_under(requirement.right_id, requirements)
+        noun = _join_key_noun(requirement, plan)
+        return [
+            _unmatched_key_sentence(count, noun=noun, held=held, lacking=lacking)
+            for count, held, lacking in (
+                (record.dropped_key_count, left, right),
+                (record.right_dropped_key_count, right, left),
+            )
+            if count
+        ]
+    if not record.dropped_key_count:
+        return []
+    if isinstance(requirement, QuotientRequirement | ShareOfRequirement):
+        axis = requirement.axis
+        divisor = _measure_under(requirement.denominator.input_id, requirements)
+    else:
+        axis = divisor = None
+    return [_dropped_key_sentence(record.dropped_key_count, axis, divisor)]
+
+
+def _measure_under(
+    requirement_id: str, requirements: Mapping[str, EvidenceRequirement]
+) -> str | None:
+    """The measure of the dataset requirement `requirement_id` reads, through
+    any filter or aggregate, which keep their dataset's measure. `None` when
+    the walk reaches no dataset requirement."""
+    requirement = requirements.get(requirement_id)
+    while requirement is not None and not isinstance(requirement, DatasetRequirement):
+        requirement = requirements.get(getattr(requirement, "input_id", None) or "")
+    return requirement.measure if requirement is not None else None
 
 
 def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> str:
@@ -750,6 +785,46 @@ def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> 
     lacked = f"no {divisor} figure to divide by" if divisor else "no figure to divide by"
     verb = "was" if count == 1 else "were"
     return f"{subject} had {lacked} and {verb} left out."
+
+
+def _join_key_noun(requirement: JoinRequirement, plan: PlannerPlan) -> str:
+    """What one key of the join `requirement` is, in the plan's role words.
+    It is the role of each key pair the planner joins the two sides on
+    (`planner.shapes.join_key_pairs`, over `planner.plan.frame_shapes`),
+    as the left side names it, or "country" for a place stating none.
+
+    One pair gives its role ("country", "donor"), two or more give the
+    roles joined as a pair or a combination ("donor and recipient pair").
+    The planner refuses a join with no pair.
+    """
+    shapes = frame_shapes(plan)
+    pairs = join_key_pairs(shapes[requirement.left_id].roles, shapes[requirement.right_id].roles)
+    words = [singular(PLACE_PHRASE if role.role is None else role.role) for role, _ in pairs]
+    if len(words) == 1:
+        return words[0]
+    joint = "pair" if len(words) == 2 else "combination"
+    return f"{', '.join(words[:-1])} and {words[-1]} {joint}"
+
+
+def _unmatched_key_sentence(count: int, *, noun: str, held: str | None, lacking: str | None) -> str:
+    """The sentence for `count` keys of one side of a join that matched in
+    no period: how many, named by `noun` (`_join_key_noun`), and that the
+    other side holds no figure for any year their side holds one, named by
+    each side's measure (`lacking`, `held`) when the plan states both.
+
+    A key is left out when the other side holds no row for it, holds it
+    only in other years, or a filter on the other side removed it, and the
+    one wording is true of all three. A key both sides hold in years that
+    never overlap counts on each side, and each side's sentence is true.
+    """
+    subject = f"{count:,} {noun if count == 1 else pluralize(noun)}"
+    own, covers = ("its", "it covers") if count == 1 else ("their", "they cover")
+    verb = "was" if count == 1 else "were"
+    if held and lacking:
+        had = f"had no {lacking} figure for the same year as {own} {held}"
+    else:
+        had = f"had no figure on the other side of the join for any year {covers}"
+    return f"{subject} {had} and {verb} left out."
 
 
 def _family_name(manifest: Mapping[str, Any], source: SelectedSource | None) -> str:

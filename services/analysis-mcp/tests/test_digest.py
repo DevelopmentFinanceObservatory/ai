@@ -1112,6 +1112,8 @@ def test_join_digest_carries_the_identity_block() -> None:
             ),
             left_dropped_key_count=0,
             right_dropped_key_count=0,
+            left_unmatched_entity_count=0,
+            right_unmatched_entity_count=0,
         ),
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,

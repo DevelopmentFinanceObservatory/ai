@@ -123,19 +123,29 @@ def declared_shape(
     )
 
 
-def declared_dropped_key_count(structured_content: Mapping[str, object] | None) -> int:
-    """How many keys a successful call declared it left out of its result
-    (`analysis_mcp.result.VerbResult.dropped_key_count`): the numerator keys
-    a keyed `quotient_of` or `share_of` found nothing to divide by.
+def declared_dropped_key_counts(
+    structured_content: Mapping[str, object] | None,
+) -> tuple[int, int]:
+    """How many keys of its first and of its second input a successful call
+    declared it left out of its result
+    (`analysis_mcp.result.VerbResult.dropped_key_count` and
+    `right_dropped_key_count`): the numerator keys a keyed `quotient_of` or
+    `share_of` found nothing to divide by, and the entities of each side of
+    a `join` that matched in no period.
 
-    0 when the content carries no count, as `get_data`'s manifest never does,
-    and when the member is not a count, read the way `declared_shape` reads a
-    malformed `stat_var_count` as absent.
+    0 for a count the content does not carry, as `get_data`'s manifest
+    carries neither, and for a member that is not a count, read the way
+    `declared_shape` reads a malformed `stat_var_count` as absent.
     """
-    count = (structured_content or {}).get("dropped_key_count")
-    if isinstance(count, bool) or not isinstance(count, int):
-        return 0
-    return max(count, 0)
+    content = structured_content or {}
+
+    def count(member: str) -> int:
+        value = content.get(member)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+    return count("dropped_key_count"), count("right_dropped_key_count")
 
 
 def declared_ranked_before_limit(structured_content: Mapping[str, object] | None) -> int | None:
