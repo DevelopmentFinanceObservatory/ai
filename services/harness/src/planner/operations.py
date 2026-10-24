@@ -312,11 +312,17 @@ class ShareOfOperation(TaggedModel):
 
     @model_validator(mode="after")
     def _sides_differ(self) -> ShareOfOperation:
-        if (self.numerator.input, self.numerator.entity) == (
-            self.denominator.input,
-            self.denominator.entity,
+        # As `planner.plan.ShareOfRequirement._sides_differ`: one side keyed by
+        # `axis` and pooled across it is each member's share of their total.
+        if (
+            self.numerator == self.denominator
+            and self.denominator_scope is not DenominatorScope.POOLED
         ):
-            raise ValueError("a share_of's numerator and denominator must differ")
+            raise ValueError(
+                "a share_of's numerator and denominator must differ, unless it keys that one "
+                "side by `axis` with denominator_scope 'pooled', each member's share of the "
+                "total across them"
+            )
         return self
 
     @model_validator(mode="after")
