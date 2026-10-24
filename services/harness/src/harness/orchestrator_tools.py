@@ -43,6 +43,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -169,6 +170,9 @@ _FETCHES_KEY = "orchestrator:fetches"
 # The ids of the series the canvas drew as a turn began, with the turn's
 # invocation id: {"invocation", "ids"}.
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
+# The cards `make_charts` drew this turn: {"invocation", "drawn"}, `drawn`
+# mapping `_card_identity` to the result entry the card was drawn with.
+_DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
 HANDED_OFF = "handed_off"
@@ -599,6 +603,28 @@ class _Narrowed:
 
     select: dict[str, Any]
     cut: TopMembers | None
+
+
+# The suffix a cut card's title ends with, as `_cut_title` writes it.
+_CUT_SUFFIX = re.compile(r" \(\d+ largest of \d+ in [^()]+\)$")
+
+
+def _cut_title(title: str, cut: TopMembers) -> str:
+    """The title of a card cut to its largest members, ending in what it leaves
+    out. A title the model copied from a card already cut loses that suffix
+    first, so the new suffix is the only one."""
+    base = _CUT_SUFFIX.sub("", title)
+    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
+    return f"{base[: 117 - len(suffix)]} ({suffix})"
+
+
+def _card_identity(chart: Chart, intent: Mapping[str, Any]) -> str:
+    """What a drawn card is: the intent the platform renders and checks it
+    from (kind, frame, select, window, title) and the figures `chart` asks the
+    result to state. The title stays in, so a title the platform would refuse
+    is checked afresh rather than answered from a card drawn under another."""
+    asked = chart.model_dump(include={"state_values_for", "state_span", "state_period"})
+    return json.dumps({"intent": intent, "asked": asked}, sort_keys=True)
 
 
 async def _top_select(
@@ -1724,6 +1750,12 @@ def build_orchestrator_tools(
         that drew a chart or one that drew none."""
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
         on_canvas = _canvas_series(tool_context)
+        held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        drawn_cards: dict[str, dict[str, Any]] = (
+            dict(held_cards["drawn"])
+            if held_cards.get("invocation") == tool_context.invocation_id
+            else {}
+        )
         drawn: list[dict[str, Any]] = []
         landed = False
         try:
@@ -1795,11 +1827,7 @@ def build_orchestrator_tools(
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                title = chart.title
-                if cut is not None:
-                    # The card says what it leaves out in a suffix that ends the title.
-                    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
-                    title = f"{chart.title[: 117 - len(suffix)]} ({suffix})"
+                title = chart.title if cut is None else _cut_title(chart.title, cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
@@ -1815,6 +1843,21 @@ def build_orchestrator_tools(
                     # window, which without one moves when the frame gains a
                     # newer period.
                     intent["window"] = {"start": cut.period, "end": cut.period}
+                identity = _card_identity(chart, intent)
+                if identity in drawn_cards:
+                    # The canvas holds this card, so another write would stack a copy.
+                    drawn.append(
+                        drawn_cards[identity]
+                        | {
+                            "already_on_canvas": (
+                                "This card is already on the canvas from an earlier call "
+                                "this turn, and no copy was drawn. Use its figures; draw "
+                                "a chart again only with a different kind, frame, select "
+                                "or period."
+                            )
+                        }
+                    )
+                    continue
                 try:
                     written = await executor(tool="write_component", args={"intent": intent})
                     component = written.get("component") if written.get("outcome") == "ok" else None
@@ -1863,6 +1906,11 @@ def build_orchestrator_tools(
                 if cut is not None:
                     entry["note"] = _cut_note(cut)
                 drawn.append(entry)
+                drawn_cards[identity] = entry
+                tool_context.state[_DRAWN_CARDS_KEY] = {
+                    "invocation": tool_context.invocation_id,
+                    "drawn": drawn_cards,
+                }
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
