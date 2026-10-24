@@ -144,7 +144,7 @@ def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tup
             requirement_revision(requirement), requirement.id, requirement.source_spec_id
         )
         if found is not None:
-            scope = log.scope_kept(requirement, found)
+            scope = log.scope_kept(plan, requirement, found)
             stale.append(
                 StalePin(
                     requirement_id=requirement.id,
@@ -1070,7 +1070,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
                 no_data_reason = log.no_data_reason(key, requirement_id)
             elif kind is ReferralKind.PINNED_SOURCE_NOT_FOUND:
                 candidates, withheld, scope_repair = log.scope_kept(
-                    requirement, log.pinnable_for(key, requirement_id)
+                    plan, requirement, log.pinnable_for(key, requirement_id)
                 )
                 stale_pins = _other_stale_pins(plan, log, requirement_id)
             elif kind is ReferralKind.REQUIREMENT_UNMEETABLE:

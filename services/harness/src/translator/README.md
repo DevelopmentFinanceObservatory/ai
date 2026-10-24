@@ -133,7 +133,11 @@ members on a role it leaves open or binds in part) goes under the referral's
 `withheld`, never under `candidates`, so the planner cannot pin it. The
 referral's `repair` then names the change that keeps that scope, when the
 pinned source held the side to one group or one entity ("name 'Africa' as
-recipient in `entities` and drop 'recipient' from `across`"). The pin's source is read for
+recipient in `entities` and drop 'recipient' from `across`"). That holds
+only while every requirement reading the pinned one sums the side away. Any
+other reader, such as a rank or a filter, reads the side per member, which
+naming one member cannot answer: the pin gives way, and the referral offers
+the sources found as `candidates`. The pin's source is read for
 this check from the discovery log too, when a search the translator ran found
 it. A pin `propose_plan` moved to a copy over the requirement's period, or a
 pin whose identity a search in the conversation recorded over that period,

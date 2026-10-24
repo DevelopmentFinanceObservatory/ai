@@ -15,7 +15,9 @@ every name `needs` lists. Each asserts the replayed call is accepted
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,19 +34,25 @@ from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
     Decision,
+    DecisionFixes,
     Entity,
+    EvidenceRequirement,
+    Period,
     PinSource,
     Plan,
+    RankRequirement,
     Unit,
     plan_revision,
     save_pin_sources,
 )
+from planner.records import GroupBy, RankAmong, RankDirection, Reduction
 from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource
 from submission.service import _choice_not_offered
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
     DiscoveryRecord,
+    _sums_its_sides_away,
     load_log,
     requirement_revision,
     save_log,
@@ -53,6 +61,7 @@ from translator.mechanical import TranslatorCore
 from translator.referral import load_referral
 from translator.tool import build_translator_core
 
+from ..split_plan import stored_split_plan
 from .conftest import _envelope, _spec
 
 DraftFactory = Callable[..., Plan]
@@ -511,6 +520,133 @@ async def test_a_source_dropping_the_pinned_group_is_withheld_and_cannot_be_pinn
         _choice_not_offered(unpinned(africa_named, None), load_referral(context.state), context)
         is None
     )
+
+
+# The planner-entry eval's recorded Kenya answers: the DAC official-donors
+# total Search binds when no donor is named, and the 143 providers it leaves
+# open when the donor side is asked for open.
+_KENYA_ODA = json.loads(
+    (
+        Path(__file__).parents[1] / "fixtures" / "search_spec_dac_total_and_donor_open.json"
+    ).read_text()
+)
+
+
+def _donor_open_server() -> FastMCP:
+    """A `data-mcp` whose `search` answers every ask with ODA to Kenya from 143 providers."""
+    server = FastMCP(name="data-mcp")
+
+    @server.tool(name="search")
+    async def search(parts: list[dict[str, Any]], raw_query: str | None = None) -> ToolResult:
+        """Find what data exists for the ask."""
+        del parts, raw_query
+        envelope = _envelope("definite", [], spec=_KENYA_ODA["donor_open"])
+        return ToolResult(
+            content="digest",
+            structured_content=render_answer(envelope),
+            meta={SEARCH_ENVELOPE_META_KEY: envelope},
+        )
+
+    return server
+
+
+_TOP_DONORS = RankRequirement(
+    id="top_donors",
+    decision_ids=["every_donor"],
+    input_id="oda",
+    direction=RankDirection.HIGHEST_FIRST,
+    among=RankAmong.POPULATION,
+    axis="donor",
+    reduction=Reduction.SUM,
+    limit=10,
+    window_start=2022,
+    window_end=2022,
+)
+_TOTAL = AggregateRequirement(
+    id="total",
+    decision_ids=["measure"],
+    input_id="oda",
+    reduction=Reduction.SUM,
+    group_by=(GroupBy.PERIOD,),
+)
+_NAME_THE_TOTAL = (
+    "name 'official donors (DAC)' as donor in `entities` and drop 'donor' from `across`"
+)
+
+
+@pytest.mark.parametrize(
+    ("reader", "repair"),
+    [(_TOP_DONORS, None), (_TOTAL, _NAME_THE_TOTAL)],
+    ids=["rank", "total"],
+)
+async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the_open_source(
+    reader: EvidenceRequirement,
+    repair: str | None,
+    draft: DraftFactory,
+    decision: DecisionFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # The pin is the DAC official-donors total and `across` asks for every
+    # donor. A ranking reads each donor, so the donor-open source search finds
+    # is offered and the pin gives way to it: naming the total would leave one
+    # donor to rank. A total over donors sums the side away, so the pin's
+    # scope is the figure asked for, the open source is withheld, and the
+    # repair names the total.
+    dac_total = _KENYA_ODA["dac_total"]["spec_id"]
+    donor_open = _KENYA_ODA["donor_open"]["spec_id"]
+
+    def oda(**overrides: Any) -> DatasetRequirement:
+        return requirement(
+            id="oda",
+            measure="official development assistance",
+            entities=[Entity(name="Kenya", role="recipient")],
+            across=("donor",),
+            period=Period(start=2015, end=2022),
+            **overrides,
+        )
+
+    every_donor = (
+        [decision(slot="every_donor", fixes=DecisionFixes(among=RankAmong.POPULATION))]
+        if isinstance(reader, RankRequirement)
+        else []
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(dac_total), *every_donor],
+            evidence_requirements=[oda(source_spec_id=dac_total), reader],
+        )
+    )
+    save_pin_sources(
+        context.state, {dac_total: PinSource(block=_KENYA_ODA["dac_total"], settled=True)}
+    )
+    core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
+
+    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    referred = await _replay_action(core, result["action"], context)
+
+    referral = referred["referral"]
+    assert referral["kind"] == "pinned_source_not_found"
+    assert referral.get("repair") == repair
+    offered = [] if repair else [donor_open]
+    assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
+    assert len(referral.get("withheld", [])) == (1 if repair else 0)
+    repinned = draft(
+        decisions=[pinning_decision(donor_open), *every_donor],
+        evidence_requirements=[oda(source_spec_id=donor_open), reader],
+    )
+    refused = _choice_not_offered(repinned, load_referral(context.state), context)
+    assert (refused is None) == (repair is None)
+
+
+@pytest.mark.parametrize("requirement_id", ["debt", "debt_history"])
+def test_a_copy_of_a_whole_history_is_judged_by_its_origins_readers(
+    decision: DecisionFactory, requirement_id: str
+) -> None:
+    # `last_five`, a growth, reads `debt_history`, the copy the split added;
+    # the plan as the model wrote it has `last_five` read `debt`.
+    assert _sums_its_sides_away(stored_split_plan(decision), requirement_id) is False
 
 
 async def test_requirement_unmeetable_action_refers(
