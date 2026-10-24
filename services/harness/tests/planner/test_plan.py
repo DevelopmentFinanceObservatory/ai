@@ -113,7 +113,7 @@ from planner.records import (
     TaggedModel,
     ValueThreshold,
 )
-from planner.shapes import FrameShape, TimeLabel
+from planner.shapes import FrameShape, TimeLabel, pooling_remedy
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -1323,6 +1323,48 @@ def test_a_requirement_side_entity_must_name_an_upstream_entity(
         _plan(decision(), evidence_requirements=[dataset, agg, other_agg, comparison])
 
 
+@pytest.mark.parametrize(
+    ("denominator", "refused"),
+    [("all_oda", True), ("pooled", False)],
+    ids=["every-donor-whole", "pooled-per-year"],
+)
+def test_a_whole_side_over_a_party_nobody_named_is_rejected(
+    decision: DecisionFactory, requirement: RequirementFactory, denominator: str, refused: bool
+) -> None:
+    # Germany's share of all ODA to Ethiopia: the denominator covers every
+    # donor and names none, so read whole it is one series per donor. The
+    # compiler refuses that side (`entity_required`) on the same rule, and an
+    # aggregate pooling the donors per year clears both.
+    ethiopia = Entity(name="Ethiopia", role="recipient")
+    germany = requirement(
+        id="germany", measure="ODA", entities=[Entity(name="Germany", role="donor"), ethiopia]
+    )
+    all_oda = requirement(id="all_oda", measure="ODA", entities=[ethiopia], across=["donor"])
+    pooled = AggregateRequirement(
+        id="pooled",
+        decision_ids=["measure"],
+        input_id="all_oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="germany"),
+        denominator=RequirementSide(input_id=denominator),
+    )
+    requirements = [germany, all_oda, *([pooled] if denominator == "pooled" else []), share]
+
+    if not refused:
+        _plan(decision(), evidence_requirements=requirements)
+        return
+    with pytest.raises(ValidationError) as rejected:
+        _plan(decision(), evidence_requirements=requirements)
+    message = str(rejected.value)
+    assert "covers every 'donor'" in message
+    assert pooling_remedy(one_figure=True, each_side=True) in message
+
+
 def test_a_comparison_reading_a_join_is_rejected(
     decision: DecisionFactory,
     requirement: RequirementFactory,
@@ -1685,7 +1727,7 @@ _PEAK_YEAR_FILTERS = {
     "five-years-back-filter": _years_back("gte", -5),
     "after-ten-years-back-filter": _years_back("gt", -10),
     "ten-years-back-filter": _years_back("gte", -10),
-    "entity-filter": EntityIn(names=("France",)),
+    "entity-filter": EntityIn(names=("Kenya",)),
 }
 # Filters in front of the peak: a first year six years back behind a fixed
 # 2018, a first year ten years back, and a last year before the newest.

@@ -419,7 +419,12 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     families are `DISJOINT` when a shape field differs as both state it, or
     when a property both bind to stated codes admits no code in common.
     Health and education aid bind `crsPurpose` to two subtrees of the code
-    index that share no code.
+    index that share no code. They are `DISJOINT` too when one binds a
+    property its own identity lists and the other's does not, since a member
+    carries a code only on a property its family's schema lists. DAC2a aid
+    binds `dac2aAidType`, which no IDS debt family lists, so no StatVar is
+    both. A bound slot no identity lists, a where-classed constraint such as
+    `comparisonRegion`, proves nothing (`_binds_unlisted`).
 
     A shape field differs only when both sides state it as a dcid string, or
     both as `{"ref": dcid}`, and the dcids differ. A field one side leaves out
@@ -438,9 +443,10 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     Everything else is `UNDECIDED`. That covers a side with no described shape
     or no `slot_codes`, a property bound to codes not stated (a `None` entry)
     where the verdict would rest on it, two families that each bind a property
-    the other leaves open, and two that would nest but whose shapes differ in
-    a field one side leaves out, leaves unresolved, or spells another way,
-    since the open fields may name different nodes.
+    the other leaves open or whose identity lists no slots, and two that would
+    nest but whose shapes differ in a field one side leaves out, leaves
+    unresolved, or spells another way, since the open fields may name
+    different nodes.
     """
     pinned = [pinned_stat_var(source.identity) for source in (left, right)]
     if pinned[0] is not None and pinned[1] is not None:
@@ -460,17 +466,45 @@ def _described_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOve
         return FamilyOverlap.DISJOINT
     if left.slot_codes is None or right.slot_codes is None:
         return FamilyOverlap.UNDECIDED
-    if any(
-        codes is not None
-        and (other := right.slot_codes.get(prop)) is not None
-        and set(codes).isdisjoint(other)
-        for prop, codes in left.slot_codes.items()
+    if (
+        any(
+            codes is not None
+            and (other := right.slot_codes.get(prop)) is not None
+            and set(codes).isdisjoint(other)
+            for prop, codes in left.slot_codes.items()
+        )
+        or _binds_unlisted(left, right)
+        or _binds_unlisted(right, left)
     ):
         return FamilyOverlap.DISJOINT
     nested = _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes)
     if nested and _same_shape(left_shape, right_shape):
         return FamilyOverlap.NESTED
     return FamilyOverlap.UNDECIDED
+
+
+def _binds_unlisted(source: SelectedSource, other: SelectedSource) -> bool:
+    """Whether `source` binds a property both identities could list and `other`'s does not.
+
+    An identity lists the what and how slots alone: apis leaves every when,
+    where and source slot out, a constraint property classed `where` such as
+    `comparisonRegion` included (`search.engine.spec_id._EXCLUDED_SLOT_AXES`).
+    So only a property `source`'s own identity lists counts, and a slot
+    missing from both identities never reads as a binding difference.
+    Proves nothing when either identity states no slot list.
+    """
+    own, listed = _listed_properties(source), _listed_properties(other)
+    if own is None or listed is None:
+        return False
+    return any(prop in own and prop not in listed for prop in source.slot_codes or {})
+
+
+def _listed_properties(source: SelectedSource) -> set[object] | None:
+    """The properties `source`'s identity lists a slot for, or `None` when it lists none."""
+    slots = (source.identity or {}).get("slots")
+    if not isinstance(slots, list):
+        return None
+    return {slot.get("property") for slot in slots if isinstance(slot, Mapping)}
 
 
 def _same_shape(left: Mapping[str, object], right: Mapping[str, object]) -> bool:

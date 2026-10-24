@@ -1139,15 +1139,19 @@ def _pooled_recipient_share_sentence(
     *,
     denominator_entity: str | None = None,
 ) -> str:
-    """The card sentence for ODA per recipient, pooled over the last of `denominator_steps`.
+    """The card sentence for the UK's ODA per recipient, pooled over the last of `denominator_steps`.
 
-    A rank over the population cites the `population` decision.
+    The dataset names six recipients for the steps' filters to keep. A rank
+    over the population cites the `population` decision.
     """
     dataset = DatasetRequirement(
         id="dataset",
         decision_ids=["measure"],
         measure="ODA",
-        entities=[Entity(name="UK", role="donor"), Entity(name="Kenya", role="recipient")],
+        entities=[
+            Entity(name="UK", role="donor"),
+            *(Entity(name=name, role="recipient") for name in _SIX),
+        ],
         period=Period(start=2015, end=2024),
     )
     share = ShareOfRequirement(
@@ -1764,7 +1768,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
         id="share",
         decision_ids=["measure"],
         numerator=RequirementSide(input_id="nigeria"),
-        denominator=RequirementSide(input_id="countries"),
+        denominator=RequirementSide(input_id="world"),
     )
     plan = Plan(
         question="What share of the world's GDP is Nigeria's?",
@@ -1773,6 +1777,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
             nigeria,
             every_place,
             _filter("countries", "gdp", PlaceLevel(level=PlaceType.COUNTRY)),
+            _total("countries", id_="world"),
             share,
         ],
     )

@@ -35,6 +35,7 @@ from planner.plan import (
 from planner.records import (
     Breakdown,
     BreakdownDimension,
+    EntityIn,
     GroupBy,
     PeriodThreshold,
     RankAmong,
@@ -213,8 +214,29 @@ def test_a_sector_ranking_sets_beside_another_year_by_a_per_period_rank_or_a_gro
             lambda: [_aid_to_kenya(breakdown=None), _by_sector()],
             "cannot group by breakdown over a frame that carries none",
         ),
+        (
+            # A frame's sector cells hold the labels apis decodes, which no
+            # plan knows, so a filter keeps no sector by name.
+            lambda: [
+                _aid_to_kenya(),
+                _by_sector(),
+                FilterRequirement(
+                    id="health",
+                    decision_ids=["measure"],
+                    input_id="by_sector",
+                    predicates=(EntityIn(names=("Health",), role="sector"),),
+                ),
+            ],
+            "'sector' is a breakdown, whose codes are no entities a filter keeps",
+        ),
     ],
-    ids=["summed", "entity_role_named_sector", "across_sector", "aggregate_without_breakdown"],
+    ids=[
+        "summed",
+        "entity_role_named_sector",
+        "across_sector",
+        "aggregate_without_breakdown",
+        "filter_keeping_a_sector",
+    ],
 )
 def test_a_breakdown_the_plan_cannot_carry_out_is_refused(
     decision: DecisionFactory,

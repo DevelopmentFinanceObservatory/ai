@@ -377,6 +377,16 @@ class LevelRole(NamedRole, Protocol):
     def level_filterable(self) -> bool: ...
 
 
+class SideRole(NamedRole, Protocol):
+    """What `open_on_whole_side` reads of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
+
+    @property
+    def open(self) -> bool: ...
+
+    @property
+    def breakdown(self) -> bool: ...
+
+
 # The phrase a refusal tells the planner to write for a place dimension whose
 # entities state no role.
 PLACE_PHRASE: Final = "country"
@@ -408,6 +418,40 @@ def pooling_remedy(*, one_figure: bool, each_side: bool = False) -> str:
     if not one_figure:
         return per_year
     return f"{per_year}, or, {one_figure_remedy(each_side=each_side)}"
+
+
+def open_on_whole_side[R: SideRole](roles: Sequence[R], *, keyed: str | None) -> R | None:
+    """The first open dimension a side naming no entity reads whole, or `None` when it reads none.
+
+    A two-sided step reads such a side as one series on every dimension but
+    the one it is keyed by (`keyed`, the role phrase of a keyed `share_of`
+    or `quotient_of` side). An open dimension holds every member of a party
+    nobody named, so the side cannot say which it reads. A breakdown's codes
+    are left to the reading verb. `planner.plan` refuses the plan and
+    `compiler.compile` the operation on this one rule
+    (`open_whole_side_reason`).
+    """
+    key = role_named(roles, keyed) if keyed is not None else None
+    return next(
+        (role for role in roles if role.open and not role.breakdown and role is not key), None
+    )
+
+
+def open_whole_side_reason(role: SideRole, *, one_figure: bool, keyable: bool = False) -> str:
+    """Why a side reading `role` (`open_on_whole_side`) whole is refused, and every way to fix it.
+
+    `one_figure` is whether the reader takes one figure from each side, an
+    un-keyed `share_of` or `quotient_of` (`pooling_remedy`). `keyable` is
+    whether the side is that reader's numerator, which the reader keys on
+    `role` once it states `axis`, giving one figure per member. That is the
+    repair for "ODA per person in each country".
+    """
+    key = f"key the step on {role.role!r} with `axis`, one figure per member, " if keyable else ""
+    return (
+        f"whose requirement covers every {role.role!r} and names none of them, so the side "
+        f"cannot say which it reads; {key}name them in the requirement's `entities`, or "
+        f"{pooling_remedy(one_figure=one_figure, each_side=True)}"
+    )
 
 
 def place_role(role: str | None) -> bool:

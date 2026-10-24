@@ -117,6 +117,8 @@ from planner.shapes import (
     growth_endpoint_leaves,
     joined,
     level_filter,
+    open_on_whole_side,
+    open_whole_side_reason,
     place_role,
     quotiented,
     ranked,
@@ -2824,10 +2826,117 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     )
 
 
+def stated_under(entity: Entity, role: str | None) -> bool:
+    """Whether the phrase `role` names the dimension `entity` sits on; any does when `role` is `None`.
+
+    The rule is `planner.shapes.roles_named`'s: a phrase names the role it
+    equals, and a place word names the place dimension, whose entities
+    state no role or a place phrase.
+    """
+    if role is None or entity.role == role:
+        return True
+    return across_party(role) == "place" and place_role(entity.role)
+
+
+def entities_named(requirement: DatasetRequirement, name: str, role: str | None) -> list[Entity]:
+    """The entities of `requirement` called `name`, under `role` when one is given (`stated_under`)."""
+    return [
+        entity
+        for entity in requirement.entities
+        if entity.name == name and stated_under(entity, role)
+    ]
+
+
+def unknown_names(
+    names: Iterable[str], role: str | None, requirements: Sequence[DatasetRequirement]
+) -> list[str]:
+    """Each of `names` that none of `requirements` states, under `role` when one is given.
+
+    A filter keeps entities by the names the requirements behind its input
+    state. A name they do not state matches no row the compiler can write,
+    since a breakdown's codes are no entities and analysis-mcp matches the
+    code labels apis decodes, which no plan knows. `_filter_shape` refuses such a
+    filter and `compiler.compile` reports it as `unknown_entity`.
+    """
+    return [
+        name
+        for name in names
+        if not any(entities_named(requirement, name, role) for requirement in requirements)
+    ]
+
+
+def stated_names(requirements: Sequence[DatasetRequirement], role: str | None) -> list[str]:
+    """Every entity name `requirements` state, under `role` when one is given, sorted.
+
+    What a refusal of `unknown_names` lists as the names a filter may keep.
+    """
+    return sorted(
+        {
+            entity.name
+            for requirement in requirements
+            for entity in requirement.entities
+            if stated_under(entity, role)
+        }
+    )
+
+
+def _requirements_behind(
+    shape: FrameShape, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> list[DatasetRequirement]:
+    """The dataset requirements whose entities `shape`'s role dimensions hold, each once.
+
+    A frame with no role dimension resting on one retrieval answers with
+    that retrieval's requirement; one resting on several holds one series
+    and no entity to name.
+    """
+    ids = list(dict.fromkeys(role.requirement_id for role in shape.roles))
+    if not ids and len(shape.roots) == 1:
+        ids = list(shape.roots)
+    return [
+        requirement
+        for requirement_id in ids
+        if isinstance(requirement := requirements_by_id[requirement_id], DatasetRequirement)
+    ]
+
+
+def _check_filter_names_known(
+    requirement: FilterRequirement,
+    input_shape: FrameShape,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject an `EntityIn` naming what no requirement behind the filter's input states (`unknown_names`)."""
+    behind = _requirements_behind(input_shape, requirements_by_id)
+    for predicate in requirement.predicates:
+        if not isinstance(predicate, EntityIn):
+            continue
+        unknown = unknown_names(predicate.names, predicate.role, behind)
+        if not unknown:
+            continue
+        under = f" under role {predicate.role!r}" if predicate.role is not None else ""
+        stated = stated_names(behind, predicate.role)
+        codes = predicate.role is not None and any(
+            role.breakdown for role in roles_named(input_shape.roles, predicate.role)
+        )
+        remedy = (
+            f"; {predicate.role!r} is a breakdown, whose codes are no entities a filter keeps: "
+            "to read one code, state a dataset requirement whose measure names it, or keep "
+            "every code"
+            if codes
+            else ""
+        )
+        raise ValueError(
+            f"{requirement.id!r} keeps {unknown!r}{under}, which no requirement behind "
+            f"{requirement.input_id!r} names; the entities they name{under} are "
+            f"{stated!r}{remedy}"
+        )
+
+
 def _filter_shape(
     requirement: FilterRequirement,
     input_shape: FrameShape,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
 ) -> FrameShape:
+    _check_filter_names_known(requirement, input_shape, requirements_by_id)
     years = year_filter(input_shape.period, requirement.predicates, drift=input_shape.drift)
     if isinstance(years, str):
         raise ValueError(f"{requirement.id!r}: {years}")
@@ -2869,9 +2978,28 @@ def _check_side_entity_is_named(
     side: RequirementSide,
     side_shape: FrameShape,
     requirements_by_id: dict[str, EvidenceRequirement],
+    *,
+    keyed: str | None = None,
+    one_figure: bool = False,
+    keyable: bool = False,
 ) -> None:
-    """Reject `side` narrowed to an entity none of its shape's role dimensions' requirements name."""
+    """Reject `side` narrowed to an entity none of its shape's role dimensions' requirements name,
+    or read whole over a dimension nobody named.
+
+    A side naming no entity is one series on every dimension but the one
+    `keyed` names, so an open dimension left on it is refused
+    (`planner.shapes.open_on_whole_side`), as the compiler refuses it.
+    `one_figure` is whether the reader takes one figure from each side, and
+    `keyable` whether `side` is an un-keyed reader's numerator, which `axis`
+    would key (`planner.shapes.open_whole_side_reason`).
+    """
     if side.entity is None:
+        role = open_on_whole_side(side_shape.roles, keyed=keyed)
+        if role is not None:
+            raise ValueError(
+                f"{requirement_id!r} reads its {field} ({side.input_id!r}) whole, "
+                f"{open_whole_side_reason(role, one_figure=one_figure, keyable=keyable)}"
+            )
         return
     names: set[str] = set()
     for role in side_shape.roles:
@@ -2898,8 +3026,17 @@ def _share_of_shape(
 ) -> FrameShape:
     numerator_shape = shapes_by_id[requirement.numerator.input_id]
     denominator_shape = shapes_by_id[requirement.denominator.input_id]
+    one_figure = requirement.axis is None
+    per_axis = requirement.denominator_scope is DenominatorScope.PER_AXIS
     _check_side_entity_is_named(
-        requirement.id, "numerator", requirement.numerator, numerator_shape, requirements_by_id
+        requirement.id,
+        "numerator",
+        requirement.numerator,
+        numerator_shape,
+        requirements_by_id,
+        keyed=requirement.axis,
+        one_figure=one_figure,
+        keyable=one_figure,
     )
     _check_side_entity_is_named(
         requirement.id,
@@ -2907,6 +3044,8 @@ def _share_of_shape(
         requirement.denominator,
         denominator_shape,
         requirements_by_id,
+        keyed=requirement.axis if per_axis else None,
+        one_figure=one_figure,
     )
     # The denominator's own *in* rule (measures, time, not ordinal) is
     # checked with no axis: the numerator's side alone gives the output its
@@ -2945,8 +3084,16 @@ def _quotient_of_shape(
 ) -> FrameShape:
     numerator_shape = shapes_by_id[requirement.numerator.input_id]
     denominator_shape = shapes_by_id[requirement.denominator.input_id]
+    one_figure = requirement.axis is None
     _check_side_entity_is_named(
-        requirement.id, "numerator", requirement.numerator, numerator_shape, requirements_by_id
+        requirement.id,
+        "numerator",
+        requirement.numerator,
+        numerator_shape,
+        requirements_by_id,
+        keyed=requirement.axis,
+        one_figure=one_figure,
+        keyable=one_figure,
     )
     _check_side_entity_is_named(
         requirement.id,
@@ -2954,6 +3101,8 @@ def _quotient_of_shape(
         requirement.denominator,
         denominator_shape,
         requirements_by_id,
+        keyed=requirement.denominator_axis,
+        one_figure=one_figure,
     )
     # As for a share_of, the denominator's own *in* rule is checked with no
     # axis, and the numerator's call states both, with the denominator passed
@@ -3050,7 +3199,7 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     if isinstance(requirement, RankRequirement):
         return _rank_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, FilterRequirement):
-        return _filter_shape(requirement, shapes_by_id[requirement.input_id])
+        return _filter_shape(requirement, shapes_by_id[requirement.input_id], requirements_by_id)
     if isinstance(requirement, ShareOfRequirement):
         return _share_of_shape(requirement, shapes_by_id, requirements_by_id)
     if isinstance(requirement, QuotientRequirement):
@@ -4076,8 +4225,9 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     not want. A result kept per member of such a party passes when the plan
     states that scope: a step on its way to the result operates over the
     role by name (`_operand_roles`: a rank ordering it, a share or quotient
-    keyed on it, a filter naming its role or naming none over an input
-    carrying that role alone), or, like `among='population'`
+    keyed on it, or a place-level filter on it, since `_filter_shape`
+    refuses an `EntityIn` naming a member of an open role, by
+    `unknown_names`), or, like `among='population'`
     (`_check_population_claims_are_cited`), the dataset requirement that
     opened the role cites a decision whose `fixes` states its `across`, every
     word of it. An ask the result answers states the scope too when it
@@ -4638,7 +4788,9 @@ def _operand_roles(
     per member of the numerator's dimension it names. A filter narrows the
     dimensions its `EntityIn` predicates name, and a predicate naming no
     role counts only over an input with one dimension, since its names may
-    sit in any of several. A `PlaceLevel` keeps one level of the place
+    sit in any of several. An `EntityIn` names only what the requirements
+    state (`unknown_names`), so it reaches an open dimension only where a
+    named one shares its role phrase. A `PlaceLevel` keeps one level of the place
     dimension. Each is resolved against its input's shape the way the
     shape transform resolves it (`planner.shapes.roles_named`).
     """

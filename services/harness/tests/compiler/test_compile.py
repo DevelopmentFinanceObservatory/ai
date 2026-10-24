@@ -102,7 +102,7 @@ from planner.workflow import (
     ResolvedGroup,
     SelectedSource,
 )
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from translator.mechanical import build_translation
 
 SPEC_KENYA = "spec_" + "a" * 32
@@ -171,6 +171,15 @@ def _translation(*operations: Operation, terminal: Sequence[str] = ("totals",)) 
 
 def _codes(result: CompileResult) -> list[Code]:
     return [issue.code for issue in result.issues]
+
+
+def _plan_refusal(
+    decisions: Sequence[Decision], requirements: Sequence[EvidenceRequirement]
+) -> str:
+    """Why the plan refuses `requirements`, which `propose_plan` reports before any compile."""
+    with pytest.raises(ValidationError) as refused:
+        _draft(decisions, requirements)
+    return str(refused.value)
 
 
 def _pools(result: CompileResult, *, one_figure: bool) -> bool:
@@ -1041,6 +1050,8 @@ def test_a_side_naming_a_group_of_several_members_is_refused(
     source: SourceFactory,
 ) -> None:
     # A side's entity argument picks one series; Africa's members are two.
+    # The requirement names one donor and one recipient, so G7's side and
+    # Africa's both read the one G7-to-Africa flow, which is degenerate too.
     comparison = ComparisonRequirement(
         id="gap",
         decision_ids=["measure"],
@@ -1061,7 +1072,7 @@ def test_a_side_naming_a_group_of_several_members_is_refused(
         discovered={"annual_debt_service": _g7_to_africa(source)},
     )
 
-    assert _codes(result) == [Code.ENTITY_AMBIGUOUS], result.issues
+    assert _codes(result) == [Code.DEGENERATE_SIDES, Code.ENTITY_AMBIGUOUS], result.issues
     assert result.workflow is None
 
 
@@ -2855,6 +2866,149 @@ def test_two_sides_of_one_retrieval_naming_different_entities_are_not_degenerate
     assert result.ok, result.issues
 
 
+_DEBTORS = (Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor"))
+_FLOWS = (
+    Entity(name="France", role="donor"),
+    Entity(name="Germany", role="donor"),
+    Entity(name="Kenya", role="recipient"),
+    Entity(name="Uganda", role="recipient"),
+)
+# Two places stated under different place words, or one under none: the
+# source resolves both on `observationAbout`, one column.
+_PLACES_BY_WORD = (Entity(name="Kenya", role="country"), Entity(name="Ghana", role="economy"))
+_PLACES_ROLE_AND_NONE = (Entity(name="Kenya"), Entity(name="Ghana", role="country"))
+_FLOW_SOURCE = (
+    ResolvedEntity(role="origin", ref="country/FRA", label="France"),
+    ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
+    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    ResolvedEntity(role="destination", ref="country/UGA", label="Uganda"),
+)
+
+
+def _keeps(*names: str, role: str | None) -> EntityIn:
+    return EntityIn(names=names, role=role)
+
+
+@pytest.mark.parametrize(
+    ("entities", "left", "right", "degenerate"),
+    [
+        pytest.param(
+            _DEBTORS,
+            ((_keeps("Kenya", role="debtor"),), None),
+            ((_keeps("Ghana", role="debtor"),), None),
+            False,
+            id="kenya-against-ghana",
+        ),
+        pytest.param(
+            _DEBTORS,
+            ((_keeps("Kenya", role="debtor"),), None),
+            ((_keeps("Kenya", role="debtor"),), None),
+            True,
+            id="kenya-against-kenya",
+        ),
+        pytest.param(
+            _DEBTORS,
+            ((_keeps("Kenya", "Ghana", role="debtor"),), None),
+            ((_keeps("Ghana", "Kenya", role="debtor"),), None),
+            True,
+            id="both-in-either-order",
+        ),
+        pytest.param(
+            _PLACES_BY_WORD,
+            ((_keeps("Kenya", role=None),), None),
+            ((_keeps("Ghana", role=None),), None),
+            False,
+            id="kenya-as-country-against-ghana-as-economy",
+        ),
+        pytest.param(
+            _PLACES_ROLE_AND_NONE,
+            ((_keeps("Kenya", role=None),), None),
+            ((_keeps("Ghana", role=None),), None),
+            False,
+            id="kenya-with-no-role-against-ghana-as-country",
+        ),
+        pytest.param(
+            _FLOWS,
+            ((_keeps("France", role="donor"), _keeps("Kenya", role="recipient")), None),
+            ((_keeps("Germany", role="donor"), _keeps("Uganda", role="recipient")), None),
+            False,
+            id="france-to-kenya-against-germany-to-uganda",
+        ),
+        pytest.param(
+            _FLOWS,
+            ((_keeps("Kenya", role="recipient"),), "France"),
+            ((_keeps("Uganda", role="recipient"),), "France"),
+            False,
+            id="france-to-kenya-against-france-to-uganda",
+        ),
+        pytest.param(
+            _FLOWS[::2],
+            ((_keeps("Kenya", role="recipient"),), None),
+            ((_keeps("France", role="donor"),), None),
+            True,
+            id="each-filter-keeps-the-one-flow",
+        ),
+    ],
+)
+def test_two_filters_of_one_retrieval_are_degenerate_only_when_they_keep_the_same_entities(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    entities: tuple[Entity, ...],
+    left: tuple[tuple[EntityIn, ...], str | None],
+    right: tuple[tuple[EntityIn, ...], str | None],
+    degenerate: bool,
+) -> None:
+    # Each side reads a filter of the one retrieval, and may name an entity
+    # of its own; the side identity reads the names kept per role, so Kenya
+    # against Ghana, or France to Kenya against Germany to Uganda, is two
+    # series.
+    filters = [
+        FilterRequirement(
+            id=filter_id,
+            decision_ids=["measure"],
+            input_id="annual_debt_service",
+            predicates=predicates,
+        )
+        for filter_id, (predicates, _) in zip(("left", "right"), (left, right), strict=True)
+    ]
+    comparison = ComparisonRequirement(
+        id="gap",
+        decision_ids=["measure"],
+        minuend=RequirementSide(input_id="right", entity=right[1]),
+        subtrahend=RequirementSide(input_id="left", entity=left[1]),
+    )
+    gap = CompareOperation(
+        id="gap",
+        requirement_id="gap",
+        left=Side(input="left", entity=left[1]),
+        right=Side(input="right", entity=right[1]),
+    )
+    filter_ops = [
+        FilterOperation(id=one.id, requirement_id=one.id, input="debt", predicates=one.predicates)
+        for one in filters
+    ]
+    resolved = (
+        _FLOW_SOURCE
+        if entities[0].role == "donor"
+        else tuple(
+            ResolvedEntity(
+                role="observationAbout", ref=f"country/{one.name[:3].upper()}", label=one.name
+            )
+            for one in entities
+        )
+    )
+
+    result = build(
+        _draft([decision()], [requirement(entities=list(entities)), *filters, comparison]),
+        _translation(_retrieve(), *filter_ops, gap, terminal=["gap"]),
+        discovered={"annual_debt_service": source(entities=resolved)},
+    )
+
+    assert (Code.DEGENERATE_SIDES in _codes(result)) is degenerate, result.issues
+
+
 def test_comparing_requirements_whose_periods_share_no_year_is_reported(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
@@ -3745,15 +3899,31 @@ _EDUCATION = ("CRSPurposeCode110", "CRSPurposeCode112", "CRSPurposeCode11220")
 _HEALTH = ("CRSPurposeCode120", "CRSPurposeCode121", "CRSPurposeCode12220")
 
 
+# The properties the education family's identity lists; apis lists the what
+# and how slots alone, so a where-classed constraint such as
+# `comparisonRegion` is in no identity.
+_EDUCATION_SLOTS = ("crsCooperationModality", "crsPurpose", "crsTypeOfFlow")
+
+
 def _family(
-    digest: str, *, slot_codes: dict[str, tuple[str, ...] | None] | None, **shape: object
+    digest: str,
+    *,
+    slot_codes: dict[str, tuple[str, ...] | None] | None,
+    slots: tuple[str, ...] | None = None,
+    **shape: object,
 ) -> dict:
-    """A family `search` states by member digest, its membership not served as one StatVar."""
+    """A family `search` states by member digest, its membership not served as one StatVar.
+
+    `slots` is the properties its identity lists, bound or not; `None` lists none.
+    """
+    identity: dict[str, object] = {"shape": _ODA_SHAPE | shape}
+    if slots is not None:
+        identity["slots"] = [{"property": prop, "binding": {"state": "unbound"}} for prop in slots]
     return {
         "served_count": None,
         "shape_member_digest": digest,
         "shape_member_count": 40,
-        "identity": {"shape": _ODA_SHAPE | shape},
+        "identity": identity,
         "slot_codes": slot_codes,
     }
 
@@ -3784,6 +3954,36 @@ def _family(
             {"slot_codes": {"crsCooperationModality": ("CRSModalityC01",)}},
             Code.SUM_OVERLAP_UNDECIDED,
             id="each-binds-a-property-the-other-leaves-open",
+        ),
+        pytest.param(
+            {},
+            {
+                "slot_codes": {"crsCooperationModality": ("CRSModalityC01",)},
+                "slots": ("crsCooperationModality", "crsPurpose", "crsTypeOfFlow"),
+            },
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="the-other-lists-the-bound-properties-open",
+        ),
+        pytest.param(
+            {"slots": _EDUCATION_SLOTS},
+            {
+                "slot_codes": {"idsCreditorType": ("IDSCreditorTypeBilateral",)},
+                "slots": ("idsCreditorType", "financialFlowType"),
+            },
+            None,
+            id="the-other-lists-no-slot-for-a-bound-property",
+        ),
+        pytest.param(
+            {"slots": _EDUCATION_SLOTS},
+            {
+                "slot_codes": {
+                    "crsTypeOfFlow": ("CRSTypeOfFlow10",),
+                    "comparisonRegion": ("africa",),
+                },
+                "slots": _EDUCATION_SLOTS,
+            },
+            Code.SUM_OVERLAP_UNDECIDED,
+            id="a-bound-where-slot-no-identity-lists",
         ),
         pytest.param({}, {"slot_codes": None}, Code.SUM_OVERLAP_UNDECIDED, id="slots-unread"),
         pytest.param(
@@ -4060,13 +4260,18 @@ def test_filter_entity_names_must_be_an_entity_of_the_upstream_requirement(
     decision: DecisionFactory,
     requirement: RequirementFactory,
 ) -> None:
-    filter_req = FilterRequirement(
+    # The plan refuses a filter naming what its requirement does not
+    # (`planner.plan.unknown_names`), and the compiler reads the same rule for
+    # a filter operation that departs from its requirement.
+    uganda = FilterRequirement(
         id="filtered",
         decision_ids=["measure"],
         input_id="annual_debt_service",
         predicates=(EntityIn(names=("Uganda",)),),
     )
-    plan = _draft([decision()], [requirement(), filter_req])
+    assert "keeps ['Uganda']" in _plan_refusal([decision()], [requirement(), uganda])
+    kenya = uganda.model_copy(update={"predicates": (EntityIn(names=("Kenya",)),)})
+    plan = _draft([decision()], [requirement(), kenya])
     filter_op = FilterOperation(
         id="filtered",
         requirement_id="filtered",
@@ -5343,16 +5548,19 @@ def test_an_open_axis_with_an_unknown_count_or_one_below_two_is_source_unusable(
         assert "instead of stating that party in `across`" in result.issues[0].reason
 
 
-def test_an_axis_less_share_of_over_an_open_axis_is_share_axis_required(
+def test_an_axis_less_share_of_over_an_open_axis_is_offered_its_axis(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     place_scope_block: dict[str, Any],
     source: SourceFactory,
 ) -> None:
     # Every country's health spending over every country's population, with
-    # no axis: each side pools 193 members, so the quotient answers for
-    # nobody. Each side keeps its countries first, since a share over every
-    # level of place is refused before this check.
+    # no axis: each side pools 193 members, so the share answers for nobody,
+    # and keying it by country gives one figure per country. The plan refuses
+    # it offering the axis first; the compiler reads the same rule for a share
+    # operation that drops the plan's axis. Each side keeps its countries
+    # first, since a share over every level of place is refused before this.
+    keyed = "key the step on 'country' with `axis`"
     open_place = source_from_spec_block(place_scope_block)
     population = _every_country(id="population", measure="population")
     spenders_req, spenders = _countries_of("health", filter_id="spenders")
@@ -5365,7 +5573,23 @@ def test_an_axis_less_share_of_over_an_open_axis_is_share_axis_required(
         numerator=RequirementSide(input_id="spenders"),
         denominator=RequirementSide(input_id="peoples"),
     )
-    plan = _draft([decision()], [_every_country(), population, spenders_req, peoples_req, share])
+    steps = [_every_country(), population, spenders_req, peoples_req]
+
+    refusal = _plan_refusal([decision()], [*steps, share])
+    assert f"{keyed}, one figure per member" in refusal
+    assert pooling_remedy(one_figure=True, each_side=True) in refusal
+
+    per_country = share.model_copy(
+        update={
+            "axis": "country",
+            "denominator_scope": DenominatorScope.PER_AXIS,
+            "decision_ids": ("measure", "per_axis"),
+        }
+    )
+    per_axis = decision(
+        slot="per_axis", fixes=DecisionFixes(denominator_scope=DenominatorScope.PER_AXIS)
+    )
+    plan = _draft([decision(), per_axis], [*steps, per_country])
     share_op = ShareOfOperation(
         id="share",
         requirement_id="share",
@@ -5393,8 +5617,13 @@ def test_an_axis_less_share_of_over_an_open_axis_is_share_axis_required(
         },
     )
 
-    assert Code.SHARE_AXIS_REQUIRED in _codes(result)
-    assert result.workflow is None
+    whole = {
+        issue.requirement_id: issue.reason
+        for issue in result.issues
+        if issue.code is Code.ENTITY_REQUIRED
+    }
+    assert keyed in whole["health"]
+    assert keyed not in whole["population"]
 
 
 def test_a_whole_side_over_an_open_axis_is_entity_required(
@@ -5405,7 +5634,9 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
     source: SourceFactory,
 ) -> None:
     # Kenya against "every country" as one side: the side names none of the
-    # 193 countries, so it cannot say which of them it reads.
+    # 193 countries, so it cannot say which of them it reads. The plan
+    # refuses it (`planner.shapes.open_on_whole_side`), and the compiler reads
+    # the same rule for a compare whose side departs from its requirement's.
     open_place = source_from_spec_block(place_scope_block)
     kenya = requirement(
         id="kenya_health",
@@ -5419,7 +5650,18 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
         minuend=RequirementSide(input_id="health"),
         subtrahend=RequirementSide(input_id="kenya_health"),
     )
-    plan = _draft([decision()], [kenya, _every_country(), gap])
+    refusal = _plan_refusal([decision()], [kenya, _every_country(), gap])
+    assert "covers every 'country' and names none of them" in refusal
+    assert pooling_remedy(one_figure=False, each_side=True) in refusal
+    pooled = AggregateRequirement(
+        id="pooled",
+        decision_ids=["measure"],
+        input_id="health",
+        reduction=Reduction.MEAN,
+        group_by=(GroupBy.PERIOD,),
+    )
+    pooled_gap = gap.model_copy(update={"minuend": RequirementSide(input_id="pooled")})
+    plan = _draft([decision()], [kenya, _every_country(), pooled, pooled_gap])
     compare = CompareOperation(
         id="gap", requirement_id="gap", left=Side(input="kenya"), right=Side(input="fetch")
     )
@@ -5429,6 +5671,12 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
         _translation(
             RetrieveOperation(id="kenya", requirement_id="kenya_health", spec_id=SPEC_KENYA),
             RetrieveOperation(id="fetch", requirement_id="health", spec_id=open_place.spec_id),
+            _aggregate(
+                id="pooled",
+                requirement_id="pooled",
+                input="fetch",
+                reduction=Reduction.MEAN,
+            ),
             compare,
             terminal=["gap"],
         ),
@@ -5443,8 +5691,7 @@ def test_a_whole_side_over_an_open_axis_is_entity_required(
         },
     )
 
-    assert _codes(result) == [Code.ENTITY_REQUIRED]
-    (issue,) = result.issues
+    (issue,) = [issue for issue in result.issues if issue.code is Code.ENTITY_REQUIRED]
     assert issue.requirement_id == "health"
     assert "covers every 'country' and names none of them" in issue.reason
     assert "name them in the requirement's `entities`" in issue.reason
@@ -5567,16 +5814,11 @@ def test_a_second_open_axis_holding_one_member_leaves_the_rank_to_compile(
     assert rank.args == {"rank_by": ["origin"], "ascending": False, "aggregation": "mean"}
 
 
-def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_entity_required(
-    build: Callable[..., CompileResult],
-    decision: DecisionFactory,
-    requirement: RequirementFactory,
-    source: SourceFactory,
+def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_refused(
+    decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
     # Kenya's aid from every donor as one side names none of the donors, as
     # every donor's aid with nobody named does.
-    kenya_destination = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
-    uganda_destination = ResolvedEntity(role="destination", ref="country/UGA", label="Uganda")
     uganda = requirement(
         id="uganda_aid",
         measure="education aid",
@@ -5589,32 +5831,10 @@ def test_a_whole_side_over_an_open_axis_beside_a_named_entity_is_entity_required
         minuend=RequirementSide(input_id="uganda_aid"),
         subtrahend=RequirementSide(input_id="aid"),
     )
-    plan = _draft([decision()], [_kenya_from_every_donor(), uganda, gap])
 
-    result = build(
-        plan,
-        _translation(
-            RetrieveOperation(id="fetch", requirement_id="aid", spec_id=SPEC_KENYA),
-            RetrieveOperation(id="uganda", requirement_id="uganda_aid", spec_id=SPEC_OTHER),
-            CompareOperation(
-                id="gap", requirement_id="gap", left=Side(input="fetch"), right=Side(input="uganda")
-            ),
-            terminal=["gap"],
-        ),
-        discovered={
-            "aid": source(
-                entities=(kenya_destination,),
-                open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
-                coverage_window=Period(start=2015, end=2023),
-            ),
-            "uganda_aid": source(spec_id=SPEC_OTHER, entities=(uganda_destination,)),
-        },
-    )
+    refusal = _plan_refusal([decision()], [_kenya_from_every_donor(), uganda, gap])
 
-    assert _codes(result) == [Code.ENTITY_REQUIRED]
-    (issue,) = result.issues
-    assert issue.requirement_id == "aid"
-    assert "covers every 'donor' and names none of them" in issue.reason
+    assert "covers every 'donor' and names none of them" in refusal
 
 
 def test_a_keyed_share_over_an_open_axis_divides_member_by_member(
@@ -5793,6 +6013,7 @@ def test_the_drc_drafts_compile_and_total_every_donor(
 
 
 UNITED_KINGDOM = ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom")
+GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
 
 
 @pytest.mark.parametrize(
@@ -5806,10 +6027,10 @@ def test_a_share_side_pooling_two_donors_is_offered_one_figure_only_un_keyed(
     axis: str | None,
     one_figure: bool,
 ) -> None:
-    # Every donor's ODA to Kenya over the US's and the UK's together, read
-    # whole. Un-keyed, one figure on each side is a share; keyed by donor,
-    # the numerator keeps one series per donor and year, which one figure of
-    # the denominator would not match.
+    # Germany's ODA to Kenya, or keyed by donor every donor's, over the US's
+    # and the UK's together, read whole. Un-keyed, one figure on each side is
+    # a share; keyed by donor, the numerator keeps one series per donor and
+    # year, which one figure of the denominator would not match.
     years = Period(start=2015, end=2022)
     kenya = Entity(name="Kenya", role="recipient")
     every = DatasetRequirement(
@@ -5820,6 +6041,14 @@ def test_a_share_side_pooling_two_donors_is_offered_one_figure_only_un_keyed(
         across=("donor",),
         period=years,
     )
+    germany = DatasetRequirement(
+        id="germany",
+        decision_ids=["measure"],
+        measure="ODA",
+        entities=[Entity(name="Germany", role="donor"), kenya],
+        period=years,
+    )
+    numerator = every if axis is not None else germany
     named = DatasetRequirement(
         id="named",
         decision_ids=["measure"],
@@ -5836,23 +6065,28 @@ def test_a_share_side_pooling_two_donors_is_offered_one_figure_only_un_keyed(
     share = ShareOfRequirement(
         id="share",
         decision_ids=["measure"] if axis is None else ["measure", "pooled"],
-        numerator=RequirementSide(input_id="every"),
+        numerator=RequirementSide(input_id=numerator.id),
         denominator=RequirementSide(input_id="named"),
         axis=axis,
         denominator_scope=scope,
     )
-    sources = {
-        "every": source(
+    numerator_source = (
+        source(
             spec_id=SPEC_KENYA,
             entities=(_KENYA,),
             open_entity_axes=(OpenEntityAxis(column="origin", member_count=55),),
             **_pinned("Oda"),
-        ),
+        )
+        if axis is not None
+        else source(spec_id=SPEC_KENYA, entities=(GERMANY, _KENYA), **_pinned("Oda"))
+    )
+    sources = {
+        numerator.id: numerator_source,
         "named": source(
             spec_id=SPEC_OTHER, entities=(UNITED_STATES, UNITED_KINGDOM, _KENYA), **_pinned("Oda")
         ),
     }
-    plan = _draft([decision(), pooled][: 1 + (axis is not None)], [every, named, share])
+    plan = _draft([decision(), pooled][: 1 + (axis is not None)], [numerator, named, share])
     translation = build_translation(
         plan, {requirement_id: s.spec_id for requirement_id, s in sources.items()}
     )
