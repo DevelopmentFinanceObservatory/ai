@@ -148,7 +148,16 @@ recipient in `entities` and drop 'recipient' from `across`"). That holds
 only while every requirement reading the pinned one sums the side away. Any
 other reader, such as a rank or a filter, reads the side per member, which
 naming one member cannot answer: the pin gives way, and the referral offers
-the sources found as `candidates`. The pin's source is read for
+the sources found as `candidates`. The pin gives way too on a total a
+`share_of` or `quotient_of` divides by, when its source binds the side to the
+numerator's own members and no others, compared by graph ref: "the United
+States' share of ODA to Kenya" with the total pinned to the United States'
+figure would divide the United States by itself, so the referral offers every
+donor's total and states no repair. A total pinned to a group the numerator
+is one member of keeps its scope, as G7 does in "Germany's share of G7 ODA".
+A total pinned to the numerator's own group is not renamed to that group
+either, so "G7's share of ODA to Kenya" keeps the whole
+(`translator.discovery._divides_its_member_by_itself`). The pin's source is read for
 this check from the discovery log too, when a search the translator ran found
 it. A pin `propose_plan` moved to a copy over the requirement's period, or a
 pin whose identity a search in the conversation recorded over that period,

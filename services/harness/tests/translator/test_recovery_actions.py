@@ -43,7 +43,10 @@ from planner.plan import (
     Period,
     PinSource,
     Plan,
+    QuotientRequirement,
     RankRequirement,
+    RequirementSide,
+    ShareOfRequirement,
     Unit,
     current_discovery_time_left,
     plan_revision,
@@ -650,6 +653,151 @@ async def test_a_pin_closing_the_side_a_reader_reads_per_member_gives_way_to_the
     )
     refused = _choice_not_offered(repinned, load_referral(context.state), context)
     assert (refused is None) == (repair is None)
+
+
+# The pins a share's whole may carry. Search bound "United States" to
+# `country/USA`, which the source labels "United States of America", so the
+# numerator's donor matches the pin by ref alone. Each covers the years the
+# requirement asks for exactly, so discovery reads the pin's own block.
+_KENYA_WINDOW = {
+    "kind": "exact",
+    "has_data": True,
+    "window": {"start_year": 2015, "end_year": 2022},
+}
+_US_TO_KENYA = {
+    **_spec(
+        "spec_cab592cba40ca753825cc796a8b8a39b",
+        "United States' gross disbursements to Kenya",
+        coverage=_KENYA_WINDOW,
+        entities=[
+            {"role": "origin", "label": "United States of America", "ref": "country/USA"},
+            {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+        ],
+    ),
+    "_bound_refs": {"united states": ["country/USA"]},
+}
+_G7_TO_KENYA = _spec(
+    "spec_9c7a11e2" + "0" * 24,
+    "G7 countries' gross disbursements to Kenya",
+    coverage=_KENYA_WINDOW,
+    entities=[
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "origin", "label": "France", "ref": "country/FRA"},
+        {"role": "origin", "label": "United States of America", "ref": "country/USA"},
+        {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+    ],
+    entity_groups={"origin": {"label": "G7", "ref": "GroupOfSeven"}},
+)
+_US_AND_UK_TO_KENYA = {
+    **_spec(
+        "spec_5a1b7e04" + "0" * 24,
+        "The United States' and the United Kingdom's gross disbursements to Kenya",
+        coverage=_KENYA_WINDOW,
+        entities=[
+            {"role": "origin", "label": "United States of America", "ref": "country/USA"},
+            {"role": "origin", "label": "United Kingdom", "ref": "country/GBR"},
+            {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+        ],
+    ),
+    "_bound_refs": {"united states": ["country/USA"], "united kingdom": ["country/GBR"]},
+}
+_KEEP_G7 = "name 'G7' as donor in `entities` and drop 'donor' from `across`"
+
+
+@pytest.mark.parametrize(
+    ("pin", "donors", "narrowed_to", "divider", "withheld", "repair"),
+    [
+        (_US_TO_KENYA, ("United States",), None, ShareOfRequirement, False, None),
+        (_US_TO_KENYA, ("United States",), None, QuotientRequirement, False, None),
+        (_G7_TO_KENYA, ("Germany",), None, ShareOfRequirement, True, _KEEP_G7),
+        (
+            _US_AND_UK_TO_KENYA,
+            ("United States", "United Kingdom"),
+            "United States",
+            ShareOfRequirement,
+            True,
+            None,
+        ),
+        (
+            _G7_TO_KENYA,
+            ("Germany", "France", "United States of America"),
+            "Germany",
+            ShareOfRequirement,
+            True,
+            _KEEP_G7,
+        ),
+    ],
+    ids=["member-share", "member-quotient", "group-share", "narrowed-member", "narrowed-group"],
+)
+async def test_a_pin_on_the_whole_gives_way_only_where_it_holds_the_numerators_member(
+    pin: dict[str, Any],
+    donors: tuple[str, ...],
+    narrowed_to: str | None,
+    divider: type[ShareOfRequirement | QuotientRequirement],
+    withheld: bool,
+    repair: str | None,
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Decision],
+    requirement: RequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    # The whole of a donor's share of ODA to Kenya, every donor's total by
+    # year, is pinned to a source holding the donor side closed. Pinned to
+    # the numerator's own donor, the US figure under "US share of ODA to
+    # Kenya", the share would divide the donor by itself, so the pin gives
+    # way to the donor-open source and no repair names the donor. Pinned to
+    # G7 under "Germany's share of G7 ODA", G7 is the whole the user named,
+    # so the open source is withheld and the repair keeps G7. A numerator
+    # narrowed to one entity of its requirement names that entity alone, so
+    # the US read out of the US and the UK, over the two of them, and Germany
+    # read out of the G7 members the pin binds, over G7, keep its scope too.
+    spec_id = pin["spec_id"]
+    donor_open = _KENYA_ODA["donor_open"]["spec_id"]
+    kenya = Entity(name="Kenya", role="recipient")
+
+    def plan(source_spec_id: str) -> Plan:
+        return draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(
+                    id="oda",
+                    measure="official development assistance",
+                    entities=[kenya],
+                    across=("donor",),
+                    period=Period(start=2015, end=2022),
+                    source_spec_id=source_spec_id,
+                ),
+                requirement(
+                    id="part",
+                    measure="official development assistance",
+                    entities=[kenya, *(Entity(name=donor, role="donor") for donor in donors)],
+                    period=Period(start=2015, end=2022),
+                ),
+                _TOTAL,
+                divider(
+                    id="ratio",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="part", entity=narrowed_to),
+                    denominator=RequirementSide(input_id="total"),
+                ),
+            ],
+        )
+
+    context = context_holding(plan(spec_id))
+    save_pin_sources(context.state, {spec_id: PinSource(block=pin, settled=True)})
+    core = _core(McpSurface(sources={"data-mcp": _donor_open_server()}))
+
+    result = await core.discover_source(requirement_id="oda", tool_context=context)
+    referred = await _replay_action(core, result["action"], context)
+
+    referral = referred["referral"]
+    assert referral["kind"] == "pinned_source_not_found"
+    assert referral.get("repair") == repair
+    offered = [] if withheld else [donor_open]
+    assert [candidate["spec_id"] for candidate in referral["candidates"]] == offered
+    assert len(referral.get("withheld", [])) == (1 if withheld else 0)
+    refused = _choice_not_offered(plan(donor_open), load_referral(context.state), context)
+    assert (refused is None) == (not withheld)
 
 
 @pytest.mark.parametrize("requirement_id", ["debt", "debt_history"])
