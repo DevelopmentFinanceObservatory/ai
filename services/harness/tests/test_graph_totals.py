@@ -400,7 +400,7 @@ def _germany_bilateral_oda(
 
 
 def _by_default(count: str, name: str = CRS) -> str:
-    return f'By default, the figures for "{name}" sum the family\'s {count} indicators.'
+    return f'By default, the figures for "{name}" are the sum of {count} indicators.'
 
 
 @pytest.mark.parametrize(
@@ -495,8 +495,8 @@ async def test_a_reading_the_user_settled_says_so_and_the_planners_own_says_noth
     planner_plan = _germany_bilateral_oda(schemas, stat_vars=StatVarReading.SUM)
 
     for plan, expected in (
-        (user_plan, f'As you asked, the figures for "{CRS}" sum the family\'s 74 indicators.'),
-        (planner_plan, f'The figures for "{CRS}" sum the family\'s 74 indicators.'),
+        (user_plan, f'As you asked, the figures for "{CRS}" are the sum of 74 indicators.'),
+        (planner_plan, f'The figures for "{CRS}" are the sum of 74 indicators.'),
     ):
         surface, outcome = _run(plan, summed={"oda_op": 74}, role_keys={"yearly_total": ()})
         assert _stat_var_totals(surface, outcome, plan=plan) == [expected + REGIONAL]
@@ -619,7 +619,7 @@ async def test_two_retrievals_of_one_spec_each_state_their_own_reading(
 
     # Steps run in canonical order, `by_plan_op` first.
     assert _stat_var_totals(surface, outcome, plan=plan) == [
-        f'The figures for "{CRS}" sum the family\'s 3 indicators.',
+        f'The figures for "{CRS}" are the sum of 3 indicators.',
         _by_default("3"),
     ]
 

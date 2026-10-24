@@ -43,7 +43,7 @@ import typing
 from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
-from compiler.sources import stat_var_count
+from compiler.sources import stat_var_count, stat_var_count_is_floor
 from planner.parties import across_party, singular
 from planner.phrasing import (
     among_phrase,
@@ -840,11 +840,14 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
 def _reading_clause(source: SelectedSource) -> str | None:
     """How the retrieval reads `source`'s family of StatVars, or `None` for a source binding one.
 
-    Counts the family as the source does (`stat_var_count`). A family
-    counted at fewer than two members is named without a count, since its
-    retrieval holds every member with data. Says when the reading is the
-    compiler's default (`ReadingSetBy.RULE`), so the user knows the plan can
-    be amended to read it the other way.
+    The user reads a StatVar as an indicator, the noun the card attribution
+    counts them by. Counts the family as the source does (`stat_var_count`).
+    A family counted at fewer than two members, or at a floor
+    (`stat_var_count_is_floor`), is named without a count: its retrieval
+    holds every member with data, which can be more or fewer than the
+    members `search` confirmed. Says when the reading is the compiler's
+    default (`ReadingSetBy.RULE`), so the user knows the plan can be amended
+    to read it the other way.
 
     A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
@@ -857,13 +860,13 @@ def _reading_clause(source: SelectedSource) -> str | None:
     if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
     summed = source.stat_var_reading is StatVarReading.SUM
-    if count < 2:
-        clause = "summed over its StatVars" if summed else "kept as separate StatVars"
+    if count < 2 or stat_var_count_is_floor(source):
+        clause = "summed over its indicators" if summed else "kept as separate indicators"
     else:
         clause = (
-            f"summed over its {count:,} StatVars"
+            f"summed over its {count:,} indicators"
             if summed
-            else f"kept as {count:,} separate StatVars"
+            else f"kept as {count:,} separate indicators"
         )
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 

@@ -381,7 +381,9 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
     assert result.issues == ()
     assert _step_args(result, "health_op") == _retrieval(source, "sum") | {"place_types": True}
     assert _reading_clause(read) == (
-        "summed over its StatVars by default" if requested is None else "summed over its StatVars"
+        "summed over its indicators by default"
+        if requested is None
+        else "summed over its indicators"
     )
 
 
@@ -390,23 +392,30 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
     [
         pytest.param(_place_open(), None, id="one-confirmed-no-open-axis"),
         pytest.param(
-            _place_open(member_count=3),
-            "kept as 3 separate StatVars by default",
+            _place_open(member_count=3, member_count_exact=True),
+            "kept as 3 separate indicators by default",
             id="three-confirmed",
+        ),
+        # Search counts the members it confirmed as a floor, so the mint may
+        # serve more or fewer of them.
+        pytest.param(
+            _place_open(member_count=27),
+            "kept as separate indicators by default",
+            id="twenty-seven-confirmed-as-a-floor",
         ),
         pytest.param(
             _place_open(member_count=None),
-            "kept as separate StatVars by default",
+            "kept as separate indicators by default",
             id="nothing-counted",
         ),
         pytest.param(
             _stating_no_summable(_donor_open(confirmed=2, served=2)),
-            "kept as 2 separate StatVars by default",
+            "kept as 2 separate indicators by default",
             id="two-served",
         ),
         pytest.param(
             _stating_no_summable(_donor_open(confirmed=1, served=None)),
-            "kept as separate StatVars by default",
+            "kept as separate indicators by default",
             id="one-confirmed-over-open-axes",
         ),
     ],

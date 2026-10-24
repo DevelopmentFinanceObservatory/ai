@@ -116,6 +116,7 @@ from compiler.sources import (
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    stat_var_count_is_floor,
     wire_groups,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
@@ -948,8 +949,7 @@ def _measure_count(source: SelectedSource) -> str | None:
     count = stat_var_count(source)
     if count == 0:
         return None
-    floor = source.served_count is None and source.stat_var_member_count_exact is False
-    return stat_var_count_text(count, floor=floor)
+    return stat_var_count_text(count, floor=stat_var_count_is_floor(source))
 
 
 def stat_var_count_text(count: int, *, floor: bool) -> str:

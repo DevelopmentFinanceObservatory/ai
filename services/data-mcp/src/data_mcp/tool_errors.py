@@ -84,6 +84,7 @@ class ToolErrorCode(StrEnum):
     SKILL_RESOURCE_NOT_FOUND = "skill_resource_not_found"
     ROLLUP_NOT_SUMMABLE = "rollup_not_summable"
     OPEN_ROLE_UNAVAILABLE = "open_role_unavailable"
+    MEMBER_NOT_RESOLVABLE = "member_not_resolvable"
 
 
 # Locked table: two upstream `retryable: false` codes land on different modes
@@ -110,6 +111,7 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.SKILL_RESOURCE_NOT_FOUND: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLUP_NOT_SUMMABLE: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.OPEN_ROLE_UNAVAILABLE: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.MEMBER_NOT_RESOLVABLE: RetryMode.DO_NOT_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
     # A plain `raise` rather than `assert` — `python -O` strips asserts, and
@@ -1176,10 +1178,10 @@ _UPSTREAM_CODE_MAP: dict[str, ToolErrorCode] = {
     # against the graph.
     "spec_not_exportable": ToolErrorCode.SPEC_NOT_EXPORTABLE,
     # `member_not_resolvable` (422, not retryable) fires when the definition's StatVars
-    # cannot be resolved as it stands: the graph's arcs for a member are inconsistent.
-    # This spec cannot be minted, which is `spec_not_exportable`'s meaning;
-    # `_member_not_resolvable_refusal` names the StatVars.
-    "member_not_resolvable": ToolErrorCode.SPEC_NOT_EXPORTABLE,
+    # cannot be resolved as it stands: the graph's arcs for a member are inconsistent,
+    # so the platform cannot confirm what the member measures and does not mint the
+    # spec. `_member_not_resolvable_refusal` names the StatVars.
+    "member_not_resolvable": ToolErrorCode.MEMBER_NOT_RESOLVABLE,
     # `RollupNotSummableError` (`datasets_api/doors/mint_errors.py`, 422): a
     # `get_data(stat_vars="sum")` mint over StatVars that do not add into one total.
     "rollup_not_summable": ToolErrorCode.ROLLUP_NOT_SUMMABLE,
@@ -1381,18 +1383,22 @@ def _int_member(extensions: Mapping[str, Any], key: str) -> int | None:
 _SPEC_ID_PREFIX = "spec_"
 
 
-def _stat_var_count(count: int) -> str:
-    return f"{count:,} StatVar{'' if count == 1 else 's'}"
+# The end-user remedy for a `member_not_resolvable` refusal.
+_MEMBER_NOT_RESOLVABLE_REMEDY = (
+    "This dataset holds indicators the platform cannot confirm, so its figures cannot be "
+    "fetched. Ask for them from another source."
+)
 
 
 def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
-    """`member_not_resolvable` as a `spec_not_exportable` refusal listing its StatVars in `fix`.
+    """`member_not_resolvable` as a refusal listing its StatVars in `fix`.
 
     Each issue names one StatVar or spec_id whose graph arcs could not be resolved in
     `member`: `fix.members` lists them all, and the message counts the StatVars alone,
-    since a spec_id is the dataset and no StatVar of it. The message names no StatVar,
-    since a model reads it. A failed operation with no stored refusal carries no issues,
-    so its refusal counts no StatVar.
+    as indicators, since a spec_id is the dataset and no StatVar of it. The message names
+    no StatVar, since a model reads it and repeats it to the user. A failed operation
+    with no stored refusal carries no issues, so its refusal counts no StatVar.
+    `fix.remedy` is written for the end user, like `over_ceiling`'s.
     """
     members = [
         issue["member"]
@@ -1400,15 +1406,16 @@ def _member_not_resolvable_refusal(exc: UpstreamError) -> ToolRefusal:
         if isinstance(issue.get("member"), str) and issue["member"]
     ]
     stat_vars = [member for member in members if not member.startswith(_SPEC_ID_PREFIX)]
-    counted = f" ({_stat_var_count(len(stat_vars))})" if stat_vars else ""
+    counted = f" ({len(stat_vars):,} the graph defines inconsistently)" if stat_vars else ""
     message = (
-        f"This spec can't be minted: the graph could not resolve its StatVars{counted}. "
-        "Retrying it refuses the same way -- search again for a different ask."
+        f"This dataset holds indicators the platform cannot confirm{counted}, so this spec "
+        "can't be minted. Retrying it refuses the same way -- search again for a "
+        "different ask."
     )
     return ToolRefusal(
-        code=ToolErrorCode.SPEC_NOT_EXPORTABLE,
+        code=ToolErrorCode.MEMBER_NOT_RESOLVABLE,
         message=message,
-        fix={"members": members},
+        fix={"members": members, "remedy": _MEMBER_NOT_RESOLVABLE_REMEDY},
         trace_id=exc.trace_id,
         capability_version=exc.capability_version,
     )
@@ -1484,15 +1491,12 @@ def _map_known_upstream_code(code: str | None, exc: UpstreamError) -> ToolRefusa
             if code == "definition_not_reproducible"
             else _request_invalid_refusal(exc)
         ),
-        ToolErrorCode.SPEC_NOT_EXPORTABLE: lambda: (
-            _member_not_resolvable_refusal(exc)
-            if code == "member_not_resolvable"
-            else ToolRefusal.spec_not_exportable(
-                detail=exc.detail or "this spec resolves to no exportable member",
-                trace_id=exc.trace_id,
-                capability_version=exc.capability_version,
-            )
+        ToolErrorCode.SPEC_NOT_EXPORTABLE: lambda: ToolRefusal.spec_not_exportable(
+            detail=exc.detail or "this spec resolves to no exportable member",
+            trace_id=exc.trace_id,
+            capability_version=exc.capability_version,
         ),
+        ToolErrorCode.MEMBER_NOT_RESOLVABLE: lambda: _member_not_resolvable_refusal(exc),
         ToolErrorCode.ROLLUP_NOT_SUMMABLE: lambda: _rollup_not_summable_refusal(exc),
         ToolErrorCode.OPEN_ROLE_UNAVAILABLE: lambda: ToolRefusal.open_role_unavailable(
             pointer=exc.extensions.get("pointer"),
