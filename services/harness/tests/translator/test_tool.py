@@ -54,6 +54,8 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RequirementSide,
+    ShareOfRequirement,
     Unit,
     UnsupportedOperation,
     WindowedPin,
@@ -1209,6 +1211,91 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
 
     assert surface.calls["resolve_definition"] == 1
     assert ("named_in_place_of_across" in answer) is named
+
+
+SPEC_G7 = "spec_9c7a11e2" + "0" * 24
+_G7_BLOCK = _spec(
+    SPEC_G7,
+    "G7 countries' gross disbursements to Kenya",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "origin", "label": "France", "ref": "country/FRA"},
+        {"role": "origin", "label": "United States of America", "ref": "country/USA"},
+        {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+    ],
+    entity_groups={"origin": {"label": "G7", "ref": "GroupOfSeven"}},
+)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "named"),
+    [("G7", False), ("Germany", True), (None, True)],
+    ids=["groups-own-share", "members-share", "total"],
+)
+async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    numerator: str | None,
+    named: bool,
+) -> None:
+    """ODA to Kenya across donors, pinned to G7 and totalled each year.
+
+    Read alone, or as the whole of Germany's share, the total is G7's, so G7
+    is named on it. As the whole of G7's own share it would divide G7 by
+    itself, so it stays across every donor.
+    """
+    kenya = Entity(name="Kenya", role="recipient")
+    share = (
+        []
+        if numerator is None
+        else [
+            requirement(
+                id="part",
+                measure="official development assistance",
+                entities=[kenya, Entity(name=numerator, role="donor")],
+                unit=None,
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ]
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_G7)],
+            evidence_requirements=[
+                requirement(
+                    id="oda",
+                    measure="official development assistance",
+                    entities=[kenya],
+                    across=("donor",),
+                    source_spec_id=SPEC_G7,
+                    unit=None,
+                ),
+                derived_requirement(id="total", input_id="oda"),
+                *share,
+            ],
+        )
+    )
+    save_pin_sources(context.state, {SPEC_G7: PinSource(block=_G7_BLOCK, settled=True)})
+
+    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+
+    g7 = Entity(name="G7", role="donor")
+    assert found == ((NamedGroup("oda", g7, "donor"),) if named else ())
+    total = _stored(context).requirement("oda")
+    assert isinstance(total, DatasetRequirement)
+    assert (total.entities, total.across) == (
+        ((kenya, g7), ()) if named else ((kenya,), ("donor",))
+    )
 
 
 SPEC_AFRICA_HISTORY = "spec_fb3cc27e" + "1" * 24
