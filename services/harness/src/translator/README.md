@@ -184,17 +184,28 @@ when the issues mean the plan rather than the proposal has to change.
 step has each group's newest year read before it reaches the plan, through the
 run's own path (`executor.run.read_anchors`): the retrievals the group rests on,
 whole-history copies included, and `resolve_anchor` over the same populations.
+The read takes no longer than the planner entry has left
+(`planner.plan.discovery_time_left`).
 A group whose newest year is the one its rolling years state, or later, keeps
-its years, since the run reads them moved later (`executor.run`). A group behind
-has its rolling years, in the plan and in the translation, moved to the newest
-year (`planner.plan.restated_to_anchors`, `restated_translation`), and the moved
-plan is compiled again. A plan rule that refuses the moved plan comes back as a
-`rolling_anchor_behind` issue naming the year and quoting the rule, a repair for
-the planner. A read the run would stop on answers `run_would_stop`, whose `detail`
-names the step the run would report (`executor.outcomes.failed_step`): its id,
-the run's own `code`, its message and its requirement. A transient stop refers
-the plan as `surface_unavailable`, any other as `requirement_unmeetable` on that
-requirement, and the referral carries the code as `stop_code`.
+its years, since the run reads them moved later (`executor.run`). So does every
+group when the read runs out of time, which the trace records as
+`translation.anchor_read_skipped`, and a group whose read meets a method choice
+or a source to discover again, since the run meets those as it does for any
+plan and refuses a newest year before the stated one. A group behind has its
+rolling years, in the plan and in the translation, moved to the newest year
+(`planner.plan.restated_to_anchors`, `restated_translation`), and the moved plan
+is compiled again. The `ok` answer then lists each requirement moved under
+`restated`, with the newest year and its years before and after
+(`planner.plan.Restatement`), and the approval card reads the moved plan. A plan
+rule or a compile that refuses the moved plan comes back as a
+`rolling_anchor_behind` issue on the requirement refused, naming the year and
+quoting the refusal, a repair for the planner. A read the run would stop on
+answers `run_would_stop`, whose `detail` names the step the run would report
+(`executor.outcomes.failed_step`): its id, the run's own `code`, its message and
+its requirement. The referral carries the code as `stop_code` and goes by whose
+stop it is (`executor.outcomes.stop_cause`): a transient stop as
+`surface_unavailable`, the harness's own fault as `internal_failure`, and a fact
+of the data as `requirement_unmeetable` on that requirement.
 
 **Only a draft is translated.** A plan in any other status is refused, as is one
 that states no evidence requirements.

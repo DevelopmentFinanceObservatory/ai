@@ -3,8 +3,8 @@
     uv run --package harness python evals/rolling_anchor/run.py
     uv run --package harness python evals/rolling_anchor/run.py --count 3000 --seed 7
 
-No model and no network: every plan goes through `Plan` and the half rule
-(`generator`).
+It needs no model and no network. Every plan goes through `Plan` and the half
+rule (`generator`).
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ def main() -> None:
     began = time.perf_counter()
     result = tally(args.seed, args.count)
     print(f"{args.count} admitted plans, seed {args.seed}, {time.perf_counter() - began:.1f} s")
+    print(f"admitted but not compiled: {result.uncompiled}")
+    print(f"reading a dataset's whole history: {result.whole_history}")
     print(f"restated at translation: {result.restated}")
     print()
     print(f"| world | side | {' | '.join(outcome.value for outcome in Outcome)} |")

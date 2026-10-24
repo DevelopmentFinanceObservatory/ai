@@ -115,14 +115,15 @@ tool is part of the surface check. A plan with no rolling step never calls it.
 The outcome carries each group's answer in `anchors`.
 
 A group's rolling literals, less their offsets, state the newest period the
-plan was checked against. The run reads the plan's years moved later, never
-earlier: a resolved period before the stated one is refused
+plan was checked against. The run reads the plan's years moved later. A
+resolved period before the stated one is refused
 `ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN` before the group's first step, with
 a message asking the user to ask again, so the plan is made from the period
-the data now holds. `read_anchors` takes the same path before a plan is
+the data holds. `read_anchors` takes the same path before a plan is
 approved, so translation states the plan's rolling years from the period its
-run will resolve: the retrievals each group rests on and `resolve_anchor`, with
-no ledger, no derived step and no check against the stated period.
+run will resolve. It runs the retrievals each group rests on and
+`resolve_anchor`, with no ledger, no derived step and no check against the
+stated period.
 
 A rolled start before the first year its dataset holds is refused
 `ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
@@ -1111,17 +1112,18 @@ class AnchorRead:
 
     `steps` are the group's rolling steps (`compiler.rolling.AnchorGroup`),
     `planned` the newest period their literals state (`planned_anchor`) and
-    `result` what `resolve_anchor` answered over the group's retrievals.
+    `result` what `resolve_anchor` answered over the group's retrievals, or
+    the stop its run would meet on one of them or on `resolve_anchor`.
     """
 
     steps: tuple[str, ...]
     planned: str
-    result: AnchorResult
+    result: AnchorResult | MethodChoiceNeeded | Refused | RediscoveryNeeded
 
     @property
     def behind(self) -> bool:
         """Whether the newest period resolved is before the one the plan states."""
-        return self.result.period < self.planned
+        return isinstance(self.result, AnchorResult) and self.result.period < self.planned
 
 
 def planned_anchor(group: AnchorGroup, steps_by_id: Mapping[str, WorkflowStep]) -> str:
@@ -1162,9 +1164,10 @@ async def read_anchors(
 
     Returns:
         Each group's `AnchorRead`, in the order its run resolves them, empty
-        for a workflow with no rolling step; or the outcome a run of
-        `workflow` stops on when a retrieval or a resolution is refused,
-        with no `run_id`.
+        for a workflow with no rolling step, each holding the stop a run
+        would meet on the group's retrievals or its resolution, with no
+        `run_id`; or the outcome a run of `workflow` stops on before any
+        retrieval, or on a retrieval whose stop names no step.
     """
     runtime = _Runtime(
         surface=surface,
@@ -1301,24 +1304,45 @@ class _Run:
         The run's own steps for the part of it a group's newest period rests
         on (`execute`), with each group resolved under its first step to
         run, and no derived step run and no check of the period against the
-        plan's (`_check_anchor_held`), which the caller makes.
+        plan's (`_check_anchor_held`), which the caller makes. A retrieval
+        that stops stops only the groups resting on it, which read as that
+        stop, the first in step order. A group whose resolution stops reads
+        as that stop too. Every other group is resolved.
         """
         schemas = await self._surface_as_compiled()
         roots = {root for group in self.anchor_groups for root in group.roots}
-        await self._run_wave(tuple(s for s in self.workflow.steps if s.id in roots), schemas)
+        stops: dict[str, MethodChoiceNeeded | Refused | RediscoveryNeeded] = {}
+        try:
+            await self._run_wave(tuple(s for s in self.workflow.steps if s.id in roots), schemas)
+        except _Stopped as stopped:
+            for outcome in (stopped.outcome, *stopped.siblings):
+                if outcome.step_id is None:
+                    raise
+                stops.setdefault(outcome.step_id, outcome)
         await self._seal()
         read: list[AnchorRead] = []
         for wave in _waves(self.workflow):
             for group, first in self._groups_starting(wave):
-                anchor = await self._resolve_group(group, first, schemas)
+                if any(read_group.steps == group.steps for read_group in read):
+                    continue
+                stop = next((stops[step] for step in group.roots if step in stops), None)
                 read.append(
                     AnchorRead(
                         steps=group.steps,
                         planned=planned_anchor(group, self.steps_by_id),
-                        result=anchor,
+                        result=stop or await self._resolved_or_stop(group, first, schemas),
                     )
                 )
         return tuple(read)
+
+    async def _resolved_or_stop(
+        self, group: AnchorGroup, first: WorkflowStep, schemas: Mapping[str, ToolSchema]
+    ) -> AnchorResult | MethodChoiceNeeded | Refused | RediscoveryNeeded:
+        """`_resolve_group`'s period for `group`, or the stop it raised."""
+        try:
+            return await self._resolve_group(group, first, schemas)
+        except _Stopped as stopped:
+            return stopped.outcome
 
     def _groups_starting(
         self, wave: Sequence[WorkflowStep]
@@ -1344,16 +1368,14 @@ class _Run:
         self, wave: Sequence[WorkflowStep], schemas: Mapping[str, ToolSchema]
     ) -> None:
         """Run every step of `wave` to completion, then raise the first stop among them."""
-        # Each step runs as its own task; `asyncio.gather` copies the
+        # Each step runs as its own task. `asyncio.gather` copies the
         # calling context per task, so `current_step_id`, set inside
-        # `_run_step`, never leaks between concurrent siblings.
+        # `_run_step`, stays with its step among concurrent siblings.
         # `return_exceptions=True` lets every step in the wave run to
-        # completion even when one of them raises something `_attempt`
-        # did not catch: an exception here is only ever a defect
-        # `_Stopped` was never meant to carry (`_Stopped` itself is
-        # always returned, never raised, out of `_attempt`), and letting
-        # it end the wave at once would abandon that wave's other
-        # in-flight steps unawaited rather than let them finish. A
+        # completion when one of them raises something `_attempt` did not
+        # catch. Such an exception is a defect, since `_attempt` returns
+        # `_Stopped` and never raises it, and ending the wave at once would
+        # abandon that wave's other in-flight steps unawaited. A
         # `BaseException` outside `Exception`, such as `CancelledError`,
         # is not captured by `return_exceptions` and propagates
         # regardless.
@@ -1364,10 +1386,9 @@ class _Run:
         stopped: _Stopped | None = None
         other_stops: list[MethodChoiceNeeded | Refused | RediscoveryNeeded] = []
         for outcome in outcomes:
-            # `_Stopped` is an `Exception` subclass but is always
-            # returned, never raised, out of `_attempt`, so it is read
-            # off first, before the general `BaseException` check below
-            # that re-raises anything else.
+            # `_attempt` returns `_Stopped`, an `Exception` subclass, and
+            # never raises it, so it is read off first, before the general
+            # `BaseException` check below that re-raises anything else.
             if isinstance(outcome, _Stopped):
                 if stopped is None:
                     stopped = outcome
@@ -1694,7 +1715,7 @@ class _Run:
         stop, since the same plan resolves the same period over the same data.
         """
         planned = planned_anchor(group, self.steps_by_id)
-        if anchor.period >= planned:
+        if not AnchorRead(steps=group.steps, planned=planned, result=anchor).behind:
             return
         raise self._refused(
             RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN,

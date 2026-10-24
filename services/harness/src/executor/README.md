@@ -123,11 +123,13 @@ the group's first step to run, and `resolve_anchor` is part of the surface
 check, compared with its row of the capability table. A plan with no rolling
 step never calls it. The group's rolling years, less their offsets, state the
 newest year the plan was checked against, and the run reads them moved later
-only: an earlier newest year stops the run, and the user asks again to plan
-from the year the data now holds. Translation reads the same newest years
+only. An earlier newest year stops the run, and the user asks again to plan
+from the year the data holds. Translation reads the same newest years
 before approval (`read_anchors`, the run's own retrievals and `resolve_anchor`
 with no ledger and no derived step) and states the plan from them, so this stop
-fires only when the data changed between approval and the run.
+fires when the data changed between approval and the run, when translation had
+no time to read them or met a method choice or a source to discover again, and
+for a plan translated before translation read them.
 
 | Stop                                                                                    | Reported as                                                                                  |
 | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |

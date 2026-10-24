@@ -176,8 +176,8 @@ class EndDrift(StrEnum):
     (`executor.run`, analysis-mcp's `resolve_anchor`), moved by the bound's
     offset; the run resolves one anchor per group of rolling years
     (`planner.plan.rolling_groups`), and every step of one group counts
-    from it. That anchor is the plan's stated newest year or later:
-    translation states the rolling years from the anchor it reads, and the
+    from it. That anchor is the plan's stated newest year or later.
+    Translation states the rolling years from the anchor it reads, and the
     run refuses an earlier one (`executor.run._Run._check_anchor_held`). `DATA`
     is each series' own newest year, which a retrieval stating no end year
     holds, so a series reporting past the anchor holds years after it.
@@ -831,8 +831,8 @@ def _stays(
     `anchor_year_stays`, `growth_endpoint_leaves`, `span_end_leaves` and
     `_picked_year_leaves`. Where both years state `today`, `year` has to
     stand there today too. Every other reader has checked that already. A
-    year moves only later: translation states a plan's rolling years from
-    the newest year its run will read (`translator.tool`), and the run
+    year moves only later, since translation states a plan's rolling years
+    from the newest year its run will read (`translator.tool`) and the run
     refuses a newest year before the stated one
     (`executor.run._Run._check_anchor_held`). Every rolling year of one
     group counts from one newest year (`planner.plan._check_rolling_years_agree`), and the
@@ -965,6 +965,25 @@ def growth_endpoint_leaves(
                 "input's first year"
             )
     return None
+
+
+def window_outside(shape: FrameShape, window: Period) -> str | None:
+    """Why a growth `window` reaches a year outside the years `shape` holds, or `None`.
+
+    A retrieval's years start at its dataset's first year on record for a
+    read of its whole history, and at the stated start otherwise
+    (`planner.plan.retrieved_period`), so a window starting before the
+    stated start fits a whole-history read. A shape with no period holds no
+    years for a window to fall outside. `planner.plan` and `compiler.compile`
+    read this on every growth.
+    """
+    held = shape.period
+    if held is None or held.covers(window):
+        return None
+    return (
+        f"growth window ({window.start}-{window.end}) falls outside its input's period "
+        f"({held.start}-{held.end})"
+    )
 
 
 def anchor_misses(sides: Sequence[FrameShape], anchored: Collection[str]) -> str | None:

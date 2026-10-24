@@ -127,6 +127,7 @@ from planner.shapes import (
     roles_named,
     shared,
     summed_sides,
+    window_outside,
     windowed,
     year_filter,
     years_run_out,
@@ -2666,14 +2667,26 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
         roles = (*roles, breakdown)
     separate = requirement.stat_vars is StatVarReading.SEPARATE and requirement.breakdown is None
     measures = None if separate else 1
-    period = requirement.period
     return retrieved(
         requirement_id=requirement.id,
         roles=roles,
-        period=period if first_year is None else Period(start=first_year, end=period.end),
+        period=retrieved_period(requirement, first_year=first_year),
         measures=measures,
         end_open=requirement.period_end_open,
     )
+
+
+def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None) -> Period:
+    """The years a retrieval of `requirement` reads.
+
+    Its stated period, started at `first_year` for a read of its dataset's
+    whole history (`HistorySplit.whole_history`). The plan's shapes and the
+    compiler's both start a retrieval here, so both check a growth window
+    against the same years (`planner.shapes.window_outside`).
+    """
+    if first_year is None:
+        return requirement.period
+    return Period(start=first_year, end=requirement.period.end)
 
 
 def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape) -> FrameShape:
@@ -2705,15 +2718,9 @@ def _growth_shape(requirement: GrowthRequirement, input_shape: FrameShape) -> Fr
     reason = shape_rejects(ShapeVerb.GROWTH, input_shape, change=requirement.change, window=window)
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
-    if input_shape.period is not None and (
-        requirement.window_start < input_shape.period.start
-        or requirement.window_end > input_shape.period.end
-    ):
-        raise ValueError(
-            f"{requirement.id!r}'s growth window ({requirement.window_start}-"
-            f"{requirement.window_end}) falls outside its input's period "
-            f"({input_shape.period.start}-{input_shape.period.end})"
-        )
+    outside = window_outside(input_shape, window)
+    if outside is not None:
+        raise ValueError(f"{requirement.id!r}'s {outside}")
     leaves = growth_endpoint_leaves(input_shape, window, requirement.rolling)
     if leaves is not None:
         raise RollingPlanError(
@@ -4097,12 +4104,12 @@ def restated_to_anchors(plan: Plan, *, anchors: Mapping[str, int]) -> Plan:
     (`rolls`), copies included, as the run resolves it for the requirement's
     group. Each rolling year moves by that year less the newest year the
     requirement states (`RelativePeriod.latest_implied_by`), either way, and
-    keeps its offset; a fixed year stays. A copy moves with the requirement
+    keeps its offset. A fixed year stays. A copy moves with the requirement
     it copies. Where no year moves, `plan` itself comes back, with its
     revision. Otherwise the result is `plan` stating the moved requirements,
     split again (`with_authored_requirements`), and so held to every rule a
-    proposal is. `plan` is a draft, since a translation states the years
-    too; `restated_translation` moves them by the same years.
+    proposal is. `plan` is a draft. A translation states the years too, and
+    `restated_translation` moves them by the same years.
 
     Raises:
         KeyError: `anchors` does not name exactly the rolling requirements of
@@ -4154,6 +4161,48 @@ def restated_translation(
             ],
         }
     )
+
+
+class Restatement(StrictModel):
+    """One requirement's rolling years, as written and as translation stated them from the data.
+
+    `anchor` is the newest year the data holds that they now count from,
+    and `years_from` and `years_to` the years the requirement states that
+    follow the newest data, in the order it states them (a window's first
+    and last, a filter's predicates), before and after.
+    """
+
+    requirement_id: Identifier
+    anchor: Year
+    years_from: tuple[Year, ...]
+    years_to: tuple[Year, ...]
+
+
+def restatements(plan: Plan, restated: Plan) -> tuple[Restatement, ...]:
+    """Each requirement of `plan` whose rolling years `restated` states otherwise, in plan order.
+
+    `restated` is `plan` as `restated_to_anchors` returns it. A copy is left
+    out: it moves with the requirement it copies, and the model wrote only
+    that one.
+    """
+    copies = copy_origins(plan.rolling_copies)
+    moved: list[Restatement] = []
+    for requirement in plan.evidence_requirements:
+        if requirement.id in copies or not rolls(requirement):
+            continue
+        after = restated.requirement(requirement.id)
+        years_from = tuple(year for year, _ in _rolling_years(requirement))
+        years_to = tuple(year for year, _ in _rolling_years(after))
+        if years_from != years_to:
+            moved.append(
+                Restatement(
+                    requirement_id=requirement.id,
+                    anchor=_stated_newest(after),
+                    years_from=years_from,
+                    years_to=years_to,
+                )
+            )
+    return tuple(moved)
 
 
 def _rolling_moves(plan: Plan, *, anchors: Mapping[str, int]) -> dict[str, int]:

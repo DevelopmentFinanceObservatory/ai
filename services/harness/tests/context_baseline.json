@@ -4,8 +4,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 149289,
-      "system_instruction_chars": 18459,
+      "total_chars": 149553,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {
@@ -49,8 +49,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 182861,
-      "system_instruction_chars": 18459,
+      "total_chars": 183125,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {
@@ -104,8 +104,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 184181,
-      "system_instruction_chars": 18459,
+      "total_chars": 184445,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {
@@ -169,8 +169,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 67418,
-      "system_instruction_chars": 18459,
+      "total_chars": 67682,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {
@@ -214,8 +214,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 100990,
-      "system_instruction_chars": 18459,
+      "total_chars": 101254,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {
@@ -269,8 +269,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 102851,
-      "system_instruction_chars": 18459,
+      "total_chars": 103115,
+      "system_instruction_chars": 18721,
       "declaration_total_chars": 38813,
       "declarations": [
         {

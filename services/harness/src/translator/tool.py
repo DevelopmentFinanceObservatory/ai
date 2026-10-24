@@ -25,8 +25,8 @@ it to the user.
 
 None of the translator's work is confirmation-gated. Discovery reads
 metadata, and compiling writes a workflow that nothing runs before the user
-approves it. The one read of observations is a workflow's newest years: one
-with a rolling step has them read through its own retrievals and
+approves it. The one read of observations is a workflow's newest years. A
+workflow with a rolling step has them read through its own retrievals and
 `resolve_anchor`, as its run reads them (`executor.run.read_anchors`), so the
 years the user approves are the years the run reads. That read shows the user
 nothing and records nothing. The approval gate is the harness workflow's
@@ -41,23 +41,27 @@ misconfiguration retrying cannot resolve.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from enum import StrEnum
 from typing import assert_never, cast
 
+from common.telemetry import record_event
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult, compile_plan
 from compiler.rolling import anchor_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
-from executor.classify import Disposition, classify_refusal
 from executor.outcomes import (
+    AnchorResult,
     MethodChoiceNeeded,
     RediscoveryNeeded,
-    RefusalKind,
     Refused,
+    StopCause,
     failed_step,
+    stop_cause,
 )
 from executor.run import AnchorRead, read_anchors
 from google.adk.tools.tool_context import ToolContext
@@ -66,8 +70,10 @@ from planner.plan import (
     DatasetRequirement,
     HistorySplit,
     Plan,
+    Restatement,
     UnsupportedOperation,
     authored_text,
+    discovery_time_left,
     load_plan,
     origin_of,
     plan_revision,
@@ -75,10 +81,11 @@ from planner.plan import (
     record_unsupported,
     restated_to_anchors,
     restated_translation,
+    restatements,
     save_plan,
     split_of,
 )
-from planner.records import EvidenceIssueCode
+from planner.records import EvidenceIssueCode, RollingPlanError
 from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
 from planner.workflow import SelectedSource, Workflow
@@ -158,9 +165,10 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
     `spec_id` so the only way one reaches a pinnable choice is a real
     `source_ambiguous` or `pinned_source_not_found` referral. `budget_spent`
     and `not_issued` appear only when set, the cases the planner seam ends
-    the entry on, and `source_mismatch` and `stop_code` likewise. `withheld` appears only when a source is
-    withheld, each rendered without its `spec_id` beside the scope it drops,
-    since no pin may name it, and `repair` only when one is stated.
+    the entry on, and `source_mismatch` and `stop_code` likewise. `withheld`
+    appears only when a source is withheld, each rendered without its
+    `spec_id` beside the scope it drops, since no pin may name it, and
+    `repair` only when one is stated.
     """
     selectable = referral.kind is not ReferralKind.NO_DATA
     excluded = {"candidates", "stale_pins", "withheld"}
@@ -528,92 +536,184 @@ def _not_compiled(
     )
 
 
-def _restated_to_the_data(
+def restated_to_the_data(
     plan: Plan, translation: Translation, workflow: Workflow, read: Sequence[AnchorRead]
 ) -> tuple[Plan, Translation] | CompileResult:
     """`plan` and `translation` stating each group's rolling years from the newest year `read` found before it.
 
     A group whose newest year is the one its rolling years state, or later,
-    keeps its years: every plan rule holds of them moved later, and the run
-    reads them so (`executor.run._Run._check_anchor_held`). A group behind
-    moves to its newest year (`planner.plan.restated_to_anchors`,
-    `restated_translation`). A plan rule that refuses the moved plan comes
-    back as a `ROLLING_ANCHOR_BEHIND` issue on the first group behind, naming
-    its newest year and quoting the rule's own words.
+    keeps its years, since every plan rule holds of them moved later and the
+    run reads them so (`executor.run._Run._check_anchor_held`). So does a group
+    `read` holds a stop for. A group behind moves to its newest year
+    (`planner.plan.restated_to_anchors`, `restated_translation`). A plan
+    rule that refuses the moved plan comes back as a `ROLLING_ANCHOR_BEHIND`
+    issue on the requirement the rule names, in the first group whose move
+    alone the rules refuse (`_refused_move`).
     """
     steps = {step.id: step for step in workflow.steps}
     requirement_of = {op.id: op.requirement_id for op in translation.operations}
-    anchors: dict[str, int] = {}
-    for group in read:
-        year = group.result.period if group.behind else group.planned
-        for step_id in group.steps:
-            anchors[requirement_of[steps[step_id].operation_id]] = int(year)
+
+    def anchors(moving: Sequence[AnchorRead]) -> dict[str, int]:
+        years: dict[str, int] = {}
+        for group in read:
+            moved = group in moving and isinstance(group.result, AnchorResult)
+            year = group.result.period if moved else group.planned
+            for step_id in group.steps:
+                years[requirement_of[steps[step_id].operation_id]] = int(year)
+        return years
+
+    behind = [group for group in read if group.behind]
     try:
         return (
-            restated_to_anchors(plan, anchors=anchors),
-            restated_translation(translation, plan=plan, anchors=anchors),
+            restated_to_anchors(plan, anchors=anchors(behind)),
+            restated_translation(translation, plan=plan, anchors=anchors(behind)),
         )
     except ValueError as exc:
-        behind = next(group for group in read if group.behind)
-        operation_id = steps[behind.steps[0]].operation_id
-        issue = CompileIssue(
-            code=CompileIssueCode.ROLLING_ANCHOR_BEHIND,
-            reason=(
-                f"the newest year at least half of the series these rolling years read hold "
-                f"is {behind.result.period}, before {behind.planned}, the year they state, "
-                f"and the plan stated from {behind.result.period} is refused: "
-                f"{_rule_refusal(exc)}"
-            ),
-            operation_id=operation_id,
-            requirement_id=requirement_of[operation_id],
+        group, refusal = _refused_move(plan, behind, exc, anchors=anchors)
+        requirements = [requirement_of[steps[step_id].operation_id] for step_id in group.steps]
+        named = _named_requirements(refusal)
+        requirement_id = next((r for r in requirements if r in named), requirements[0])
+        return CompileResult(
+            issues=(
+                _anchor_behind(
+                    group,
+                    _rule_refusal(refusal),
+                    operation_id=next(
+                        op.id
+                        for op in translation.operations
+                        if op.requirement_id == requirement_id
+                    ),
+                    requirement_id=requirement_id,
+                ),
+            )
         )
-        return CompileResult(issues=(issue,))
+
+
+def _refused_move(
+    plan: Plan,
+    behind: Sequence[AnchorRead],
+    refused: ValueError,
+    *,
+    anchors: Callable[[Sequence[AnchorRead]], Mapping[str, int]],
+) -> tuple[AnchorRead, ValueError]:
+    """The first group of `behind` whose move alone a plan rule refuses, with the refusal.
+
+    Where every group moves alone and only their moves together are
+    refused, `refused` stands, on the first group behind.
+    """
+    for group in behind:
+        try:
+            restated_to_anchors(plan, anchors=anchors([group]))
+        except ValueError as alone:
+            return group, alone
+    return behind[0], refused
+
+
+def _named_requirements(refusal: ValueError) -> tuple[str, ...]:
+    """The requirements a plan rule's `RollingPlanError` under `refusal` names, if one raised it."""
+    raised: list[object] = [refusal]
+    if isinstance(refusal, ValidationError):
+        raised = [error.get("ctx", {}).get("error") for error in refusal.errors(include_url=False)]
+    return tuple(
+        requirement_id
+        for cause in raised
+        if isinstance(cause, RollingPlanError)
+        for requirement_id in cause.requirement_ids
+    )
+
+
+def _anchor_behind(
+    group: AnchorRead, refusal: str, *, operation_id: str, requirement_id: str
+) -> CompileIssue:
+    """The `ROLLING_ANCHOR_BEHIND` issue for `group`'s years stated from its newest year, refused for `refusal`."""
+    assert isinstance(group.result, AnchorResult)
+    newest = group.result.period
+    return CompileIssue(
+        code=CompileIssueCode.ROLLING_ANCHOR_BEHIND,
+        reason=(
+            f"the newest year at least half of the series these rolling years read hold is "
+            f"{newest}, before {group.planned}, the year they state, and the plan stated from "
+            f"{newest} is refused: {refusal}"
+        ),
+        operation_id=operation_id,
+        requirement_id=requirement_id,
+    )
+
+
+def _restatement_not_compiled(
+    result: CompileResult, translation: Translation, workflow: Workflow, read: Sequence[AnchorRead]
+) -> CompileResult:
+    """`result`, the failed compile of a restated translation, its issues told as `ROLLING_ANCHOR_BEHIND`.
+
+    Only years moved, so each issue is the restatement's. It is told on the
+    group behind holding its operation, or else the first group behind,
+    with that group's newest year and the compiler's own words, on the
+    requirement its operation carries out.
+    """
+    operation_of = {step.id: step.operation_id for step in workflow.steps}
+    requirement_of = {op.id: op.requirement_id for op in translation.operations}
+    behind = [group for group in read if group.behind]
+    issues: list[CompileIssue] = []
+    for issue in result.issues:
+        group = next(
+            (g for g in behind if issue.operation_id in {operation_of[s] for s in g.steps}),
+            behind[0],
+        )
+        operation_id = (
+            issue.operation_id
+            if issue.operation_id in requirement_of
+            else operation_of[group.steps[0]]
+        )
+        issues.append(
+            _anchor_behind(
+                group,
+                issue.reason,
+                operation_id=operation_id,
+                requirement_id=requirement_of[operation_id],
+            )
+        )
+    return CompileResult(issues=tuple(issues), warnings=result.warnings)
 
 
 def _run_would_stop(
-    stop: MethodChoiceNeeded | Refused | RediscoveryNeeded,
-    *,
-    workflow: Workflow,
-    translation: Translation,
+    stop: Refused, *, workflow: Workflow, translation: Translation
 ) -> dict[str, object]:
     """The `RUN_WOULD_STOP` problem for a read of the newest year that stopped where the run would.
 
     `detail` holds the step the run's caller would be told it failed at
     (`executor.outcomes.failed_step`): its `step_id`, the run's own `code`
     and `message`, and the requirement that step carries out. Its `action`
-    refers the plan back with that code as `stop_code`: as
-    `surface_unavailable` when a later try can get past the stop, as
-    `requirement_unmeetable` on that requirement for the user to decide
-    otherwise, and as an internal failure when the stop names no requirement,
-    since then it is no fact of the data. The stop is logged with its code.
+    refers the plan back with that code as `stop_code`, by whose stop it is
+    (`executor.outcomes.stop_cause`): as `surface_unavailable` when a later
+    try can get past it, as an internal failure when it is the harness's,
+    and as `requirement_unmeetable` on that requirement when it is the
+    data's, for the user to decide otherwise. A data stop that names no
+    requirement is an internal failure too. The stop is logged with its
+    code.
     """
     failed = failed_step(stop)
     code, step_id = str(failed["code"]), failed["step_id"]
-    requirement_id = stop.requirement_id if not isinstance(stop, MethodChoiceNeeded) else None
+    requirement_id = stop.requirement_id
     if requirement_id is None and step_id is not None:
         requirement_of = {op.id: op.requirement_id for op in translation.operations}
         operation_of = {step.id: step.operation_id for step in workflow.steps}
         requirement_id = requirement_of.get(operation_of.get(step_id, ""))
-    failure = stop.payload if isinstance(stop, Refused) else stop.refusal
-    transient = (isinstance(stop, Refused) and stop.refusal is RefusalKind.TRANSPORT_FAILED) or (
-        failure is not None and classify_refusal(failure) is Disposition.RETRY_LATER
-    )
+    cause = stop_cause(stop)
     logger.warning(
-        "translation: the newest-year read stopped code=%s step_id=%s requirement_id=%s "
-        "transient=%s",
+        "translation: the newest-year read stopped code=%s step_id=%s requirement_id=%s cause=%s",
         code,
         step_id,
         requirement_id,
-        transient,
+        cause,
     )
     reason = (
         "reading the newest year the rolling years count from stopped where the run would: "
         f"{failed['message']}"
     )
     arguments: dict[str, JsonValue] = {"reason": reason, "stop_code": code}
-    if transient:
+    if cause is StopCause.TRANSIENT:
         arguments["kind"] = ReferralKind.SURFACE_UNAVAILABLE.value
-    elif requirement_id is not None:
+    elif cause is StopCause.DATA and requirement_id is not None:
         arguments["kind"] = ReferralKind.REQUIREMENT_UNMEETABLE.value
         arguments["requirement_id"] = requirement_id
     else:
@@ -676,6 +776,75 @@ def _logged_reference(reason: str) -> str:
     return reference
 
 
+async def _read_within_entry(
+    workflow: Workflow, plan: Plan, *, surface: ToolSurface
+) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
+    """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
+
+    Inside a planner entry the read may take the time the entry has left
+    (`planner.plan.discovery_time_left`). A read that time cuts short, or
+    one there is no time to start, is logged and recorded on the trace as
+    skipped, with its groups, the time it had and the time it took.
+    """
+    time_left = discovery_time_left()
+    began = time.monotonic()
+    if time_left is None or time_left > 0:
+        deadline = asyncio.timeout(time_left)
+        try:
+            async with deadline:
+                return await read_anchors(
+                    workflow,
+                    revision=plan_revision(plan),
+                    requirements=[
+                        r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
+                    ],
+                    surface=surface,
+                )
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+    metadata: dict[str, str | int | float | bool] = {
+        "groups": len(anchor_groups(workflow)),
+        "time_left_s": round(time_left or 0.0, 3),
+        "elapsed_s": round(time.monotonic() - began, 3),
+    }
+    logger.warning(
+        "translation: the newest-year read was skipped for want of time groups=%s "
+        "time_left_s=%s elapsed_s=%s",
+        metadata["groups"],
+        metadata["time_left_s"],
+        metadata["elapsed_s"],
+    )
+    record_event("translation.anchor_read_skipped", metadata=metadata)
+    return None
+
+
+def _groups_read(
+    read: tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None,
+) -> tuple[AnchorRead, ...] | Refused:
+    """The groups `read` resolved, or the stop that answers the translation.
+
+    A refusal answers it, the whole read's or the first group's. A read
+    skipped, or one stopping on a method choice or a source to discover
+    again, resolves no group, and the run meets those itself.
+    """
+    if read is None or isinstance(read, MethodChoiceNeeded | RediscoveryNeeded):
+        return ()
+    if isinstance(read, Refused):
+        return read
+    for group in read:
+        if isinstance(group.result, Refused):
+            return group.result
+    return read
+
+
+def _restated_answer(restated: Sequence[Restatement]) -> dict[str, object]:
+    """`restated` as the `ok` answer carries it, under `restated`, or nothing when no year moved."""
+    if not restated:
+        return {}
+    return {"restated": [restatement.model_dump(mode="json") for restatement in restated]}
+
+
 def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
     """Build the translator's three core functions, for `build_translate` or a test to drive.
 
@@ -697,37 +866,39 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
 
         A workflow with a rolling step has its newest years read as its run
         reads them (`executor.run.read_anchors`), over its own retrievals,
-        before the user approves anything. Every group on or after the year
-        its rolling years state leaves all three as they are. Otherwise the
-        restated plan and translation (`_restated_to_the_data`) are compiled
-        again. A read that stops answers `_run_would_stop`, and a restatement
-        a plan rule refuses, or one that does not compile, answers
-        `_not_compiled`.
+        before the user approves anything, within the time the planner
+        entry has left (`planner.plan.discovery_time_left`). Every group on
+        or after the year its rolling years state keeps them, and so does
+        every group when the read runs out of time, and a group whose read
+        meets a method choice or a source to discover again, since the run
+        meets those as it does any plan and refuses a newest year before the
+        stated one (`executor.run._Run._check_anchor_held`). Otherwise the
+        restated plan and translation (`restated_to_the_data`) are compiled
+        again. A read that stops otherwise answers `_run_would_stop`, and a
+        restatement a plan rule refuses, or one that does not compile,
+        answers `_not_compiled` with `ROLLING_ANCHOR_BEHIND` issues.
         """
         workflow = result.workflow
         assert workflow is not None
         if not anchor_groups(workflow):
             return plan, translation, result
-        read = await read_anchors(
-            workflow,
-            revision=plan_revision(plan),
-            requirements=[
-                r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
-            ],
-            surface=surface,
-        )
-        if not isinstance(read, tuple):
+        read = _groups_read(await _read_within_entry(workflow, plan, surface=surface))
+        if isinstance(read, Refused):
             return _run_would_stop(read, workflow=workflow, translation=translation)
         if not any(group.behind for group in read):
             return plan, translation, result
-        restated = _restated_to_the_data(plan, translation, workflow, read)
+        restated = restated_to_the_data(plan, translation, workflow, read)
         if isinstance(restated, CompileResult):
             return _not_compiled(restated, translation, tool_context)
-        plan, translation = restated
-        result = compiled(plan, translation)
-        if result.workflow is None:
-            return _not_compiled(result, translation, tool_context)
-        return plan, translation, result
+        moved_plan, moved_translation = restated
+        recompiled = compiled(moved_plan, moved_translation)
+        if recompiled.workflow is None:
+            return _not_compiled(
+                _restatement_not_compiled(recompiled, moved_translation, workflow, read),
+                moved_translation,
+                tool_context,
+            )
+        return moved_plan, moved_translation, recompiled
 
     async def propose_operations(
         translation: Translation, tool_context: ToolContext
@@ -735,10 +906,12 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         """Compile `translation` against the recorded draft, the sources discovery
         recorded and the live tool surface, and record it on the plan if it
         compiles, its rolling years stated from the newest year the data
-        holds (`stated_from_the_data`). Answers `ok` with the plan's new status, version, revision,
-        sources and steps, or the problem that stopped it, carrying every
-        compile issue and, when known, the action that moves past it; the plan
-        is then left untouched, and a decline the closing issue earns
+        holds (`stated_from_the_data`). Answers `ok` with the plan's new
+        status, version, revision, sources and steps, and under `restated`
+        each requirement whose years moved (`planner.plan.restatements`), or
+        the problem that stopped it, carrying every compile issue and, when
+        known, the action that moves past it; the plan is then left
+        untouched, and a decline the closing issue earns
         (`_earned_decline`) is recorded as optional, for the rest of the
         planner entry."""
         plan = _translatable_draft(tool_context)
@@ -809,6 +982,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         )
         if isinstance(stated, dict):
             return stated
+        restated = restatements(plan, stated[0])
         plan, translation, result = stated
         assert result.workflow is not None
         warnings = [warning.model_dump(mode="json") for warning in result.warnings]
@@ -816,6 +990,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         plan = plan.with_translation(translation=translation, workflow=result.workflow)
         save_plan(tool_context.state, plan)
         return ok(
+            **_restated_answer(restated),
             status=plan.status.value,
             version=plan.version,
             revision=plan_revision(plan),
@@ -971,14 +1146,15 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
 def _planner_answer(result: dict[str, object]) -> dict[str, object]:
     """Return the verdict the planner reads, given `run_translate`'s `result`.
 
-    A compiled plan answers `ok` alone. `declare_ready` reads the version,
-    revision and warnings off the plan's record, and the user reads the
-    sources and steps on the approval card. A referral answers as the
-    referral itself, its `outcome` one of `OUTCOME_OF`'s. A problem answers
-    unchanged.
+    A compiled plan answers `ok`, with the requirements whose rolling years
+    translation restated under `restated` when it moved any.
+    `declare_ready` reads the version, revision and warnings off the plan's
+    record, and the user reads the sources and steps on the approval card. A
+    referral answers as the referral itself, its `outcome` one of
+    `OUTCOME_OF`'s. A problem answers unchanged.
     """
     if result.get("outcome") == Outcome.OK.value:
-        return ok()
+        return ok(**({"restated": result["restated"]} if "restated" in result else {}))
     if result.get("outcome") == Outcome.REFERRED.value:
         return cast("dict[str, object]", result["referral"])
     return result
@@ -1091,7 +1267,8 @@ def build_translate(*, surface: ToolSurface) -> Translate:
         (`translator.discovery.resolving_once`).
 
         Returns:
-            `{"outcome": "ok"}` once the plan compiled, or the referral the
+            `{"outcome": "ok"}` once the plan compiled, with `restated` when
+            its rolling years were stated from the data, or the referral the
             plan goes back on, whose `outcome` says what it asks of the
             planner. Either carries `named_in_place_of_across` when a group
             was named, each entry the requirement, the entity named and the

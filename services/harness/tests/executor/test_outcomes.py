@@ -7,6 +7,7 @@ from common.materialisation import FrameRef
 from executor.classify import ToolFailure
 from executor.outcomes import (
     RUN_STATE_KEY,
+    STOP_CAUSES,
     Accepted,
     AnchorResult,
     LeftOutSeries,
@@ -92,3 +93,8 @@ def test_a_rediscovery_must_name_what_to_rediscover() -> None:
 
 def test_no_outcome_reads_as_none() -> None:
     assert load_outcome({}) is None
+
+
+def test_every_kind_of_stop_has_a_cause() -> None:
+    """A caller routes a stop by its cause (`stop_cause`), so a new kind must state one."""
+    assert STOP_CAUSES.keys() == set(RefusalKind)

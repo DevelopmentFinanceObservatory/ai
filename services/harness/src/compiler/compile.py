@@ -86,6 +86,7 @@ from planner.shapes import (
     pooling_remedy,
     role_named,
     roles_named,
+    window_outside,
 )
 from planner.workflow import (
     ArtifactKind,
@@ -736,16 +737,22 @@ class _Build:
             )
 
     def _check_growth(self, operation: GrowthOperation) -> None:
+        """Report `WINDOW_OUTSIDE_PERIOD` for a window reaching past the years its input holds.
+
+        The input's shape holds them. A retrieval's years start at its
+        dataset's first year on record for a whole-history read, as the plan's
+        shape rule reads it (`planner.shapes.window_outside`).
+        """
         requirement = self._requirement_upstream(operation.input)
-        if requirement is None:
+        upstream = self.shapes.get(operation.input)
+        if requirement is None or upstream is None:
             return
         window = Period(start=operation.window_start, end=operation.window_end)
-        if not requirement.period.covers(window):
+        outside = window_outside(upstream.shape, window)
+        if outside is not None:
             self._issue(
                 CompileIssueCode.WINDOW_OUTSIDE_PERIOD,
-                f"operation {operation.id!r} takes growth over {window.start}-{window.end}, "
-                f"outside requirement {requirement.id!r}'s {requirement.period.start}-"
-                f"{requirement.period.end}",
+                f"operation {operation.id!r}'s {outside}",
                 operation_id=operation.id,
                 requirement_id=requirement.id,
             )

@@ -373,6 +373,41 @@ def test_a_year_filter_rolling_from_its_start_reads_the_copy_of_its_dataset_and_
     assert group.roots == ("debt_history",)
 
 
+def test_a_growth_rolling_from_its_start_before_the_stated_period_reads_the_whole_history(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    """Stated 2019-2024 with 2010 on record, a growth over the last five years stated from
+    2023 starts in 2018. Its copy of the dataset starts in 2010, so the window falls inside
+    the years it reads, as the plan's own shape rule holds (`planner.plan._growth_shape`)."""
+    growth_req, change = _growth_pair(window_start=2018, window_end=2023, reads="debt_history")
+
+    result = build(
+        [requirement(period=Period(start=2019, end=2024), period_end_open=True), growth_req],
+        [
+            _retrieve(),
+            _retrieve(id="debt_history", requirement_id="annual_debt_service_history"),
+            change,
+        ],
+        terminal=["debt", "change"],
+        decisions=[decision()],
+        discovered={
+            "annual_debt_service": source(),
+            "annual_debt_service_history": source(),
+        },
+        first_years={"annual_debt_service": 2010},
+        asks=[
+            AskAnswer(ask=0, outputs=("annual_debt_service",)),
+            AskAnswer(ask=1, outputs=("growth_of_debt",)),
+        ],
+    )
+
+    step = _step(result, "change")
+    assert (step.args["window_start"], step.args["window_end"]) == ("2018", "2023")
+
+
 def test_each_retrievals_shape_starts_in_the_year_its_pins_requested_window_starts(
     decision: DecisionFactory, requirement: RequirementFactory, source: SourceFactory
 ) -> None:

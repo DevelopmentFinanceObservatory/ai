@@ -1,9 +1,10 @@
 """CI's share of the seeded rolling-plan generator (`evals/rolling_anchor`).
 
-3,000 admitted plans from a fixed seed, run as admitted and as translation
-restates them, in the world each was planned over, one with newer years and one with a
-lagging or stopped series. About 5 s, most of it `Plan` admitting each draw.
-`evals/rolling_anchor/run.py` runs the full count.
+500 admitted plans from a fixed seed, run as admitted and as translation
+restates them, in the world each was planned over, one with newer years and one
+with a lagging or stopped series. About 8 s, most of it compiling each plan and
+each restated one against the live schemas. `evals/rolling_anchor/run.py` runs
+the full count.
 
 `evals/` sits outside the workspace, so the generator is loaded by file path.
 """
@@ -35,7 +36,7 @@ WorldKind = generator.WorldKind
 
 @pytest.fixture(scope="module")
 def tally():
-    return generator.tally(seed=0, count=3_000)
+    return generator.tally(seed=0, count=500)
 
 
 def test_plans_run_empty_as_admitted_are_refused_at_translation(tally) -> None:
@@ -48,6 +49,13 @@ def test_plans_run_empty_as_admitted_are_refused_at_translation(tally) -> None:
 @pytest.mark.parametrize("kind", list(WorldKind))
 def test_no_translated_run_reads_years_no_series_holds(tally, kind) -> None:
     assert tally.translated[kind][Outcome.EMPTY] == 0
+
+
+def test_every_plan_admitted_and_every_restatement_admitted_compiles(tally) -> None:
+    # Restated reads over a dataset's whole history are among them.
+    assert tally.whole_history > 0
+    assert tally.uncompiled == 0
+    assert tally.translated[WorldKind.SAME][Outcome.RESTATEMENT_UNCOMPILED] == 0
 
 
 def test_newer_years_never_trip_the_run_check(tally) -> None:

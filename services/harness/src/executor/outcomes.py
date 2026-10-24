@@ -19,7 +19,7 @@ from planner.records import Identifier, Period, SpecId, StrictModel
 from planner.workflow import ToolId
 from pydantic import Field, JsonValue, TypeAdapter
 
-from executor.classify import ToolFailure
+from executor.classify import Disposition, ToolFailure, classify_refusal, is_harness_fault
 
 # The session-state slot holding the latest `RunOutcome`. Separate from the
 # plan's own slot, so the plan stays a control record.
@@ -276,9 +276,9 @@ def save_outcome(
 
 
 # What the orchestrator is told of a stop no tool refused and no evidence check
-# explains, by its kind. `Refused.detail` stays out of the hand-back: it can
-# quote an exception, the ledger's failure reason or literal spec ids, so it is
-# logged instead.
+# explains, by its kind. `Refused.detail` stays out of the hand-back, since it
+# can quote an exception, the ledger's failure reason or literal spec ids, and
+# is logged instead.
 STOP_MESSAGES: dict[RefusalKind, str] = {
     RefusalKind.NOT_APPROVED: "the calculation was not approved",
     RefusalKind.STALE_REVISION: "the calculation changed after it was approved",
@@ -304,6 +304,61 @@ STOP_MESSAGES: dict[RefusalKind, str] = {
 }
 
 
+class StopCause(StrEnum):
+    """The cause of a refused run's stop, which decides where a caller outside the run routes it."""
+
+    # A later try can get past it.
+    TRANSIENT = "transient"
+    # The compiler or the run wrote something wrong, or a server failed of
+    # itself, so nothing the user asked for is wrong.
+    HARNESS = "harness"
+    # A fact of the data or of the plan, which the user decides on.
+    DATA = "data"
+
+
+# The cause of a stop no tool refused, by its kind. The approval, revision and
+# ledger kinds are the run's own state, so a stop on one is no fact of the data.
+# A stop a tool refused is told by its refusal (`stop_cause`).
+STOP_CAUSES: dict[RefusalKind, StopCause] = {
+    RefusalKind.NOT_APPROVED: StopCause.HARNESS,
+    RefusalKind.STALE_REVISION: StopCause.HARNESS,
+    RefusalKind.SURFACE_CHANGED: StopCause.HARNESS,
+    RefusalKind.TRANSPORT_FAILED: StopCause.TRANSIENT,
+    RefusalKind.BINDING_INVALID: StopCause.HARNESS,
+    RefusalKind.STEP_REFUSED: StopCause.HARNESS,
+    RefusalKind.STEP_RESULT_UNUSABLE: StopCause.HARNESS,
+    RefusalKind.REQUIREMENT_UNMET: StopCause.DATA,
+    RefusalKind.EMPTY_ANSWER: StopCause.DATA,
+    RefusalKind.SHAPE_MISMATCH: StopCause.HARNESS,
+    RefusalKind.COLUMN_UNBOUND: StopCause.HARNESS,
+    RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET: StopCause.DATA,
+    RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN: StopCause.DATA,
+    RefusalKind.AUTHORISATION_EXPIRED: StopCause.HARNESS,
+    RefusalKind.MANIFEST_OUTSIDE_AUTHORISATION: StopCause.HARNESS,
+    RefusalKind.AUTHORISATION_MISMATCH: StopCause.HARNESS,
+    RefusalKind.RUN_ABANDONED: StopCause.HARNESS,
+}
+
+
+def stop_cause(outcome: Refused) -> StopCause:
+    """Whose `outcome`'s stop is.
+
+    A stop carrying a tool's refusal is transient when the tool says waiting
+    helps (`classify_refusal`), the harness's when the code says the harness
+    wrote the call wrong or a server failed of itself (`is_harness_fault`),
+    and the data's otherwise. Any other stop is told by its kind
+    (`STOP_CAUSES`).
+    """
+    failure = outcome.payload
+    if failure is None:
+        return STOP_CAUSES[outcome.refusal]
+    if classify_refusal(failure) is Disposition.RETRY_LATER:
+        return StopCause.TRANSIENT
+    if is_harness_fault(failure):
+        return StopCause.HARNESS
+    return StopCause.DATA
+
+
 def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
     """The step a stopped run failed at, as its caller is told it: `step_id`, `tool`, `code` and `message`.
 
@@ -326,20 +381,17 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
             "message": outcome.refusal.message
             or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
         }
-    # `outcome.detail` wraps the tool's own text ("'aggregate' refused:
-    # ..."), but only when the call left one -- with no `result.text`,
-    # `_refused` falls back to `failure.code` instead of `failure.message`
-    # (`executor.run._Run._stopped_by_refusal`), so `detail` is not a
-    # reliable stand-in for what the tool actually said. `payload`, set on
-    # every `STEP_REFUSED` stop, carries the tool's own `code` and
-    # `message` straight from its `ToolFailure`; a `Refused` raised for any
+    # `payload`, set on every `STEP_REFUSED` stop, carries the tool's own
+    # `code` and `message` from its `ToolFailure`. `outcome.detail` wraps the
+    # tool's text ("'aggregate' refused: ...") only when the call left one,
+    # since `_refused` falls back to `failure.code` with no `result.text`
+    # (`executor.run._Run._stopped_by_refusal`). A `Refused` raised for any
     # other reason (`EMPTY_ANSWER`, `SHAPE_MISMATCH`, ...) has no tool call
-    # to report and is told by its kind (`STOP_MESSAGES`) -- unless it
-    # carries `issues` (`executor.run._Run._check_evidence`'s
-    # `REQUIREMENT_UNMET`, the only source of them): `outcome.detail`
-    # there is the generic "requirement X is not met by what Y returned",
-    # naming neither which of `check_evidence`'s ten sub-checks fired nor
-    # what it found versus what the plan required, so the specific
+    # to report and is told by its kind (`STOP_MESSAGES`), unless it carries
+    # `issues` (`executor.run._Run._check_evidence`'s `REQUIREMENT_UNMET` is
+    # their only source). `outcome.detail` there is the generic "requirement X
+    # is not met by what Y returned", which names no sub-check of
+    # `check_evidence` and no expected or actual value, so the specific
     # `EvidenceIssueCode` and its own expected/actual detail lead instead.
     if outcome.payload is not None:
         return _refused_step(step_id=outcome.step_id, failure=outcome.payload)
@@ -362,11 +414,11 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
 def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any]:
     """`failed_step` for a step the tool itself refused.
 
-    A tool's `fix` can carry its own `remedy`: one sentence written for the
-    end user (`data_mcp.tool_errors`: an `over_ceiling` on
-    `member_cardinality`, and a mint apis refuses `member_not_resolvable`),
-    not the code/detail prose the rest of `fix` holds for a retrying caller.
-    `plan_done` hands it to the orchestrator under `failed_step`.
+    A tool's `fix` can carry its own `remedy`, one sentence written for the
+    end user, where the rest of `fix` holds code/detail prose for a retrying
+    caller. `data_mcp.tool_errors` sets one for an `over_ceiling` on
+    `member_cardinality` and for the `member_not_resolvable` a mint apis
+    refuses. `plan_done` hands it to the orchestrator under `failed_step`.
     """
     failed: dict[str, Any] = {
         "step_id": step_id,
