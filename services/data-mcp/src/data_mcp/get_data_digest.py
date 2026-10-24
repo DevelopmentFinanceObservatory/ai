@@ -327,10 +327,7 @@ def render_get_data_digest(
     ]
     if breakdown is not None:
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
-    sections.extend(
-        _left_out_totals_line(left_out, entity_labels)
-        for left_out in party_totals_left_out(manifest.trace)
-    )
+    sections.extend(_left_out_totals_lines(party_totals_left_out(manifest.trace), entity_labels))
     sections.extend(_warning_lines(shown_coverage))
     if note := period_note(manifest.coverage.model_dump(mode="json")):
         sections.append(note)
@@ -582,23 +579,45 @@ def _gap_words(path: str) -> str:
     return " ".join(named).replace("_", " ")
 
 
+def _left_out_totals_lines(
+    entries: Sequence[PartyTotalsLeftOut], entity_labels: Mapping[str, str]
+) -> list[str]:
+    """The lines naming the group totals apis left out of the frame on each party role
+    (`options.without_party_totals`), one per entry, each total by its label when this call
+    resolved it. The population a search names for a side's whole total follows the last line
+    of the role, once however many datasets the role lost totals in."""
+    last_of_role = {entry.role: index for index, entry in enumerate(entries)}
+    lines = []
+    for index, entry in enumerate(entries):
+        line = _left_out_totals_line(entry, entity_labels)
+        population = WHOLE_SIDE_POPULATIONS.get(entry.role)
+        if population is not None and last_of_role[entry.role] == index:
+            line = (
+                f"{line} For the total across the whole side, search again naming the "
+                f'population ("{population}") with no operation over that side.'
+            )
+        lines.append(line)
+    return lines
+
+
 def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[str, str]) -> str:
-    """The line naming the group totals apis left out of the frame on one party role
-    (`options.without_party_totals`), each by its label when this call resolved it, and the
-    population a search names for that side's whole total when the role has one."""
+    """The line naming the group totals one entry left out of its party role. The entry's
+    scope follows the role: a provenance names the dataset by its dcid, since the manifest
+    carries no label for it; a null provenance says the rows carry no dataset; an entry
+    recorded without the key comes from a trace whose cut covered every dataset, so it
+    names none."""
     totals = [entity_labels.get(ref, ref) for ref in left_out.entities]
     noun = "group total" if len(totals) == 1 else "group totals"
     names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
-    line = (
-        f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
-        "frame holds that side's other parties."
-    )
-    population = WHOLE_SIDE_POPULATIONS.get(left_out.role)
-    if population is None:
-        return line
+    if "provenance" not in left_out.model_fields_set:
+        scope = ""
+    elif left_out.provenance is None:
+        scope = " in the rows that carry no dataset"
+    else:
+        scope = f" in {left_out.provenance}"
     return (
-        f"{line} For the total across the whole side, search again naming the population "
-        f'("{population}") with no operation over that side.'
+        f"Left out of the frame: {len(totals)} {noun} on {left_out.role}{scope} "
+        f"({names}); the frame holds that side's other parties."
     )
 
 
