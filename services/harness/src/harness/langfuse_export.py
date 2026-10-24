@@ -1,14 +1,21 @@
 """Loads Langfuse observation rows into BigQuery. Run as `python -m harness.langfuse_export`.
 
-Each run reads `GET /api/public/v2/observations` for one Langfuse environment,
-one UTC day at a time, and replaces that day's partition of the BigQuery table
-`observations`, which is day-partitioned on `start_time`. The days are the latest
-loaded day minus one through today, plus every day Langfuse still shows whole
-(`retained_from` on) whose observation count, from one `GET /api/public/v2/metrics`
-query grouped by day, differs from its partition's row count. An empty table is
-backfilled from `BACKFILL_FLOOR`, the first day the prod project holds data. A
-run that fails part-way leaves every day it reached replaced whole and every
-other day as it was, and the next run's count comparison picks up the gap.
+Each run reads `GET /api/public/v2/observations` for one Langfuse environment, one
+UTC day at a time, and replaces that day's partition of the BigQuery table
+`observations`, which is day-partitioned on `start_time`. A load adds any column
+of `SCHEMA` the table lacks, which rows loaded earlier hold as NULL until their
+day is replaced. The days are the latest loaded day minus one through today, plus
+every day Langfuse still shows whole (`retained_from` on) whose observation count,
+from one `GET /api/public/v2/metrics` query grouped by day, differs from its
+partition's row count. An empty table is backfilled from `BACKFILL_FLOOR`, the
+first day the prod project holds data. `--from DAY` adds every day from DAY
+through today to the window, under the same rules, to re-read history after a
+column is added: run it once with `--from 2026-10-05` after `cached_input_tokens`
+ships, before 2026-11-04, when Langfuse's access window starts to hide 2026-10-05.
+A run that fails part-way leaves every day it reached replaced whole and every
+other day as it was. For the scheduled window, the next run's count comparison
+picks up the gap. A `--from` run that stops part-way is repaired by running it
+again, which is safe because every replace is whole-day and never shrinks.
 
 A replace never shrinks a partition: a day that reads fewer rows than its
 partition holds, none included, keeps the partition and prints both counts.
@@ -25,7 +32,10 @@ project read as empty and prod has had turns every day since `BACKFILL_FLOOR`.
 Each day prints a line as it is replaced or kept, and a failure prints the day it
 stopped on before the error.
 
-The rows carry ids, names, the model, times, tokens and cost. Requests omit the
+The rows carry ids, names, the model, times, tokens and cost. `input_tokens` is
+Langfuse's `inputUsage`, which includes the cached input tokens, and
+`cached_input_tokens` is `usageDetails.input_cached_tokens`, NULL when the
+observation has no such key. Requests omit the
 `io` and `metadata` field groups, so prompts and answers stay in
 Langfuse, and `observation_row` copies named fields only, which keeps
 `statusMessage` (it can echo user input) and `userId` out of BigQuery.
@@ -35,9 +45,9 @@ Langfuse Cloud counts every page against the organisation's General API bucket
 `REQUEST_INTERVAL_S`. A 429 waits for its `Retry-After`. A 5xx or a transport
 error is retried with backoff.
 
-`--check-day DAY` reads one day and compares the row count and summed cost the
-mapping produces with `GET /api/public/v2/metrics` for the same day and
-environment. It writes nothing.
+`--check-day DAY` reads one day and compares the row count, summed cost and summed
+cached input tokens the mapping produces with `GET /api/public/v2/metrics` for the
+same day and environment. It writes nothing.
 
 Settings come from the environment or `.env`: `LANGFUSE_PUBLIC_KEY`,
 `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, `LANGFUSE_EXPORT_ENVIRONMENT`, and for
@@ -97,6 +107,7 @@ SCHEMA = [
     bigquery.SchemaField("latency_seconds", "FLOAT64"),
     bigquery.SchemaField("time_to_first_token_seconds", "FLOAT64"),
     bigquery.SchemaField("input_tokens", "INT64"),
+    bigquery.SchemaField("cached_input_tokens", "INT64"),
     bigquery.SchemaField("output_tokens", "INT64"),
     bigquery.SchemaField("total_tokens", "INT64"),
     bigquery.SchemaField("input_cost_usd", "FLOAT64"),
@@ -165,6 +176,7 @@ def observation_row(observation: Mapping[str, Any]) -> dict[str, Any]:
         "latency_seconds": observation.get("latency"),
         "time_to_first_token_seconds": observation.get("timeToFirstToken"),
         "input_tokens": observation.get("inputUsage"),
+        "cached_input_tokens": (observation.get("usageDetails") or {}).get("input_cached_tokens"),
         "output_tokens": observation.get("outputUsage"),
         "total_tokens": observation.get("totalUsage"),
         "input_cost_usd": observation.get("inputCost"),
@@ -192,11 +204,15 @@ def export_days(
     today: date,
     langfuse: Mapping[date, int],
     held: Mapping[date, int],
+    since: date | None = None,
 ) -> list[date]:
     """The days a run replaces: the latest loaded day minus one (or `BACKFILL_FLOOR`
-    when nothing is loaded) through today, and every day from `retained_from` on
-    whose Langfuse count differs from its partition's row count."""
+    when nothing is loaded) through today, or `since` through today when `since` is
+    earlier, and every day from `retained_from` on whose Langfuse count differs from
+    its partition's row count."""
     first = _catch_up_from(latest_loaded)
+    if since is not None:
+        first = min(first, since)
     days = {first + timedelta(days=offset) for offset in range((today - first).days + 1)}
     retained = retained_from(today)
     days.update(
@@ -277,14 +293,21 @@ class LangfuseReader:
             params["cursor"] = cursor
 
     def _metrics(
-        self, *, first: date, last: date, metrics: list[dict[str, str]], by_day: bool
+        self,
+        *,
+        first: date,
+        last: date,
+        metrics: list[dict[str, str]],
+        dimensions: list[dict[str, str]] | None = None,
+        by_day: bool,
     ) -> list[dict[str, Any]]:
         """The metrics rows for the environment's observations from `first` through
-        `last` (UTC), one row a day when `by_day` and one row otherwise."""
+        `last` (UTC), one row a day when `by_day` and one row otherwise, for each
+        value of `dimensions`."""
         query: dict[str, Any] = {
             "view": "observations",
             "metrics": metrics,
-            "dimensions": [],
+            "dimensions": dimensions or [],
             "filters": [
                 {
                     "column": "environment",
@@ -311,6 +334,22 @@ class LangfuseReader:
             by_day=True,
         )
         return {date.fromisoformat(row["time_dimension"]): int(row["count_count"]) for row in rows}
+
+    def day_cached_input_tokens(self, day: date) -> int:
+        """The summed `input_cached_tokens` usage Langfuse's metrics report for `day`.
+        The `usageByType` measure sums each usage key, grouped by `usageType`."""
+        rows = self._metrics(
+            first=day,
+            last=day,
+            metrics=[{"measure": "usageByType", "aggregation": "sum"}],
+            dimensions=[{"field": "usageType"}],
+            by_day=False,
+        )
+        return sum(
+            int(row["sum_usageByType"] or 0)
+            for row in rows
+            if row["usageType"] == "input_cached_tokens"
+        )
 
     def day_totals(self, day: date) -> tuple[int, float]:
         """The observation count and summed total cost Langfuse's metrics report for `day`."""
@@ -348,7 +387,8 @@ def partition_row_counts(bq: bigquery.Client, table_id: str, first: date) -> dic
 
 
 def replace_day(bq: bigquery.Client, table_id: str, day: date, rows: list[dict[str, Any]]) -> None:
-    """Replace `day`'s partition with `rows` in one load job."""
+    """Replace `day`'s partition with `rows` in one load job, adding any `SCHEMA`
+    column the table lacks."""
     partition = f"{table_id}${day:%Y%m%d}"
     config = bigquery.LoadJobConfig(
         schema=SCHEMA,
@@ -361,10 +401,16 @@ def replace_day(bq: bigquery.Client, table_id: str, day: date, rows: list[dict[s
 
 
 def run_export(
-    *, reader: LangfuseReader, bq: bigquery.Client, table_id: str, today: date
+    *,
+    reader: LangfuseReader,
+    bq: bigquery.Client,
+    table_id: str,
+    today: date,
+    since: date | None = None,
 ) -> list[tuple[date, int]]:
-    """Create the table if absent and replace every day `export_days` names whose
-    read holds rows and at least as many as its partition. Returns each replaced day
+    """Create the table if absent and replace every day `export_days` names, with
+    `since` widening the window, whose read holds rows and at least as many as its
+    partition. Returns each replaced day
     with its row count. Raises `EmptyWindowError` when every day reads no rows, and
     otherwise `IncompleteDaysError` when a day from `retained_from` on read fewer
     rows than its partition or Langfuse's count."""
@@ -374,8 +420,10 @@ def run_export(
     latest = latest_loaded_day(bq, table_id)
     retained = retained_from(today)
     langfuse = reader.day_counts(first=retained, last=today)
-    held = partition_row_counts(bq, table_id, min(_catch_up_from(latest), retained))
-    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held)
+    held = partition_row_counts(
+        bq, table_id, min(_catch_up_from(latest), retained, since or retained)
+    )
+    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held, since=since)
     loaded = []
     short = []
     read_any = False
@@ -422,11 +470,18 @@ def check_day(*, reader: LangfuseReader, day: date) -> tuple[bool, str]:
     Returns whether they match and a line stating both sides."""
     rows = [observation_row(observation) for observation in reader.observations(day)]
     cost = math.fsum(row["total_cost_usd"] or 0.0 for row in rows)
+    cached = sum(row["cached_input_tokens"] or 0 for row in rows)
     metric_count, metric_cost = reader.day_totals(day)
-    matched = len(rows) == metric_count and math.isclose(cost, metric_cost, abs_tol=1e-9)
+    metric_cached = reader.day_cached_input_tokens(day)
+    matched = (
+        len(rows) == metric_count
+        and math.isclose(cost, metric_cost, abs_tol=1e-9)
+        and cached == metric_cached
+    )
     line = (
-        f"{day}: rows {len(rows)} cost {cost:.9f}; "
-        f"metrics count {metric_count} totalCost {metric_cost:.9f}; "
+        f"{day}: rows {len(rows)} cost {cost:.9f} cached input tokens {cached}; "
+        f"metrics count {metric_count} totalCost {metric_cost:.9f} "
+        f"input_cached_tokens {metric_cached}; "
         f"{'match' if matched else 'MISMATCH'}"
     )
     return matched, line
@@ -437,11 +492,19 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         prog="python -m harness.langfuse_export",
         description="Replace recent days of Langfuse observations in BigQuery.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check-day",
         type=date.fromisoformat,
         metavar="DAY",
         help="compare one day's mapped rows with the metrics API and write nothing",
+    )
+    mode.add_argument(
+        "--from",
+        dest="since",
+        type=date.fromisoformat,
+        metavar="DAY",
+        help="also replace every day from DAY through today",
     )
     return parser.parse_args(argv)
 
@@ -472,6 +535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             bq=bigquery.Client(project=settings.export_bq_project),
             table_id=_table_id(settings),
             today=datetime.now(UTC).date(),
+            since=arguments.since,
         )
     return 0
 
