@@ -388,6 +388,31 @@ def top_members(
     )
 
 
+def latest_shared_period(
+    *, rows: Sequence[Mapping[str, Any]], select: dict[str, Any]
+) -> str | None:
+    """The latest period at which every series among `rows` matching `select`
+    holds a value, the period apis draws a bar chart or a stat card at when
+    its intent names no window; None when no rows match or the series share
+    no period. A series is the rows sharing every coordinate, and cells are
+    compared as apis spells them in a select (`coordinate_text`)."""
+    held: dict[tuple[tuple[str, Any], ...], set[str]] = {}
+    for row in rows:
+        keyed = {
+            name: cell if name in _NOT_COORDINATES else coordinate_text(cell)
+            for name, cell in row.items()
+        }
+        if keyed.get("value") is None or not all(
+            keyed.get(name) in value if isinstance(value, list) else keyed.get(name) == value
+            for name, value in select.items()
+        ):
+            continue
+        series = tuple(sorted((n, c) for n, c in keyed.items() if n not in _NOT_COORDINATES))
+        held.setdefault(series, set()).add(str(keyed["time_period"]))
+    shared = set.intersection(*held.values()) if held else set()
+    return max(shared, default=None)
+
+
 def comparable_members(cells: Mapping[str, str], *, dimension: str) -> frozenset[str]:
     """The members of `dimension` that one ranking compares, from each member's
     served kind or type cell (`common.place_type`): on a flow party role, the

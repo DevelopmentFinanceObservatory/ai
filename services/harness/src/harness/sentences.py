@@ -590,6 +590,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "release_mismatch",
             HarnessCode.SELECT_INVALID,
             HarnessCode.CHART_NOT_DRAWN,
+            HarnessCode.TITLE_NAMES_PERIOD,
             HarnessCode.FIELD_CREATE_ONLY,
             HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
             HarnessCode.ROLLING_REPLAY_REFUSED,
@@ -737,6 +738,7 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
         "That part of a card is set when the card is made", "so ask for a new card instead"
     ),
     HarnessCode.SELECT_INVALID: _MODEL_MAY_CORRECT,
+    HarnessCode.TITLE_NAMES_PERIOD: _MODEL_MAY_CORRECT,
     HarnessCode.TITLE_QUOTES_ROLLING_PERIOD: FailureText(
         "The title names a period this card will move past as newer data arrives",
         "so ask for a title without it",

@@ -751,6 +751,20 @@ _SLIPPED = {**_SEARCH, "open_roles": ["purpose"]}
 _FOUND = {"parts": []}
 _CHARTS = {"charts": [{"title": "Aid to Kenya"}]}
 _OTHER_CHARTS = {"charts": [{"title": "Aid to Kenya by donor"}]}
+_BAR = {"frame": "f1", "type": "bar_chart"}
+_NAMED_CHARTS = {"charts": [{**_BAR, "title": "Aid to Kenya in 2024"}]}
+_CORRECTED_CHARTS = {"charts": [{**_BAR, "title": "Aid to Kenya"}]}
+# `make_charts` refusing a chart whose title names a year of its frame.
+_TITLE_REFUSED = {
+    "charts": [
+        {
+            "title": "Aid to Kenya in 2024",
+            "error": "The title names 2024.",
+            "code": "title_names_period",
+            "retry_mode": "correct_and_retry",
+        }
+    ]
+}
 
 
 def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Event:
@@ -866,6 +880,80 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
             ],
             [StepStatus.COMPLETE, StepStatus.FAILED],
         ),
+        # A chart refused for a title the model corrects, then the corrected call.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", _CORRECTED_CHARTS),
+                _response("c2", "make_charts", _CORRECTED_CHARTS),
+            ],
+            [StepStatus.COMPLETE],
+        ),
+        # The corrected chart drawn beside others corrects it too.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call(
+                    "c2",
+                    "make_charts",
+                    {"charts": [{"frame": "f2", "type": "table"}, *_CORRECTED_CHARTS["charts"]]},
+                ),
+                _response("c2", "make_charts", {"charts": [{"title": "t"}, {"title": "Aid"}]}),
+            ],
+            [StepStatus.COMPLETE],
+        ),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A chart of another frame or another type drawn later leaves the
+        # refused one undrawn.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", {"charts": [{**_BAR, "type": "table"}]}),
+                _response("c2", "make_charts", _CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", {"charts": [{**_BAR, "frame": "f2"}]}),
+                _response("c2", "make_charts", _CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A chart the platform failed beside it is no slip to correct.
+        (
+            lambda: [
+                _call(
+                    "c1",
+                    "make_charts",
+                    {"charts": [*_NAMED_CHARTS["charts"], {"frame": "f2", "type": "table"}]},
+                ),
+                _response(
+                    "c1",
+                    "make_charts",
+                    {
+                        "charts": [
+                            *_TITLE_REFUSED["charts"],
+                            {"title": "Aid to Kenya by donor", **_FAULT},
+                        ]
+                    },
+                ),
+                _call("c2", "make_charts", _CORRECTED_CHARTS),
+                _response("c2", "make_charts", _CORRECTED_CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
     ],
     ids=[
         "slip-slip-success",
@@ -876,6 +964,12 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
         "other-tool",
         "beside-the-slip",
         "keyless-failure-then-success",
+        "chart-refused-then-corrected",
+        "chart-corrected-beside-others",
+        "chart-refused-uncorrected",
+        "chart-refused-then-another-type",
+        "chart-refused-then-another-frame",
+        "chart-refused-beside-a-fault",
     ],
 )
 def test_a_later_call_of_its_tool_that_completes_settles_a_slip(events, settled):

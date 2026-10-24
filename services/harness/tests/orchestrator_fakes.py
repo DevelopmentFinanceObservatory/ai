@@ -195,7 +195,7 @@ def chart(
     frame: str,
     *,
     type_: str = "line_chart",
-    title: str = "Life expectancy in Kenya, 1960 to 2023",
+    title: str = "Life expectancy in Kenya",
     select: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One `make_charts` chart on `frame`, its `select` sent as `select_json`.

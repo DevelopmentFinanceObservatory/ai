@@ -93,6 +93,9 @@ class HarnessCode(StrEnum):
     DEADLINE_EXCEEDED = "deadline_exceeded"
     # A chart the `make_charts` tool was asked for and did not draw.
     CHART_NOT_DRAWN = "chart_not_drawn"
+    # A `make_charts` title naming a year of the frame it draws: the tool
+    # writes a card's period.
+    TITLE_NAMES_PERIOD = "title_names_period"
     # A tool called after its budget of calls for the turn is spent.
     TOOL_BUDGET_SPENT = "tool_budget_spent"
     # A tool call whose arguments do not fit the tool's schema.
@@ -143,6 +146,7 @@ class HarnessCode(StrEnum):
 _RETRY_MODES: Mapping[HarnessCode, RetryMode] = {
     HarnessCode.TOOL_ARGUMENTS_INVALID: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.SELECT_INVALID: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.TITLE_NAMES_PERIOD: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.FIELD_CREATE_ONLY: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.STATE_NOT_SAVED: RetryMode.RETRY_AFTER_DELAY,
     HarnessCode.MEMBER_KIND_UNREAD: RetryMode.RETRY_AFTER_DELAY,
