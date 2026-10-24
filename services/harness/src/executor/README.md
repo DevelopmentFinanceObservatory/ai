@@ -174,7 +174,11 @@ on the evidence instead of stopping it, and so is a named entity the approved
 source resolved but the retrieval holds no series for, such as a donor whose
 reporting stopped before the period, while another named entity on the same
 column of the approved source remains: the run answers for the rest, and the answer names the one left
-out (`harness.graph.answer._left_out_entity_sentences`). A step that narrows
+out (`harness.graph.answer._left_out_entity_sentences`). A series that starts
+late, ends early or misses years is recorded as `window_short` or
+`coverage_gaps`, naming its entities (`EvidenceIssue.entities`), and the answer
+states it where it misses the period the model wrote
+(`harness.graph.answer._short_series_sentences`). A step that narrows
 to left-out entities alone, a side narrowed to one or a filter keeping only
 them, stops the run as `requirement_unmet` before the first derived step, naming
 that step (`_check_left_out_narrowings`, reading the narrowings off the

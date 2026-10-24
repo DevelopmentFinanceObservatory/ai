@@ -27,7 +27,13 @@ from compiler.sources import member_digest, source_from_spec_block, stat_var_rea
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
 from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
-from planner.records import EvidenceIssue, Period, ResolvedSourceMention, StatVarReading
+from planner.records import (
+    EvidenceIssue,
+    Period,
+    ResolvedSourceMention,
+    SeriesEntity,
+    StatVarReading,
+)
 from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -1433,6 +1439,86 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
         for issue in issues
         if issue.code in _PER_SERIES_CODES
     ] == found
+
+
+@pytest.mark.parametrize(
+    ("approved", "kenya"),
+    [
+        pytest.param(True, "Kenya", id="labelled-by-the-approved-source"),
+        pytest.param(False, None, id="unlabelled-with-no-approved-source"),
+    ],
+)
+def test_a_short_series_finding_names_its_entities(
+    requirement: RequirementFactory, source: SourceFactory, approved: bool, kenya: str | None
+) -> None:
+    """A series ending in 2021 with a year missing is short of 2015-2024 on
+    both counts; each finding carries its entities, with the label the
+    approved source gives a ref and none where it labels none."""
+    named = (
+        SeriesEntity(role="recipient", ref="country/KEN", label=kenya),
+        SeriesEntity(role="donor", ref="donor/X"),
+    )
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                entities=[
+                    {"role": "recipient", "ref": "country/KEN"},
+                    {"role": "donor", "ref": "donor/X"},
+                ],
+                observations=6,
+                latest={"value": 2.0, "period": "2021"},
+            )
+        ),
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=source() if approved else None)
+
+    assert [
+        (issue.code, issue.entities)
+        for issue in issues
+        if issue.code in {EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS}
+    ] == [(EvidenceIssueCode.WINDOW_SHORT, named), (EvidenceIssueCode.COVERAGE_GAPS, named)]
+
+
+@pytest.mark.parametrize(
+    ("end_open", "on_missing", "found"),
+    [
+        # Kenya's series covers the 2015-2024 asked for, but Ghana's runs to
+        # 2025, the newest year retrieved: Kenya's is short of that, and
+        # meets the requirement however it treats gaps.
+        pytest.param(True, "report_gaps", [("country/KEN", Severity.WARNING)], id="open"),
+        pytest.param(True, "fail", [("country/KEN", Severity.WARNING)], id="open-failing-on-gaps"),
+        pytest.param(False, "report_gaps", [], id="closed"),
+    ],
+)
+def test_an_open_period_holds_each_series_to_the_newest_year_retrieved(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    end_open: bool,
+    on_missing: str,
+    found: list[tuple[str, Severity]],
+) -> None:
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid"),
+            _stat(
+                "DebtServicePaid",
+                entities=[{"role": "recipient", "ref": "country/GHA"}],
+                observations=11,
+                latest={"value": 2.0, "period": "2025"},
+            ),
+        ),
+    )
+    asked = requirement(period_end_open=end_open, coverage=Coverage(on_missing=on_missing))
+
+    issues = check_evidence(asked, evidence, approved=source())
+
+    short = [issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT]
+    assert [(issue.entities[0].ref, issue.severity) for issue in short] == found
+    assert all(issue.required == {"start": 2015, "end": 2025} for issue in short)
 
 
 @pytest.mark.parametrize(

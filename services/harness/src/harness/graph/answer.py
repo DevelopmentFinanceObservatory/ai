@@ -10,6 +10,7 @@ before the run (`store_run_plan`, `stored_run_plan`).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import (
     Callable,
     Collection,
@@ -22,6 +23,7 @@ from typing import Any, NamedTuple
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
+from common.rolling import flat_populations
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -29,6 +31,7 @@ from executor.artifacts import declared_shape, parse_manifest
 from executor.ledger import RunLedger, store_faults
 from executor.outcomes import (
     Accepted,
+    EvidenceRecord,
     RunOutcome,
     StepRecord,
 )
@@ -42,11 +45,13 @@ from planner.plan import (
     QuotientRequirement,
     ResolvedBy,
     ShareOfRequirement,
+    authored,
+    copy_origins,
     frame_shapes,
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import EvidenceIssueCode, Reduction
+from planner.records import EvidenceIssueCode, Period, Reduction, SeriesEntity
 from planner.shapes import PLACE_PHRASE, join_key_pairs
 from planner.workflow import ReadingSetBy, ResolvedGroup, SelectedSource, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
@@ -474,7 +479,9 @@ def answer_notes(
     answer frame (`answer_frames`) or only those of `terminals`: one per
     summed family (`_stat_var_totals`), one per named set a retrieval reads
     (`_group_reading_sentences`), one per entity a retrieval left out
-    (`_left_out_entity_sentences`), one per step that left keys out
+    (`_left_out_entity_sentences`), one per window of the user's that a
+    series misses part of and one per window a series misses years inside
+    (`_short_series_sentences`), one per step that left keys out
     (`_dropped_key_sentences`), then one per one-year retrieval when a newer
     year holds data, the year served is not the elected year, or a fuller
     earlier year is named (`_period_notes`)."""
@@ -482,6 +489,7 @@ def answer_notes(
         *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
         *_group_reading_sentences(outcome, plan=plan, terminals=terminals),
         *_left_out_entity_sentences(outcome, plan=plan, terminals=terminals),
+        *_short_series_sentences(outcome, plan=plan, terminals=terminals),
         *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
         *_period_notes(tool_surface, outcome, plan=plan, terminals=terminals),
     ]
@@ -659,6 +667,49 @@ def _group_column(group: ResolvedGroup, role_keys: Sequence[str] | None) -> str 
     return roles[0] if len(roles) == 1 else None
 
 
+def _answer_evidence(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[EvidenceRecord]:
+    """The evidence of each retrieval under an answer frame (`answer_frames`),
+    or only under those of `terminals`, listed per answer frame in the plan's
+    step order, so a retrieval under two frames comes twice."""
+    return [record for _, record in _terminal_evidence(outcome, plan=plan, terminals=terminals)]
+
+
+def _terminal_evidence(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[tuple[str, EvidenceRecord]]:
+    """`_answer_evidence`, each record beside the answer frame's step id it
+    is listed under."""
+    workflow = plan.workflow
+    if workflow is None:
+        return []
+    retrieval_step_ids = frozenset(binding.step_id for binding in workflow.evidence_bindings)
+    steps_by_id = {step.id: step for step in workflow.steps}
+    step_order = {step.id: index for index, step in enumerate(workflow.steps)}
+    evidence_by_step = {record.step_id: record for record in outcome.evidence}
+    memo: dict[str, frozenset[str]] = {}
+    records: list[tuple[str, EvidenceRecord]] = []
+    for terminal_id in answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
+        under = _upstream_retrievals(
+            terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
+        )
+        records.extend(
+            (terminal_id, record)
+            for retrieval_id in sorted(under, key=step_order.__getitem__)
+            if (record := evidence_by_step.get(retrieval_id)) is not None
+        )
+    return records
+
+
 def _left_out_entity_sentences(
     outcome: RunOutcome,
     *,
@@ -672,41 +723,281 @@ def _left_out_entity_sentences(
 
     The sentence names the entity and the years the retrieval holds
     (`EvidenceRecord.window`), in which it has no data. Retrievals are taken
-    in the plan's step order, and identical sentences are stated once.
+    in the plan's step order (`_answer_evidence`), and identical sentences
+    are stated once.
     """
-    workflow = plan.workflow
-    if workflow is None:
-        return []
-    retrieval_step_ids = frozenset(binding.step_id for binding in workflow.evidence_bindings)
-    steps_by_id = {step.id: step for step in workflow.steps}
-    step_order = {step.id: index for index, step in enumerate(workflow.steps)}
-    evidence_by_step = {record.step_id: record for record in outcome.evidence}
-    memo: dict[str, frozenset[str]] = {}
     sentences: list[str] = []
-    for terminal_id in answer_frames(outcome):
-        if terminals is not None and terminal_id not in terminals:
-            continue
-        under = _upstream_retrievals(
-            terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
-        )
-        for retrieval_id in sorted(under, key=step_order.__getitem__):
-            record = evidence_by_step.get(retrieval_id)
-            if record is None:
+    for record in _answer_evidence(outcome, plan=plan, terminals=terminals):
+        window = record.window
+        if window is None:
+            years = "in the years retrieved"
+        elif window.start == window.end:
+            years = f"in {window.start}"
+        else:
+            years = f"from {window.start} to {window.end}"
+        for gap in record.gaps:
+            if gap.code is not EvidenceIssueCode.ENTITY_MISSING:
                 continue
-            window = record.window
-            if window is None:
-                years = "in the years retrieved"
-            elif window.start == window.end:
-                years = f"in {window.start}"
-            else:
-                years = f"from {window.start} to {window.end}"
-            for gap in record.gaps:
-                if gap.code is not EvidenceIssueCode.ENTITY_MISSING:
-                    continue
-                sentence = f"{gap.required} has no data {years} and was left out."
-                if sentence not in sentences:
-                    sentences.append(sentence)
+            sentence = f"{gap.required} has no data {years} and was left out."
+            if sentence not in sentences:
+                sentences.append(sentence)
     return sentences
+
+
+# The most short series one note names; it counts the rest.
+_SHORT_SERIES_NAMED = 3
+
+# A series by the requirement the model wrote that reads it, its StatVar, and
+# its entities' roles and refs.
+type _SeriesKey = tuple[str, str | None, tuple[tuple[str, str], ...]]
+
+
+class _ShortSeries(NamedTuple):
+    """One series a note states: whose it is ("Kenya's"), `None` where the
+    approved source labels one of its entities none; the measure its
+    requirement reads; how it falls short ("ends in 2021"); and the verb
+    phrase, plural and singular, a count of series short the same way
+    takes."""
+
+    owner: str | None
+    measure: str
+    shortfall: str
+    counted: tuple[str, str]
+
+
+def _short_series_sentences(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One note per window of the user's that series of retrievals under an
+    answer frame (`answer_frames`), or only those of `terminals`, miss part
+    of, and one per such window whose series miss years inside it.
+
+    A series is read from the `WINDOW_SHORT` and `COVERAGE_GAPS` findings
+    among its retrieval's `EvidenceRecord.gaps` and held to the user's
+    window (`_users_window`) as the answer frame it is under reads it
+    (`_answer_anchors`). Under rolling steps of the frame's, only a series
+    their newest period was taken over is stated, so a sibling answer over
+    the same retrieval changes neither the window nor the series stated. A
+    series reaching across that window is not stated, even where its
+    retrieval reads from the first year on record and the series starts
+    after it. Missing years are stated only where the retrieval's window
+    (`EvidenceRecord.window`) lies inside the user's, since a finding counts
+    them without saying which. A series is one StatVar's for one set
+    of entities under one requirement the model wrote, so a series two
+    retrievals of a requirement read is stated once (`_short_series_note`
+    words the notes).
+    """
+    written = {
+        requirement.id: requirement
+        for requirement in authored(plan).evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    origins = copy_origins(plan.rolling_copies)
+    steps_by_id = {step.id: step for step in plan.workflow.steps} if plan.workflow else {}
+    anchors: dict[str, dict[str, _Anchoring]] = {}
+    reaches: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
+    holes: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
+    for terminal_id, record in _terminal_evidence(outcome, plan=plan, terminals=terminals):
+        origin = origins.get(record.requirement_id, record.requirement_id)
+        requirement = written.get(origin)
+        if requirement is None:
+            continue
+        if terminal_id not in anchors:
+            anchors[terminal_id] = _answer_anchors(
+                outcome, terminal_id=terminal_id, steps_by_id=steps_by_id
+            )
+        anchoring = anchors[terminal_id].get(record.step_id)
+        window = _users_window(
+            requirement, record, anchor=anchoring.year if anchoring is not None else None
+        )
+        for gap in record.gaps:
+            if not gap.entities:
+                continue
+            if anchoring is not None and not anchoring.counts(gap.entities, spec_id=record.spec_id):
+                continue
+            key = (origin, gap.stat_var, tuple((one.role, one.ref) for one in gap.entities))
+            owner = _owner_of(gap.entities)
+            if gap.code is EvidenceIssueCode.WINDOW_SHORT and isinstance(gap.found, dict):
+                short = _short_reach(Period.model_validate(gap.found), window)
+                if short is not None:
+                    reaches.setdefault(window, {}).setdefault(
+                        key, _ShortSeries(owner, requirement.measure, *short)
+                    )
+            elif (
+                gap.code is EvidenceIssueCode.COVERAGE_GAPS
+                and record.window is not None
+                and window.covers(record.window)
+                and isinstance(gap.found, int)
+                and isinstance(gap.required, int)
+            ):
+                missing = gap.required - gap.found
+                holes.setdefault(window, {}).setdefault(
+                    key,
+                    _ShortSeries(
+                        owner,
+                        requirement.measure,
+                        f"has no data for {missing} of its {gap.required} years",
+                        ("miss years", "misses years"),
+                    ),
+                )
+    return [
+        _short_series_note(by_series, window)
+        for notes in (reaches, holes)
+        for window, by_series in notes.items()
+    ]
+
+
+class _Anchoring(NamedTuple):
+    """How an answer frame's rolling steps read one retrieval: the year of
+    the newest period they stand on, and the flat populations it was taken
+    over (`AnchorResult.populations`)."""
+
+    year: int
+    populations: tuple[Mapping[str, Any], ...]
+
+    def counts(self, entities: Sequence[SeriesEntity], *, spec_id: str) -> bool:
+        """Whether the series of `entities` in the retrieval approved for
+        `spec_id` is one the newest period was taken over.
+
+        A population keeps the series of its dataset whose entity on each
+        column it binds is one of the values bound. A column the series
+        holds no entity on, such as a StatVar's own dimension, keeps it,
+        since its entities cannot say otherwise."""
+        refs = {entity.role: entity.ref for entity in entities}
+        for population in self.populations:
+            bindings = population.get("bindings")
+            if population.get("spec_id") != spec_id or not isinstance(bindings, Mapping):
+                continue
+            if all(refs[column] in values for column, values in bindings.items() if column in refs):
+                return True
+        return False
+
+
+def _answer_anchors(
+    outcome: RunOutcome, *, terminal_id: str, steps_by_id: dict[str, WorkflowStep]
+) -> dict[str, _Anchoring]:
+    """How the rolling steps the answer frame `terminal_id` rests on
+    (`_upstream_steps`, `AnchorResult.steps`) read each retrieval they root
+    (`AnchorResult.roots`), by its step id: at the earliest of their years
+    where groups of them root it, over every population of those groups.
+
+    A retrieval no rolling step of the frame's roots is absent, whatever a
+    sibling answer's rolling steps read of it."""
+    under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
+    anchorings: dict[str, _Anchoring] = {}
+    for anchor in outcome.anchors:
+        head = anchor.period[:4]
+        if not head.isdigit() or under.isdisjoint(anchor.steps):
+            continue
+        populations = tuple(
+            flat_populations(
+                population for population in anchor.populations if isinstance(population, dict)
+            )
+        )
+        for root in anchor.roots:
+            held = anchorings.get(root)
+            anchorings[root] = (
+                _Anchoring(int(head), populations)
+                if held is None
+                else _Anchoring(min(held.year, int(head)), (*held.populations, *populations))
+            )
+    return anchorings
+
+
+def _users_window(
+    requirement: DatasetRequirement, record: EvidenceRecord, *, anchor: int | None
+) -> Period:
+    """The years `requirement` asks of `record`'s retrieval: its period as
+    the model wrote it, ending, where that end is open (`period_end_open`),
+    at the newest year the run read. That is the `anchor` year of the
+    answer's rolling steps the retrieval roots, where it roots any, and
+    otherwise the newest year the retrieval holds (`EvidenceRecord.window`)."""
+    period = requirement.period
+    if not requirement.period_end_open:
+        return period
+    if anchor is not None:
+        end = anchor
+    elif record.window is not None:
+        end = record.window.end
+    else:
+        return period
+    return Period(start=period.start, end=max(end, period.start))
+
+
+def _short_reach(reach: Period, window: Period) -> tuple[str, tuple[str, str]] | None:
+    """How a series reaching over `reach` falls short of `window`, with the
+    verb phrase a count of series short that way takes, or `None` where it
+    reaches across `window`."""
+    if reach.covers(window):
+        return None
+    if reach.start <= window.start:
+        return f"ends in {reach.end}", (f"end before {window.end}", f"ends before {window.end}")
+    if reach.end >= window.end:
+        return f"starts in {reach.start}", (
+            f"start after {window.start}",
+            f"starts after {window.start}",
+        )
+    years = str(reach.start) if reach.start == reach.end else f"{reach.start} to {reach.end}"
+    return f"covers only {years}", _part_of(window)
+
+
+def _part_of(window: Period) -> tuple[str, str]:
+    """The verb phrase, plural and singular, for series covering only part of `window`."""
+    years = f"{window.start} to {window.end}"
+    return f"cover only part of {years}", f"covers only part of {years}"
+
+
+def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
+    """Whose series `entities` hold, as a sentence names them ("Germany's"),
+    or `None` where one of them has no label."""
+    labels = [entity.label for entity in entities]
+    if None in labels:
+        return None
+    name = " and ".join(label for label in labels if label is not None)
+    return f"{name}'" if name.endswith("s") else f"{name}'s"
+
+
+def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries], window: Period) -> str:
+    """The note naming up to `_SHORT_SERIES_NAMED` of the series `short`
+    holds and counting the rest, by their shared shortfall or else as
+    covering part of `window`.
+
+    A series is named by its owner, and by its measure as well where
+    `short` holds series of several requirements the model wrote. One with
+    no owner, or one whose name another series shares, as each StatVar's
+    series of one entity under one requirement does, is counted.
+    """
+    several = len({origin for origin, _, _ in short}) > 1
+    names = [
+        None
+        if one.owner is None
+        else f"{one.owner} series for {one.measure}"
+        if several
+        else f"{one.owner} series"
+        for one in short.values()
+    ]
+    shared = Counter(names)
+    named: list[str] = []
+    rest: list[_ShortSeries] = []
+    for name, one in zip(names, short.values(), strict=True):
+        if name is not None and shared[name] == 1 and len(named) < _SHORT_SERIES_NAMED:
+            named.append(f"{name} {one.shortfall}")
+        else:
+            rest.append(one)
+    parts = list(named)
+    if rest:
+        phrases = {one.counted for one in rest}
+        plural, singular = phrases.pop() if len(phrases) == 1 else _part_of(window)
+        series = "other series" if named else "series"
+        parts.append(
+            f"1 {series} {singular}" if len(rest) == 1 else f"{len(rest)} {series} {plural}"
+        )
+    if len(parts) < 3:
+        return f"{' and '.join(parts)}."
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}."
 
 
 def _dropped_key_sentences(

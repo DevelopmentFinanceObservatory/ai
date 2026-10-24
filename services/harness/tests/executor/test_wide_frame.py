@@ -426,7 +426,7 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
         requirements: Sequence[EvidenceRequirement],
         operations: Sequence[Operation],
         *,
-        terminal: str,
+        terminal: str | Sequence[str],
         discovered: dict[str, SelectedSource] | None = None,
         decisions: Sequence[Decision] = (),
         anchors_read: Sequence[AnchorRead] = (),
@@ -442,7 +442,8 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             ],
             status=PlanStatus.DRAFT,
         )
-        translation = Translation(operations=list(operations), terminal=[terminal])
+        terminals = [terminal] if isinstance(terminal, str) else list(terminal)
+        translation = Translation(operations=list(operations), terminal=terminals)
 
         def compiled_from(plan: Plan, translation: Translation) -> CompileResult:
             result = compile_plan(
@@ -2368,6 +2369,8 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
 
     assert isinstance(read.result, AnchorResult)
     assert (read.planned, read.result.period) == ("2024", "2023")
+    # Translation's read and the run each name the group's retrievals.
+    assert read.result.roots == outcome.anchors[0].roots == ("crs", "crs_health")
     bindings = {PROVIDER: sorted(donor.ref for donor in _MATCHED_DONORS), RECIPIENT: [KENYA.ref]}
     assert _analysis_call(reading, "resolve_anchor")["populations"] == [
         {
@@ -2848,3 +2851,116 @@ async def test_a_step_reading_the_left_out_donor_alone_is_refused_before_any_ver
     assert [name for name, _ in surface.calls] == ["get_data"] * len(
         plan.workflow.evidence_bindings
     )
+
+
+TANZANIA = ResolvedEntity(role="destination", ref="country/TZA", label="Tanzania")
+# Germany's ODA to each recipient ends in its own year.
+_LATEST_ODA = {KENYA: 2021, UGANDA: 2024, TANZANIA: 2022}
+
+
+@pytest.mark.parametrize("with_kenya", [True, False], ids=["beside-kenya", "alone"])
+async def test_an_answer_states_the_short_series_of_its_own_newest_year(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    with_kenya: bool,
+) -> None:
+    # One retrieval of Germany's ODA to Kenya, Uganda and Tanzania, open to
+    # the newest year, under the latest year for Uganda and Tanzania and,
+    # beside it, the latest year for Kenya. Kenya's newest year is 2021, and
+    # Uganda and Tanzania's 2024, which Tanzania's series falls short of.
+    # Each answer states the series of its own newest year: the Kenya branch
+    # neither ends Uganda and Tanzania's window at 2021 nor puts Kenya's
+    # series in it.
+    recipients = tuple(_LATEST_ODA)
+    source = _source(entities=(GERMANY, *recipients)).model_copy(
+        update={"coverage_window": Period(start=2000, end=2024)}
+    )
+    oda = _requirement(donors=("Germany",), recipients=[r.label for r in recipients]).model_copy(
+        update={"period": Period(start=2000, end=2024), "period_end_open": True}
+    )
+    branches = [("kenya", ("Kenya",)), ("others", ("Uganda", "Tanzania"))][not with_kenya :]
+    latest = {
+        id: (
+            EntityIn(names=names, role="recipient"),
+            PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),
+        )
+        for id, names in branches
+    }
+
+    def planned(**restated: Any) -> Plan:
+        return plan_for(
+            [
+                oda,
+                *(
+                    FilterRequirement(
+                        id=id, decision_ids=["measure"], input_id="oda", predicates=predicates
+                    )
+                    for id, predicates in latest.items()
+                ),
+            ],
+            [
+                _RETRIEVE,
+                *(
+                    FilterOperation(
+                        id=f"{id}_op", requirement_id=id, input="crs", predicates=predicates
+                    )
+                    for id, predicates in latest.items()
+                ),
+            ],
+            terminal=[f"{id}_op" for id in latest],
+            discovered={"oda": source},
+            **restated,
+        )
+
+    results = {
+        SPEC_CRS: await retrieved(
+            source,
+            frame=_family_frame(
+                providers=(GERMANY,), recipients=recipients, last_years=_LATEST_ODA
+            ),
+            providers=(GERMANY,),
+            recipients=recipients,
+            statistics=[
+                {
+                    "stat_var": "dcid:Oda",
+                    "entities": [
+                        {"role": PROVIDER, "ref": GERMANY.ref},
+                        {"role": RECIPIENT, "ref": recipient.ref},
+                    ],
+                    "facet": {"unit": "usd"},
+                    "observations": end - 2000 + 1,
+                    "first": {"value": 100.0, "period": "2000"},
+                    "latest": {"value": 123.0, "period": str(end)},
+                    "minimum": {"value": 100.0, "period": "2000"},
+                    "maximum": {"value": 123.0, "period": str(end)},
+                }
+                for recipient, end in _LATEST_ODA.items()
+            ],
+            dimensions=[
+                {"label": PROVIDER, "count": 1, "axis": "origin"},
+                {"label": RECIPIENT, "count": len(recipients), "axis": "destination"},
+                {"label": "years", "count": 25},
+            ],
+        )
+    }
+    draft = planned()
+    assert draft.workflow is not None
+    read = await read_anchors(
+        draft.workflow,
+        revision=plan_revision(draft),
+        requirements=[oda],
+        surface=surface_for(get_data=_get_data_answers(draft, results)),
+    )
+    assert isinstance(read, tuple), read
+    plan = planned(anchors_read=read)
+
+    outcome = await _run(plan, surface_for(get_data=_get_data_answers(plan, results)))
+
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2021", "2024"][not with_kenya :]
+    assert answer_notes(None, outcome, plan=plan, terminals=["others_op"]) == [
+        "Germany and Tanzania's series ends in 2022."
+    ]
+    if with_kenya:
+        assert answer_notes(None, outcome, plan=plan, terminals=["kenya_op"]) == []

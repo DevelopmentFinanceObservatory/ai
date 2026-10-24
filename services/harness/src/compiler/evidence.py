@@ -91,6 +91,7 @@ from planner.records import (
     EvidenceIssueCode,
     Period,
     ResolvedSourceMention,
+    SeriesEntity,
     Severity,
     SpecId,
     StrictModel,
@@ -106,7 +107,7 @@ class SeriesEvidence(StrictModel):
     """One series of a retrieved frame whose coverage `_series_issues` reports on."""
 
     stat_var: str
-    entity_refs: tuple[str, ...]
+    entities: tuple[SeriesEntity, ...]
     first_year: int
     latest_year: int
     observations: int
@@ -353,7 +354,7 @@ def check_evidence(
     if approved is not None:
         issues.extend(_drift_issues(requirement, evidence, approved))
     if not at_discovery:
-        issues.extend(_series_issues(requirement, evidence))
+        issues.extend(_series_issues(requirement, evidence, approved))
     issues.extend(_entity_issues(requirement, evidence, approved))
     issues.extend(_period_issues(requirement, evidence))
     issues.extend(_scope_issues(requirement, evidence))
@@ -1131,6 +1132,18 @@ def _period_issues(
             )
         ]
     return []
+
+
+def _held_period(requirement: DatasetRequirement, evidence: RetrievalEvidence) -> Period:
+    """The years `_series_issues` holds each series to: `requirement.period`,
+    running on, where its end is open (`period_end_open`), to the newest year
+    the retrieval holds (`RetrievalEvidence.window`), so a series the rest
+    outlast is recorded however the run's newest year falls."""
+    period = requirement.period
+    window = evidence.window
+    if not requirement.period_end_open or window is None or window.end <= period.end:
+        return period
+    return Period(start=period.start, end=window.end)
 
 
 def _asked_for(period: Period, evidence: RetrievalEvidence) -> str:
@@ -2069,7 +2082,9 @@ def _membership_unverified(
 
 
 def _series_issues(
-    requirement: DatasetRequirement, evidence: RetrievalEvidence
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None = None,
 ) -> list[EvidenceIssue]:
     """Per-series coverage: the requirement's period, one observation per year.
 
@@ -2081,7 +2096,10 @@ def _series_issues(
     the severity the requirement's `coverage` asks for; missing statistics
     are mandatory metadata the manifest failed to carry, and a grain that is
     not annual is never what was asked for, so both are errors whatever it
-    says.
+    says. A period with an open end runs on to the newest year the retrieval
+    holds (`_held_period`), and a series covering the period as stated but
+    stopping before that year is a `WARNING` whatever `coverage` says, since
+    it meets the requirement.
 
     Reading a count above the span as a finer grain rests on one series
     covering one entity per role. `compute_series_statistics` in apis'
@@ -2092,6 +2110,10 @@ def _series_issues(
     population's observations as one series and refuse it here as a grain
     error, which is what a ranking over a definition's full population
     would look like.
+
+    A `window_short` or `coverage_gaps` finding carries its series'
+    entities (`EvidenceIssue.entities`), each with the label `approved`
+    gives its ref, so an answer can say whose series falls short.
     """
     if evidence.series is None or not evidence.series.num_rows:
         # `None` (the manifest carries no statistics at all) and a table with
@@ -2108,20 +2130,31 @@ def _series_issues(
         ]
     issues: list[EvidenceIssue] = []
     period = requirement.period
-    for one in _series_off_period(evidence.series, period):
+    held = _held_period(requirement, evidence)
+    labels = {one.ref: one.label for one in approved.entities} if approved is not None else {}
+    for one in _series_off_period(evidence.series, held, labels=labels):
         reach = Period(start=one.first_year, end=one.latest_year)
-        if not reach.covers(period):
+        if not reach.covers(held):
+            met = reach.covers(period)
             issues.append(
                 EvidenceIssue(
                     code=EvidenceIssueCode.WINDOW_SHORT,
-                    severity=_coverage_severity(requirement),
+                    # A series covering the period as stated meets it.
+                    severity=Severity.WARNING if met else _coverage_severity(requirement),
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} covers "
-                        f"{reach.start}-{reach.end}, {_asked_for(period, evidence)}"
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} covers "
+                        f"{reach.start}-{reach.end}, "
+                        + (
+                            f"short of {held.end}, the newest year its retrieval holds"
+                            if met
+                            else _asked_for(period, evidence)
+                        )
                     ),
                     found=reach.model_dump(),
-                    required=period.model_dump(),
+                    required=held.model_dump(),
+                    stat_var=one.stat_var,
+                    entities=one.entities,
                 )
             )
         span = one.latest_year - one.first_year + 1
@@ -2132,11 +2165,13 @@ def _series_issues(
                     severity=_coverage_severity(requirement),
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} has "
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} has "
                         f"{one.observations} observations across {span} years"
                     ),
                     found=one.observations,
                     required=span,
+                    stat_var=one.stat_var,
+                    entities=one.entities,
                 )
             )
         elif one.observations > span:
@@ -2146,7 +2181,7 @@ def _series_issues(
                     severity=Severity.ERROR,
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} has "
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} has "
                         f"{one.observations} observations across {span} years; the grain is not annual"
                     ),
                     found=one.observations,
@@ -2267,7 +2302,9 @@ def _series_units(series: pa.Table) -> set[str | Unit]:
     return {unit for facet in facets if (unit := _facet_unit(facet.get("unit")))}
 
 
-def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvidence]:
+def _series_off_period(
+    series: pa.Table, period: Period, *, labels: Mapping[str, str]
+) -> Iterator[SeriesEvidence]:
     """The series whose reach misses `period` or whose count differs from its
     span, in the order of their head rows: the only ones `_series_issues`
     reports on.
@@ -2278,7 +2315,7 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
     held to the period as one. A series with a first or last period that
     names no year is left out, since neither check can run on it. The rest
     are selected column by column, and only the selected series become
-    `SeriesEvidence`.
+    `SeriesEvidence`, each entity labelled by `labels`, keyed by ref.
     """
     unskipped = pc.ScalarAggregateOptions(skip_nulls=False)
     folded = (
@@ -2328,7 +2365,12 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
     for row in selected.to_pylist():
         yield SeriesEvidence(
             stat_var=_bare_dcid(row["stat_var"]),
-            entity_refs=tuple(entity["ref"] for entity in row["entities"]),
+            entities=tuple(
+                SeriesEntity(
+                    role=entity["role"], ref=entity["ref"], label=labels.get(entity["ref"])
+                )
+                for entity in row["entities"]
+            ),
             first_year=row["first_year"],
             latest_year=row["latest_year"],
             observations=row["observations"],
