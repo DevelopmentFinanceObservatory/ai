@@ -10,6 +10,7 @@ import pytest
 from compiler.sources import (
     DiscoveryStatus,
     MembersAnswer,
+    bound_refs,
     is_family,
     measure_named_by_query,
     members_reading,
@@ -76,6 +77,40 @@ def _part(status: str, **payload: Any) -> dict[str, Any]:
 def _envelope(status: str, **payload: Any) -> dict[str, Any]:
     """A single-part envelope, the shape one `discover_source` call gets back."""
     return {"schema_version": 1, "status": status, "parts": [_part(status, **payload)]}
+
+
+@pytest.mark.parametrize(
+    ("part", "expected"),
+    [
+        (
+            {
+                "entity_refs": [
+                    {"text": "G7", "refs": ["GroupOfSeven"]},
+                    {"text": "Africa", "refs": ["DACAfrica"]},
+                ]
+            },
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        # A text Search bound nothing for names nothing by ref.
+        ({"entity_refs": [{"text": "Atlantis", "refs": []}]}, {}),
+        # A Search that predates `entity_refs` states none, whatever it restates.
+        ({"restatement": {"entities": [{"text": "G7", "role_text": "from"}]}}, {}),
+        # A text stated twice binds every ref either row states.
+        (
+            {
+                "entity_refs": [
+                    {"text": "Kenya", "refs": ["country/KEN"]},
+                    {"text": "kenya", "refs": ["KEN2"]},
+                ]
+            },
+            {"kenya": ("country/KEN", "KEN2")},
+        ),
+    ],
+)
+def test_each_entity_text_maps_to_the_refs_it_bound(
+    part: dict[str, Any], expected: dict[str, tuple[str, ...]]
+) -> None:
+    assert bound_refs(part) == expected
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:

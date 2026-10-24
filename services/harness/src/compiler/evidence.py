@@ -154,10 +154,10 @@ class RetrievalEvidence(StrictModel):
     without them.
 
     `groups` are the named sets the source binds (`SelectedSource.groups`),
-    and `entity_refs` the refs the graph resolved the requirement's
-    unmatched names to (`SelectedSource.entity_refs`), both discovery's
-    alone: at run time the approved source's are read instead, as its open
-    axes are.
+    `entity_refs` the refs the graph resolved the requirement's unmatched
+    names to (`SelectedSource.entity_refs`), and `bound_refs` the refs
+    Search bound for each entity text (`SelectedSource.bound_refs`), all discovery's alone: at run time
+    the approved source's are read instead, as its open axes are.
 
     `axis_by_column` is the manifest's alone: each coverage dimension's label
     and the flow axis apis states for it. A source names a flow
@@ -188,6 +188,7 @@ class RetrievalEvidence(StrictModel):
     open_entity_axes: tuple[OpenEntityAxis, ...] | None = None
     groups: tuple[ResolvedGroup, ...] = ()
     entity_refs: dict[str, str] = Field(default_factory=dict)
+    bound_refs: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
@@ -211,6 +212,7 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         open_entity_axes=source.open_entity_axes,
         groups=source.groups,
         entity_refs=source.entity_refs,
+        bound_refs=source.bound_refs,
         unit_ref=source.unit_ref,
         unit_label=source.unit_label,
         stated_unit=requested_unit(source.identity),
@@ -399,34 +401,46 @@ def resolve_name(
 ) -> ResolvedEntity | None:
     """Return the one entity of `source` that `entity` names, by label or else by ref.
 
-    A name no label matches (`resolve_entity`) is looked up in the refs the
-    graph resolved the requirement's names to (`SelectedSource.entity_refs`),
-    so "United States" names the entity labelled "United States of
-    America". A stated role tells apart a ref resolved under several role
-    columns, as it does a label.
+    A name no label matches (`resolve_entity`) is looked up in the refs
+    Search bound for it as an entity text (`SelectedSource.bound_refs`),
+    so "G7" names the published total labelled "Group of Seven", and else
+    in the refs the graph resolved the requirement's names to
+    (`SelectedSource.entity_refs`), so "United States" names the entity
+    labelled "United States of America". A stated role tells apart a ref
+    resolved under several role columns, as it does a label.
     """
     resolved = resolve_entity(entity, source.entities)
-    if resolved is not None or (ref := source.entity_refs.get(entity.name.casefold())) is None:
+    if resolved is not None:
         return resolved
-    matches = [one for one in source.entities if one.ref == ref]
+    name = entity.name.casefold()
+    refs = source.bound_refs.get(name) or (
+        (source.entity_refs[name],) if name in source.entity_refs else ()
+    )
+    matches = [one for one in source.entities if one.ref in refs]
     if len(matches) > 1:
         matches = [one for one in matches if _role_fits(entity.role, one.role)]
     return matches[0] if len(matches) == 1 else None
 
 
-def resolve_group(entity: Entity, groups: Sequence[ResolvedGroup]) -> ResolvedGroup | None:
-    """Return the one named set in `groups` that `entity` names, or `None` when none or several do.
+def resolve_group(
+    entity: Entity, source: SelectedSource | RetrievalEvidence
+) -> ResolvedGroup | None:
+    """Return the one named set of `source` that `entity` names, or `None` when none or several do.
 
-    Matches `Entity.name` against the set's `label`, case-folded. A stated
-    role has to name the set's role column or sit on its side of the flow
-    (`donor` and `origin`), so "G7" asked for as a recipient is not the G7
-    whose members give.
+    Matches `Entity.name` against the set's `label`, case-folded, or names
+    the set whose ref or published total Search bound for it as an entity
+    text (`SelectedSource.bound_refs`), so "G7" names the set Search
+    labels "Group of Seven". A stated role has to name the set's role
+    column or sit on its side of the flow (`donor` and `origin`), so "G7"
+    asked for as a recipient is not the G7 whose members give.
     """
     wanted = entity.name.casefold()
+    bound = source.bound_refs.get(wanted, ())
     matches = [
         group
-        for group in groups
-        if group.label.casefold() == wanted and _role_fits(entity.role, group.role)
+        for group in source.groups
+        if (group.label.casefold() == wanted or group.ref in bound or group.total in bound)
+        and _role_fits(entity.role, group.role)
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -444,7 +458,7 @@ def named_members(
     name to. Callers compare the result by `ref`, so a member is named
     whatever label it carries.
     """
-    group = resolve_group(entity, source.groups)
+    group = resolve_group(entity, source)
     if group is not None:
         return tuple(one for one in source.entities if one.role == group.role)
     resolved = resolve_name(entity, source)
@@ -713,8 +727,8 @@ def _named_group(
     so at run time the set is the approved source's.
     """
     if evidence.origin == "discovery":
-        return resolve_group(entity, evidence.groups)
-    return resolve_group(entity, approved.groups) if approved is not None else None
+        return resolve_group(entity, evidence)
+    return resolve_group(entity, approved) if approved is not None else None
 
 
 def _group_present(
@@ -912,8 +926,9 @@ def _named_entity_issues(
     A name is met by a named set the source binds (`_group_present`), as
     its members or, unless the entity asks for its members, as its
     published total (`_group_reading_issues`); by a resolved entity's
-    label; or by the ref the graph resolved the name to, or at run time the
-    ref the approved source resolved it to (`_resolved_by_ref`).
+    label; or, through `resolve_name`, by a ref Search bound for the name
+    as an entity text or the ref the graph resolved the name to, at run
+    time as the approved source resolved it (`_resolved_by_ref`).
 
     A name the approved source resolves and the retrieval holds no series
     for, such as a donor whose reporting stopped before the requirement's
@@ -1020,7 +1035,7 @@ def _approved_column(entity: Entity, approved: SelectedSource) -> str | None:
     or the named set's (`resolve_group`), or `None`."""
     if (resolved := resolve_name(entity, approved)) is not None:
         return resolved.role
-    group = resolve_group(entity, approved.groups)
+    group = resolve_group(entity, approved)
     return group.role if group is not None else None
 
 

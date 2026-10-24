@@ -288,6 +288,17 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
+    `bound_refs` maps each entity text of the search part, case-folded, to
+    the refs Search states it bound (the part's `entity_refs`,
+    `compiler.sources.bound_refs`), so "G7" names the set Search labels
+    "Group of Seven" by its ref `GroupOfSeven`
+    (`compiler.evidence.named_members`). Empty for a part stating no
+    `entity_refs`, and for a source read from a block no search part
+    carried: a pin copied over another window
+    (`translator.discovery._recorded_source`) is resolved again by its
+    definition, which restates no entity, so its names match by label and
+    the graph's resolve door alone.
+
     `exact_codes` are the publisher series codes the source is exactly:
     the entries of `resolved.stat_vars.source_codes` that Search marks
     `exact`, meaning a `source_code` search for that code would accept this
@@ -327,6 +338,11 @@ class SelectedSource(StrictModel):
     # Left out of every dump while empty, so a source saved without it keeps
     # its serialised form.
     entity_refs: Annotated[dict[str, str], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda refs: not refs
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    bound_refs: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
         default_factory=dict, exclude_if=lambda refs: not refs
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
