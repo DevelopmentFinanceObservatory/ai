@@ -69,13 +69,13 @@ an attempt the retry policy would have made, plus `EVIDENCE_ALLOWANCE_S` on
 an evidence-bearing step. Each call runs inside it, so its timeout is clipped
 to what remains. The evidence check's own statistics fetch runs under a
 deadline built from what is left of the step budget once the check starts,
-capped at `EVIDENCE_ALLOWANCE_S` (`default_fetch_series_stats`); a fetch that
-outruns it degrades the requirement to `STATISTICS_UNAVAILABLE` rather than
-spending the rest of the step's own budget. A step that runs past that
-budget stops as `TRANSPORT_FAILED`, the same refusal a call that ran past its
-own deadline gets. A tool with no pinned timeout runs at the surface's
-default per call and has no statistics fetch, so each of its attempts is
-already bounded and no step budget applies.
+capped at `EVIDENCE_ALLOWANCE_S` (`default_fetch_series_stats`). A fetch that
+outruns it, or fails in transit, stops the step `TRANSPORT_FAILED`, the same
+refusal a step that runs past its own budget gets, and a statistics artifact
+the run cannot trust stops it `STEP_RESULT_UNUSABLE`; neither is a fact of
+the data, so neither is reported as an unmet requirement. A tool with no
+pinned timeout runs at the surface's default per call and has no statistics
+fetch, so each of its attempts is already bounded and no step budget applies.
 
 The compiler names role columns in the approved source's vocabulary (a flow
 axis such as `origin`), while a retrieved frame names them by the dataset's
@@ -220,6 +220,7 @@ from compiler.surface import (
     UnhashableSchemaError,
     deliver_progress,
 )
+from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest
 from data_mcp.series_statistics import (
@@ -259,6 +260,7 @@ from executor.classify import (
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
     ROLLING_ANCHOR_UNRESOLVED,
+    TRANSIENT_CODES,
     Disposition,
     ExecutorCode,
     Jitter,
@@ -325,7 +327,8 @@ EVIDENCE_ALLOWANCE_S = 30.0
 # a cancellation into `TimeoutError` for the context whose own deadline fired,
 # so two deadlines landing at the same instant could let the outer budget's
 # cancellation reach `_check_evidence` as a bare `CancelledError` instead of
-# something `default_fetch_series_stats` can catch.
+# the `TimeoutError` `default_fetch_series_stats` reports as
+# `StatisticsUnreachableError`.
 _EVIDENCE_DEADLINE_MARGIN_S = 1.0
 
 # What the user reads when a retrieval asked to sum its family of StatVars
@@ -423,6 +426,38 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
+
+class StatisticsUnreachableError(Exception):
+    """A manifest's statistics artifact could not be fetched this time.
+
+    A timeout, a failed connection, an HTTP 429 or 5xx, or a link lookup the
+    data service refused with a transient code (`TRANSIENT_CODES`). A later
+    try can get past it, so `_Run._check_evidence` stops the step
+    `TRANSPORT_FAILED`.
+    """
+
+
+class StatisticsUnusableError(Exception):
+    """A manifest's statistics metadata cannot be trusted or read.
+
+    The manifest names series but carries no statistics artifact, the
+    artifact fails its digest, size, schema or series-count check, or the data
+    service refused its link or download for good. Nothing the user asked for
+    is wrong, so `_Run._check_evidence` stops the step
+    `STEP_RESULT_UNUSABLE`.
+    """
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether a failed statistics fetch is one a later try can get past."""
+    if isinstance(exc, ArtifactRefusalError):
+        return exc.code in TRANSIENT_CODES
+    if isinstance(exc, httpx2.HTTPStatusError):
+        status = exc.response.status_code
+        return status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500
+    return isinstance(exc, (TimeoutError, httpx2.TransportError))
+
+
 # What `execute_approved_plan` hands each progress report to, with the id of
 # the plan step it describes: a wave's steps run concurrently, so a report
 # means nothing without its step. `_Run._call` binds the step id and passes
@@ -454,16 +489,18 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     with no cap: unlike the MCP digest's own `_STATISTICS_SERIES_CAP`,
     which only bounds what a model reads, `_series_issues` is a bulk
     coverage check that reads every series a retrieval carries, as Arrow
-    columns rather than one model a series. A fetch or read failure is not
-    raised: it degrades to `None`, which
-    `_series_issues` already reports as `STATISTICS_UNAVAILABLE` --
-    failing the requirement closed rather than passing it unverified,
-    `TimeoutError` included. The fetch runs under its own deadline --
-    `current_step_deadline`'s remaining seconds, capped at
+    columns rather than one model a series. The fetch runs under its own
+    deadline -- `current_step_deadline`'s remaining seconds, capped at
     `EVIDENCE_ALLOWANCE_S` and reduced by `_EVIDENCE_DEADLINE_MARGIN_S` -- so
-    a `get_data` call that used most of the step's own budget still degrades
-    the requirement alone rather than failing the whole step
-    `transport_failed` once the outer budget catches up.
+    it gives up before the step's outer budget does and its failure is
+    reported as its own.
+
+    Raises:
+        StatisticsUnreachableError: the fetch timed out or failed in transit
+            (`_is_transient`).
+        StatisticsUnusableError: the manifest names series but no statistics
+            artifact, or the artifact's link, download or contents failed
+            for any other reason.
     """
     if manifest.series_count == 0:
         return SERIES_STATISTICS_ARROW_SCHEMA.empty_table()
@@ -473,13 +510,10 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     if artifact is None:
         if manifest.series_count is None:
             return None
-        logger.warning(
-            "executor: manifest for %s/%s names series_count=%d but carries no statistics artifact",
-            manifest.definition.spec_id,
-            manifest.content_version,
-            manifest.series_count,
+        raise StatisticsUnusableError(
+            f"the manifest for {manifest.definition.spec_id}/{manifest.content_version} names "
+            f"series_count={manifest.series_count} but carries no statistics artifact"
         )
-        return None
     step_deadline = current_step_deadline.get()
     remaining_s = step_deadline.remaining() if step_deadline is not None else EVIDENCE_ALLOWANCE_S
     fetch_deadline = CallDeadline.after(
@@ -503,13 +537,20 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
         KeyError,
         TimeoutError,
     ) as exc:
+        # The detail leaves `exc` out: an `httpx2` error names the artifact link it failed on.
         logger.warning(
             "executor: could not fetch or decode the statistics artifact for %s/%s: %s",
             manifest.definition.spec_id,
             manifest.content_version,
             exc,
         )
-        return None
+        detail = (
+            f"the statistics artifact for {manifest.definition.spec_id}/"
+            f"{manifest.content_version} could not be fetched or read"
+        )
+        if _is_transient(exc):
+            raise StatisticsUnreachableError(detail) from exc
+        raise StatisticsUnusableError(detail) from exc
 
 
 class _Stopped(Exception):  # noqa: N818 -- a control-flow signal carrying an outcome, not an error
@@ -997,7 +1038,9 @@ async def execute_approved_plan(
     semaphore). `fetch_series_stats`
     resolves a dataset step's manifest into the rows `evidence_from_manifest`
     checks coverage against; the real fetch by default, injectable for a
-    caller whose `surface` is itself fully virtualised. `on_progress` hears
+    caller whose `surface` is itself fully virtualised, which raises
+    `StatisticsUnreachableError` or `StatisticsUnusableError` the way the real
+    one does. `on_progress` hears
     every progress report a step's tool call sends, and a report naming the
     next attempt each time a step is retried, tagged with the step's id.
 
@@ -2353,7 +2396,9 @@ class _Run:
             manifest = parse_manifest(structured)
             series_stats = await self.fetch_series_stats(manifest)
             evidence = evidence_from_manifest(manifest, series_stats=series_stats)
-        except (ArtifactError, ValueError, ResourceError) as exc:
+        except StatisticsUnreachableError as exc:
+            raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc), step_id=step.id) from exc
+        except (ArtifactError, ValueError, ResourceError, StatisticsUnusableError) as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE, str(exc), step_id=step.id
             ) from exc

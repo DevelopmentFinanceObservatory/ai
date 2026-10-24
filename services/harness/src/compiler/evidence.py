@@ -250,9 +250,9 @@ def evidence_from_manifest(
     its own and reads whatever the caller resolved. Entities and the unit come
     from it, the window from the earliest first and latest last period
     across it, each read over the columns and their distinct values rather
-    than series by series; `None` (the manifest carries no statistics artifact,
-    or the fetch failed) or a table with no rows (`series_count == 0`) leaves
-    those unknown, and the checks that read `series` treat both the same as
+    than series by series; `None` (the manifest carries no statistics artifact
+    and names no series count, an old record) or a table with no rows
+    (`series_count == 0`) leaves those unknown, and the checks that read `series` treat both the same as
     unavailable, per `_series_issues`. Provenance comes from
     `citation.sources`: one source's `ref`/`label`, several joined with
     `"; "`. `axis_by_column` comes from `coverage.dimensions`, each label with

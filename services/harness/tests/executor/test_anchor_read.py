@@ -18,6 +18,7 @@ import pytest
 from compiler.compile import CompileIssueCode
 from compiler.sources import DiscoveryStatus
 from compiler.surface import ToolCallResult, ToolSchema
+from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from executor.outcomes import Accepted
 from executor.run import execute_approved_plan
 from harness.plan_display import step_rows
@@ -322,6 +323,56 @@ async def test_a_resolution_refused_at_translation_goes_back_by_whose_stop_it_is
     referral = answer["action"]["arguments"]
     assert referral["kind"] == kind.value
     assert ("requirement_id" in referral) is (kind is ReferralKind.REQUIREMENT_UNMEETABLE)
+    assert context.plan() == draft
+
+
+async def _times_out(**_kwargs: Any) -> None:
+    raise TimeoutError("signed artifact GET timed out")
+
+
+async def _fails_its_digest(**_kwargs: Any) -> None:
+    raise SeriesStatisticsSchemaError("fetched artifact bytes do not hash to the advertised digest")
+
+
+@pytest.mark.parametrize(
+    ("fetch", "held", "stop_code", "kind"),
+    [
+        (_times_out, "country/KEN", "transport_failed", ReferralKind.SURFACE_UNAVAILABLE),
+        (_fails_its_digest, "country/KEN", "step_result_unusable", ReferralKind.INTERNAL_FAILURE),
+        (None, "country/UGA", "entity_missing", ReferralKind.REQUIREMENT_UNMEETABLE),
+    ],
+    ids=["transport", "malformed", "shortfall"],
+)
+async def test_a_statistics_check_that_stops_at_translation_goes_back_by_whose_stop_it_is(
+    rolling_draft: Callable[..., Plan],
+    source: Callable[..., SelectedSource],
+    manifest: Callable[..., dict[str, Any]],
+    real_schemas: list[ToolSchema],
+    monkeypatch: pytest.MonkeyPatch,
+    fetch: Callable[..., Any] | None,
+    held: str,
+    stop_code: str,
+    kind: ReferralKind,
+) -> None:
+    """A statistics artifact that cannot be fetched now is a later try's to get past, and
+    one the run cannot trust is the harness's; only statistics that hold no series for
+    Kenya are the data's, for the user to decide. The failures are injected at the download helper, so
+    `executor.run.default_fetch_series_stats` reads them as production does."""
+    if fetch is not None:
+        monkeypatch.setattr("executor.run.fetch_series_statistics_table", fetch)
+    draft = rolling_draft()
+    context = _Context(draft, source())
+    retrieved = manifest()
+    retrieved["statistics"][0]["entities"][0]["ref"] = held
+    surface = ScriptedSurface(schemas=real_schemas, responses={"get_data": [ok(retrieved)]})
+
+    answer = await _propose(context, surface)
+
+    assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
+    referral = answer["action"]["arguments"]
+    assert (referral["kind"], referral["stop_code"]) == (kind.value, stop_code)
+    assert ("requirement_id" in referral) is (kind is ReferralKind.REQUIREMENT_UNMEETABLE)
+    assert [name for name, _ in surface.calls] == ["get_data"]
     assert context.plan() == draft
 
 

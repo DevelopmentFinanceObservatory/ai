@@ -165,8 +165,11 @@ column, through `data_mcp.series_statistics.fetch_series_statistics_table`; at
 25,000 series that table holds about 8 MiB where one pydantic model a series
 held about 180 MiB. A caller whose tool surface allows no real
 upstream call, such as the scripted studio eval
-(`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. An
-error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
+(`harness.scripted_plan.scripted_fetch_series_stats`), injects its own. A
+statistics fetch that times out or fails in transit (`StatisticsUnreachableError`)
+stops the run as `transport_failed`, and an artifact the run cannot trust or
+read (`StatisticsUnusableError`) as `step_result_unusable`: neither says anything
+about the data. An error stops the run as `requirement_unmet` with every finding attached. Under `coverage.on_missing = report_gaps`, missing years are recorded
 on the evidence instead of stopping it.
 
 **No in-place refresh: what a tool says can be retried is retried, and what
@@ -200,9 +203,9 @@ calls at the full timeout, the longest delay before each retry, and a
 timeout is clipped to what remains. The evidence check's own statistics fetch
 runs under a deadline of its own -- what's left of the step budget once the
 check starts, capped at that 30-second allowance -- so a fetch that outruns
-it degrades the requirement to `statistics_unavailable` instead of spending
+it stops the step `transport_failed` with its own detail instead of spending
 the rest of the step's budget. A step that runs past its own budget is
-`transport_failed`.
+`transport_failed` too.
 
 A `correct_and_retry` refusal is never corrected here either, and
 `classify.py` places every code both servers can send. Fourteen whose `fix` is a

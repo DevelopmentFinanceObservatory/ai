@@ -40,7 +40,15 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import BACKOFF_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_delay
 from executor.completion import FramePublished, ResultPublisher
 from executor.ledger import Attempt, InMemoryRunLedger, RunChange, RunRecord
-from executor.outcomes import Accepted, MethodChoiceNeeded, RediscoveryNeeded, RefusalKind, Refused
+from executor.outcomes import (
+    Accepted,
+    MethodChoiceNeeded,
+    RediscoveryNeeded,
+    RefusalKind,
+    Refused,
+    StopCause,
+    stop_cause,
+)
 from executor.run import (
     EVIDENCE_ALLOWANCE_S,
     MAX_ATTEMPTS_PER_STEP,
@@ -648,7 +656,7 @@ async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
     assert outcome.completed == ()
 
 
-async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_transport_failed(
+async def test_a_slow_statistics_fetch_stops_the_step_as_transient_before_its_budget_runs_out(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
@@ -658,10 +666,9 @@ async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_tr
     """`default_fetch_series_stats` gives `fetch_series_statistics_table` a deadline built off
     what is left of the step budget, capped at `EVIDENCE_ALLOWANCE_S`; a fetch that outlives
     it raises `TimeoutError` the way the real one does once its own internal
-    `asyncio.timeout` expires, and `default_fetch_series_stats` catches that like any other
-    fetch failure. Before F3 this degraded path did not exist: the fetch ran with no
-    deadline of its own, so only the step's outer budget could ever cut it off, stopping the
-    whole step `transport_failed` instead of the requirement alone.
+    `asyncio.timeout` expires. That is a failed transport, which a later try can get past,
+    so the step stops `transport_failed` with the fetch's own detail rather than as a
+    requirement the data does not meet.
 
     `_EVIDENCE_DEADLINE_MARGIN_S` is shrunk to fit `short_budget`'s millisecond scale --
     production's 1s margin would swallow the whole 50ms evidence allowance and refuse before
@@ -687,9 +694,11 @@ async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_tr
     )
 
     assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+    assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
+    assert stop_cause(outcome) is StopCause.TRANSIENT
     assert outcome.step_id == "debt"
-    assert "statistics_unavailable" in [issue.code.value for issue in outcome.issues]
+    assert "statistics artifact" in outcome.detail
+    assert outcome.issues == ()
 
 
 async def test_a_refresh_then_retry_refusal_sends_the_requirement_back_to_discovery(
@@ -1774,16 +1783,40 @@ async def test_a_manifest_with_statistics_but_no_series_count_is_accepted(
     assert evidence.stat_vars == ("DebtServicePaid",)
 
 
-async def test_a_manifest_with_neither_series_count_nor_statistics_still_fails_closed(
-    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+@pytest.mark.parametrize(
+    ("series_count", "kind", "cause", "issue_codes"),
+    [
+        (
+            None,
+            RefusalKind.REQUIREMENT_UNMET,
+            StopCause.DATA,
+            ["statistics_unavailable", "unit_unverified"],
+        ),
+        (1, RefusalKind.STEP_RESULT_UNUSABLE, StopCause.HARNESS, []),
+    ],
+    ids=["old-record", "series-named-without-artifact"],
+)
+async def test_a_manifest_without_a_statistics_artifact_fails_closed(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    series_count: int | None,
+    kind: RefusalKind,
+    cause: StopCause,
+    issue_codes: list[str],
 ) -> None:
-    surface = _surface(real_schemas, manifest(series_count=None, artifacts=[]))
+    """A record minted before statistics existed has none to check; a manifest that names
+    its series but carries no artifact for them breaks the wire contract, which is no fact
+    of the data."""
+    surface = _surface(real_schemas, manifest(series_count=series_count, artifacts=[]))
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
     assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
-    assert "statistics_unavailable" in [issue.code.value for issue in outcome.issues]
+    assert (outcome.refusal, stop_cause(outcome)) == (kind, cause)
+    assert [issue.code.value for issue in outcome.issues if issue.severity.value == "error"] == (
+        issue_codes
+    )
 
 
 async def test_default_fetch_series_stats_bounds_the_deadline_by_the_smaller_of_the_two(
