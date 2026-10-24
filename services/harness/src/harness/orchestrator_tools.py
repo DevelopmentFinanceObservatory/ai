@@ -43,6 +43,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -169,6 +170,11 @@ _FETCHES_KEY = "orchestrator:fetches"
 # The ids of the series the canvas drew as a turn began, with the turn's
 # invocation id: {"invocation", "ids"}.
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
+# The cards `make_charts` drew this turn that are still on the canvas:
+# {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
+# {"component_id", "entry"}, `entry` the result it was drawn with.
+# `remove_cards` drops the cards it takes off.
+_DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
 HANDED_OFF = "handed_off"
@@ -599,6 +605,28 @@ class _Narrowed:
 
     select: dict[str, Any]
     cut: TopMembers | None
+
+
+# The suffix a cut card's title ends with, as `_cut_title` writes it.
+_CUT_SUFFIX = re.compile(r" \(\d+ largest of \d+ in [^()]+\)$")
+
+
+def _cut_title(title: str, cut: TopMembers) -> str:
+    """The title of a card cut to its largest members, ending in what it leaves
+    out. A title the model copied from a card already cut loses that suffix
+    first, so the new suffix is the only one."""
+    base = _CUT_SUFFIX.sub("", title)
+    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
+    return f"{base[: 117 - len(suffix)]} ({suffix})"
+
+
+def _card_identity(chart: Chart, intent: Mapping[str, Any]) -> str:
+    """What a drawn card is: the intent the platform renders and checks it
+    from (kind, frame, select, window, title) and the figures `chart` asks the
+    result to state. The title stays in, so a title the platform would refuse
+    is checked afresh rather than answered from a card drawn under another."""
+    asked = chart.model_dump(include={"state_values_for", "state_span", "state_period"})
+    return json.dumps({"intent": intent, "asked": asked}, sort_keys=True)
 
 
 async def _top_select(
@@ -1348,8 +1376,16 @@ def build_orchestrator_tools(
     """
     # One lock per invocation, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
-    # is admitted on exact counts. An entry lasts while a call holds its lock.
+    # is admitted on exact counts, and by remove_cards while it takes cards
+    # off and drops them from the turn's drawn cards. An entry lasts while a
+    # call holds its lock.
     chart_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _canvas_lock(tool_context: ToolContext) -> asyncio.Lock:
+        lock = chart_locks.get(tool_context.invocation_id)
+        if lock is None:
+            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
+        return lock
 
     async def search(
         query: str,
@@ -1724,6 +1760,12 @@ def build_orchestrator_tools(
         that drew a chart or one that drew none."""
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
         on_canvas = _canvas_series(tool_context)
+        held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        drawn_cards: dict[str, dict[str, Any]] = (
+            dict(held_cards["drawn"])
+            if held_cards.get("invocation") == tool_context.invocation_id
+            else {}
+        )
         drawn: list[dict[str, Any]] = []
         landed = False
         try:
@@ -1795,11 +1837,7 @@ def build_orchestrator_tools(
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                title = chart.title
-                if cut is not None:
-                    # The card says what it leaves out in a suffix that ends the title.
-                    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
-                    title = f"{chart.title[: 117 - len(suffix)]} ({suffix})"
+                title = chart.title if cut is None else _cut_title(chart.title, cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
@@ -1815,6 +1853,21 @@ def build_orchestrator_tools(
                     # window, which without one moves when the frame gains a
                     # newer period.
                     intent["window"] = {"start": cut.period, "end": cut.period}
+                identity = _card_identity(chart, intent)
+                if identity in drawn_cards:
+                    # The canvas holds this card, so another write would stack a copy.
+                    drawn.append(
+                        drawn_cards[identity]["entry"]
+                        | {
+                            "already_on_canvas": (
+                                "This card is already on the canvas from an earlier call "
+                                "this turn, and no copy was drawn. Use its figures; draw "
+                                "a chart again only with a different kind, frame, select "
+                                "or period."
+                            )
+                        }
+                    )
+                    continue
                 try:
                     written = await executor(tool="write_component", args={"intent": intent})
                     component = written.get("component") if written.get("outcome") == "ok" else None
@@ -1863,6 +1916,11 @@ def build_orchestrator_tools(
                 if cut is not None:
                     entry["note"] = _cut_note(cut)
                 drawn.append(entry)
+                drawn_cards[identity] = {"component_id": component["component_id"], "entry": entry}
+                tool_context.state[_DRAWN_CARDS_KEY] = {
+                    "invocation": tool_context.invocation_id,
+                    "drawn": drawn_cards,
+                }
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
@@ -1878,10 +1936,7 @@ def build_orchestrator_tools(
         values it would accept. A chart drawn whose values could not be read
         back says so under the code `figures_unread`.
         """
-        lock = chart_locks.get(tool_context.invocation_id)
-        if lock is None:
-            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
-        async with lock:
+        async with _canvas_lock(tool_context):
             spent = _charts_spent(tool_context)
             if spent:
                 return spent
@@ -2079,6 +2134,22 @@ def build_orchestrator_tools(
                 "legal": exc.legal,
             }
 
+    def _forget_drawn(tool_context: ToolContext, removed: list[str]) -> None:
+        """Drop the cards `removed` took off from the turn's drawn cards, so a
+        later `make_charts` of one draws it again."""
+        held = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        if not removed or held.get("invocation") != tool_context.invocation_id:
+            return
+        gone = set(removed)
+        tool_context.state[_DRAWN_CARDS_KEY] = {
+            "invocation": tool_context.invocation_id,
+            "drawn": {
+                identity: card
+                for identity, card in held["drawn"].items()
+                if card["component_id"] not in gone
+            },
+        }
+
     async def remove_cards_tool(
         tool_context: ToolContext,
         component_ids: list[str] | None = None,
@@ -2104,9 +2175,11 @@ def build_orchestrator_tools(
                 "Name the cards to take off, or set all_cards. Nothing changed.",
             )
         _canvas_series(tool_context)
-        removed, missing = await remove_cards(
-            component_ids=component_ids or [], all_cards=all_cards
-        )
+        async with _canvas_lock(tool_context):
+            removed, missing = await remove_cards(
+                component_ids=component_ids or [], all_cards=all_cards
+            )
+            _forget_drawn(tool_context, removed)
         if not removed and missing and len(missing) == len(component_ids or []):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,

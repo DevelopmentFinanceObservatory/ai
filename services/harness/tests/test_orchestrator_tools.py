@@ -1386,7 +1386,9 @@ async def test_a_card_whose_figures_cannot_be_read_keeps_its_entry_and_the_chart
     chart = _one_chart(frame_id_for(REF))[0]
 
     with caplog.at_level(logging.ERROR, logger=orchestrator_tools.__name__):
-        drawn = await tools["make_charts"]([chart | {"title": "Unread"}, chart], ctx)
+        drawn = await tools["make_charts"](
+            [chart | {"title": "Unread"}, chart | {"type": "table"}], ctx
+        )
 
     unread, after = drawn["charts"]
     assert (unread["title"], unread["reply_figures"]) == ("Unread", [])
@@ -1657,6 +1659,15 @@ def _one_chart(frame: str) -> list[dict[str, str]]:
     return [{"frame": frame, "type": "bar_chart", "title": "t", "select_json": select}]
 
 
+def _distinct_charts(frame: str, count: int) -> list[dict[str, Any]]:
+    """`count` charts of one frame that differ in the window they show, so none
+    repeats a card another draws."""
+    return [
+        chart | {"latest_periods": number}
+        for number, chart in enumerate(_one_chart(frame) * count, 1)
+    ]
+
+
 def _stated(failed: dict[str, Any]) -> tuple[Any, Any]:
     """The code and retry mode a failed answer or chart entry states."""
     return failed.get("code"), failed.get("retry_mode")
@@ -1675,11 +1686,12 @@ async def test_make_charts_spends_its_drawn_budget_only_on_calls_that_drew():
     for _ in range(BUDGETS["make_charts_failed"] - 1):
         failed = await tools["make_charts"](_one_chart("f999999"), ctx)
         assert "error" in failed["charts"][0]
-    for _ in range(BUDGETS["make_charts"]):
-        drawn = await tools["make_charts"](_one_chart(frame), ctx)
+    *charts, last = _distinct_charts(frame, BUDGETS["make_charts"] + 1)
+    for chart in charts:
+        drawn = await tools["make_charts"]([chart], ctx)
         assert "reply_figures" in drawn["charts"][0]
     writes = _writes(executor)
-    spent = await tools["make_charts"](_one_chart(frame), ctx)
+    spent = await tools["make_charts"]([last], ctx)
 
     assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
     assert "charts" not in spent
@@ -1715,7 +1727,7 @@ async def test_make_charts_reports_a_write_that_raised_and_draws_nothing_after_i
     tools, ctx = _tools(executor=executor)
     await tools["fetch"](SPEC_LIFE, ctx)
 
-    drawn = await tools["make_charts"](_one_chart(frame_id_for(REF)) * 3, ctx)
+    drawn = await tools["make_charts"](_distinct_charts(frame_id_for(REF), 3), ctx)
 
     assert ["error" if "error" in chart else "holds" for chart in drawn["charts"]] == results
     assert "RuntimeError" in drawn["charts"][-1]["error"]
@@ -2373,6 +2385,108 @@ async def test_make_charts_asks_a_frame_with_no_fetch_for_its_kinds_by_its_spec(
     else:
         assert calls == [asked]
         assert result["charts"][0]["title"] == "t (24 largest of 30 in 2024)"
+
+
+async def test_make_charts_cut_title_carries_one_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chart titled with the title of a card already cut, as the model copies
+    it from the first card's result, ends in one suffix."""
+    cut = "Aid to Kenya (24 largest of 30 in 2024)"
+
+    executor, _ = await _draw_wide(monkeypatch, HeldFrames(), type="table", title=cut)
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == cut
+
+
+async def _draw_wide_twice(
+    monkeypatch: pytest.MonkeyPatch, first: dict[str, Any], second: dict[str, Any]
+) -> tuple[WideFrameExecutor, list[dict[str, Any]]]:
+    """Fetch the wide frame and draw `first` then `second` in two calls of one turn."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor = WideFrameExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    results = [await tools["make_charts"]([_wide_chart(**chart)], ctx) for chart in (first, second)]
+    return executor, results
+
+
+async def test_make_charts_does_not_draw_a_card_the_canvas_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same title, kind, frame, select and cut drawn again writes no
+    second component and returns the first card with a notice."""
+    executor, (first, again) = await _draw_wide_twice(
+        monkeypatch, {"type": "table"}, {"type": "table"}
+    )
+
+    assert len(_intents(executor)) == 1
+    (card,) = again["charts"]
+    assert card["title"] == first["charts"][0]["title"]
+    assert "already_on_canvas" in card
+
+
+class LandingWideExecutor(WideFrameExecutor):
+    """The wide frame's executor, each write a card with an id of its own
+    that lands on `state`'s canvas."""
+
+    def __init__(self, state: ConversationState) -> None:
+        super().__init__()
+        self.state = state
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        written = await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        if tool != "write_component":
+            return written
+        component_id = f"cmp_{len(_intents(self)):02d}"
+        component = written["component"] | {"component_id": component_id}
+        component["payload"] = component["payload"] | {"component_id": component_id}
+        return written | {"component": component}
+
+    def land_component(self, component: dict[str, Any]) -> None:
+        super().land_component(component)
+        land_component(self.state, component)
+
+
+@pytest.mark.parametrize("all_cards", [False, True], ids=["named", "all_cards"])
+async def test_make_charts_draws_again_a_card_remove_cards_took_off(
+    monkeypatch: pytest.MonkeyPatch, all_cards: bool
+) -> None:
+    """A card taken off the canvas, by its id or with every card, is drawn
+    again by a later call of the turn, and the card left on is not."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    state = ConversationState(conversation_id="c1")
+    executor = LandingWideExecutor(state)
+    tools, ctx = _tools(executor=executor, remove_cards=_remove_seam(state))
+    await tools["fetch"](SPEC_LIFE, ctx)
+    table, bars = _wide_chart(), _wide_chart(type="bar_chart")
+    await tools["make_charts"]([table, bars], ctx)
+
+    removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
+    again = await tools["make_charts"]([table, bars], ctx)
+
+    assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
+    assert [intent["type"] for intent in _intents(executor)] == (
+        ["table", "bar_chart", "table", "bar_chart"]
+        if all_cards
+        else ["table", "bar_chart", "table"]
+    )
+    assert ["already_on_canvas" in card for card in again["charts"]] == [False, not all_cards]
+    assert state.composition is not None
+    assert len(state.composition.blocks) == 2
+
+
+async def test_make_charts_draws_a_card_of_another_kind_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second chart of the same frame and select in another kind is drawn."""
+    executor, (_, second) = await _draw_wide_twice(
+        monkeypatch, {"type": "table"}, {"type": "bar_chart"}
+    )
+
+    assert len(_intents(executor)) == 2
+    assert "already_on_canvas" not in second["charts"][0]
 
 
 async def test_make_charts_counts_only_the_members_the_chart_lists(
