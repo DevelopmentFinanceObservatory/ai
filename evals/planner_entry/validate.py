@@ -3,7 +3,14 @@
 A scripted model proposes each task's reference plan, and each alternative, through
 `entry.run_entry`, the same entry a live run takes, so this proves the recording
 replays, the orchestrator's tools take the searches and the hand-off, and the real
-`propose_plan` accepts the plan in that state. A task with `first_proposal_refusal`
+`propose_plan` accepts the plan in that state. Each accepted plan then goes through
+production's translation (`translator.tool.build_translate`) as `propose_plan` runs it:
+each dataset requirement's source found by `discover_source` (its pin's block, the
+windowed copy, a pin set aside, a fresh search), entity names resolved, and the
+workflow compiled against the real tool schemas. Its calls are answered only from
+what the recording holds under the exact arguments they send now, so a payload whose
+translation asks anything else, or that does not compile, fails; the newest-year read
+of a rolling step is left out, since it reads the data. A task with `first_proposal_refusal`
 has to be refused with that code first, ask the user, and be accepted once the user
 picks adding them. The reference plan, once accepted, has to do with its years what
 the task's `period_reduction` says (`none` or `across_years`; `propose_plan` accepts
@@ -31,14 +38,19 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import aclosing
+from dataclasses import dataclass
 from typing import Any
 
+from analysis_mcp.server import mcp as analysis_mcp
+from compiler.surface import McpSurface, ToolSchema
+from data_mcp.server import mcp as data_mcp
 from entry import (
     KINDS,
     TASKS_DIR,
     EntryRun,
     PeriodReduction,
     Task,
+    TranslationCalls,
     first_year_gaps,
     load_recording,
     load_tasks,
@@ -116,16 +128,62 @@ def _kinds(payload: Mapping[str, Any]) -> set[str]:
     return {requirement["kind"] for requirement in payload["evidence_requirements"]}
 
 
-async def propose(
+@dataclass(frozen=True)
+class Payload:
+    """One plan a task states: what `propose_plan` is sent, the refusal it answers
+    first if any, and what the accepted plan does with its years."""
+
+    label: str
+    body: Mapping[str, Any]
+    refusal: str | None
+    years: PeriodReduction
+
+
+def task_payloads(task: Task) -> list[Payload]:
+    """`task`'s reference payload, then each alternative."""
+    reference = Payload(
+        "reference", task.reference_payload, task.first_proposal_refusal, task.period_reduction
+    )
+    return [reference] + [
+        Payload(
+            f"alternative {index}",
+            alt.payload,
+            alt.first_proposal_refusal,
+            alt.period_reduction or task.period_reduction,
+        )
+        for index, alt in enumerate(task.alternative_payloads)
+    ]
+
+
+_SCHEMAS: list[ToolSchema] = []
+
+
+async def tool_schemas() -> list[ToolSchema]:
+    """The real data-mcp and analysis-mcp tool schemas, as the harness lists them,
+    listed once per process."""
+    if not _SCHEMAS:
+        surface = McpSurface(sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp})
+        try:
+            _SCHEMAS.extend(await surface.list_tools())
+        finally:
+            await surface.aclose()
+    return _SCHEMAS
+
+
+async def accepted_run(
     task: Task,
-    payload: Mapping[str, Any],
-    refusal: str | None,
-    years: PeriodReduction,
-) -> list[str]:
-    """Every fault in proposing `payload` for `task` through the eval's entry. `years`
-    is what the accepted plan has to do with its years."""
-    propose_call = ("propose_plan", dict(payload))
-    if refusal is None:
+    recording: Mapping[str, Any],
+    payload: Payload,
+    translation: TranslationCalls | None = None,
+    *,
+    timeout_s: float = 60.0,
+) -> EntryRun:
+    """The entry over `recording` in which a scripted model proposes `payload` and, when
+    it is refused first, asks the user and proposes it again once they answer, cut
+    after `timeout_s`. With `translation`, the recorded plan is translated over those
+    calls."""
+    propose_call = ("propose_plan", dict(payload.body))
+    if payload.refusal is None:
         script: list[Step] = [[propose_call]]
         answers: list[Mapping[str, Any]] = []
     else:
@@ -139,15 +197,41 @@ async def propose(
         script = [[propose_call], [ask], [propose_call]]
         # The reply the studio's interrupt route sends for an answered pause.
         answers = [{"result": {"answers": {"q1": {"kind": "option", "spec_id": COMBINE_OPTION}}}}]
-    run = await run_entry(
+    return await run_entry(
         task,
-        load_recording(task.id),
+        recording,
         prefix_cache=None,
         model=ScriptedLlm(script=script),
-        timeout_s=60.0,
+        timeout_s=timeout_s,
         answers=answers,
+        translation=translation,
     )
-    return _faults(run, payload, refusal, years)
+
+
+async def propose(task: Task, payload: Payload, translation: TranslationCalls) -> list[str]:
+    """Every fault in proposing `payload` for `task` through the eval's entry, and in
+    translating the plan it accepts over `translation` (`translation_faults`)."""
+    run = await accepted_run(task, load_recording(task.id), payload, translation)
+    faults = _faults(run, payload.body, payload.refusal, payload.years)
+    if faults or run.probe.plan is None:
+        return faults
+    return translation_faults(run, translation)
+
+
+def translation_faults(run: EntryRun, translation: TranslationCalls) -> list[str]:
+    """Every fault in the translation of the plan `run` accepted: each call its
+    recording holds no answer for, else the referral it ended on, by kind, the issue
+    code that closed it (`constraint`) and the requirement it names."""
+    if translation.misses:
+        return [f"no recording for {key}" for key in dict.fromkeys(translation.misses)]
+    answer = run.probe.translation or {}
+    if answer.get("outcome") == "ok":
+        return []
+    return [
+        f"translation {answer.get('kind') or answer.get('code')}: "
+        f"{answer.get('constraint')}@{answer.get('requirement_id')}: "
+        f"{str(answer.get('reason') or answer.get('message'))[:300]}"
+    ]
 
 
 def _faults(
@@ -210,31 +294,29 @@ async def check_task(task: Task) -> list[str]:
     if not (TASKS_DIR / f"{task.id}.json").exists():
         faults.append("the task file is not named for its id")
     witnessed: set[str] = set()
-    plans = [
-        ("reference", task.reference_payload, task.first_proposal_refusal, task.period_reduction)
-    ]
-    plans += [
-        (
-            f"alternative {index}",
-            alt.payload,
-            alt.first_proposal_refusal,
-            alt.period_reduction or task.period_reduction,
-        )
-        for index, alt in enumerate(task.alternative_payloads)
-    ]
-    for label, payload, refusal, years in plans:
-        kinds = _kinds(payload)
+    try:
+        held = load_recording(task.id).get("translation") or {}
+    except Exception as exc:
+        faults.append(f"recording: {type(exc).__name__}: {exc}")
+        held = {}
+    translation = TranslationCalls(held, schemas=await tool_schemas())
+    for payload in task_payloads(task):
+        label, kinds = payload.label, _kinds(payload.body)
         witnessed |= kinds
         if not required <= kinds:
             faults.append(f"{label} lacks required kinds {sorted(required - kinds)}")
         if task.required_one_of and not kinds & set(task.required_one_of):
             faults.append(f"{label} uses none of {sorted(task.required_one_of)}")
+        translation.misses.clear()
         try:
-            faults += [
-                f"{label}: {fault}" for fault in await propose(task, payload, refusal, years)
-            ]
+            faults += [f"{label}: {fault}" for fault in await propose(task, payload, translation)]
         except Exception as exc:
             faults.append(f"{label}: {type(exc).__name__}: {exc}")
+    if not faults and (unasked := translation.unasked()):
+        faults.append(
+            f"the recording holds {len(unasked)} translation answers no payload asks for, "
+            f"so record it again: {unasked[0][:160]}"
+        )
     try:
         recording = load_recording(task.id)
         shown = await run_entry(task, recording, prefix_cache=None, model=ScriptedLlm())

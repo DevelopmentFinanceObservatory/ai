@@ -93,6 +93,7 @@ from pydantic import JsonValue, ValidationError
 
 from translator.discovery import (
     DiscoveryLog,
+    ResolveEntities,
     apply_definitions,
     build_discovery_tools,
     compact_source,
@@ -101,6 +102,7 @@ from translator.discovery import (
     described_sources,
     discovery_lock,
     fetch_definitions,
+    graph_resolve,
     load_log,
     name_pinned_groups,
     requirement_revision,
@@ -123,6 +125,13 @@ logger = logging.getLogger(__name__)
 # What `build_translate` builds: the planner's tool context in, the verdict
 # `propose_plan` answers under `translation` out.
 type Translate = Callable[[ToolContext], Awaitable[dict[str, object]]]
+
+# The newest-year read of a compiled workflow's rolling steps, as
+# `read_within_entry` makes it: `None` when it was skipped.
+type AnchorReader = Callable[
+    ...,
+    Awaitable[tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None],
+]
 
 
 def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tuple[StalePin, ...]:
@@ -776,7 +785,7 @@ def _logged_reference(reason: str) -> str:
     return reference
 
 
-async def _read_within_entry(
+async def read_within_entry(
     workflow: Workflow, plan: Plan, *, surface: ToolSurface
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
     """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
@@ -845,13 +854,21 @@ def _restated_answer(restated: Sequence[Restatement]) -> dict[str, object]:
     return {"restated": [restatement.model_dump(mode="json") for restatement in restated]}
 
 
-def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
+def build_translator_core(
+    *,
+    surface: ToolSurface,
+    resolve_entities: ResolveEntities = graph_resolve,
+    anchor_read: AnchorReader = read_within_entry,
+) -> TranslatorCore:
     """Build the translator's three core functions, for `build_translate` or a test to drive.
 
     `build_translate` drives the three in Python through
     `translator.mechanical.run_translate`. They are built here so a test can
     exercise `propose_operations`'s and `return_to_planner`'s own logic
-    without going through `build_translate`.
+    without going through `build_translate`. `resolve_entities` is the
+    graph's resolve door `resolve_entity_refs` asks, and `anchor_read` the
+    newest-year read of a workflow's rolling steps; the served translation
+    takes the defaults, and `evals/planner_entry` replays both.
     """
 
     async def stated_from_the_data(
@@ -882,7 +899,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
         assert workflow is not None
         if not anchor_groups(workflow):
             return plan, translation, result
-        read = _groups_read(await _read_within_entry(workflow, plan, surface=surface))
+        read = _groups_read(await anchor_read(workflow, plan, surface=surface))
         if isinstance(read, Refused):
             return _run_would_stop(read, workflow=workflow, translation=translation)
         if not any(group.behind for group in read):
@@ -957,6 +974,7 @@ def build_translator_core(*, surface: ToolSurface) -> TranslatorCore:
             discovered = settled(log)
         resolved = await resolve_entity_refs(
             log,
+            resolve_entities=resolve_entities,
             revision=plan_revision(plan),
             requirements=[
                 r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
@@ -1248,14 +1266,22 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     return mapped
 
 
-def build_translate(*, surface: ToolSurface) -> Translate:
+def build_translate(
+    *,
+    surface: ToolSurface,
+    resolve_entities: ResolveEntities = graph_resolve,
+    anchor_read: AnchorReader = read_within_entry,
+) -> Translate:
     """Build the translation `propose_plan` runs on every plan it records, closing over `surface`.
 
     The function takes the planner's tool context and reads the plan
     `propose_plan` just recorded from session state, so the model never calls
-    it and spends no generation on it.
+    it and spends no generation on it. `resolve_entities` and `anchor_read`
+    are as `build_translator_core` takes them.
     """
-    core = build_translator_core(surface=surface)
+    core = build_translator_core(
+        surface=surface, resolve_entities=resolve_entities, anchor_read=anchor_read
+    )
 
     async def translate(tool_context: ToolContext) -> dict[str, object]:
         """Find the data the recorded plan needs and compile the workflow the user approves.

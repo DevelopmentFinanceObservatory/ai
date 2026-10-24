@@ -102,7 +102,8 @@
           "end": 2024
         },
         "across": [
-          "donor"
+          "donor",
+          "recipient"
         ],
         "source_spec_id": "spec_cacb1731d27248637380de7c7bd68f44"
       },

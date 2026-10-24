@@ -1499,6 +1499,22 @@ def _unmatched_names(requirement: DatasetRequirement, source: SelectedSource) ->
     )
 
 
+# The graph's resolve door as `resolve_entity_refs` calls it.
+type ResolveEntities = Callable[
+    [Mapping[str, Sequence[str]]], Awaitable[dict[str, dict[str, resolution.ResolutionOutcome]]]
+]
+
+
+async def graph_resolve(
+    scope: Mapping[str, Sequence[str]],
+) -> dict[str, dict[str, resolution.ResolutionOutcome]]:
+    """`data_mcp.resolution.resolve_entities`, the door the served translation resolves through.
+
+    Looked up when called, so a patch of `data_mcp.resolution` reaches it.
+    """
+    return await resolution.resolve_entities(scope)
+
+
 async def resolve_entity_refs(
     log: DiscoveryLog,
     *,
@@ -1506,6 +1522,7 @@ async def resolve_entity_refs(
     requirements: Sequence[DatasetRequirement],
     requirement_keys: Mapping[str, str],
     sources: Mapping[str, SelectedSource],
+    resolve_entities: ResolveEntities = graph_resolve,
 ) -> tuple[DescribedPair, ...]:
     """Resolve the entity names each source matches by no label to graph refs, one pair per source.
 
@@ -1513,8 +1530,8 @@ async def resolve_entity_refs(
     on. A name that names nothing the source holds (`named_members`), such
     as "United States" beside an entity labelled "United States of
     America", is resolved through the graph's resolve door in process
-    (`data_mcp.resolution.resolve_entities`), every requirement's names in
-    one call. Only a `resolved` outcome counts: a region, a group, an
+    (`resolve_entities`, `graph_resolve` when served), every requirement's
+    names in one call. Only a `resolved` outcome counts: a region, a group, an
     ambiguous name or one the graph lacks maps to nothing, and the
     evidence check reports it as missing. The refs found are
     recorded on the source (`SelectedSource.entity_refs`), so compile and
@@ -1550,7 +1567,7 @@ async def resolve_entity_refs(
     failure: str | None = None
     outcomes: dict[str, resolution.ResolutionOutcome] = {}
     try:
-        outcomes = (await resolution.resolve_entities({"names": asked})).get("names", {})
+        outcomes = (await resolve_entities({"names": asked})).get("names", {})
     except UpstreamError as exc:
         failure = str(exc)
         logger.warning(
