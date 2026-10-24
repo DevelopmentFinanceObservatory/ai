@@ -21,7 +21,6 @@ import pytest
 from google.cloud import bigquery
 from harness import langfuse_export
 from harness.langfuse_export import (
-    ACCESS_DAYS,
     BACKFILL_FLOOR,
     ERROR_BODY_CHARS,
     MAX_RETRY_AFTER_S,
@@ -36,7 +35,6 @@ from harness.langfuse_export import (
     LangfuseReader,
     check_day,
     export_days,
-    retained_from,
     run_export,
     window_start,
 )
@@ -70,19 +68,25 @@ def recorded_langfuse(
     requests: list[httpx2.Request], counts: dict[date, int] | None = None
 ) -> httpx2.MockTransport:
     """Answers the recorded pages for `RECORDED_DAY` by cursor, an empty page for any
-    other day, and the day-grouped metrics query with `counts`, by default the
-    recording's four observations on `RECORDED_DAY`."""
+    other day, and the day-grouped metrics query with the days of `counts` in its
+    range, by default the recording's four observations on `RECORDED_DAY`. Like
+    Langfuse, it answers at most the query's `config.row_limit` rows, 100 when unset."""
     pages = {page["cursor"]: page["answer"] for page in RECORDING["pages"]}
     counts = {RECORDED_DAY: 4} if counts is None else counts
 
     def handle(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
         if request.url.path == "/api/public/v2/metrics":
+            query = json.loads(request.url.params["query"])
+            first = date.fromisoformat(query["fromTimestamp"][:10])
+            end = date.fromisoformat(query["toTimestamp"][:10])
             data = [
                 {"time_dimension": day.isoformat(), "count_count": n}
                 for day, n in sorted(counts.items())
+                if first <= day < end
             ]
-            return httpx2.Response(200, json={"data": data})
+            row_limit = query.get("config", {}).get("row_limit", 100)
+            return httpx2.Response(200, json={"data": data[:row_limit]})
         if not request.url.params["fromStartTime"].startswith(RECORDED_DAY.isoformat()):
             return httpx2.Response(200, json={"data": [], "meta": {}})
         return httpx2.Response(200, json=pages[request.url.params.get("cursor")])
@@ -267,16 +271,14 @@ def test_export_days_replace_from_latest_minus_one(latest, today, first, last):
         # A partition Langfuse no longer counts.
         ({}, {date(2026, 10, 24): 4}, [date(2026, 10, 24)]),
         ({date(2026, 10, 25): 4}, {date(2026, 10, 25): 4}, []),
-        # The oldest day the access window shows whole is compared, the day before
-        # it is not.
-        ({date(2026, 10, 22): 4}, {date(2026, 10, 22): 3}, [date(2026, 10, 22)]),
-        ({date(2026, 10, 21): 4}, {date(2026, 10, 21): 3}, []),
+        # Every day from the floor on is compared, however old, and none before it.
+        ({BACKFILL_FLOOR: 4}, {BACKFILL_FLOOR: 3}, [BACKFILL_FLOOR]),
+        ({date(2026, 10, 4): 4}, {date(2026, 10, 4): 3}, []),
     ],
 )
-def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added):
-    today = date(2026, 11, 20)
-    assert retained_from(today) == date(2026, 10, 22)
-    first = date(2026, 11, 17)
+def test_export_days_add_days_whose_counts_differ(langfuse, held, added):
+    today = date(2026, 12, 20)
+    first = date(2026, 12, 17)
 
     days = export_days(first=first, today=today, langfuse=langfuse, held=held)
 
@@ -306,13 +308,20 @@ def test_from_widens_the_window_to_its_day(since, first):
     assert days == [first + timedelta(days=offset) for offset in range((today - first).days + 1)]
 
 
-def test_a_window_reaching_before_the_access_window_requests_no_day_before_it():
-    """`--from` back to the floor asks Langfuse for no day it hides: those days keep their
-    partitions and get one outcome apiece, and the days from the first whole one on are
-    read, an empty one keeping its partition."""
-    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS - 1)
-    assert retained_from(today) == RECORDED_DAY
-    bq = FakeBigQuery(latest=today - timedelta(days=1), held={RECORDED_DAY - timedelta(days=1): 5})
+@pytest.mark.parametrize(
+    ("latest", "since", "first"),
+    [
+        # `--from` back to the floor reads every day from it.
+        (date(2026, 12, 18), BACKFILL_FLOOR, BACKFILL_FLOOR),
+        # A long outage reads from the latest loaded day minus one.
+        (RECORDED_DAY + timedelta(days=1), None, RECORDED_DAY),
+    ],
+)
+def test_a_window_months_long_reads_every_day_of_it(latest, since, first):
+    """Every day of a window reaching back months is requested, an empty one keeping its
+    partition."""
+    today = date(2026, 12, 19)
+    bq = FakeBigQuery(latest=latest)
     requests: list[httpx2.Request] = []
 
     outcomes = run_export(
@@ -320,39 +329,19 @@ def test_a_window_reaching_before_the_access_window_requests_no_day_before_it():
         bq=bq,
         table_id=TABLE_ID,
         today=today,
-        since=BACKFILL_FLOOR,
+        since=since,
     )
 
+    window = [first + timedelta(days=n) for n in range((today - first).days + 1)]
     days_read = sorted(
         {r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params}
     )
-    assert days_read == [
-        (RECORDED_DAY + timedelta(days=offset)).isoformat() for offset in range(ACCESS_DAYS)
-    ]
+    assert days_read == [day.isoformat() for day in window]
     assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
-    hidden = [
-        BACKFILL_FLOOR + timedelta(days=n) for n in range((RECORDED_DAY - BACKFILL_FLOOR).days)
-    ]
     assert outcomes == {
-        **dict.fromkeys(hidden, DayOutcome.OUTSIDE_WINDOW),
+        **dict.fromkeys(window, DayOutcome.KEPT),
         RECORDED_DAY: DayOutcome.REPLACED,
-        **dict.fromkeys(
-            (RECORDED_DAY + timedelta(days=n) for n in range(1, ACCESS_DAYS)), DayOutcome.KEPT
-        ),
     }
-
-
-@pytest.mark.parametrize(
-    ("today", "first"),
-    [
-        (date(2026, 11, 30), date(2026, 11, 1)),
-        # The floor holds whole: nothing before it was ever exported.
-        (date(2026, 10, 23), BACKFILL_FLOOR),
-    ],
-)
-def test_retained_from_is_the_oldest_whole_day(today, first):
-    assert retained_from(today) == first
-    assert (today - first).days <= ACCESS_DAYS - 1
 
 
 def logged_days(output: str) -> list[str]:
@@ -376,7 +365,7 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert [field.name for field in table.schema] == [field.name for field in SCHEMA]
     assert table.time_partitioning.field == "start_time"
     assert table.time_partitioning.type_ == bigquery.TimePartitioningType.DAY
-    # The partition counts reach back to the oldest day Langfuse holds whole.
+    # The partition counts reach back to the floor.
     assert bq.queries == [
         f"SELECT DATE(MAX(start_time)) AS day FROM `{TABLE_ID}`",
         f"SELECT DATE(start_time) AS day, COUNT(*) AS row_count FROM `{TABLE_ID}` "
@@ -434,7 +423,7 @@ def test_a_read_holding_the_partition_replaces_it(capsys, held):
         ({RECORDED_DAY: 3}, {RECORDED_DAY: 6}, True),
     ],
 )
-def test_a_retained_day_read_short_fails_after_the_other_days(capsys, held, counts, replaced):
+def test_a_day_read_short_fails_after_the_other_days(capsys, held, counts, replaced):
     bq = FakeBigQuery(latest=date(2026, 10, 21), held=held)
 
     with pytest.raises(IncompleteDaysError) as failure:
@@ -478,11 +467,52 @@ def test_a_day_missing_from_bigquery_is_loaded():
     assert query["filters"][0]["value"] == ["dfo-prod-ai"]
 
 
-def test_a_short_day_inside_the_access_window_fails_and_keeps_its_partition(capsys):
-    """Hobby's access window hides older observations, so only a day inside it reads whole."""
-    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS - 1)
-    bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: 5})
-    reader = reader_for(recorded_langfuse([], {RECORDED_DAY: 5}))
+# 101 days of counts, one more than the metrics API's default row limit.
+LONG_COUNTS = {BACKFILL_FLOOR + timedelta(days=n): n + 1 for n in range(101)}
+
+
+@pytest.mark.parametrize(
+    ("chunk_days", "chunks"),
+    [(None, [(0, 101)]), (30, [(0, 30), (30, 60), (60, 90), (90, 101)])],
+)
+def test_day_counts_read_a_range_past_the_default_row_limit_whole(monkeypatch, chunk_days, chunks):
+    """Consecutive chunks of at most `DAY_COUNT_CHUNK_DAYS` days cover the range once:
+    each chunk's bounds, as day offsets from the floor, end where the next begins."""
+    if chunk_days is not None:
+        monkeypatch.setattr(langfuse_export, "DAY_COUNT_CHUNK_DAYS", chunk_days)
+    requests: list[httpx2.Request] = []
+    reader = reader_for(recorded_langfuse(requests, LONG_COUNTS))
+
+    counts = reader.day_counts(first=BACKFILL_FLOOR, last=max(LONG_COUNTS))
+
+    assert counts == LONG_COUNTS
+    queries = [json.loads(request.url.params["query"]) for request in requests]
+    assert [(query["fromTimestamp"], query["toTimestamp"]) for query in queries] == [
+        (
+            f"{BACKFILL_FLOOR + timedelta(days=start)}T00:00:00Z",
+            f"{BACKFILL_FLOOR + timedelta(days=end)}T00:00:00Z",
+        )
+        for start, end in chunks
+    ]
+
+
+def test_day_counts_refuse_an_answer_that_fills_the_row_limit(monkeypatch):
+    monkeypatch.setattr(langfuse_export, "METRICS_ROW_LIMIT", 10)
+    reader = reader_for(recorded_langfuse([], LONG_COUNTS))
+
+    with pytest.raises(LangfuseError) as failure:
+        reader.day_counts(first=BACKFILL_FLOOR, last=max(LONG_COUNTS))
+
+    assert failure.value.status == 200
+    # `_readable`'s refusal of an unreadable answer chains the read error.
+    assert failure.value.__cause__ is None
+
+
+def test_a_short_day_months_old_fails_and_keeps_its_partition(capsys):
+    """The count comparison reaches a day months before the window."""
+    today = date(2026, 12, 19)
+    bq = FakeBigQuery(latest=today - timedelta(days=1), held={RECORDED_DAY: 5})
+    reader = reader_for(recorded_langfuse([], {RECORDED_DAY: 6}))
 
     with pytest.raises(IncompleteDaysError) as failure:
         run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today)
@@ -617,7 +647,7 @@ def counts_answering(
     ("held", "replaced", "error"),
     [
         ({}, True, LangfuseError),
-        # A retained day that reads below its partition is reported with the failure.
+        # A day that reads below its partition is reported with the failure.
         ({RECORDED_DAY: 5}, False, IncompleteDaysError),
     ],
 )
@@ -643,7 +673,8 @@ def test_a_failed_count_query_still_loads_the_window_and_fails(held, replaced, e
         counts_failure = failure.value
     assert isinstance(counts_failure, LangfuseError)
     assert counts_failure.status == 503
-    # Metrics queries draw from a daily bucket, so a failing one is tried only twice.
+    # Metrics queries draw from a separate, smaller bucket, so a failing one is tried
+    # only twice.
     assert len([r for r in requests if r.url.path == "/api/public/v2/metrics"]) == (
         METRICS_ATTEMPTS
     )
@@ -793,7 +824,7 @@ def test_pages_are_paced_and_429_waits_for_retry_after():
     assert not answers
     # 429 waits its Retry-After, which already covers the pacing interval. The 503
     # backs off two seconds, after which the retry needs no further pacing wait.
-    assert clock.sleeps == [7.0, REQUEST_INTERVAL_S, langfuse_export.BACKOFF_S]
+    assert clock.sleeps == pytest.approx([7.0, REQUEST_INTERVAL_S, langfuse_export.BACKOFF_S])
 
 
 @pytest.mark.parametrize(

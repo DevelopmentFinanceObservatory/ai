@@ -5,19 +5,18 @@ UTC day at a time, and replaces that day's partition of the BigQuery table
 `observations`, which is day-partitioned on `start_time`. A load adds any column
 of `SCHEMA` the table lacks, which rows loaded earlier hold as NULL until their
 day is replaced. The days are the latest loaded day minus one through today, plus
-every day Langfuse still shows whole (`retained_from` on) whose observation count,
-from one `GET /api/public/v2/metrics` query grouped by day, differs from its
-partition's row count. An empty table is backfilled from `BACKFILL_FLOOR`, the
-first day the prod project holds data. `--from DAY` adds every day from DAY (or
+every day from `BACKFILL_FLOOR` on whose observation count, from
+`GET /api/public/v2/metrics` queries grouped by day, each covering at most
+`DAY_COUNT_CHUNK_DAYS` days, differs from its partition's row count.
+`BACKFILL_FLOOR` is the first day the prod project holds data, and an empty table
+is backfilled from it. `--from DAY` adds every day from DAY (or
 `BACKFILL_FLOOR`, when DAY is earlier) through today to the window, under the
-same rules, so a column added to `SCHEMA` reaches the days Langfuse still shows.
-Hobby's data access window hides observations older than `ACCESS_DAYS` from the
-API, so no window starts before `retained_from`: a day before it is logged once
-as outside the access window, its partition is kept, and the API is not asked
-for it. A run that fails part-way leaves every day it reached replaced whole and
-every other day as it was. For the scheduled window, the next run's count
-comparison picks up the gap. A `--from` run that stops part-way is repaired by
-running it again, since the scheduled runs skip days whose counts already match.
+same rules, so a column added to `SCHEMA` reaches history. A run that fails
+part-way leaves every day it reached replaced whole and every other day as it
+was. For the scheduled window, the next run's count comparison picks up the gap.
+A `--from` run that stops part-way is repaired by rerunning it from the first day
+it did not log, since the scheduled runs skip days whose counts already match and
+a rerun from the original DAY replaces the same leading days again.
 
 `LangfuseReader.observations` returns each observation id once, so an observation
 two pages both hold loads once and `--check-day` counts it once. Of two copies of
@@ -40,8 +39,8 @@ keys for another project read as empty and prod has had turns every day since
 prints the day it stopped on before the error.
 
 When the day-count query fails, the run still reads the window from the latest
-loaded day minus one (or `--from`, or `retained_from` when later) through today,
-which needs no count, under the never-shrink rule. It then raises
+loaded day minus one (or `--from` when earlier) through today, which needs no
+count, under the never-shrink rule. It then raises
 `EmptyWindowError` chained from the query's `LangfuseError` when every day read no
 rows, so a wrong environment is always named, and otherwise the query's
 `LangfuseError`, or an `IncompleteDaysError` chained from it and naming it when a
@@ -55,18 +54,18 @@ observation has no such key. Requests omit the
 Langfuse, and `observation_row` copies named fields only, which keeps
 `statusMessage` (it can echo user input) and `userId` out of BigQuery.
 
-Langfuse Cloud counts every observations page against the organisation's General
-API bucket (30 requests a minute on Hobby), so requests go out at most one per
-`REQUEST_INTERVAL_S`. Metrics queries draw from the separate Metrics API bucket
-(100 requests a day on Hobby) and make at most `METRICS_ATTEMPTS` attempts. An
-hourly run makes one query, spending one request and at most two, so 24 runs
-spend 24 to 48 a day, and each `--check-day` makes two queries, spending two to
-four. A 429 waits when its `Retry-After`, in seconds or as an HTTP date, is at most
+Langfuse Cloud's limits are stated beside `REQUEST_INTERVAL_S`. Every
+observations page counts against the organisation's General API bucket, so
+requests go out at most one per `REQUEST_INTERVAL_S`. Metrics queries draw from
+the separate Metrics API bucket and make at most `METRICS_ATTEMPTS` attempts. A
+run makes one day-count query for each `DAY_COUNT_CHUNK_DAYS` days since
+`BACKFILL_FLOOR`, and each `--check-day` makes two queries, spending two to four.
+A 429 waits when its `Retry-After`, in seconds or as an HTTP date, is at most
 `MAX_RETRY_AFTER_S`, and backs off with a doubling wait from `RATE_LIMIT_BACKOFF_S`
 capped at `MAX_RETRY_AFTER_S` when the header is missing or unusable. It ends the
-run with `LangfuseError` when it asks for longer, as an exhausted daily Metrics
-bucket does, or when the attempts run out. Any other 4xx ends the run at once. A
-5xx or a transport error is retried with backoff.
+run with `LangfuseError` when it asks for longer, as an exhausted Metrics bucket
+can, or when the attempts run out. Any other 4xx ends the run at once. A 5xx or a
+transport error is retried with backoff.
 
 `--check-day DAY` reads one day and compares the row count, summed cost and summed
 cached input tokens the mapping produces with `GET /api/public/v2/metrics` for the
@@ -77,7 +76,7 @@ Settings come from the environment or `.env`: `LANGFUSE_PUBLIC_KEY`,
 a load also `EXPORT_BQ_PROJECT` and `EXPORT_BQ_DATASET`.
 
 Exit status: 0 when every day loaded or kept or the check matched, 1 when the
-check found a difference, a request failed, a retained day read short or the
+check found a difference, a request failed, a day read short or the
 whole run read no rows, and 2 when a setting is missing.
 """
 
@@ -100,30 +99,36 @@ from google.cloud import bigquery
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKFILL_FLOOR = date(2026, 10, 5)
-# Langfuse Cloud's Hobby plan has a 30-day data access window
-# (https://langfuse.com/docs/administration/data-retention): the API shows
-# observations from the last 30 days by `start_time` and hides older ones, which
-# stay stored.
-ACCESS_DAYS = 30
 TABLE = "observations"
 
 # Every group except `io` and `metadata` (free text) and `time` and `prompt`,
 # which no column reads.
 FIELD_GROUPS = "core,basic,model,usage,metrics,trace_context"
 PAGE_LIMIT = 1000
-# One page every two seconds stays under Hobby's 30 requests a minute.
-REQUEST_INTERVAL_S = 2.0
+# The limits of Langfuse Cloud's Pro plan, which the dfo organisation holds
+# (https://langfuse.com/faq/all/api-limits): data access for 3 years, which
+# reaches back past `BACKFILL_FLOOR`; a General API bucket of 1,000 requests a
+# minute; and a Metrics API bucket of 500 queries an hour.
+# One page every 0.1 seconds is 600 requests a minute, under the General API bucket.
+REQUEST_INTERVAL_S = 0.1
 ATTEMPTS = 5
 BACKOFF_S = 2.0
-# A metrics query's attempts. The Metrics bucket allows 100 requests a day, so a
-# persistent metrics failure spends at most 48 of them across 24 hourly runs.
+# A metrics query's attempts.
 METRICS_ATTEMPTS = 2
+# The most rows a metrics query asks for, Langfuse's maximum `config.row_limit`
+# (https://langfuse.com/docs/metrics/features/metrics-api); the default is 100.
+METRICS_ROW_LIMIT = 1000
+# The days one day-count query covers, one row each, below `METRICS_ROW_LIMIT` so
+# a whole answer never fills it. A run makes one query through 2029-03-22 and two
+# through 2031-09-08, so with `METRICS_ATTEMPTS` an hourly run spends at most 4 of
+# the Metrics bucket's 500 queries an hour until then.
+DAY_COUNT_CHUNK_DAYS = 900
 # A 429 without a usable `Retry-After` waits this long, doubling with each
 # consecutive 429.
 RATE_LIMIT_BACKOFF_S = 15.0
 # The longest a 429 waits. The General API bucket refills within a minute, and a
-# longer `Retry-After`, such as the hours an exhausted daily Metrics bucket names,
-# fails the request at once.
+# longer `Retry-After`, such as the minutes an exhausted hourly Metrics bucket can
+# name, fails the request at once.
 MAX_RETRY_AFTER_S = 60.0
 # How much of a refusal's body a `LangfuseError` message carries.
 ERROR_BODY_CHARS = 500
@@ -191,7 +196,6 @@ class DayOutcome(StrEnum):
 
     REPLACED = "replaced"
     KEPT = "partition kept"
-    OUTSIDE_WINDOW = "outside the access window"
 
 
 class EmptyWindowError(RuntimeError):
@@ -199,11 +203,10 @@ class EmptyWindowError(RuntimeError):
 
 
 class IncompleteDaysError(RuntimeError):
-    """A day Langfuse still shows whole read fewer rows than its partition or
-    Langfuse's own count; `days` lists them. A partition holding rows Langfuse no
-    longer counts, such as an observation deleted in Langfuse, fails every run until
-    that day's rows are deleted from the table, after which the next run reloads the
-    day."""
+    """A day read fewer rows than its partition or Langfuse's own count; `days`
+    lists them. A partition holding rows Langfuse no longer counts, such as an
+    observation deleted in Langfuse, fails every run until that day's rows are
+    deleted from the table, after which the next run reloads the day."""
 
     def __init__(self, message: str, *, days: list[date]) -> None:
         super().__init__(message)
@@ -257,13 +260,6 @@ def observation_row(observation: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def retained_from(today: date) -> date:
-    """The oldest day Langfuse still shows whole. Its age at the end of `today` is
-    `ACCESS_DAYS`, so the day before it is the newest the access window may have
-    partly hidden."""
-    return max(today - timedelta(days=ACCESS_DAYS - 1), BACKFILL_FLOOR)
-
-
 def window_start(*, latest_loaded: date | None, since: date | None) -> date:
     """The first day of the run's window, which is read whatever the counts say: the
     latest loaded day minus one (`BACKFILL_FLOOR` when nothing is loaded), or `since`
@@ -285,16 +281,15 @@ def export_days(
     held: Mapping[date, int],
 ) -> list[date]:
     """The days a run replaces: `first` (the run's `window_start`) through today, and
-    every day from `retained_from` on whose Langfuse count differs from its
+    every day from `BACKFILL_FLOOR` on whose Langfuse count differs from its
     partition's row count. `langfuse` is None when the counts could not be read,
     which leaves the window."""
     days = {first + timedelta(days=offset) for offset in range((today - first).days + 1)}
     if langfuse is not None:
-        retained = retained_from(today)
         days.update(
             day
             for day in langfuse.keys() | held.keys()
-            if retained <= day <= today and langfuse.get(day, 0) != held.get(day, 0)
+            if BACKFILL_FLOOR <= day <= today and langfuse.get(day, 0) != held.get(day, 0)
         )
     return sorted(days)
 
@@ -455,6 +450,7 @@ class LangfuseReader:
             ],
             "fromTimestamp": _day_bounds(first)[0],
             "toTimestamp": _day_bounds(last)[1],
+            "config": {"row_limit": METRICS_ROW_LIMIT},
         }
         if by_day:
             query["timeDimension"] = {"granularity": "day"}
@@ -466,19 +462,33 @@ class LangfuseReader:
 
     def day_counts(self, *, first: date, last: date) -> dict[date, int]:
         """The observation count Langfuse's metrics report for each day from `first`
-        through `last` that holds observations. The metrics bucket a day by UTC
-        start time, the bounds `observations` reads. Raises `LangfuseError` when the
-        query fails or answers rows without a readable day and count."""
-        rows = self._metrics(
-            first=first,
-            last=last,
-            metrics=[{"measure": "count", "aggregation": "count"}],
-            by_day=True,
-        )
-        with _readable({"data": rows}):
-            return {
-                date.fromisoformat(row["time_dimension"]): int(row["count_count"]) for row in rows
-            }
+        through `last` that holds observations, read in consecutive queries of at most
+        `DAY_COUNT_CHUNK_DAYS` days. The metrics bucket a day by UTC start time, the
+        bounds `observations` reads. Raises `LangfuseError` when a query fails,
+        answers rows without a readable day and count, or answers `METRICS_ROW_LIMIT`
+        rows, which Langfuse may have cut."""
+        counts: dict[date, int] = {}
+        while first <= last:
+            chunk_last = min(first + timedelta(days=DAY_COUNT_CHUNK_DAYS - 1), last)
+            rows = self._metrics(
+                first=first,
+                last=chunk_last,
+                metrics=[{"measure": "count", "aggregation": "count"}],
+                by_day=True,
+            )
+            with _readable({"data": rows}):
+                if len(rows) >= METRICS_ROW_LIMIT:
+                    raise LangfuseError(
+                        f"the day-count query for {first} through {chunk_last} answered "
+                        f"{len(rows)} rows, the row limit, so it may be cut",
+                        status=200,
+                    )
+                counts.update(
+                    (date.fromisoformat(row["time_dimension"]), int(row["count_count"]))
+                    for row in rows
+                )
+            first = chunk_last + timedelta(days=1)
+        return counts
 
     def day_cached_input_tokens(self, day: date) -> int:
         """The summed `input_cached_tokens` usage Langfuse's metrics report for `day`.
@@ -568,8 +578,7 @@ def run_export(
 ) -> dict[date, DayOutcome]:
     """Create the table if absent and replace every day `export_days` names, with
     `since` widening the window, whose read holds rows and at least as many as its
-    partition. No day before `retained_from` is requested: those days keep their
-    partitions. Returns each day's `DayOutcome`. Raises a read's `LangfuseError` at
+    partition. Returns each day's `DayOutcome`. Raises a read's `LangfuseError` at
     once, then `EmptyWindowError` when every day reads no rows, chained from the
     day-count query's `LangfuseError` when that failed, then that `LangfuseError` or
     an `IncompleteDaysError` chained from it when a day read fewer rows than its
@@ -578,30 +587,17 @@ def run_export(
     table = bigquery.Table(table_id, schema=SCHEMA)
     table.time_partitioning = PARTITIONING
     bq.create_table(table, exists_ok=True)
-    latest = latest_loaded_day(bq, table_id)
-    retained = retained_from(today)
-    wanted = window_start(latest_loaded=latest, since=since)
-    first = max(wanted, retained)
+    first = window_start(latest_loaded=latest_loaded_day(bq, table_id), since=since)
     outcomes: dict[date, DayOutcome] = {}
-    if wanted < retained:
-        outcomes = dict.fromkeys(
-            (wanted + timedelta(days=offset) for offset in range((retained - wanted).days)),
-            DayOutcome.OUTSIDE_WINDOW,
-        )
-        print(
-            f"{wanted} through {retained - timedelta(days=1)}: {DayOutcome.OUTSIDE_WINDOW}; "
-            f"partitions kept, not requested, since {retained} is the first day inside it",
-            flush=True,
-        )
     counts_error = None
     langfuse: dict[date, int] | None
     try:
-        langfuse = reader.day_counts(first=retained, last=today)
+        langfuse = reader.day_counts(first=BACKFILL_FLOOR, last=today)
     except LangfuseError as exc:
         print(f"day counts: failed, so only {first} through {today} is read; {exc}", flush=True)
         counts_error = exc
         langfuse = None
-    held = partition_row_counts(bq, table_id, retained)
+    held = partition_row_counts(bq, table_id, BACKFILL_FLOOR)
     days = export_days(first=first, today=today, langfuse=langfuse, held=held)
     short = []
     read_any = False
