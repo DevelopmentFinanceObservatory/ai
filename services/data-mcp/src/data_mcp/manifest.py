@@ -147,12 +147,47 @@ class CitationModel(BaseModel):
     sources: list[CitationSource]
 
 
+class CountedRefsModel(BaseModel):
+    """The things of one kind a warning counts: how many, and the `dcid:` refs of the
+    first few (apis' `CountedRefsModel`). The warning's message states the count and
+    names none."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    count: int
+    refs: list[str]
+
+
+class EntityYearsModel(BaseModel):
+    """One entity a conversion left rows out of, and the years of those rows as runs,
+    `1990-2001` or `2004` (apis' `EntityYearsModel`)."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    ref: str
+    years: list[str]
+
+
+class CountedEntityYearsModel(BaseModel):
+    """The entities a conversion left rows out of: how many, and the first few, each with
+    its years (apis' `CountedEntityYearsModel`)."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    count: int
+    entities: list[EntityYearsModel]
+
+
 class WarningModel(BaseModel):
     """One manifest warning.
 
     `contributing_member_count` and `stat_var_label` are set on a `stat_vars_summed`
     warning only: the number of StatVars with rows that apis added into the family
     total, and the label apis' presentation door gives the family ref.
+
+    A `coverage_below_scope` warning can carry `member_count`, the series a group
+    requested, `off_cadence_members` and `out_of_window_members`, the group members the
+    figures leave out, and `unserved_entities`, the bound entities that served nothing.
+    `omitted_entities` is set on `currency_unmapped_omitted` and `omitted_entity_years`
+    on `deflator_missing_omitted`. Each stays out of a dump when absent, so a warning
+    without them serialises as it arrived.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -161,6 +196,12 @@ class WarningModel(BaseModel):
     message: str
     contributing_member_count: int | None = None
     stat_var_label: str | None = None
+    member_count: int | None = Field(default=None, exclude_if=_is_none)
+    off_cadence_members: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    out_of_window_members: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    unserved_entities: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    omitted_entities: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    omitted_entity_years: CountedEntityYearsModel | None = Field(default=None, exclude_if=_is_none)
 
 
 class StatPointModel(BaseModel):

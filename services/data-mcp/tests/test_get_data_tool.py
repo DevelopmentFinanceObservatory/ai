@@ -61,6 +61,7 @@ from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
+from .node_fixtures import load_node_fixture
 from .resolve_results import members_result, resolve_result, resolved_result
 from .test_client import _client, _problem_body, id_token_auth, text_of
 from .test_operations import _FakeClock
@@ -5533,3 +5534,166 @@ def test_a_refusal_names_a_place_by_its_label_and_only_counts_one_without() -> N
         == "Kenya and 1 more place"
     )
     assert get_data_tool._places_named(["country/GHA", "country/NGA"], labels) == "2 places"
+
+
+# Warning refs: every warning's refs labelled by one node lookup
+
+_NODES_PATH = "/api/graph/nodes"
+
+# Two warnings naming three distinct refs between them, `country/KEN` in both, and one
+# naming none.
+_REF_WARNINGS: list[dict[str, Any]] = [
+    {
+        "code": "coverage_below_scope",
+        "severity": "warn",
+        "message": "2 of 14 series report at a different frequency.",
+        "member_count": 14,
+        "off_cadence_members": {"count": 2, "refs": ["dcid:country/KEN", "dcid:country/UGA"]},
+    },
+    {
+        "code": "deflator_missing_omitted",
+        "severity": "warn",
+        "message": "It left out 3 entities.",
+        "omitted_entity_years": {
+            "count": 3,
+            "entities": [
+                {"ref": "dcid:country/KEN", "years": ["2004"]},
+                {"ref": "dcid:country/TCD", "years": ["2010-2012"]},
+            ],
+        },
+    },
+    {"code": "facet_fallback", "severity": "info", "message": "Fell back."},
+]
+
+
+def _returned_warnings(result: CallToolResult) -> list[dict[str, Any]]:
+    assert result.structured_content is not None
+    return result.structured_content["warnings"]
+
+
+def _with_messages(*messages: str) -> list[dict[str, Any]]:
+    """`_REF_WARNINGS` with the given messages, in order, every field kept, and the two
+    `stat_vars_summed` fields the stripped manifest dumps as null."""
+    return [
+        {"contributing_member_count": None, "stat_var_label": None, **warning, "message": message}
+        for warning, message in zip(_REF_WARNINGS, messages, strict=True)
+    ]
+
+
+def _ref_warnings_handler(
+    spec_id: str,
+    nodes: Handler,
+    node_requests: list[list[str]],
+    *,
+    on_mint: Callable[[], None] = lambda: None,
+) -> Handler:
+    """Answer the mint with `_REF_WARNINGS`, calling `on_mint` first, and the node batch
+    route with `nodes`, recording each request's dcids in `node_requests`."""
+    payload = _manifest_response(spec_id=spec_id)
+    payload["warnings"] = _REF_WARNINGS
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            on_mint()
+            return httpx2.Response(200, json=payload)
+        if request.url.path == _NODES_PATH:
+            node_requests.append(json.loads(request.content)["dcids"])
+            response = nodes(request)
+            return response if isinstance(response, httpx2.Response) else await response
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    return handler
+
+
+async def _never_answers(_request: httpx2.Request) -> httpx2.Response:
+    await asyncio.Event().wait()
+    raise AssertionError("the wait above never ends")
+
+
+def _labelled_nodes(request: httpx2.Request) -> httpx2.Response:
+    """Kenya and Uganda by name; `country/TCD` not held."""
+    country = load_node_fixture("node_country")
+    labels = {"country/KEN": "Kenya", "country/UGA": "Uganda"}
+    entries = [
+        {**country, "ref": dcid, "label": labels[dcid]}
+        if dcid in labels
+        else {"ref": dcid, "status": "not_held"}
+        for dcid in json.loads(request.content)["dcids"]
+    ]
+    return httpx2.Response(200, json={"nodes": entries})
+
+
+async def test_every_warnings_refs_are_labelled_by_one_node_lookup() -> None:
+    stored = _stored_definition()
+    node_requests: list[list[str]] = []
+
+    result = await _call_get_data(
+        _ref_warnings_handler(stored.spec_id, _labelled_nodes, node_requests),
+        _StubStore(stored),
+        {"spec_id": stored.spec_id},
+    )
+
+    assert result.is_error is False
+    assert node_requests == [["country/KEN", "country/UGA", "country/TCD"]]
+    text = text_of(result)
+    assert "Series at another frequency: Kenya, Uganda." in text
+    assert "Entities left out: Kenya (2004), country/TCD (2010-2012), and 1 more." in text
+    # The harness copies the returned messages into card warnings.
+    assert _returned_warnings(result) == _with_messages(
+        "2 of 14 series report at a different frequency. "
+        "Series at another frequency: Kenya, Uganda.",
+        "It left out 3 entities. "
+        "Entities left out: Kenya (2004), country/TCD (2010-2012), and 1 more.",
+        "Fell back.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("nodes", "seconds_left"),
+    [
+        (
+            lambda _request: httpx2.Response(
+                500, content=_problem_body(code="internal", retryable=False)
+            ),
+            None,
+        ),
+        (lambda _request: httpx2.Response(200, json={"nodes": "not a list"}), None),
+        # The mint answers with 3.05s of the call deadline left, so the label read, which
+        # must leave 3s unspent, gets 0.05s: its request is sent and cut unanswered.
+        (_never_answers, get_data_tool._STATISTICS_RESERVE_S + 0.05),
+    ],
+    ids=["refused", "unparsable", "past_its_reserve"],
+)
+async def test_a_failed_label_lookup_names_the_warnings_refs_bare(
+    monkeypatch: pytest.MonkeyPatch, nodes: Handler, seconds_left: float | None
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(get_data_tool, "_deadline_clock", clock)
+    stored = _stored_definition()
+    node_requests: list[list[str]] = []
+
+    def on_mint() -> None:
+        if seconds_left is not None:
+            clock.now = Settings().get_data_deadline_s - seconds_left
+
+    # Without the read's own bound, the unanswered route would hold the call open; this
+    # guard turns that into a failure instead of a hang.
+    async with asyncio.timeout(5.0):
+        result = await _call_get_data(
+            _ref_warnings_handler(stored.spec_id, nodes, node_requests, on_mint=on_mint),
+            _StubStore(stored),
+            {"spec_id": stored.spec_id},
+        )
+
+    assert result.is_error is False
+    assert len(node_requests) == 1
+    text = text_of(result)
+    assert "Series at another frequency: country/KEN, country/UGA." in text
+    assert "Entities left out: country/KEN (2004), country/TCD (2010-2012), and 1 more." in text
+    assert _returned_warnings(result) == _with_messages(
+        "2 of 14 series report at a different frequency. "
+        "Series at another frequency: country/KEN, country/UGA.",
+        "It left out 3 entities. "
+        "Entities left out: country/KEN (2004), country/TCD (2010-2012), and 1 more.",
+        "Fell back.",
+    )
