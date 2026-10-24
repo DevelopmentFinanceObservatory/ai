@@ -5,8 +5,9 @@ and its summary scores runs as its README says.
 orchestrator tools, graph nodes and `PlannerSeam` over the task's recording, with a
 scripted model in place of the planner's. So a change to the planner's rules, the
 seam's brief or the orchestrator's search storage that leaves a reference plan
-refused, or a recording that no longer replays or lacks a first-year read the
-planner can make, fails here rather than in a paid run. No model, no network. The
+refused, a plan whose translation no longer compiles, or a recording that no longer
+replays or lacks a first-year read or a call the translation makes, fails here rather
+than in a paid run. No model, no network. The
 full-set test takes about 20 s: it runs one scripted entry for each of the 68 tasks'
 plans, and one more per task for the datasets its seam shows the planner.
 
@@ -18,6 +19,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
+import dataclasses
 import datetime
 import importlib.util
 import json
@@ -28,6 +31,8 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, get_args
 
 import pytest
+from compiler.surface import ToolSurfaceUnavailableError
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
@@ -53,6 +58,7 @@ summarise = _load("summarise")
 arms = _load("arms")
 langfuse_store = _load("langfuse_store")
 run = _load("run")
+recorder = _load("record")
 
 
 async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
@@ -110,6 +116,176 @@ async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
     assert any(fault in line for line in faults), faults
 
 
+def _task(task_id: str) -> Any:
+    return next(task for task in entry.load_tasks() if task.id == task_id)
+
+
+async def test_a_plan_propose_plan_accepts_but_the_translation_refuses_is_reported() -> None:
+    # GDP as a share of population: `propose_plan` admits it, and the compile refuses
+    # dividing US dollars by a count with `share_of`. Both pins' blocks are exact, so
+    # the translation needs no recorded call.
+    entry.quiet_logs()
+    task = _task("join-population-gdp-kenya")
+    payload = copy.deepcopy(task.reference_payload)
+    payload["evidence_requirements"][2] = {
+        "kind": "share_of",
+        "id": "table",
+        "numerator": {"input_id": "gdp"},
+        "denominator": {"input_id": "population"},
+    }
+    broken = entry.Task.model_validate({**task.model_dump(), "reference_payload": payload})
+
+    faults = await validate.check_task(broken)
+
+    assert any(
+        line.startswith("reference: translation requirement_needs_repair: share_units_differ@table")
+        for line in faults
+    ), faults
+
+
+async def test_a_translation_reads_only_the_search_recorded_under_the_arguments_it_sends_now() -> (
+    None
+):
+    # `growth-gdp-kenya` pins nothing, so `discover_source` searches. Its answer is the
+    # orchestrator's recorded search, filed under whatever arguments discovery sent.
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    schemas = await validate.tool_schemas()
+
+    async def translate(held: dict[str, Any], payload: Any) -> tuple[list[str], Any]:
+        calls = entry.TranslationCalls(held, schemas=schemas)
+        run = await validate.accepted_run(task, recording, payload, calls)
+        return validate.translation_faults(run, calls), calls
+
+    unrecorded, calls = await translate({}, reference)
+    (asked,) = calls.misses
+    answer = {
+        "is_error": False,
+        "structured_content": {},
+        "text": "",
+        "meta": {SEARCH_ENVELOPE_META_KEY: recording["searches"][0]["envelope"]},
+    }
+    held = {"calls": {asked: answer}}
+    recorded, _ = await translate(held, reference)
+    body = copy.deepcopy(dict(reference.body))
+    body["evidence_requirements"][0]["measure"] = "gross domestic product"
+    edited, calls = await translate(held, dataclasses.replace(reference, body=body))
+
+    assert unrecorded == [f"no recording for {asked}"]
+    assert asked.startswith("search ") and '"variable":"GDP"' in asked
+    assert recorded == []
+    assert len(edited) == 1 and '"variable":"gross domestic product"' in edited[0], edited
+    assert calls.unasked() == [asked]
+
+
+async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements_period() -> None:
+    # `rank-top-donors-malawi` pins a search answered over every year, for a
+    # requirement over 1960 to 2025. `propose_plan` moves the pin to its copy over
+    # those years only when it reads the identity the search recorded, as a studio
+    # turn's conversation holds it; the translation then confirms the copy.
+    entry.quiet_logs()
+    task = _task("rank-top-donors-malawi")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    pinned = reference.body["evidence_requirements"][0]["source_spec_id"]
+    calls = entry.TranslationCalls(
+        recording.get("translation") or {}, schemas=await validate.tool_schemas()
+    )
+
+    run = await validate.accepted_run(task, recording, reference, calls)
+
+    assert run.probe.plan is not None
+    (oda,) = (item for item in run.probe.plan.evidence_requirements if item.id == "oda")
+    assert oda.source_spec_id not in {None, pinned}
+    assert validate.translation_faults(run, calls) == []
+
+
+class _LiveClient:
+    """A data-mcp client whose every call `answer` answers, keeping what it was asked."""
+
+    def __init__(self, answer: Callable[[], Any]) -> None:
+        self.answer = answer
+        self.asked: list[str] = []
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], **_: Any) -> Any:
+        self.asked.append(entry.surface_key(name, arguments))
+        return await self.answer()
+
+
+def _searched(envelope: dict[str, Any]) -> Callable[[], Any]:
+    async def answer() -> Any:
+        return SimpleNamespace(
+            is_error=False,
+            structured_content={},
+            content=[],
+            meta={SEARCH_ENVELOPE_META_KEY: envelope},
+        )
+
+    return answer
+
+
+async def _refused_for_now() -> Any:
+    return SimpleNamespace(
+        is_error=True,
+        structured_content={"retry_mode": "retry_after_delay", "message": "busy"},
+        content=[],
+        meta=None,
+    )
+
+
+async def _cut() -> Any:
+    raise ToolSurfaceUnavailableError("search timed out")
+
+
+async def _broken() -> Any:
+    raise RuntimeError("connection reset")
+
+
+async def _stalled() -> Any:
+    await asyncio.sleep(30)
+
+
+@pytest.mark.parametrize(
+    ("answer", "refusal"),
+    [
+        (_refused_for_now, "refused for now"),
+        (_cut, "ToolSurfaceUnavailableError: search timed out"),
+        (_broken, "RuntimeError: connection reset"),
+        (_stalled, "ran past 0.5 s"),
+    ],
+)
+async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
+    answer: Callable[[], Any], refusal: str
+) -> None:
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    # The translation's own answers left out, so its search goes to the live client.
+    recording = {**entry.load_recording(task.id), "translation": {}}
+    client = _LiveClient(answer)
+
+    with pytest.raises(recorder.TranslationRecordError) as raised:
+        await recorder._translation_calls(client, task, recording, wall_s=0.5)
+
+    assert raised.value.args[0].startswith("reference: ")
+    assert refusal in raised.value.args[0]
+    if answer is not _stalled:
+        assert client.asked[0] in raised.value.args[0]
+
+
+async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    recording = {**entry.load_recording(task.id), "translation": {}}
+    client = _LiveClient(_searched(recording["searches"][0]["envelope"]))
+
+    kept = await recorder._translation_calls(client, task, recording, wall_s=60.0)
+
+    assert list(kept["calls"]) == client.asked
+    assert kept["calls"][client.asked[0]]["meta"][SEARCH_ENVELOPE_META_KEY]["parts"]
+
+
 def test_a_task_states_its_period_reduction_in_the_closed_vocabulary() -> None:
     task = next(task for task in entry.load_tasks() if task.id == "aggregate-total-oda-kenya")
 
@@ -162,6 +338,24 @@ def test_stray_recordings_name_files_no_task_uses(tmp_path: Path) -> None:
     assert stray[0] == entry.recording_path("removed-task", tmp_path)
     assert stray[1:] and all(path.parent.name == "answers" for path in stray[1:])
     assert not kept & {path.stem for path in stray[1:]}
+
+
+def test_a_translation_answer_is_stored_once_and_read_back(tmp_path: Path) -> None:
+    call = 'search {"parts":[{"variable":"GDP"}]}'
+    answer = {"is_error": False, "structured_content": {}, "text": "", "meta": {"envelope": 1}}
+    translation = {"calls": {call: answer}, "resolved": {"Kenya": None}}
+    task_ids = ("series-gdp-ghana", "aggregate-total-oda-kenya")
+    for task_id in task_ids:
+        recorded = {**entry.load_recording(task_id), "translation": translation}
+        entry.save_recording(task_id, recorded, tmp_path)
+
+    body = json.loads(entry.recording_path(task_ids[0], tmp_path).read_text())
+
+    name = entry.answer_id(call, answer)
+    assert body["translation"] == {"answers": [name], "resolved": {"Kenya": None}}
+    assert (tmp_path / "answers" / f"{name}.json").exists()
+    assert entry.load_recording(task_ids[0], tmp_path)["translation"] == translation
+    assert entry.stray_recordings(set(task_ids), tmp_path) == []
 
 
 class _StalledLlm(validate.ScriptedLlm):

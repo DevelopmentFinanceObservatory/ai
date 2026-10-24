@@ -5,14 +5,14 @@
     "b076e9ccad77d481",
     "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-13T15:06:20+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:31+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "899626cd29ddf951a8fb2b9ddd45c229b71f8acb",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
@@ -20,14 +20,19 @@
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1220
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 2
           },
-          "trace_id": "977ed97cd6d445d99bf7289e755518d5",
+          "trace_id": "2a5fe7379008411587a015b06400e332",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -192,12 +197,12 @@
                         }
                       }
                     ],
-                    "served_rows": 3038,
+                    "served_rows": 3029,
                     "served_rows_exact": true
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -216,18 +221,18 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 2985
+                  "observation_count": 2976
                 },
-                "coverage_stamp": "aa6a0059bfe72dcc6d3c9199fc8029cd",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 2985,
+                  "rows": 2976,
                   "rows_exact": true,
                   "series": 122,
                   "window": {
-                    "end_year": 2025,
+                    "end_year": 2024,
                     "start_year": 1960
                   }
                 },
@@ -305,17 +310,8 @@
                   }
                 },
                 "headline": {
-                  "observations": 9,
+                  "observations": 85,
                   "recent_years": [
-                    {
-                      "observations": 9,
-                      "role_counts": {
-                        "financingProvider": 9,
-                        "financingRecipient": 1
-                      },
-                      "series": 9,
-                      "year": 2025
-                    },
                     {
                       "observations": 85,
                       "role_counts": {
@@ -333,14 +329,23 @@
                       },
                       "series": 91,
                       "year": 2023
+                    },
+                    {
+                      "observations": 92,
+                      "role_counts": {
+                        "financingProvider": 92,
+                        "financingRecipient": 1
+                      },
+                      "series": 92,
+                      "year": 2022
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 9,
+                    "financingProvider": 85,
                     "financingRecipient": 1
                   },
-                  "series": 9,
-                  "year": 2025,
+                  "series": 85,
+                  "year": 2024,
                   "year_named": false
                 },
                 "inapplicable_slots": [
@@ -392,7 +397,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Gross disbursements to Malawi from 122 providers for official development assistance, 1960 to 2025. Current US dollars \u00b7 OECD DAC2a.",
+                "rendered_sentence": "Gross disbursements to Malawi from 122 providers for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a.",
                 "role_axis_facts": [
                   {
                     "member_count": 122,
@@ -518,7 +523,7 @@
                     "states": [
                       "when:"
                     ],
-                    "text": "1960 to 2025"
+                    "text": "1960 to 2024"
                   },
                   {
                     "entity_refs": [],
@@ -679,7 +684,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 2648,
+                        "served_rows": 2639,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -692,7 +697,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 1574,
+                        "served_rows": 1571,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -851,7 +856,7 @@
                 ],
                 "stat_vars": {
                   "data_date_range": {
-                    "end": "2025",
+                    "end": "2024",
                     "start": "1960"
                   },
                   "member_count": 1,
@@ -859,7 +864,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_d813a953b5c325f6",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -1008,7 +1013,7 @@
                       "base_year_min": 2023,
                       "code": "AED",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1022,11 +1027,11 @@
                       "base_year_min": 2002,
                       "code": "AFN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2002
                       },
                       "noun": "Afghan afghanis"
@@ -1036,11 +1041,11 @@
                       "base_year_min": 1980,
                       "code": "ALL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Albanian leks"
@@ -1050,11 +1055,11 @@
                       "base_year_min": 1992,
                       "code": "AMD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Armenian drams"
@@ -1064,11 +1069,11 @@
                       "base_year_min": 1991,
                       "code": "AOA",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1991
                       },
                       "noun": "Angolan kwanzas"
@@ -1078,11 +1083,11 @@
                       "base_year_min": 1980,
                       "code": "ARS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Argentine pesos"
@@ -1092,11 +1097,11 @@
                       "base_year_min": 1960,
                       "code": "AUD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Australian dollars"
@@ -1106,11 +1111,11 @@
                       "base_year_min": 1995,
                       "code": "AWG",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1995
                       },
                       "noun": "Aruban florins"
@@ -1120,7 +1125,7 @@
                       "base_year_min": 2023,
                       "code": "AZN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1134,11 +1139,11 @@
                       "base_year_min": 1996,
                       "code": "BAM",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1996
                       },
                       "noun": "Bosnia-Herzegovina convertible marks"
@@ -1148,11 +1153,11 @@
                       "base_year_min": 1980,
                       "code": "BBD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Barbadian dollars"
@@ -1162,11 +1167,11 @@
                       "base_year_min": 1980,
                       "code": "BDT",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Bangladeshi taka"
@@ -1176,11 +1181,11 @@
                       "base_year_min": 1980,
                       "code": "BHD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Bahraini dinars"
@@ -1190,11 +1195,11 @@
                       "base_year_min": 1980,
                       "code": "BIF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Burundian francs"
@@ -1204,11 +1209,11 @@
                       "base_year_min": 1985,
                       "code": "BND",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1985
                       },
                       "noun": "Brunei dollars"
@@ -1218,11 +1223,11 @@
                       "base_year_min": 1980,
                       "code": "BOB",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Bolivian bolivianos"
@@ -1232,11 +1237,11 @@
                       "base_year_min": 1986,
                       "code": "BRL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1986
                       },
                       "noun": "Brazilian reais"
@@ -1246,11 +1251,11 @@
                       "base_year_min": 1980,
                       "code": "BSD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Bahamian dollars"
@@ -1260,11 +1265,11 @@
                       "base_year_min": 1980,
                       "code": "BTN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Bhutanese ngultrums"
@@ -1274,11 +1279,11 @@
                       "base_year_min": 1980,
                       "code": "BWP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Botswana pula"
@@ -1288,11 +1293,11 @@
                       "base_year_min": 1992,
                       "code": "BYN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Belarusian rubles"
@@ -1302,11 +1307,11 @@
                       "base_year_min": 1980,
                       "code": "BZD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Belize dollars"
@@ -1316,11 +1321,11 @@
                       "base_year_min": 1960,
                       "code": "CAD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Canadian dollars"
@@ -1330,11 +1335,11 @@
                       "base_year_min": 1991,
                       "code": "CDF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1991
                       },
                       "noun": "Congolese francs"
@@ -1344,11 +1349,11 @@
                       "base_year_min": 1960,
                       "code": "CHF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Swiss francs"
@@ -1358,11 +1363,11 @@
                       "base_year_min": 1980,
                       "code": "CLP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Chilean pesos"
@@ -1372,11 +1377,11 @@
                       "base_year_min": 1980,
                       "code": "CNY",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Chinese yuan"
@@ -1386,11 +1391,11 @@
                       "base_year_min": 1980,
                       "code": "COP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Colombian pesos"
@@ -1400,11 +1405,11 @@
                       "base_year_min": 1980,
                       "code": "CRC",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Costa Rican colones"
@@ -1414,11 +1419,11 @@
                       "base_year_min": 1980,
                       "code": "CVE",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Cape Verdean escudos"
@@ -1428,11 +1433,11 @@
                       "base_year_min": 1998,
                       "code": "CZK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1998
                       },
                       "noun": "Czech korunas"
@@ -1442,11 +1447,11 @@
                       "base_year_min": 1990,
                       "code": "DJF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1990
                       },
                       "noun": "Djiboutian francs"
@@ -1456,11 +1461,11 @@
                       "base_year_min": 1960,
                       "code": "DKK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Danish kroner"
@@ -1470,11 +1475,11 @@
                       "base_year_min": 1980,
                       "code": "DOP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Dominican pesos"
@@ -1484,11 +1489,11 @@
                       "base_year_min": 1980,
                       "code": "DZD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Algerian dinars"
@@ -1498,11 +1503,11 @@
                       "base_year_min": 1980,
                       "code": "EGP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Egyptian pounds"
@@ -1512,7 +1517,7 @@
                       "base_year_min": 1992,
                       "code": "ERN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1526,11 +1531,11 @@
                       "base_year_min": 1980,
                       "code": "ETB",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Ethiopian birr"
@@ -1540,11 +1545,11 @@
                       "base_year_min": 1973,
                       "code": "EUR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1973
                       },
                       "noun": "euros"
@@ -1554,11 +1559,11 @@
                       "base_year_min": 1980,
                       "code": "FJD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Fijian dollars"
@@ -1568,11 +1573,11 @@
                       "base_year_min": 1960,
                       "code": "GBP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "British pounds"
@@ -1582,11 +1587,11 @@
                       "base_year_min": 1994,
                       "code": "GEL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1994
                       },
                       "noun": "Georgian lari"
@@ -1596,11 +1601,11 @@
                       "base_year_min": 1980,
                       "code": "GHS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Ghanaian cedis"
@@ -1610,11 +1615,11 @@
                       "base_year_min": 1980,
                       "code": "GMD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Gambian dalasis"
@@ -1624,11 +1629,11 @@
                       "base_year_min": 1980,
                       "code": "GNF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Guinean francs"
@@ -1638,11 +1643,11 @@
                       "base_year_min": 1980,
                       "code": "GTQ",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Guatemalan quetzales"
@@ -1652,11 +1657,11 @@
                       "base_year_min": 1980,
                       "code": "GYD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Guyanese dollars"
@@ -1666,11 +1671,11 @@
                       "base_year_min": 1980,
                       "code": "HKD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Hong Kong dollars"
@@ -1680,11 +1685,11 @@
                       "base_year_min": 1980,
                       "code": "HNL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Honduran lempiras"
@@ -1694,11 +1699,11 @@
                       "base_year_min": 1980,
                       "code": "HTG",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Haitian gourdes"
@@ -1708,11 +1713,11 @@
                       "base_year_min": 2003,
                       "code": "HUF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2003
                       },
                       "noun": "Hungarian forints"
@@ -1722,11 +1727,11 @@
                       "base_year_min": 1980,
                       "code": "IDR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Indonesian rupiahs"
@@ -1736,11 +1741,11 @@
                       "base_year_min": 1997,
                       "code": "ILS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1997
                       },
                       "noun": "Israeli new shekels"
@@ -1750,11 +1755,11 @@
                       "base_year_min": 1980,
                       "code": "INR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Indian rupees"
@@ -1764,11 +1769,11 @@
                       "base_year_min": 2000,
                       "code": "IQD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2000
                       },
                       "noun": "Iraqi dinars"
@@ -1778,11 +1783,11 @@
                       "base_year_min": 1980,
                       "code": "IRR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Iranian rials"
@@ -1792,11 +1797,11 @@
                       "base_year_min": 1997,
                       "code": "ISK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1997
                       },
                       "noun": "Icelandic kr\u00f3nur"
@@ -1806,11 +1811,11 @@
                       "base_year_min": 1980,
                       "code": "JMD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Jamaican dollars"
@@ -1820,11 +1825,11 @@
                       "base_year_min": 1980,
                       "code": "JOD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Jordanian dinars"
@@ -1834,11 +1839,11 @@
                       "base_year_min": 1960,
                       "code": "JPY",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Japanese yen"
@@ -1848,11 +1853,11 @@
                       "base_year_min": 1980,
                       "code": "KES",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Kenyan shillings"
@@ -1862,11 +1867,11 @@
                       "base_year_min": 1992,
                       "code": "KGS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Kyrgyz soms"
@@ -1876,11 +1881,11 @@
                       "base_year_min": 1986,
                       "code": "KHR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1986
                       },
                       "noun": "Cambodian riels"
@@ -1890,11 +1895,11 @@
                       "base_year_min": 1980,
                       "code": "KMF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Comorian francs"
@@ -1904,11 +1909,11 @@
                       "base_year_min": 1987,
                       "code": "KRW",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1987
                       },
                       "noun": "South Korean won"
@@ -1918,7 +1923,7 @@
                       "base_year_min": 1995,
                       "code": "KWD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1932,7 +1937,7 @@
                       "base_year_min": 2013,
                       "code": "KZT",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1946,11 +1951,11 @@
                       "base_year_min": 1980,
                       "code": "LAK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Lao kip"
@@ -1960,11 +1965,11 @@
                       "base_year_min": 1980,
                       "code": "LBP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Lebanese pounds"
@@ -1974,7 +1979,7 @@
                       "base_year_min": 1980,
                       "code": "LKR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -1988,11 +1993,11 @@
                       "base_year_min": 1980,
                       "code": "LSL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Lesotho maloti"
@@ -2002,11 +2007,11 @@
                       "base_year_min": 1980,
                       "code": "LYD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Libyan dinars"
@@ -2016,11 +2021,11 @@
                       "base_year_min": 1980,
                       "code": "MAD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Moroccan dirhams"
@@ -2030,11 +2035,11 @@
                       "base_year_min": 1992,
                       "code": "MDL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Moldovan lei"
@@ -2044,11 +2049,11 @@
                       "base_year_min": 1980,
                       "code": "MGA",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Malagasy ariary"
@@ -2058,11 +2063,11 @@
                       "base_year_min": 1992,
                       "code": "MKD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Macedonian denars"
@@ -2072,11 +2077,11 @@
                       "base_year_min": 1998,
                       "code": "MMK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1998
                       },
                       "noun": "Myanmar kyats"
@@ -2086,11 +2091,11 @@
                       "base_year_min": 1980,
                       "code": "MNT",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Mongolian tugriks"
@@ -2100,11 +2105,11 @@
                       "base_year_min": 2001,
                       "code": "MOP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2001
                       },
                       "noun": "Macanese patacas"
@@ -2114,11 +2119,11 @@
                       "base_year_min": 1990,
                       "code": "MRU",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1990
                       },
                       "noun": "Mauritanian ouguiyas"
@@ -2128,11 +2133,11 @@
                       "base_year_min": 1980,
                       "code": "MUR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Mauritian rupees"
@@ -2142,11 +2147,11 @@
                       "base_year_min": 1980,
                       "code": "MVR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Maldivian rufiyaa"
@@ -2156,11 +2161,11 @@
                       "base_year_min": 1980,
                       "code": "MWK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Malawian kwachas"
@@ -2170,11 +2175,11 @@
                       "base_year_min": 1980,
                       "code": "MXN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Mexican pesos"
@@ -2184,11 +2189,11 @@
                       "base_year_min": 1980,
                       "code": "MYR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Malaysian ringgits"
@@ -2198,11 +2203,11 @@
                       "base_year_min": 1980,
                       "code": "MZN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Mozambican meticais"
@@ -2212,11 +2217,11 @@
                       "base_year_min": 1989,
                       "code": "NAD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1989
                       },
                       "noun": "Namibian dollars"
@@ -2226,11 +2231,11 @@
                       "base_year_min": 1990,
                       "code": "NGN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1990
                       },
                       "noun": "Nigerian naira"
@@ -2240,11 +2245,11 @@
                       "base_year_min": 1987,
                       "code": "NIO",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1987
                       },
                       "noun": "Nicaraguan c\u00f3rdobas"
@@ -2254,11 +2259,11 @@
                       "base_year_min": 1960,
                       "code": "NOK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Norwegian kroner"
@@ -2268,11 +2273,11 @@
                       "base_year_min": 1980,
                       "code": "NPR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Nepalese rupees"
@@ -2282,11 +2287,11 @@
                       "base_year_min": 1961,
                       "code": "NZD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1961
                       },
                       "noun": "New Zealand dollars"
@@ -2296,11 +2301,11 @@
                       "base_year_min": 1980,
                       "code": "OMR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Omani rials"
@@ -2310,11 +2315,11 @@
                       "base_year_min": 1980,
                       "code": "PEN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Peruvian soles"
@@ -2324,11 +2329,11 @@
                       "base_year_min": 1980,
                       "code": "PGK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Papua New Guinean kina"
@@ -2338,11 +2343,11 @@
                       "base_year_min": 1980,
                       "code": "PHP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Philippine pesos"
@@ -2352,11 +2357,11 @@
                       "base_year_min": 1980,
                       "code": "PKR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Pakistani rupees"
@@ -2366,11 +2371,11 @@
                       "base_year_min": 1998,
                       "code": "PLN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1998
                       },
                       "noun": "Polish zlotys"
@@ -2380,11 +2385,11 @@
                       "base_year_min": 1980,
                       "code": "PYG",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Paraguayan guaran\u00eds"
@@ -2394,7 +2399,7 @@
                       "base_year_min": 2023,
                       "code": "QAR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2408,11 +2413,11 @@
                       "base_year_min": 2013,
                       "code": "RON",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2013
                       },
                       "noun": "Romanian lei"
@@ -2422,11 +2427,11 @@
                       "base_year_min": 1997,
                       "code": "RSD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1997
                       },
                       "noun": "Serbian dinars"
@@ -2436,7 +2441,7 @@
                       "base_year_min": 2010,
                       "code": "RUB",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2450,11 +2455,11 @@
                       "base_year_min": 1980,
                       "code": "RWF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Rwandan francs"
@@ -2464,7 +2469,7 @@
                       "base_year_min": 2000,
                       "code": "SAR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2478,11 +2483,11 @@
                       "base_year_min": 1980,
                       "code": "SBD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Solomon Islands dollars"
@@ -2492,11 +2497,11 @@
                       "base_year_min": 1980,
                       "code": "SCR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Seychellois rupees"
@@ -2506,11 +2511,11 @@
                       "base_year_min": 1980,
                       "code": "SDG",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Sudanese pounds"
@@ -2520,11 +2525,11 @@
                       "base_year_min": 1960,
                       "code": "SEK",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "Swedish kronor"
@@ -2534,11 +2539,11 @@
                       "base_year_min": 1980,
                       "code": "SGD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Singapore dollars"
@@ -2548,11 +2553,11 @@
                       "base_year_min": 1980,
                       "code": "SLE",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Sierra Leonean leones"
@@ -2562,11 +2567,11 @@
                       "base_year_min": 1980,
                       "code": "SRD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Surinamese dollars"
@@ -2576,11 +2581,11 @@
                       "base_year_min": 2011,
                       "code": "SSP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2011
                       },
                       "noun": "South Sudanese pounds"
@@ -2590,11 +2595,11 @@
                       "base_year_min": 1980,
                       "code": "STN",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "S\u00e3o Tom\u00e9 and Pr\u00edncipe dobras"
@@ -2604,7 +2609,7 @@
                       "base_year_min": 1980,
                       "code": "SYP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2618,11 +2623,11 @@
                       "base_year_min": 1980,
                       "code": "SZL",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Swazi emalangeni"
@@ -2632,7 +2637,7 @@
                       "base_year_min": 2018,
                       "code": "THB",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2646,11 +2651,11 @@
                       "base_year_min": 1992,
                       "code": "TJS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Tajikistani somonis"
@@ -2660,11 +2665,11 @@
                       "base_year_min": 1992,
                       "code": "TMT",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Turkmenistani manat"
@@ -2674,11 +2679,11 @@
                       "base_year_min": 1980,
                       "code": "TND",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Tunisian dinars"
@@ -2688,11 +2693,11 @@
                       "base_year_min": 1980,
                       "code": "TOP",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Tongan pa\u02bbanga"
@@ -2702,11 +2707,11 @@
                       "base_year_min": 1990,
                       "code": "TRY",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1990
                       },
                       "noun": "Turkish lira"
@@ -2716,11 +2721,11 @@
                       "base_year_min": 1980,
                       "code": "TTD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Trinidad and Tobago dollars"
@@ -2730,7 +2735,7 @@
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
@@ -2744,11 +2749,11 @@
                       "base_year_min": 1980,
                       "code": "TZS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Tanzanian shillings"
@@ -2758,11 +2763,11 @@
                       "base_year_min": 1991,
                       "code": "UAH",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1991
                       },
                       "noun": "Ukrainian hryvnias"
@@ -2772,11 +2777,11 @@
                       "base_year_min": 1980,
                       "code": "UGX",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Ugandan shillings"
@@ -2786,11 +2791,11 @@
                       "base_year_min": 1960,
                       "code": "USD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "noun": "US dollars"
@@ -2800,11 +2805,11 @@
                       "base_year_min": 1980,
                       "code": "UYU",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Uruguayan pesos"
@@ -2814,11 +2819,11 @@
                       "base_year_min": 1992,
                       "code": "UZS",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1992
                       },
                       "noun": "Uzbekistani soms"
@@ -2828,11 +2833,11 @@
                       "base_year_min": 2017,
                       "code": "VES",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2017
                       },
                       "noun": "Venezuelan bol\u00edvares"
@@ -2842,11 +2847,11 @@
                       "base_year_min": 1980,
                       "code": "VND",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Vietnamese dong"
@@ -2856,11 +2861,11 @@
                       "base_year_min": 1980,
                       "code": "VUV",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Vanuatu vatu"
@@ -2870,11 +2875,11 @@
                       "base_year_min": 1980,
                       "code": "WST",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Samoan tala"
@@ -2884,11 +2889,11 @@
                       "base_year_min": 1980,
                       "code": "XAF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Central African CFA francs"
@@ -2898,11 +2903,11 @@
                       "base_year_min": 1980,
                       "code": "XCD",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "East Caribbean dollars"
@@ -2912,11 +2917,11 @@
                       "base_year_min": 1980,
                       "code": "XOF",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "West African CFA francs"
@@ -2926,11 +2931,11 @@
                       "base_year_min": 2014,
                       "code": "YER",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 2014
                       },
                       "noun": "Yemeni rials"
@@ -2940,11 +2945,11 @@
                       "base_year_min": 1980,
                       "code": "ZAR",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "South African rand"
@@ -2954,11 +2959,11 @@
                       "base_year_min": 1980,
                       "code": "ZMW",
                       "constant_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1960
                       },
                       "current_years": {
-                        "end_year": 2025,
+                        "end_year": 2024,
                         "start_year": 1980
                       },
                       "noun": "Zambian kwachas"
@@ -2976,14 +2981,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 14,
-                "bind": 33,
-                "materialise": 65,
-                "options": 45,
-                "recall": 16,
-                "shape": 697
+                "answer": 9,
+                "bind": 147,
+                "materialise": 12,
+                "options": 8,
+                "phase_bind": 295,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 163,
+                "phase_place_bindings": 67,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 9,
+                "recall": 75,
+                "shape": 583,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 69,
+                "shape_labels": 0,
+                "shape_probe": 112,
+                "shape_probe_coverage": 4
               },
-              "total": 870
+              "total": 1368
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -2998,6 +3019,17 @@
                 "severity": "warn"
               },
               {
+                "code": "whole_total_available",
+                "message": "The source publishes the total of every official donor as official donors (DAC); a sum of the listed donors includes private donors and differs from it.",
+                "params": {
+                  "total": "DACOfficialDonors",
+                  "total_label": "official donors (DAC)",
+                  "whole_of": "official"
+                },
+                "severity": "info",
+                "spec_id": "spec_5620a71d7e0ecac900dda6ef6fb85124"
+              },
+              {
                 "code": "time_window_defaulted",
                 "message": "no time_text was given; the answer was resolved across every period with data.",
                 "severity": "warn"
@@ -3010,7 +3042,7 @@
           "extract_skipped": true,
           "raw_query": "Which donors give the most to Malawi?"
         },
-        "rendered_sentence": "Gross disbursements to Malawi from 122 providers for official development assistance, 1960 to 2025. Current US dollars \u00b7 OECD DAC2a.",
+        "rendered_sentence": "Gross disbursements to Malawi from 122 providers for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -3140,7 +3172,7 @@
             "states": [
               "when:"
             ],
-            "text": "1960 to 2025"
+            "text": "1960 to 2024"
           },
           {
             "entity_refs": [],
@@ -3221,5 +3253,11 @@
       "raw_text": false
     }
   ],
-  "task": "rank-top-donors-malawi"
+  "task": "rank-top-donors-malawi",
+  "translation": {
+    "answers": [
+      "7949be89dc302571"
+    ],
+    "resolved": {}
+  }
 }

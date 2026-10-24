@@ -4,22 +4,28 @@ A task (`tasks/<id>.json`) states a user's question, the searches the orchestrat
 for it, and the brief and asks its `plan` tool handed over. Its recording
 (`recordings/<id>.json`) holds what data-mcp answered: each search's envelope, and the
 answers to each skill a planner may load, which `recordings/answers/` stores once
-however many tasks read them. `run_entry` replays both through production code:
+however many tasks read them, and under `translation` every call the translation of
+each of the task's payloads makes. `run_entry` replays them through production code:
 
 - the orchestrator's own `search` tool (`harness.orchestrator_tools`) reads each
   recorded envelope through `resolver_digest` and stores the readings, spec blocks and
   warnings as a served turn does (`harness.graph.state.store_search`);
 - its `plan` tool checks the asks and records the hand-off;
 - the graph's `route`, `plan_start` and `planner` nodes, wired as the served workflow
-  wires them (`harness.graph.workflow.planner_entry`), hand the brief to the real
+  wires them (`harness.graph.workflow.planner_entry`), run inside a conversation that
+  holds those spec blocks as `harness.studio` holds a turn's
+  (`planner.plan.current_recorded_identity`), and hand the brief to the real
   `PlannerSeam`, which renders the planner's first message from that state and runs
   the planner with production's instruction, tools and callbacks, each request
   under the `TurnBudget` a served request gets (`harness.turn_budget`).
 
 Two edges are replaced. The planner's `get_skill` and `get_skill_file` read the
-recording through `RecordedSurface`. Translation never runs: the seam's translate
-step is the eval's own, which ends the entry once a plan is recorded
-(`PlanRecorded`), so a run measures the draft up to its first accepted plan.
+recording through `RecordedSurface`. The seam's translate step is the eval's own,
+which ends the entry once a plan is recorded (`PlanRecorded`), so a run measures the
+draft up to its first accepted plan. Given `TranslationCalls`, it first runs
+production's translation on that plan (`translator.tool.build_translate`), its calls
+to data-mcp and the graph's resolve door answered from the recording; that is how
+`validate.py` checks each plan compiles.
 Every entry runs at the planner's served thinking level and model-time budget.
 The planner streams, as it does in a studio turn.
 """
@@ -28,12 +34,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
 import time
 import traceback
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -41,6 +48,8 @@ from types import SimpleNamespace
 from typing import Any, Protocol, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema, ToolSurfaceUnavailableError
+from data_mcp import resolution
+from data_mcp.errors import UpstreamError
 from google.adk import Event
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -57,22 +66,30 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from harness.graph.seams import PlannerModel
-from harness.graph.state import GraphState
+from harness.graph.state import ORCHESTRATOR_SPECS_KEY, GraphState
 from harness.graph.workflow import planner_entry
 from harness.orchestrator_tools import HANDED_OFF, AskedOutput, build_orchestrator_tools
 from harness.planner_seam import PlannerSeam, PlannerSeamError
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
+from harness.studio_state import ConversationState
 from harness.tool_contracts import resolver_digest
 from harness.turn_budget import CLOSED_BY_KEY, TurnBudget, current_turn_budget
 from harness.wiring import handing_back_planner_failures
 from planner.agent import AGENT_NAME as PLANNER_AGENT
 from planner.agent import read_full_history
-from planner.plan import Plan, SessionState, load_plan, unstated_period_reductions
+from planner.plan import (
+    Plan,
+    SessionState,
+    current_recorded_identity,
+    load_plan,
+    unstated_period_reductions,
+)
 from planner.tool_results import ProblemCode
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from submission.service import first_year_reads
-from translator.discovery import DefinitionNotResolvedError
+from translator.discovery import DefinitionNotResolvedError, graph_resolve
+from translator.tool import Translate, build_translate
 
 EVAL_DIR = Path(__file__).resolve().parent
 TASKS_DIR = EVAL_DIR / "tasks"
@@ -245,8 +262,42 @@ def answer_id(call: str, answer: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical({"call": call, "answer": answer}).encode()).hexdigest()[:16]
 
 
+def _read_answers(task_id: str, names: Sequence[str], directory: Path) -> dict[str, Any]:
+    """The stored answers `names` address, by the call each answers."""
+    answers: dict[str, Any] = {}
+    for name in names:
+        path = _answers_dir(directory) / f"{name}.json"
+        if not path.exists():
+            raise RecordingMismatchError(f"{task_id}: answer {name} is not in answers/")
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if answer_id(stored["call"], stored["answer"]) != name:
+            raise RecordingMismatchError(f"{task_id}: answer {name} does not match its content")
+        answers[stored["call"]] = stored["answer"]
+    return answers
+
+
+def _store_answers(answers: Mapping[str, Any], directory: Path) -> list[str]:
+    """Write each of `answers`, by the call it answers, to the shared store under its
+    `answer_id`; the names, sorted."""
+    store = _answers_dir(directory)
+    store.mkdir(parents=True, exist_ok=True)
+    names = []
+    for call, answer in answers.items():
+        name = answer_id(call, answer)
+        names.append(name)
+        _write_json(store / f"{name}.json", {"call": call, "answer": answer})
+    return sorted(names)
+
+
+def _named_answers(body: Mapping[str, Any]) -> list[str]:
+    """Every stored answer a recording file names: its tool answers, then its
+    translation's."""
+    return [*body["answers"], *(body.get("translation") or {}).get("answers", [])]
+
+
 def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, Any]:
-    """The recording of `task_id`, its tool answers read back in under `tools`.
+    """The recording of `task_id`, its tool answers read back in under `tools`, and its
+    translation's under `translation["calls"]`.
 
     Refuses a recording written under another schema, one naming an answer the store
     lacks, and an answer whose content no longer matches its address.
@@ -254,33 +305,29 @@ def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, 
     recording = json.loads(recording_path(task_id, directory).read_text(encoding="utf-8"))
     if recording.get("schema") != RECORDING_SCHEMA:
         raise RecordingMismatchError(f"{task_id}: recording schema {recording.get('schema')}")
-    tools: dict[str, Any] = {}
-    for name in recording.pop("answers"):
-        path = _answers_dir(directory) / f"{name}.json"
-        if not path.exists():
-            raise RecordingMismatchError(f"{task_id}: answer {name} is not in answers/")
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        if answer_id(stored["call"], stored["answer"]) != name:
-            raise RecordingMismatchError(f"{task_id}: answer {name} does not match its content")
-        tools[stored["call"]] = stored["answer"]
+    tools = _read_answers(task_id, recording.pop("answers"), directory)
+    if (translation := recording.get("translation")) is not None:
+        recording["translation"] = {
+            "calls": _read_answers(task_id, translation["answers"], directory),
+            "resolved": translation["resolved"],
+        }
     return {**recording, "tools": tools}
 
 
 def save_recording(
     task_id: str, recording: Mapping[str, Any], directory: Path = RECORDINGS_DIR
 ) -> None:
-    """Write `recording`: each tool answer to the shared store under its `answer_id`, and
-    the task's file naming the answers it holds. A rerun that records the same answers
-    writes the same files."""
-    store = _answers_dir(directory)
-    store.mkdir(parents=True, exist_ok=True)
-    names = []
-    for call, answer in recording["tools"].items():
-        name = answer_id(call, answer)
-        names.append(name)
-        _write_json(store / f"{name}.json", {"call": call, "answer": answer})
+    """Write `recording`: each tool answer, and each answer its translation read, to the
+    shared store under its `answer_id`, and the task's file naming the answers it
+    holds. A rerun that records the same answers writes the same files."""
     body = {key: value for key, value in recording.items() if key != "tools"}
-    _write_json(recording_path(task_id, directory), {**body, "answers": sorted(names)})
+    if (translation := recording.get("translation")) is not None:
+        body["translation"] = {
+            "answers": _store_answers(translation["calls"], directory),
+            "resolved": translation["resolved"],
+        }
+    names = _store_answers(recording["tools"], directory)
+    _write_json(recording_path(task_id, directory), {**body, "answers": names})
 
 
 def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR) -> list[Path]:
@@ -291,11 +338,134 @@ def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR
         name
         for path in recordings
         if path.stem in task_ids
-        for name in json.loads(path.read_text(encoding="utf-8"))["answers"]
+        for name in _named_answers(json.loads(path.read_text(encoding="utf-8")))
     }
     return [path for path in recordings if path.stem not in task_ids] + sorted(
         path for path in _answers_dir(directory).glob("*.json") if path.stem not in named
     )
+
+
+# --- Translation replay --------------------------------------------------------------
+
+type LiveCall = Callable[[ToolId, Mapping[str, object]], Awaitable[dict[str, Any]]]
+
+
+class TranslationCalls:
+    """The `ToolSurface` and resolve door production's translation reads, answered from
+    `held`, a recording's `translation`: tool answers under `calls`, by `surface_key`,
+    and each name the resolve door was asked under `resolved`, the graph entity it
+    resolved to or `None`.
+
+    A call `held` lacks is answered as an unreachable server is and listed in `misses`,
+    so a payload whose translation now asks anything its recording does not hold
+    fails. With `live` (`record.py`), it is made instead: a tool call through `live`, a
+    name through the graph's own door (`translator.discovery.graph_resolve`), and kept.
+    A live call that raised, or answered a refusal to retry later
+    (`retry_mode: retry_after_delay`), is kept out and listed in `failures`. `kept` is
+    what a recording of the calls made so far holds. The tools listed are `schemas`,
+    the real servers' own.
+    """
+
+    def __init__(
+        self,
+        held: Mapping[str, Any],
+        *,
+        schemas: Sequence[ToolSchema],
+        live: LiveCall | None = None,
+    ) -> None:
+        self._calls: dict[str, Any] = dict(held.get("calls") or {})
+        self._resolved: dict[str, Any] = dict(held.get("resolved") or {})
+        self._schemas = list(schemas)
+        self._live = live
+        self._used: set[str] = set()
+        self._names: set[str] = set()
+        self.misses: list[str] = []
+        self.failures: list[str] = []
+
+    async def list_tools(self) -> list[ToolSchema]:
+        return self._schemas
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        key = surface_key(tool.name, arguments)
+        if key in self._calls:
+            self._used.add(key)
+            return ToolCallResult.model_validate(self._calls[key])
+        if self._live is None:
+            self.misses.append(key)
+            raise ToolSurfaceUnavailableError(f"the recording holds no answer for {key}")
+        try:
+            answer = await self._live(tool, arguments)
+        except BaseException as exc:
+            self.failures.append(f"{key}: {type(exc).__name__}: {exc}")
+            raise
+        if (
+            answer["is_error"]
+            and (answer["structured_content"] or {}).get("retry_mode") == "retry_after_delay"
+        ):
+            self.failures.append(f"{key}: refused for now: {answer['structured_content']}")
+        else:
+            self._calls[key] = answer
+            self._used.add(key)
+        return ToolCallResult.model_validate(answer)
+
+    async def resolve_entities(
+        self, scope: Mapping[str, Sequence[str]]
+    ) -> dict[str, dict[str, resolution.ResolutionOutcome]]:
+        """The graph's resolve door over the recorded names. The translation reads only
+        whether a name resolved to one entity, and to which."""
+        names = list(dict.fromkeys(name.strip() for names in scope.values() for name in names))
+        missing = [name for name in names if name not in self._resolved]
+        if missing and self._live is None:
+            self.misses += [f"resolve {name}" for name in missing]
+            raise UpstreamError(status=None, code=None, detail="the recording holds no resolve")
+        if missing:
+            try:
+                found = (await graph_resolve({"names": missing}))["names"]
+            except BaseException as exc:
+                self.failures.append(f"resolve {missing}: {type(exc).__name__}: {exc}")
+                raise
+            self._resolved |= {
+                name: dataclasses.asdict(outcome)
+                if isinstance(outcome, resolution.ResolvedEntity)
+                else None
+                for name, outcome in found.items()
+            }
+        self._names |= set(names)
+        return {
+            role: {name: _outcome(self._resolved[name.strip()]) for name in role_names}
+            for role, role_names in scope.items()
+        }
+
+    def kept(self) -> dict[str, Any]:
+        """The calls and names asked so far, as a recording's `translation` holds them."""
+        return {
+            "calls": {key: self._calls[key] for key in sorted(self._used)},
+            "resolved": {name: self._resolved[name] for name in sorted(self._names)},
+        }
+
+    def unasked(self) -> list[str]:
+        """What `held` records that no call asked for so far."""
+        return sorted(set(self._calls) - self._used) + [
+            f"resolve {name}" for name in sorted(set(self._resolved) - self._names)
+        ]
+
+
+def _outcome(recorded: Mapping[str, Any] | None) -> resolution.ResolutionOutcome:
+    return (
+        resolution.NotFound(near_matches=[])
+        if recorded is None
+        else resolution.ResolvedEntity(**recorded)
+    )
+
+
+async def _no_anchor_read(workflow: Any, plan: Plan, *, surface: Any) -> None:
+    """The newest-year read a replayed translation makes: none. That read reads the
+    data, which no recording holds, so it is skipped, as production skips it when the
+    entry has no time left for it."""
+    del workflow, plan, surface
 
 
 class RecordingMismatchError(RuntimeError):
@@ -464,13 +634,18 @@ _UNFINISHED_CALL: dict[str, Any] = {
 class Probe:
     """What one entry did that its session's events do not carry: the plan the first
     accepted proposal recorded and the id of the `propose_plan` call that recorded it,
-    the code of the refusal an entry with no plan ended on, and each model call it
-    started, with its tokens and latency once the whole answer arrived."""
+    the code of the refusal an entry with no plan ended on, each model call it
+    started, with its tokens and latency once the whole answer arrived, and what
+    `translator` answered for the plan when one is set."""
 
     plan: Plan | None = None
     plan_call: str | None = None
     refused_code: str | None = None
     calls: list[dict[str, Any]] = field(default_factory=list)
+    # Production's translation, run on the recorded plan before the entry ends, and
+    # what it answered.
+    translator: Translate | None = None
+    translation: dict[str, object] | None = None
     _started: float = 0.0
     # The requests the current turn budget had sent before the call in flight.
     _requests_before: int | None = None
@@ -478,6 +653,8 @@ class Probe:
     async def translate(self, tool_context: Any) -> dict[str, object]:
         self.plan = load_plan(tool_context.state)
         self.plan_call = tool_context.function_call_id
+        if self.translator is not None:
+            self.translation = await self.translator(tool_context)
         raise PlanRecorded
 
     def watch(self, seam: PlannerModel) -> PlannerModel:
@@ -603,6 +780,7 @@ async def run_entry(
     model: BaseLlm | None = None,
     timeout_s: float = 300.0,
     answers: Sequence[Mapping[str, Any]] = (),
+    translation: TranslationCalls | None = None,
 ) -> EntryRun:
     """Run `task`'s planner entry once on a fresh session.
 
@@ -611,9 +789,17 @@ async def run_entry(
     correction it gave up on), or after `timeout_s`. The planner streams, as a studio
     turn runs it. `answers` are the user's replies to the entry's asks, in order; each
     resumes the paused entry, as the studio's interrupt route does, in a request of its
-    own with a fresh budget. A live run passes none, so an ask ends it.
+    own with a fresh budget. A live run passes none, so an ask ends it. With
+    `translation`, production's translation runs on the recorded plan over those calls,
+    and `probe.translation` holds its answer.
     """
     probe = Probe()
+    if translation is not None:
+        probe.translator = build_translate(
+            surface=translation,
+            resolve_entities=translation.resolve_entities,
+            anchor_read=_no_anchor_read,
+        )
     surface = RecordedSurface(recording.get("tools") or {})
     resolver = RecordedResolver(recording["searches"])
     state = await orchestrator_state(task, resolver)
@@ -628,6 +814,11 @@ async def run_entry(
     planner = handing_back_planner_failures(probe.watch(seam))
     runner = Runner(node=entry_workflow(planner), app_name=_APP, session_service=sessions)
     message = types.Content(role="user", parts=[types.Part.from_text(text=task.question)])
+    # The conversation a studio turn runs in, holding the spec blocks the orchestrator's
+    # searches returned, as `harness.studio` keeps them, so `propose_plan` and the
+    # translation read a pin's identity on record (`planner.plan.recorded_identity`).
+    conversation = ConversationState(conversation_id=session.id)
+    conversation.turn_specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     pending = list(answers)
     error: str | None = None
     timed_out = False
@@ -641,6 +832,7 @@ async def run_entry(
         while content is not None:
             budgets.append(TurnBudget.from_settings(settings))
             token = current_turn_budget.set(budgets[-1])
+            identities = current_recorded_identity.set(conversation.recorded_identity)
             try:
                 async for _event in runner.run_async(
                     user_id=_USER,
@@ -650,6 +842,7 @@ async def run_entry(
                 ):
                     pass
             finally:
+                current_recorded_identity.reset(identities)
                 current_turn_budget.reset(token)
             content = None
             if probe.plan is None and pending:

@@ -62,16 +62,17 @@
           {
             "name": "Zambia",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_77ec17295bcfb8fc376f3abe67d10931",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_43878ebe498f66cecae7c1697d24abaa"
       },
       {
         "kind": "aggregate",

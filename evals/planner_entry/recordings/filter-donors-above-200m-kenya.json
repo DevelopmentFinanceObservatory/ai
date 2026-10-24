@@ -1,34 +1,40 @@
 {
   "answers": [
-    "7b9ab0b7935329e7",
     "8a9d75a6d42ea4eb",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:56:03+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:36:19+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 8625,
+            "jev_output_tokens": 1850,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 5506
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 2012
           },
-          "trace_id": "576c66fd46d045e399647a87fde79026",
+          "trace_id": "b8ca09215ee741c8b009e5fc37f70dcf",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -222,7 +228,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -247,7 +253,7 @@
                     "start_year": 2022
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -318,6 +324,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -902,7 +909,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -937,6 +944,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2754,7 +2762,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -3001,14 +3009,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 100,
-                "bind": 10,
-                "materialise": 147,
-                "options": 118,
-                "recall": 1,
-                "shape": 3220
+                "answer": 37,
+                "bind": 131,
+                "materialise": 56,
+                "options": 10,
+                "phase_bind": 589,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 249,
+                "phase_place_bindings": 77,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 10,
+                "recall": 0,
+                "shape": 850,
+                "shape_admission": 1,
+                "shape_arcs": 1,
+                "shape_groups": 65,
+                "shape_labels": 0,
+                "shape_probe": 91,
+                "shape_probe_coverage": 6
               },
-              "total": 3596
+              "total": 2009
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -3021,6 +3045,17 @@
                 "code": "role_scope_defaulted",
                 "message": "no provider was named; the answer was resolved across every provider with data.",
                 "severity": "warn"
+              },
+              {
+                "code": "whole_total_available",
+                "message": "The source publishes the total of every official donor as official donors (DAC); a sum of the listed donors includes private donors and differs from it.",
+                "params": {
+                  "total": "DACOfficialDonors",
+                  "total_label": "official donors (DAC)",
+                  "whole_of": "official"
+                },
+                "severity": "info",
+                "spec_id": "spec_8c4f1ad083159af7fc0a874e0f0cd620"
               }
             ]
           }
@@ -3215,7 +3250,7 @@
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -3243,5 +3278,9 @@
       "raw_text": false
     }
   ],
-  "task": "filter-donors-above-200m-kenya"
+  "task": "filter-donors-above-200m-kenya",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

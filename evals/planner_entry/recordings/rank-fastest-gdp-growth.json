@@ -1,823 +1,40 @@
 {
   "answers": [
-    "4cb5a92dcfd8b744",
-    "e7e3c48d56e3d761",
-    "e9398dcb5701e794",
-    "f279c775491b5692"
+    "620482fb6653aab5",
+    "a25aed12b2ed890f",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:49:08+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:25+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 13644,
+            "jev_output_tokens": 2817,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 420
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 776
           },
-          "trace_id": "0352511aa1f2410a970a4b553bd20889",
+          "trace_id": "a3b609a2354747e9bba7fb15357d434d",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
-            "candidates": {
-              "max_candidates": 6,
-              "ordering": "intent_rank",
-              "specs": [
-                {
-                  "definition": {
-                    "identity": {
-                      "entities": {
-                        "observationAbout": [
-                          "Earth"
-                        ]
-                      },
-                      "identity_version": "spec1",
-                      "requested_window": {
-                        "end_year": 2022,
-                        "kind": "range",
-                        "start_year": 2015
-                      },
-                      "shape": {
-                        "kind": "statvar_schema",
-                        "measured_property": "value",
-                        "population_type": "undata/unido/SERIES-NA_GDPCUD",
-                        "stat_type": "measuredValue"
-                      },
-                      "slots": []
-                    },
-                    "schema_version": 1,
-                    "spec_id": "spec_924586c3ff0923c04488a93bb3e97e8a"
-                  },
-                  "resolved": {
-                    "available_at_place": true,
-                    "confidence": "medium",
-                    "coverage": {
-                      "dimensions": [
-                        {
-                          "count": 1,
-                          "label": "sources"
-                        },
-                        {
-                          "count": 8,
-                          "label": "observations"
-                        },
-                        {
-                          "count": 1,
-                          "label": "variables"
-                        }
-                      ],
-                      "evidence": "facet_metadata",
-                      "has_data": true,
-                      "kind": "exact",
-                      "observation_count": 8,
-                      "window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      }
-                    },
-                    "download": {
-                      "rows": 8,
-                      "rows_exact": true,
-                      "series": 1,
-                      "window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      }
-                    },
-                    "entities": [
-                      {
-                        "entity_type": "Place",
-                        "label": "World",
-                        "ref": "Earth",
-                        "role": "observationAbout"
-                      }
-                    ],
-                    "entity_options": [],
-                    "facet_options": [
-                      {
-                        "axis": "provenance",
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "United Nations Industrial Development Organization (UNIDO)",
-                                "ref": "undata/p/UNIDO"
-                              },
-                              "value_kind": "source"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": false
-                      },
-                      {
-                        "axis": "unit",
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "United States dollars",
-                                "ref": "undata/UNIT_MEASURE-CR_USD"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": false
-                      }
-                    ],
-                    "facets": {
-                      "provenance": {
-                        "basis": "fallback",
-                        "data_commons": {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        },
-                        "label": "United Nations Industrial Development Organization (UNIDO)",
-                        "ref": "undata/p/UNIDO",
-                        "source": {
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO"
-                        }
-                      },
-                      "unit": {
-                        "basis": "fallback",
-                        "label": "United States dollars",
-                        "ref": "undata/UNIT_MEASURE-CR_USD"
-                      }
-                    },
-                    "inapplicable_slots": [],
-                    "measure_axis_values": [],
-                    "measure_label_axes": [],
-                    "rendered_sentence": "World's gross domestic product at current prices in US dollars, 2015 to 2022. United Nations Industrial Development Organization (UNIDO).",
-                    "sentence_plan": [
-                      {
-                        "axis": "where",
-                        "binding_ref": "where:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [
-                          "where:"
-                        ],
-                        "text": "World"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "'s"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "what",
-                        "distinguishes": true,
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "gross domestic product at current prices in US dollars"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ", "
-                      },
-                      {
-                        "axis": "when",
-                        "binding_ref": "when:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [
-                          "when:"
-                        ],
-                        "text": "2015 to 2022"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "."
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "source",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "byline",
-                        "states": [
-                          "source:"
-                        ],
-                        "text": "United Nations Industrial Development Organization (UNIDO)"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": "."
-                      }
-                    ],
-                    "shape": {
-                      "data_commons": [
-                        {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        }
-                      ],
-                      "label": "Gross domestic product at current prices in US dollars",
-                      "measured_property": {
-                        "label": "value",
-                        "ref": "value"
-                      },
-                      "measurement_denominator_unresolved": false,
-                      "member_count": 1,
-                      "member_digest": "aa651de81bef67c1724c8ebcf6cbc1a7e5adbc0b22d0bc85017367dd9c9d2b7b",
-                      "population_type": {
-                        "label": "Gross domestic product at current prices in US dollars",
-                        "ref": "undata/unido/SERIES-NA_GDPCUD"
-                      },
-                      "refine_supported": true,
-                      "shape_id": "undata/unido/series-na_gdpcud_value_measuredvalue",
-                      "slot_keys": [
-                        {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        {
-                          "axis": "source",
-                          "label": "data source"
-                        }
-                      ],
-                      "stat_type": {
-                        "label": "measuredValue",
-                        "ref": "measuredValue"
-                      },
-                      "upstream": {
-                        "data_commons": {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        },
-                        "source": {
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO"
-                        }
-                      }
-                    },
-                    "skills": [],
-                    "slot_options": [],
-                    "slots": [
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "ref": {
-                              "label": "World",
-                              "ref": "Earth"
-                            },
-                            "value_kind": "entity"
-                          }
-                        },
-                        "key": {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "time_window": {
-                              "end_year": 2022,
-                              "start_year": 2015
-                            },
-                            "value_kind": "time_window"
-                          }
-                        },
-                        "key": {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "source",
-                          "label": "data source"
-                        },
-                        "summable": false
-                      }
-                    ],
-                    "stat_vars": {
-                      "data_date_range": {
-                        "end": "2022",
-                        "start": "2015"
-                      },
-                      "member_count": 1,
-                      "member_count_exact": false,
-                      "served_count": 1
-                    },
-                    "trace": {
-                      "capability_version": "cap_daf889452657d56d",
-                      "default_reading": {
-                        "applied": true,
-                        "removed_stat_vars": []
-                      },
-                      "query_qualifiers": [],
-                      "requested_window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      },
-                      "resolved_entities": [
-                        {
-                          "label": "World",
-                          "ref": "Earth"
-                        }
-                      ],
-                      "resolved_sources": [
-                        {
-                          "data_commons": {
-                            "id": "un_system",
-                            "label": "UN System Data Commons"
-                          },
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO",
-                          "source": {
-                            "label": "United Nations Industrial Development Organization (UNIDO)",
-                            "ref": "undata/p/UNIDO"
-                          }
-                        }
-                      ],
-                      "slot_filters": [
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "where",
-                            "label": "place"
-                          },
-                          "provenance": "binder",
-                          "refs": [
-                            {
-                              "label": "World",
-                              "ref": "Earth"
-                            }
-                          ]
-                        },
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "when",
-                            "label": "time window"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "source",
-                            "label": "data source"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        }
-                      ]
-                    },
-                    "unresolved_slots": []
-                  },
-                  "spec_id": "spec_924586c3ff0923c04488a93bb3e97e8a"
-                },
-                {
-                  "definition": {
-                    "identity": {
-                      "entities": {
-                        "observationAbout": [
-                          "Earth"
-                        ]
-                      },
-                      "identity_version": "spec1",
-                      "requested_window": {
-                        "end_year": 2022,
-                        "kind": "range",
-                        "start_year": 2015
-                      },
-                      "shape": {
-                        "kind": "statvar_schema",
-                        "measured_property": "value",
-                        "population_type": "undata/unido/SERIES-NA_GDPCOD",
-                        "stat_type": "measuredValue"
-                      },
-                      "slots": []
-                    },
-                    "schema_version": 1,
-                    "spec_id": "spec_343a992ba0e84c7bb7a0a8df05ba7045"
-                  },
-                  "resolved": {
-                    "available_at_place": true,
-                    "confidence": "low",
-                    "coverage": {
-                      "dimensions": [
-                        {
-                          "count": 1,
-                          "label": "sources"
-                        },
-                        {
-                          "count": 8,
-                          "label": "observations"
-                        },
-                        {
-                          "count": 1,
-                          "label": "variables"
-                        }
-                      ],
-                      "evidence": "facet_metadata",
-                      "has_data": true,
-                      "kind": "exact",
-                      "observation_count": 8,
-                      "window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      }
-                    },
-                    "download": {
-                      "rows": 8,
-                      "rows_exact": true,
-                      "series": 1,
-                      "window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      }
-                    },
-                    "entities": [
-                      {
-                        "entity_type": "Place",
-                        "label": "World",
-                        "ref": "Earth",
-                        "role": "observationAbout"
-                      }
-                    ],
-                    "entity_options": [],
-                    "facet_options": [
-                      {
-                        "axis": "provenance",
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "United Nations Industrial Development Organization (UNIDO)",
-                                "ref": "undata/p/UNIDO"
-                              },
-                              "value_kind": "source"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": false
-                      },
-                      {
-                        "axis": "unit",
-                        "options": [
-                          {
-                            "value": {
-                              "ref": {
-                                "label": "United States dollars at constant prices",
-                                "ref": "undata/UNIT_MEASURE-CR_USD_K"
-                              },
-                              "value_kind": "enum_value"
-                            }
-                          }
-                        ],
-                        "source": "observed",
-                        "truncated": false
-                      }
-                    ],
-                    "facets": {
-                      "provenance": {
-                        "basis": "fallback",
-                        "data_commons": {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        },
-                        "label": "United Nations Industrial Development Organization (UNIDO)",
-                        "ref": "undata/p/UNIDO",
-                        "source": {
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO"
-                        }
-                      },
-                      "unit": {
-                        "basis": "fallback",
-                        "label": "United States dollars at constant prices",
-                        "ref": "undata/UNIT_MEASURE-CR_USD_K"
-                      }
-                    },
-                    "inapplicable_slots": [],
-                    "measure_axis_values": [],
-                    "measure_label_axes": [],
-                    "rendered_sentence": "World's gross domestic product at constant prices of 2015 in US dollars, 2015 to 2022. United Nations Industrial Development Organization (UNIDO).",
-                    "sentence_plan": [
-                      {
-                        "axis": "where",
-                        "binding_ref": "where:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [
-                          "where:"
-                        ],
-                        "text": "World"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "'s"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "what",
-                        "distinguishes": true,
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "gross domestic product at constant prices of 2015 in US dollars"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": ", "
-                      },
-                      {
-                        "axis": "when",
-                        "binding_ref": "when:",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "heading",
-                        "states": [
-                          "when:"
-                        ],
-                        "text": "2015 to 2022"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "heading",
-                        "states": [],
-                        "text": "."
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": " "
-                      },
-                      {
-                        "axis": "source",
-                        "entity_refs": [],
-                        "kind": "slot",
-                        "segment": "byline",
-                        "states": [
-                          "source:"
-                        ],
-                        "text": "United Nations Industrial Development Organization (UNIDO)"
-                      },
-                      {
-                        "entity_refs": [],
-                        "kind": "text",
-                        "segment": "byline",
-                        "states": [],
-                        "text": "."
-                      }
-                    ],
-                    "shape": {
-                      "data_commons": [
-                        {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        }
-                      ],
-                      "label": "Gross domestic product at constant prices of 2015 in US dollars",
-                      "measured_property": {
-                        "label": "value",
-                        "ref": "value"
-                      },
-                      "measurement_denominator_unresolved": false,
-                      "member_count": 1,
-                      "member_digest": "28500a85dc9dd31ee077e3c19b9d7c07d37e3f6cc9aaa31d1710f91db6c1ff3d",
-                      "population_type": {
-                        "label": "Gross domestic product at constant prices of 2015 in US dollars",
-                        "ref": "undata/unido/SERIES-NA_GDPCOD"
-                      },
-                      "refine_supported": true,
-                      "shape_id": "undata/unido/series-na_gdpcod_value_measuredvalue",
-                      "slot_keys": [
-                        {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        {
-                          "axis": "source",
-                          "label": "data source"
-                        }
-                      ],
-                      "stat_type": {
-                        "label": "measuredValue",
-                        "ref": "measuredValue"
-                      },
-                      "upstream": {
-                        "data_commons": {
-                          "id": "un_system",
-                          "label": "UN System Data Commons"
-                        },
-                        "source": {
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO"
-                        }
-                      }
-                    },
-                    "skills": [],
-                    "slot_options": [],
-                    "slots": [
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "ref": {
-                              "label": "World",
-                              "ref": "Earth"
-                            },
-                            "value_kind": "entity"
-                          }
-                        },
-                        "key": {
-                          "axis": "where",
-                          "label": "place"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "value",
-                          "value": {
-                            "time_window": {
-                              "end_year": 2022,
-                              "start_year": 2015
-                            },
-                            "value_kind": "time_window"
-                          }
-                        },
-                        "key": {
-                          "axis": "when",
-                          "label": "time window"
-                        },
-                        "summable": false
-                      },
-                      {
-                        "binding": {
-                          "kind": "unbound"
-                        },
-                        "key": {
-                          "axis": "source",
-                          "label": "data source"
-                        },
-                        "summable": false
-                      }
-                    ],
-                    "stat_vars": {
-                      "data_date_range": {
-                        "end": "2022",
-                        "start": "2015"
-                      },
-                      "member_count": 1,
-                      "member_count_exact": false,
-                      "served_count": 1
-                    },
-                    "trace": {
-                      "capability_version": "cap_daf889452657d56d",
-                      "default_reading": {
-                        "applied": true,
-                        "removed_stat_vars": []
-                      },
-                      "query_qualifiers": [],
-                      "requested_window": {
-                        "end_year": 2022,
-                        "start_year": 2015
-                      },
-                      "resolved_entities": [
-                        {
-                          "label": "World",
-                          "ref": "Earth"
-                        }
-                      ],
-                      "resolved_sources": [
-                        {
-                          "data_commons": {
-                            "id": "un_system",
-                            "label": "UN System Data Commons"
-                          },
-                          "label": "United Nations Industrial Development Organization (UNIDO)",
-                          "ref": "undata/p/UNIDO",
-                          "source": {
-                            "label": "United Nations Industrial Development Organization (UNIDO)",
-                            "ref": "undata/p/UNIDO"
-                          }
-                        }
-                      ],
-                      "slot_filters": [
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "where",
-                            "label": "place"
-                          },
-                          "provenance": "binder",
-                          "refs": [
-                            {
-                              "label": "World",
-                              "ref": "Earth"
-                            }
-                          ]
-                        },
-                        {
-                          "binding_kind": "value",
-                          "key": {
-                            "axis": "when",
-                            "label": "time window"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        },
-                        {
-                          "binding_kind": "unbound",
-                          "key": {
-                            "axis": "source",
-                            "label": "data source"
-                          },
-                          "provenance": "binder",
-                          "refs": []
-                        }
-                      ]
-                    },
-                    "unresolved_slots": []
-                  },
-                  "spec_id": "spec_343a992ba0e84c7bb7a0a8df05ba7045"
-                }
-              ],
-              "truncated": false
-            },
+            "assumptions": [],
             "departures": [],
             "operations": [],
-            "rendered_sentence": "2 readings. World's gross domestic product at current prices in US dollars. United Nations Industrial Development Organization (UNIDO) \u00b7 2015 to 2022. World's gross domestic product at constant prices of 2015 in US dollars. United Nations Industrial Development Organization (UNIDO) \u00b7 2015 to 2022.",
             "restatement": {
               "entities": [
                 {
@@ -830,188 +47,1447 @@
               "time_text": "2015 to 2022",
               "variable_text": "GDP"
             },
-            "sentence_plan": [
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "2 readings."
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "Earth"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2022,
+                    "kind": "range",
+                    "start_year": 2015
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "amount",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "EconomicActivity",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "ref": "GrossDomesticProduction",
+                        "state": "value"
+                      },
+                      "property": "activitySource"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "economicSector"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "naics"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "schoolGradeLevel"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_d552de194fab59e5c8fe01ea2ff9a53b"
               },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " "
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 8,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 8,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 8,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Place",
+                    "label": "World",
+                    "ref": "Earth",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "USDollar",
+                            "ref": "USDollar"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  },
+                  "unit": {
+                    "basis": "fallback",
+                    "currency": "USD",
+                    "label": "USDollar",
+                    "ref": "USDollar"
+                  }
+                },
+                "inapplicable_slots": [
+                  "economicSector",
+                  "naics",
+                  "schoolGradeLevel"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Economic Activity With Activity Source = Gross Domestic Production",
+                  "ref": "dc/g/EconomicActivity_ActivitySource-GrossDomesticProduction"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "Earth"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2022,
+                          "kind": "range",
+                          "start_year": 2015
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "amount",
+                          "population_type": "EconomicActivity",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "GrossDomesticProduction",
+                              "state": "value"
+                            },
+                            "property": "activitySource"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_bb50069dd6ba73152bf297faf5c1b15a"
+                    },
+                    "stat_var": {
+                      "label": "Gross domestic product growth rate",
+                      "ref": "GrowthRate_Amount_EconomicActivity_GrossDomesticProduction"
+                    }
+                  }
+                ],
+                "rendered_sentence": "World's GDP, 2015 to 2022. Current US dollars \u00b7 World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "World"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:activitySource",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "GDP"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:economicSector",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "economicSector",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:naics",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "naics",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:schoolGradeLevel",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "schoolGradeLevel",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:activitySource",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "activitySource",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2015 to 2022"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Current US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Nominal gross domestic product",
+                  "measured_property": {
+                    "label": "amount",
+                    "ref": "amount"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 65,
+                  "member_digest": "73519eeb75639bdae33042fc844830cd46becc08e4f9122dfcd0886e9875f657",
+                  "population_type": {
+                    "label": "EconomicActivity",
+                    "ref": "EconomicActivity"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "economicactivity_amount_measuredvalue_nominal",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "GrossValueAdded",
+                            "ref": "GrossValueAdded"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "GrossDomesticProduction",
+                            "ref": "GrossDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Net Domestic Production",
+                            "ref": "NetDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Net Value Added",
+                            "ref": "NetValueAdded"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture,Forestry and Fishing Sector",
+                            "ref": "AgricultureForestryFishingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Construction Sector",
+                            "ref": "ConstructionSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electric Gas Steam Air Condition Supply",
+                            "ref": "ElectricityGasSteamAirConditionSupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Finance Service",
+                            "ref": "FinanceService"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "MOSPI Other Service",
+                            "ref": "MOSPI_OtherService"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing Sector",
+                            "ref": "ManufacturingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Mining quarrying",
+                            "ref": "MiningQuarrying"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Trade Sector",
+                            "ref": "TradeSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Accommodation and food sector",
+                            "ref": "AccommodationAndFoodSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Administrative and support services",
+                            "ref": "AdministrativeAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agricultural support activities",
+                            "ref": "AgriculturalSupportActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture",
+                            "ref": "Agriculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Air transport and support services",
+                            "ref": "AirTransportAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "All economic activities",
+                            "ref": "AllEconomicActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Animal production",
+                            "ref": "AnimalProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Arts entertainment recreation",
+                            "ref": "ArtsEntertainmentRecreation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Education",
+                            "ref": "Education"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electricity supply",
+                            "ref": "ElectricitySupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employer household activities",
+                            "ref": "EmployerHouseholdActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "FinancialActivities",
+                            "ref": "FinancialActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial and insurance activities",
+                            "ref": "FinancialAndInsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial intermediation services indirectly measured",
+                            "ref": "FinancialIntermediationServicesIndirectlyMeasured"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Fishing aquaculture",
+                            "ref": "FishingAquaculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Food beverages tobacco manufacture",
+                            "ref": "FoodBeveragesTobaccoManufacture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Forestry logging",
+                            "ref": "ForestryLogging"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Human health and social work",
+                            "ref": "HumanHealthAndSocialWork"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Information and communication",
+                            "ref": "InformationAndCommunication"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Insurance activities",
+                            "ref": "InsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Land transport",
+                            "ref": "LandTransport"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other manufacturing and repair",
+                            "ref": "OtherManufacturingAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other service sector",
+                            "ref": "OtherServiceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other transport postal courier activities",
+                            "ref": "OtherTransportPostalCourierActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Product taxes",
+                            "ref": "ProductTaxes"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Professional scientific technical activities",
+                            "ref": "ProfessionalScientificTechnicalActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Public administration and defence",
+                            "ref": "PublicAdministrationAndDefence"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Publishing Broadcasting Information Activities",
+                            "ref": "PublishingBroadcastingInformationActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Real estate",
+                            "ref": "RealEstate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Telecommunications",
+                            "ref": "Telecommunications"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Transport and Storage",
+                            "ref": "TransportStorageSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Water supply sewerage waste management",
+                            "ref": "WaterSupplySewerageWasteManagement"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Wholesale retail trade and repair",
+                            "ref": "WholesaleRetailTradeAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Banking And Insurance Sector",
+                            "ref": "BankingAndInsuranceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing",
+                            "ref": "Construction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial Services",
+                            "ref": "FinancialServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Industry",
+                            "ref": "Industry"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Services",
+                            "ref": "Services"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Construction",
+                            "ref": "NAICS/23"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Retail trade",
+                            "ref": "NAICS/44-45"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Real estate and rental and leasing",
+                            "ref": "NAICS/53"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Utilities",
+                            "ref": "NAICS/22"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Management of companies and enterprises",
+                            "ref": "NAICS/55"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Transportation and warehousing",
+                            "ref": "NAICS/48-49"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Educational services",
+                            "ref": "NAICS/61"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Information",
+                            "ref": "NAICS/51"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Wholesale trade",
+                            "ref": "NAICS/42"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Mining, quarrying, and oil and gas extraction",
+                            "ref": "NAICS/21"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture, forestry, fishing and hunting",
+                            "ref": "NAICS/11"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Accommodation and food services",
+                            "ref": "NAICS/72"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Finance and insurance",
+                            "ref": "NAICS/52"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Professional, Scientific, and Technical Services",
+                            "ref": "NAICS/54"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Arts, entertainment, and recreation",
+                            "ref": "NAICS/71"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Durable Goods Manufacturing",
+                            "ref": "NAICS/311-316_322-326"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing",
+                            "ref": "NAICS/31-33"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Durable Goods Manufacturing",
+                            "ref": "NAICS/321_327-339"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Administrative and Support and Waste Management Services",
+                            "ref": "NAICS/56"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Health care and social assistance",
+                            "ref": "NAICS/62"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other services, except public administration",
+                            "ref": "NAICS/81"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Public administration",
+                            "ref": "NAICS/92"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Higher Secondary Education",
+                            "ref": "HigherSecondaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "PrePrimary and Primary",
+                            "ref": "PrePrimaryAndPrimaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "SecondaryEducation",
+                            "ref": "SecondaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "World",
+                          "ref": "Earth"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2022,
+                          "start_year": 2015
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2022",
+                    "start": "2015"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": []
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2022,
+                    "start_year": 2015
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "World",
+                      "ref": "Earth"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "activity source",
+                        "property": {
+                          "label": "activitySource",
+                          "ref": "activitySource"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "economic sector",
+                        "property": {
+                          "label": "economicSector",
+                          "ref": "economicSector"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "naics",
+                        "property": {
+                          "label": "naics",
+                          "ref": "naics"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "school grade level",
+                        "property": {
+                          "label": "schoolGradeLevel",
+                          "ref": "schoolGradeLevel"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "World",
+                          "ref": "Earth"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
               },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "World"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "'s"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "gross domestic product at current prices in US dollars"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "."
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "United Nations Industrial Development Organization (UNIDO)"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": " \u00b7 "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "2015 to 2022"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "."
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "World"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "'s"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "gross domestic product at constant prices of 2015 in US dollars"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "heading",
-                "states": [],
-                "text": "."
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": " "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "United Nations Industrial Development Organization (UNIDO)"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": " \u00b7 "
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "2015 to 2022"
-              },
-              {
-                "entity_refs": [],
-                "kind": "text",
-                "segment": "byline",
-                "states": [],
-                "text": "."
-              }
-            ],
-            "status": "candidates",
+              "spec_id": "spec_d552de194fab59e5c8fe01ea2ff9a53b"
+            },
+            "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 82,
-                "bind": 3,
-                "materialise": 72,
-                "recall": 1,
-                "shape": 151
+                "answer": 146,
+                "bind": 140,
+                "materialise": 99,
+                "options": 1,
+                "phase_bind": 15,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 6,
+                "phase_place_bindings": 9,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 24,
+                "recall": 74,
+                "shape": 259,
+                "shape_admission": 1,
+                "shape_arcs": 3,
+                "shape_groups": 45,
+                "shape_labels": 9,
+                "shape_probe": 0
               },
-              "total": 309
+              "total": 773
             },
             "variable_text": "GDP",
-            "warnings": [
-              {
-                "code": "near_neighbor_ambiguous",
-                "message": "'Gross domestic product at current prices in US dollars' and 'Gross domestic product at constant prices of 2015 in US dollars' scored closely enough to be ambiguous; surfacing both as candidates.",
-                "severity": "info"
-              }
-            ]
+            "warnings": []
           }
         ],
         "query_echo": {
@@ -1019,31 +1495,19 @@
           "extract_skipped": true,
           "raw_query": "Which five countries had the fastest GDP growth between 2015 and 2022?"
         },
-        "rendered_sentence": "2 readings. World's gross domestic product at current prices in US dollars. United Nations Industrial Development Organization (UNIDO) \u00b7 2015 to 2022. World's gross domestic product at constant prices of 2015 in US dollars. United Nations Industrial Development Organization (UNIDO) \u00b7 2015 to 2022.",
+        "rendered_sentence": "World's GDP, 2015 to 2022. Current US dollars \u00b7 World Development Indicators.",
         "schema_version": 1,
         "sentence_plan": [
           {
+            "axis": "where",
+            "binding_ref": "where:",
             "entity_refs": [],
-            "kind": "text",
+            "kind": "slot",
             "part_index": 0,
             "segment": "heading",
-            "states": [],
-            "text": "2 readings."
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
+            "states": [
+              "where:"
+            ],
             "text": "World"
           },
           {
@@ -1063,105 +1527,84 @@
             "text": " "
           },
           {
+            "axis": "what",
             "entity_refs": [],
-            "kind": "text",
+            "kind": "slot",
             "part_index": 0,
             "segment": "heading",
-            "states": [],
-            "text": "gross domestic product at current prices in US dollars"
+            "states": [
+              "how:activitySource",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "GDP"
           },
           {
+            "axis": "how",
+            "binding_ref": "how:economicSector",
             "entity_refs": [],
-            "kind": "text",
+            "kind": "slot",
             "part_index": 0,
+            "property_dcid": "economicSector",
             "segment": "heading",
             "states": [],
-            "text": "."
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:naics",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "naics",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:schoolGradeLevel",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "schoolGradeLevel",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:activitySource",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "activitySource",
+            "segment": "heading",
+            "states": [],
+            "text": ""
           },
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
+            "segment": "heading",
             "states": [],
-            "text": " "
+            "text": ", "
           },
           {
+            "axis": "when",
+            "binding_ref": "when:",
             "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
-            "states": [],
-            "text": "United Nations Industrial Development Organization (UNIDO)"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
-            "states": [],
-            "text": " \u00b7 "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
-            "states": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
             "text": "2015 to 2022"
           },
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
-            "segment": "byline",
-            "states": [],
-            "text": "."
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "World"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "'s"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": " "
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
-            "segment": "heading",
-            "states": [],
-            "text": "gross domestic product at constant prices of 2015 in US dollars"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
             "segment": "heading",
             "states": [],
             "text": "."
@@ -1169,46 +1612,49 @@
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
             "segment": "byline",
             "states": [],
             "text": " "
           },
           {
+            "axis": "unit",
+            "binding_ref": "unit:",
             "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
+            "kind": "slot",
             "segment": "byline",
-            "states": [],
-            "text": "United Nations Industrial Development Organization (UNIDO)"
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Current US dollars"
           },
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
             "segment": "byline",
             "states": [],
             "text": " \u00b7 "
           },
           {
+            "axis": "source",
             "entity_refs": [],
-            "kind": "text",
-            "part_index": 0,
+            "kind": "slot",
             "segment": "byline",
-            "states": [],
-            "text": "2015 to 2022"
+            "states": [
+              "source:"
+            ],
+            "text": "World Development Indicators"
           },
           {
             "entity_refs": [],
             "kind": "text",
-            "part_index": 0,
             "segment": "byline",
             "states": [],
             "text": "."
           }
         ],
         "skills": {},
-        "status": "candidates"
+        "status": "definite"
       },
       "parts": [
         {
@@ -1226,5 +1672,11 @@
       "raw_text": false
     }
   ],
-  "task": "rank-fastest-gdp-growth"
+  "task": "rank-fastest-gdp-growth",
+  "translation": {
+    "answers": [
+      "ac7766dd11a3284c"
+    ],
+    "resolved": {}
+  }
 }

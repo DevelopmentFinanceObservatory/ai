@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_ca18be31f3af59994a7c92ac0d52a575",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_ca18be31f3af59994a7c92ac0d52a575: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"observationAbout\":[\"Earth\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"EconomicActivity\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"GrossDomesticProduction\",\"state\":\"value\"},\"property\":\"activitySource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"economicSector\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"naics\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"schoolGradeLevel\"}]},\"spec_id\":\"spec_ca18be31f3af59994a7c92ac0d52a575\"}"
+}

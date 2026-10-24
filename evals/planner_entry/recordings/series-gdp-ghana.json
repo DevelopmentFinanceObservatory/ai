@@ -1,34 +1,40 @@
 {
   "answers": [
-    "6c3fcaba6b65d3a6",
-    "8a8d29c95a9ec5c9",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692",
-    "f7368e5f13734aba"
+    "2221e8e89553247a",
+    "39149a99a478841c",
+    "501c0155d2e5392d",
+    "a25aed12b2ed890f",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-11T20:29:55+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:33:17+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "1f6ed6307bea979d38cc35c4e38e0da896c431ad",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 13418,
+            "jev_output_tokens": 2748,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1475
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 2666
           },
-          "trace_id": "138d3932d7104a01ae3065c3a7735f8f",
+          "trace_id": "548492311bab4dfebb51f5f68aaf7125",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -77,6 +83,12 @@
                   "slots": [
                     {
                       "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "currencyConversionBasis"
+                    },
+                    {
+                      "binding": {
                         "ref": "GrossOfFixedCapitalConsumption",
                         "state": "value"
                       },
@@ -92,7 +104,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_11a94df13891880e5b22ab7c65d6326e"
+                "spec_id": "spec_46e43909a72fd4c5910fdb6b7fa4e9e2"
               },
               "resolved": {
                 "available_at_place": true,
@@ -192,6 +204,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
                     "label": "IMF World Economic Outlook (WEO)",
                     "ref": "provenance/IMFWorldEconomicOutlook",
                     "source": {
@@ -211,7 +224,9 @@
                     }
                   }
                 },
-                "inapplicable_slots": [],
+                "inapplicable_slots": [
+                  "currencyConversionBasis"
+                ],
                 "measure_axis_values": [],
                 "measure_label_axes": [],
                 "related_measures": [],
@@ -255,6 +270,16 @@
                       "axis:statType"
                     ],
                     "text": "GDP"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:currencyConversionBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "currencyConversionBasis",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
                   },
                   {
                     "axis": "how",
@@ -352,7 +377,7 @@
                       "label": "Development Finance Observatory"
                     }
                   ],
-                  "label": "Gross domestic product (GDP), Current prices",
+                  "label": "Gross domestic product (GDP)",
                   "measured_property": {
                     "label": "value added",
                     "ref": "valueAdded"
@@ -362,8 +387,8 @@
                     "label": "Nominal",
                     "ref": "Nominal"
                   },
-                  "member_count": 1,
-                  "member_digest": "5183d7a4f4c8471dee107680b8ce8b8a830d580f61723e9aa649255787800663",
+                  "member_count": 2,
+                  "member_digest": "ef9c4356618ed98aab762248e68799d78c74ad249a6041dad0e8a345c85ee02f",
                   "population_type": {
                     "label": "economic production",
                     "ref": "EconomicProduction"
@@ -385,6 +410,14 @@
                       "property": {
                         "label": "product tax basis",
                         "ref": "productTaxBasis"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
                       }
                     },
                     {
@@ -454,6 +487,29 @@
                     ],
                     "source": "observed",
                     "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "purchasing power parity rate",
+                            "ref": "PurchasingPowerParityRate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
                   }
                 ],
                 "slots": [
@@ -495,6 +551,20 @@
                       "property": {
                         "label": "product tax basis",
                         "ref": "productTaxBasis"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
                       }
                     },
                     "summable": false
@@ -549,15 +619,28 @@
                     "end": "2022",
                     "start": "2010"
                   },
-                  "member_count": 1,
+                  "member_count": 2,
                   "member_count_exact": false,
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": [
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAccommodationFoodServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAgricultureForestryFishingHunting_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSArtsEntertainmentRecreation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSConstruction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSEducationalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSFinanceInsurance_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSInformation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSManagementOfCompaniesEnterprises_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSMiningQuarryingOilGasExtraction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSProfessionalScientificTechnicalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSRealEstateRentalLeasing_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSUtilities_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSWholesaleTrade_RealValue",
                       "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
                       "InflationAdjustedGDP",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
@@ -568,7 +651,12 @@
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
                       "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
-                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector"
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSectorOrTransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_GrowthRate_Amount_EconomicActivity_GrossDomesticProduction",
+                      "dc/qt7ewllmt3826",
+                      "dc/zz6gwv838v9w"
                     ]
                   },
                   "query_qualifiers": [],
@@ -588,6 +676,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
                       "label": "IMF World Economic Outlook (WEO)",
                       "ref": "provenance/IMFWorldEconomicOutlook",
                       "source": {
@@ -634,6 +723,19 @@
                       ]
                     },
                     {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "currency conversion basis",
+                        "property": {
+                          "label": "currency conversion basis",
+                          "ref": "currencyConversionBasis"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
                       "binding_kind": "value",
                       "key": {
                         "axis": "where",
@@ -669,19 +771,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_11a94df13891880e5b22ab7c65d6326e"
+              "spec_id": "spec_46e43909a72fd4c5910fdb6b7fa4e9e2"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 90,
-                "bind": 2,
-                "materialise": 169,
-                "options": 1,
-                "recall": 1,
-                "shape": 682
+                "answer": 162,
+                "bind": 123,
+                "materialise": 105,
+                "options": 72,
+                "phase_bind": 13,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 945,
+                "phase_place_bindings": 283,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 24,
+                "recall": 642,
+                "shape": 293,
+                "shape_admission": 0,
+                "shape_arcs": 7,
+                "shape_groups": 50,
+                "shape_labels": 11,
+                "shape_probe": 112,
+                "shape_probe_coverage": 1
               },
-              "total": 945
+              "total": 2662
             },
             "variable_text": "GDP",
             "warnings": []
@@ -737,6 +855,17 @@
               "axis:statType"
             ],
             "text": "GDP"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:currencyConversionBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "currencyConversionBasis",
+            "segment": "heading",
+            "states": [],
+            "text": ""
           },
           {
             "axis": "how",
@@ -831,8 +960,8 @@
         ],
         "skills": {
           "imf-weo": {
-            "content_version": "sha256:fed443d0e2523e4ebba2ae66b0faa930642ca94ec54af332a7a25e06fc44fdbf",
-            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
+            "content_version": "sha256:a6276160a435adad67df2d4122f60d6c35d9139f2a76f899829c12fc6eb5a404",
+            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. The DFO holds the WEO's national accounts series only. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
             "id": "imf-weo",
             "name": "imf-weo"
           }
@@ -855,5 +984,11 @@
       "raw_text": false
     }
   ],
-  "task": "series-gdp-ghana"
+  "task": "series-gdp-ghana",
+  "translation": {
+    "answers": [
+      "fbb7e0f471d6351a"
+    ],
+    "resolved": {}
+  }
 }

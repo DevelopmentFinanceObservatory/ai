@@ -69,16 +69,17 @@
             "name": "Africa",
             "role": "recipient",
             "members": true
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2021,
           "end": 2021
         },
-        "source_spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b"
       },
       {
         "kind": "rank",
@@ -135,16 +136,17 @@
                 "name": "Africa",
                 "role": "recipient",
                 "members": true
+              },
+              {
+                "name": "official donors (DAC)",
+                "role": "donor"
               }
             ],
             "period": {
               "start": 2021,
               "end": 2021
             },
-            "source_spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d",
-            "across": [
-              "donor"
-            ]
+            "source_spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b"
           },
           {
             "kind": "aggregate",
@@ -166,7 +168,8 @@
             "limit": 5,
             "decision_ids": [
               "every_african_country"
-            ]
+            ],
+            "reduction": "sum"
           }
         ],
         "answered": [

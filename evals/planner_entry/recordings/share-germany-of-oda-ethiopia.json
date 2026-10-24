@@ -1,35 +1,41 @@
 {
   "answers": [
-    "7b9ab0b7935329e7",
+    "88c31d340ee71e2d",
     "8d3a8e2b6c65590b",
-    "b4736e039a63c7b7",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:49+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:39+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 17252,
+            "jev_output_tokens": 3700,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1811
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 2683
           },
-          "trace_id": "a68d4325a88240d9827fbbfcd4aef7a4",
+          "trace_id": "4558e12d5f4a4a6b9d70f57bb417faae",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -210,7 +216,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -235,7 +241,7 @@
                     "start_year": 2015
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -305,6 +311,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -887,7 +894,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -926,6 +933,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2758,7 +2766,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -3009,14 +3017,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 13,
-                "bind": 108,
-                "materialise": 168,
-                "options": 25,
+                "answer": 14,
+                "bind": 808,
+                "materialise": 130,
+                "options": 9,
+                "phase_bind": 196,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 1,
+                "phase_outcome": 158,
+                "phase_place_bindings": 95,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 9,
                 "recall": 0,
-                "shape": 1129
+                "shape": 1237,
+                "shape_admission": 1,
+                "shape_arcs": 1,
+                "shape_groups": 846,
+                "shape_labels": 0,
+                "shape_probe": 95,
+                "shape_probe_coverage": 18
               },
-              "total": 1443
+              "total": 2657
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -3028,7 +3052,14 @@
             ]
           },
           {
-            "departures": [],
+            "assumptions": [],
+            "departures": [
+              {
+                "binding_ref": "origin:",
+                "code": "whole_total_read",
+                "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -3050,6 +3081,9 @@
                   "entities": {
                     "destination": [
                       "country/ETH"
+                    ],
+                    "origin": [
+                      "DACOfficialDonors"
                     ]
                   },
                   "identity_version": "spec1",
@@ -3096,7 +3130,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34"
+                "spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623"
               },
               "resolved": {
                 "alternative_measures": [
@@ -3107,6 +3141,9 @@
                         "entities": {
                           "destination": [
                             "country/ETH"
+                          ],
+                          "origin": [
+                            "DACOfficialDonors"
                           ]
                         },
                         "identity_version": "spec1",
@@ -3153,7 +3190,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_90f89eb6b55bd25939c39efd23056742"
+                      "spec_id": "spec_65ebe603843a7031cd5f6c2ea6bfe162"
                     },
                     "label": "net disbursements",
                     "measure_axis_values": [
@@ -3193,12 +3230,12 @@
                         }
                       }
                     ],
-                    "served_rows": 755,
+                    "served_rows": 8,
                     "served_rows_exact": true
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -3217,20 +3254,20 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 739,
+                  "observation_count": 8,
                   "window": {
                     "end_year": 2022,
                     "start_year": 2015
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 739,
+                  "rows": 8,
                   "rows_exact": true,
-                  "series": 128,
+                  "series": 1,
                   "window": {
                     "end_year": 2022,
                     "start_year": 2015
@@ -3242,16 +3279,29 @@
                     "label": "Ethiopia",
                     "ref": "country/ETH",
                     "role": "destination"
-                  }
-                ],
-                "entity_options": [
+                  },
                   {
-                    "options": [],
-                    "role": "origin",
-                    "source": "observed",
-                    "truncated": true
+                    "entity_type": "DACGroup",
+                    "label": "official donors (DAC)",
+                    "ref": "DACOfficialDonors",
+                    "role": "origin"
                   }
                 ],
+                "entity_groups": {
+                  "origin": {
+                    "label": "official donors (DAC)",
+                    "side_classes": [
+                      "official",
+                      "private",
+                      "residual"
+                    ],
+                    "total": "DACOfficialDonors",
+                    "whole_of": [
+                      "official"
+                    ]
+                  }
+                },
+                "entity_options": [],
                 "facet_options": [
                   {
                     "axis": "provenance",
@@ -3294,6 +3344,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -3313,41 +3364,41 @@
                     "end_year": 2022,
                     "start_year": 2015
                   },
-                  "observations": 110,
+                  "observations": 1,
                   "recent_years": [
                     {
-                      "observations": 110,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 110,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 110,
+                      "series": 1,
                       "year": 2022
                     },
                     {
-                      "observations": 106,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 106,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 106,
+                      "series": 1,
                       "year": 2021
                     },
                     {
-                      "observations": 99,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 99,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 99,
+                      "series": 1,
                       "year": 2020
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 110,
+                    "financingProvider": 1,
                     "financingRecipient": 1
                   },
-                  "series": 110,
+                  "series": 1,
                   "year": 2022,
                   "year_named": true
                 },
@@ -3400,14 +3451,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Gross disbursements to Ethiopia from 137 providers for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
-                "role_axis_facts": [
-                  {
-                    "member_count": 137,
-                    "members_available": true,
-                    "role": "origin"
-                  }
-                ],
+                "rendered_sentence": "Gross disbursements to Ethiopia from official donors (DAC) for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -3452,14 +3496,16 @@
                   },
                   {
                     "binding_ref": "origin:",
-                    "entity_refs": [],
+                    "entity_refs": [
+                      "DACOfficialDonors"
+                    ],
                     "kind": "slot",
                     "role": "origin",
                     "segment": "heading",
                     "states": [
                       "origin:"
                     ],
-                    "text": "137 providers"
+                    "text": "official donors (DAC)"
                   },
                   {
                     "entity_refs": [],
@@ -3673,7 +3719,7 @@
                         "member_count": 2,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 199,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3687,7 +3733,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 723,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3700,7 +3746,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 351,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3713,7 +3759,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 157,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3726,7 +3772,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 372,
+                        "served_rows": 8,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3874,7 +3920,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -3901,6 +3947,10 @@
                     {
                       "label": "Ethiopia",
                       "ref": "country/ETH"
+                    },
+                    {
+                      "label": "official donors (DAC)",
+                      "ref": "DACOfficialDonors"
                     }
                   ],
                   "resolved_sources": [
@@ -3909,6 +3959,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -5741,7 +5792,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -5986,19 +6037,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34"
+              "spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 119,
-                "bind": 258,
-                "materialise": 59,
-                "options": 33,
+                "answer": 110,
+                "bind": 120,
+                "materialise": 129,
+                "options": 12,
+                "phase_bind": 294,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 190,
+                "phase_place_bindings": 72,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 11,
                 "recall": 0,
-                "shape": 879
+                "shape": 1741,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 862,
+                "shape_labels": 0,
+                "shape_probe": 84,
+                "shape_probe_coverage": 6
               },
-              "total": 1348
+              "total": 2679
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -6006,11 +6073,6 @@
                 "code": "retrieval_score_weak",
                 "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
                 "severity": "info"
-              },
-              {
-                "code": "role_scope_defaulted",
-                "message": "no provider was named; the answer was resolved across every provider with data.",
-                "severity": "warn"
               }
             ]
           }
@@ -6020,7 +6082,7 @@
           "extract_skipped": true,
           "raw_query": "What share of all ODA to Ethiopia came from Germany in each year from 2015 to 2022?"
         },
-        "rendered_sentence": "Germany's gross disbursements to Ethiopia for official development assistance, 2015 to 2022. Gross disbursements to Ethiopia from 137 providers for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a.",
+        "rendered_sentence": "Germany's gross disbursements to Ethiopia for official development assistance, 2015 to 2022. Gross disbursements to Ethiopia from official donors (DAC) for official development assistance, 2015 to 2022. Current US dollars \u00b7 OECD DAC2a. No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor'].",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -6226,7 +6288,9 @@
           },
           {
             "binding_ref": "origin:",
-            "entity_refs": [],
+            "entity_refs": [
+              "DACOfficialDonors"
+            ],
             "kind": "slot",
             "part_index": 1,
             "role": "origin",
@@ -6234,7 +6298,7 @@
             "states": [
               "origin:"
             ],
-            "text": "137 providers"
+            "text": "official donors (DAC)"
           },
           {
             "entity_refs": [],
@@ -6360,11 +6424,27 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "departure",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "departure",
+            "states": [],
+            "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
           }
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -6404,5 +6484,9 @@
       "raw_text": false
     }
   ],
-  "task": "share-germany-of-oda-ethiopia"
+  "task": "share-germany-of-oda-ethiopia",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }
