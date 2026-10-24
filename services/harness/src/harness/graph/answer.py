@@ -46,7 +46,7 @@ from planner.plan import (
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import Reduction
+from planner.records import EvidenceIssueCode, Reduction
 from planner.shapes import PLACE_PHRASE, join_key_pairs
 from planner.workflow import ReadingSetBy, ResolvedGroup, SelectedSource, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
@@ -473,13 +473,15 @@ def answer_notes(
     """The notes on how an answer's figures were computed, over every
     answer frame (`answer_frames`) or only those of `terminals`: one per
     summed family (`_stat_var_totals`), one per named set a retrieval reads
-    (`_group_reading_sentences`), one per step that left keys out
+    (`_group_reading_sentences`), one per entity a retrieval left out
+    (`_left_out_entity_sentences`), one per step that left keys out
     (`_dropped_key_sentences`), then one per one-year retrieval when a newer
     year holds data, the year served is not the elected year, or a fuller
     earlier year is named (`_period_notes`)."""
     return [
         *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
         *_group_reading_sentences(outcome, plan=plan, terminals=terminals),
+        *_left_out_entity_sentences(outcome, plan=plan, terminals=terminals),
         *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
         *_period_notes(tool_surface, outcome, plan=plan, terminals=terminals),
     ]
@@ -655,6 +657,56 @@ def _group_column(group: ResolvedGroup, role_keys: Sequence[str] | None) -> str 
         return column if column in role_keys else None
     roles = [key for key in role_keys if enrichment_role(key, roles=role_keys) is None]
     return roles[0] if len(roles) == 1 else None
+
+
+def _left_out_entity_sentences(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One sentence per entity a retrieval under an answer frame held no
+    series for and left out (an `ENTITY_MISSING` among its
+    `EvidenceRecord.gaps`), over every answer frame (`answer_frames`) or
+    only those of `terminals`.
+
+    The sentence names the entity and the years the retrieval holds
+    (`EvidenceRecord.window`), in which it has no data. Retrievals are taken
+    in the plan's step order, and identical sentences are stated once.
+    """
+    workflow = plan.workflow
+    if workflow is None:
+        return []
+    retrieval_step_ids = frozenset(binding.step_id for binding in workflow.evidence_bindings)
+    steps_by_id = {step.id: step for step in workflow.steps}
+    step_order = {step.id: index for index, step in enumerate(workflow.steps)}
+    evidence_by_step = {record.step_id: record for record in outcome.evidence}
+    memo: dict[str, frozenset[str]] = {}
+    sentences: list[str] = []
+    for terminal_id in answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
+        under = _upstream_retrievals(
+            terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
+        )
+        for retrieval_id in sorted(under, key=step_order.__getitem__):
+            record = evidence_by_step.get(retrieval_id)
+            if record is None:
+                continue
+            window = record.window
+            if window is None:
+                years = "in the years retrieved"
+            elif window.start == window.end:
+                years = f"in {window.start}"
+            else:
+                years = f"from {window.start} to {window.end}"
+            for gap in record.gaps:
+                if gap.code is not EvidenceIssueCode.ENTITY_MISSING:
+                    continue
+                sentence = f"{gap.required} has no data {years} and was left out."
+                if sentence not in sentences:
+                    sentences.append(sentence)
+    return sentences
 
 
 def _dropped_key_sentences(

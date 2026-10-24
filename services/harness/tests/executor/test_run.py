@@ -70,6 +70,7 @@ from planner.plan import (
     Coverage,
     DatasetRequirement,
     Decision,
+    Entity,
     Plan,
     PlanStatus,
     plan_revision,
@@ -1065,6 +1066,48 @@ async def test_a_result_without_the_frame_it_was_compiled_to_yield_stops_the_run
     assert isinstance(outcome, Refused)
     assert outcome.refusal is RefusalKind.STEP_RESULT_UNUSABLE
     assert outcome.step_id == "totals"
+
+
+@pytest.mark.parametrize(
+    ("on_missing", "accepted"),
+    [pytest.param("report_gaps", True, id="left-out"), pytest.param("fail", False, id="fails")],
+)
+async def test_a_retrieval_missing_one_of_two_named_entities_leaves_it_out_and_records_it(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    wide_source: Callable[..., SelectedSource],
+    on_missing: str,
+    accepted: bool,
+) -> None:
+    # Kenya's series stopped before the period: the retrieval holds Ghana's alone.
+    ghana_only = manifest()
+    ghana_only["statistics"][0]["entities"] = [{"role": "recipient", "ref": "country/GHA"}]
+    surface = _surface(real_schemas, ghana_only)
+    plan = approved_plan(
+        requirement=requirement(
+            entities=[Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor")],
+            coverage=Coverage(on_missing=on_missing),
+        ),
+        source=wide_source(),
+    )
+
+    outcome = await _run(plan, surface=surface, sleep=_Sleeps())
+
+    if accepted:
+        assert isinstance(outcome, Accepted), outcome
+        (record,) = outcome.evidence
+        findings = record.gaps
+    else:
+        assert isinstance(outcome, Refused), outcome
+        assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+        findings = outcome.issues
+    assert [
+        (issue.required, issue.severity.value)
+        for issue in findings
+        if issue.code.value == "entity_missing"
+    ] == [("Kenya", "warning" if accepted else "error")]
 
 
 async def test_a_retrieval_missing_a_required_entity_is_not_evidence(

@@ -122,8 +122,9 @@ class EvidenceRecord(StrictModel):
     """One requirement's evidence: the frame that carries it and what the checks found.
 
     `gaps` holds the findings the requirement accepts -- years missing under
-    `report_gaps`, a unit the source did not state -- so an answer built on
-    this evidence can say what it rests on.
+    `report_gaps`, a named entity the retrieval left out, a unit the source
+    did not state -- so an answer built on this evidence can say what it
+    rests on.
     """
 
     requirement_id: Identifier
@@ -391,9 +392,9 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
     # (`executor.run._Run._stopped_by_refusal`). A `Refused` raised for any
     # other reason (`EMPTY_ANSWER`, `SHAPE_MISMATCH`, ...) has no tool call
     # to report and is told by its kind (`STOP_MESSAGES`), unless it carries
-    # `issues` (`executor.run._Run._check_evidence`'s `REQUIREMENT_UNMET` is
-    # their only source). `outcome.detail` there is the generic "requirement X
-    # is not met by what Y returned", which names no sub-check of
+    # `issues` (the `REQUIREMENT_UNMET` stops of `executor.run._Run`'s
+    # `_check_evidence` and `_check_left_out_narrowings` are their only
+    # source). `outcome.detail` there is generic, naming no sub-check of
     # `check_evidence` and no expected or actual value, so the specific
     # `EvidenceIssueCode` and its own expected/actual detail lead instead.
     if outcome.payload is not None:

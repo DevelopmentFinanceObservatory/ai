@@ -1197,6 +1197,95 @@ def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(
     assert [i.code for i in errors(without)] == [EvidenceIssueCode.ENTITY_MISSING]
 
 
+_DEBTORS = (("Kenya", "debtor"), ("Ghana", "debtor"))
+# The `wide_source` fixture's two debtors, and a creditor beside them.
+_WIDE = (
+    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
+)
+_GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
+
+
+@pytest.mark.parametrize(
+    ("named", "on_missing", "approved_entities", "held", "severity"),
+    [
+        # Ghana's series stopped before the period: Kenya stands for the
+        # debtors named, so the run answers for Kenya and leaves Ghana out.
+        pytest.param(_DEBTORS, "report_gaps", "wide", "KEN", Severity.WARNING, id="left-out"),
+        # Kenya and Ghana sit on one column of the approved source, whatever
+        # the phrases: "recipient" and "debtor" place on one flow side, and
+        # "country" and "economy" on none.
+        pytest.param(
+            (("Kenya", "recipient"), ("Ghana", "debtor")),
+            "report_gaps",
+            "wide",
+            "KEN",
+            Severity.WARNING,
+            id="same-side",
+        ),
+        pytest.param(
+            (("Kenya", "country"), ("Ghana", "economy")),
+            "report_gaps",
+            "wide",
+            "KEN",
+            Severity.WARNING,
+            id="unplaced-phrases-one-column",
+        ),
+        pytest.param(_DEBTORS, "fail", "wide", "KEN", Severity.ERROR, id="fails-on-gaps"),
+        # No debtor left to answer for.
+        pytest.param(
+            (("Ghana", "debtor"),), "report_gaps", "wide", "KEN", Severity.ERROR, id="none-left"
+        ),
+        # Germany remains, on another column.
+        pytest.param(
+            (("Germany", "creditor"), ("Ghana", "debtor")),
+            "report_gaps",
+            "with-germany",
+            "DEU",
+            Severity.ERROR,
+            id="other-column",
+        ),
+        # A name the approved source never resolved is no gap in the data.
+        pytest.param(_DEBTORS, "report_gaps", "kenya", "KEN", Severity.ERROR, id="unresolved"),
+        pytest.param(_DEBTORS, "report_gaps", None, "KEN", Severity.ERROR, id="unapproved"),
+    ],
+)
+def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_one_remains(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    wide_source: SourceFactory,
+    named: tuple[tuple[str, str], ...],
+    on_missing: str,
+    approved_entities: str | None,
+    held: str,
+    severity: Severity,
+) -> None:
+    approved = {
+        "wide": wide_source(),
+        "with-germany": wide_source(entities=(*_WIDE, _GERMANY)),
+        "kenya": source(),
+    }.get(approved_entities or "")
+    issues = check_evidence(
+        requirement(
+            entities=[Entity(name=name, role=role) for name, role in named],
+            coverage=Coverage(on_missing=on_missing),
+        ),
+        evidence_from_manifest(
+            _manifest(),
+            series_stats=_series_stats(
+                _stat("DebtServicePaid", entities=[{"role": "recipient", "ref": f"country/{held}"}])
+            ),
+        ),
+        approved=approved,
+    )
+
+    assert [
+        issue.severity
+        for issue in issues
+        if issue.code is EvidenceIssueCode.ENTITY_MISSING and issue.required == "Ghana"
+    ] == [severity]
+
+
 def test_an_identity_other_than_the_approved_one_is_drift(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:

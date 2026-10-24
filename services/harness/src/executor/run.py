@@ -194,6 +194,7 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_manifest,
+    left_out_entities,
 )
 from compiler.frame_columns import (
     FRAME_PARAMETER,
@@ -203,6 +204,7 @@ from compiler.frame_columns import (
     bound_populations,
     bound_role_keys,
     bound_stat_var_count,
+    entity_narrowings,
 )
 from compiler.rolling import (
     AnchorGroup,
@@ -1222,7 +1224,8 @@ async def read_anchors(
         for a workflow with no rolling step, each holding the stop a run
         would meet on the group's retrievals or its resolution, with no
         `run_id`; or the outcome a run of `workflow` stops on before any
-        retrieval, or on a retrieval whose stop names no step.
+        retrieval, on a retrieval whose stop names no step, or on a step
+        reading only entities the retrievals left out.
     """
     runtime = _Runtime(
         surface=surface,
@@ -1290,6 +1293,10 @@ class _Run:
             for b in workflow.evidence_bindings
         }
         self.steps_by_id: dict[str, WorkflowStep] = {s.id: s for s in workflow.steps}
+        # The entities each retrieval left out, by the role and ref its
+        # approved source resolved them to, with their findings
+        # (`_check_left_out_narrowings`).
+        self.left_out: dict[str, dict[tuple[str, str], EvidenceIssue]] = {}
         self.frames: dict[str, FrameRef] = {}
         self.row_counts: dict[str, int | None] = {}
         self.stat_var_counts: dict[str, int | None] = {}
@@ -1330,6 +1337,7 @@ class _Run:
             # the first wave holding a derived step seals what they read.
             if not self.sealed and not all(self._retrieves(s) for s in wave):
                 await self._seal()
+                self._check_left_out_narrowings()
             # Every retrieval of a group is in a wave before the group's first
             # step (`_waves`), and the wave's steps start only once these return.
             for group, first in self._groups_starting(wave):
@@ -1361,8 +1369,11 @@ class _Run:
         run, and no derived step run and no check of the period against the
         plan's (`_check_anchor_held`), which the caller makes. A retrieval
         that stops stops only the groups resting on it, which read as that
-        stop, the first in step order. A group whose resolution stops reads
-        as that stop too. Every other group is resolved.
+        stop, the first in step order. With no retrieval stopped, a step
+        reading only entities they left out stops the whole read before any
+        group is resolved, as it stops the run (`_check_left_out_narrowings`).
+        A group whose resolution stops reads as that stop too. Every other
+        group is resolved.
         """
         schemas = await self._surface_as_compiled()
         roots = {root for group in self.anchor_groups for root in group.roots}
@@ -1375,6 +1386,10 @@ class _Run:
                     raise
                 stops.setdefault(outcome.step_id, outcome)
         await self._seal()
+        # The run meets a retrieval's stop before this check, which it makes
+        # once its retrievals return (`execute`).
+        if not stops:
+            self._check_left_out_narrowings()
         read: list[AnchorRead] = []
         for wave in _waves(self.workflow):
             for group, first in self._groups_starting(wave):
@@ -1894,6 +1909,68 @@ class _Run:
                     },
                 ),
             )
+
+    def _check_left_out_narrowings(self) -> None:
+        """Refuse the run before its first derived step when a step narrows a
+        frame to named entities only, every one of which a retrieval under
+        that frame left out (`compiler.evidence.left_out_entities`).
+
+        Every figure such a step gives for the entity rests on the retrieval
+        that lacks it. A side or filter over that retrieval's own rows keeps
+        no row. A keyed `share_of` or `quotient_of` holds no key for the
+        entity when the retrieval lacking it is the numerator or a keyed
+        denominator, and divides it by a total without the entity's own
+        amounts when that retrieval is a denominator read whole. So the step
+        is refused whichever side of the frame the left-out retrieval sits
+        on. It stops as
+        `REQUIREMENT_UNMET` naming the first such step in plan order, its
+        requirement the left-out entity's, carrying each left-out entity's
+        `ENTITY_MISSING` finding as an error. A narrowing is read off the
+        step's compiled arguments (`compiler.frame_columns.entity_narrowings`),
+        whose columns are the approved source's, as the left-out entities'
+        are.
+        """
+        refused: list[tuple[str, EvidenceIssue]] = []
+        for step in self.workflow.steps:
+            for narrowing in entity_narrowings(step.tool, step.args):
+                binding = step.bindings.get(narrowing.frame) or step.bindings.get(FRAME_PARAMETER)
+                if binding is None or not narrowing.refs:
+                    continue
+                left_out = {
+                    key: issue
+                    for retrieval in sorted(self._retrievals_under(binding.from_step))
+                    for key, issue in self.left_out.get(retrieval, {}).items()
+                }
+                missing = [
+                    left_out[(narrowing.column, ref)]
+                    for ref in sorted(narrowing.refs)
+                    if (narrowing.column, ref) in left_out
+                ]
+                if len(missing) == len(narrowing.refs):
+                    refused.extend((step.id, issue) for issue in missing)
+        if not refused:
+            return
+        step_id, first = refused[0]
+        raise self._refused(
+            RefusalKind.REQUIREMENT_UNMET,
+            "; ".join(
+                f"step {narrowing_step!r} reads {issue.required!r} alone, which the retrieval "
+                "holds no series for"
+                for narrowing_step, issue in refused
+            ),
+            step_id=step_id,
+            requirement_id=first.requirement_id,
+            issues=tuple(
+                issue.model_copy(
+                    update={
+                        "severity": Severity.ERROR,
+                        "detail": f"the retrieval holds no series for {issue.required!r}, "
+                        f"which step {narrowing_step!r} reads alone",
+                    }
+                )
+                for narrowing_step, issue in refused
+            ),
+        )
 
     def _retrievals_under(self, step_id: str) -> frozenset[str]:
         """The retrieval steps `step_id` rests on, through its bindings."""
@@ -2430,6 +2507,10 @@ class _Run:
                 requirement_id=requirement.id,
                 issues=tuple(findings),
             )
+        self.left_out[step.id] = {
+            (entity.role, entity.ref): issue
+            for entity, issue in left_out_entities(requirement, findings, approved).items()
+        }
         return EvidenceRecord(
             requirement_id=requirement.id,
             step_id=step.id,

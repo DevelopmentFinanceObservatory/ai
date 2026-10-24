@@ -89,6 +89,7 @@ from planner.records import (
     StatVarReading,
 )
 from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from pydantic import JsonValue
 from translator.tool import restated_to_the_data
 
 from .conftest import ScriptedSurface, ok
@@ -577,7 +578,12 @@ def _since_2005_plan(plan_for: PlanFactory, source: SelectedSource) -> Plan:
     )
 
 
-def _aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+def _aggregate_plan(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    *,
+    requirement: DatasetRequirement | None = None,
+) -> Plan:
     del decision
     totals = AggregateRequirement(
         id="totals",
@@ -587,7 +593,7 @@ def _aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) ->
         group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
     )
     return plan_for(
-        [_requirement(), totals],
+        [requirement or _requirement(), totals],
         [
             _RETRIEVE,
             AggregateOperation(
@@ -2558,3 +2564,287 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
     held, _trace = await frame_store.get(outcome.results["joined_op"])
     # Each place's growth on each side, every place matched.
     assert held.num_rows == 2 * len(_MATCHED_PLACES)
+
+
+# --- A donor whose series stopped: left out, and the answer names it ---------
+#
+# Germany's series stops before the requirement's period, so the retrieval
+# holds France's alone.
+
+_LEFT_OUT = "Germany has no data from 2000 to 2023 and was left out."
+
+
+def _entity_filter_plan(*names: str) -> Callable[..., Plan]:
+    """A plan keeping the rows of `names` from both donors' ODA to Kenya."""
+
+    def _plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+        del decision
+        kept = FilterRequirement(
+            id="kept",
+            decision_ids=["measure"],
+            input_id="oda",
+            predicates=(EntityIn(names=names),),
+        )
+        return plan_for(
+            [_requirement(), kept],
+            [
+                _RETRIEVE,
+                FilterOperation(
+                    id="kept_op",
+                    requirement_id="kept",
+                    input="crs",
+                    predicates=(EntityIn(names=names),),
+                ),
+            ],
+            terminal="kept_op",
+        )
+
+    return _plan
+
+
+def _provider_aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """`_aggregate_plan` naming Germany a donor and France a provider: one side of the flow."""
+    named = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[
+            Entity(name="Germany", role="donor"),
+            Entity(name="France", role="provider"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2000, end=2023),
+    )
+    return _aggregate_plan(plan_for, decision, requirement=named)
+
+
+def _germany_share_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """Germany's share of both donors' total."""
+    del decision
+    pooled = AggregateRequirement(
+        id="pooled",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="oda", entity="Germany"),
+        denominator=RequirementSide(input_id="pooled"),
+    )
+    return plan_for(
+        [_requirement(), pooled, share],
+        [
+            _RETRIEVE,
+            AggregateOperation(
+                id="pooled_op",
+                requirement_id="pooled",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input="crs", entity="Germany"),
+                denominator=Side(input="pooled_op"),
+            ),
+        ],
+        terminal="share_op",
+    )
+
+
+def _germany_sum_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """Germany's bilateral ODA plus its imputed ODA, each source naming both donors."""
+    del decision
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="oda", entity="Germany"),
+        right=RequirementSide(input_id="oda_health", entity="Germany"),
+    )
+    return plan_for(
+        [_requirement(), _requirement(id="oda_health"), total],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            SumOfOperation(
+                id="total_op",
+                requirement_id="total",
+                left=Side(input="crs", entity="Germany"),
+                right=Side(input="crs_health", entity="Germany"),
+            ),
+        ],
+        terminal="total_op",
+        discovered={"oda": _source(), "oda_health": _imputed_source()},
+    )
+
+
+def _imputed_source() -> SelectedSource:
+    """A second source of both donors' ODA to Kenya: imputed multilateral ODA."""
+    return _source(spec_id=SPEC_CRS_HEALTH).model_copy(
+        update={
+            "identity": _pinning("OdaImputed", SPEC_CRS_HEALTH),
+            "shape_member_digest": member_digest(["OdaImputed"]),
+        }
+    )
+
+
+def _shared_germany_plan(*, bilateral_numerator: bool) -> Callable[..., Plan]:
+    """Each donor's bilateral ODA as a share of its health ODA, or the other
+    way round, then Germany's share kept.
+
+    The share rests on both retrievals and keeps the donors both sides
+    hold, so Germany, which the bilateral retrieval left out, is in it on
+    neither reading.
+    """
+    numerator, denominator = ("oda", "oda_health") if bilateral_numerator else ("oda_health", "oda")
+    steps = {"oda": "crs", "oda_health": "crs_health"}
+
+    def _plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+        del decision
+        return _share_then_germany(plan_for, numerator, denominator, steps)
+
+    return _plan
+
+
+def _share_then_germany(
+    plan_for: PlanFactory, numerator: str, denominator: str, steps: Mapping[str, str]
+) -> Plan:
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=numerator),
+        denominator=RequirementSide(input_id=denominator),
+        axis="donor",
+        denominator_scope=DenominatorScope.PER_AXIS,
+    )
+    germany = FilterRequirement(
+        id="germany",
+        decision_ids=["measure"],
+        input_id="share",
+        predicates=(EntityIn(names=("Germany",)),),
+    )
+    return plan_for(
+        [_requirement(), _requirement(id="oda_health"), share, germany],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input=steps[numerator]),
+                denominator=Side(input=steps[denominator]),
+                axis="donor",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+            FilterOperation(
+                id="germany_op",
+                requirement_id="germany",
+                input="share_op",
+                predicates=(EntityIn(names=("Germany",)),),
+            ),
+        ],
+        terminal="germany_op",
+        discovered={"oda": _source(), "oda_health": _source(spec_id=SPEC_CRS_HEALTH)},
+    )
+
+
+async def _stopped_bilateral(
+    plan: Plan, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> FrameSurface:
+    """A surface whose bilateral retrieval holds France alone and any other
+    retrieval both donors, each frame carrying its parties' kinds, which a
+    share across donors pools by."""
+    results = {}
+    for spec_id, source in _sources_of(plan).items():
+        providers = (FRANCE,) if spec_id == SPEC_CRS else (GERMANY, FRANCE)
+        results[spec_id] = await retrieved(
+            source,
+            frame=_family_frame(stat_vars=(_pinned(source),), providers=providers, kinds=True),
+            providers=providers,
+        )
+    return surface_for(get_data=_get_data_answers(plan, results))
+
+
+def _left_out(outcome: Accepted) -> list[tuple[JsonValue, str]]:
+    return [
+        (gap.required, gap.severity.value)
+        for record in outcome.evidence
+        for gap in record.gaps
+        if gap.code.value == "entity_missing"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("plan_of", "rows"),
+    [
+        pytest.param(_aggregate_plan, 24, id="aggregate"),
+        pytest.param(_provider_aggregate_plan, 24, id="donor-and-provider"),
+        pytest.param(_rank_plan, 1, id="rank"),
+        pytest.param(_growth_plan, 1, id="growth"),
+        pytest.param(_entity_filter_plan("Germany", "France"), 24, id="filter"),
+    ],
+)
+async def test_a_donor_with_no_series_in_the_period_is_left_out_and_named(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    plan_of: Callable[..., Plan],
+    rows: int | None,
+) -> None:
+    plan = plan_of(plan_for, decision)
+    surface = await _stopped_bilateral(plan, retrieved, surface_for)
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    if rows is not None:
+        assert outcome.steps[-1].row_count == rows
+    assert _left_out(outcome) == [("Germany", "warning")]
+    assert answer_notes(surface, outcome, plan=plan) == [_LEFT_OUT]
+
+
+@pytest.mark.parametrize(
+    ("plan_of", "step_id"),
+    [
+        pytest.param(_compare_plan, "compared_op", id="compare"),
+        pytest.param(_germany_share_plan, "share_op", id="share"),
+        pytest.param(_entity_filter_plan("Germany"), "kept_op", id="filter"),
+        pytest.param(_germany_sum_plan, "total_op", id="sum"),
+        pytest.param(
+            _shared_germany_plan(bilateral_numerator=True), "germany_op", id="share-then-filter"
+        ),
+        pytest.param(
+            _shared_germany_plan(bilateral_numerator=False),
+            "germany_op",
+            id="share-over-it-then-filter",
+        ),
+    ],
+)
+async def test_a_step_reading_the_left_out_donor_alone_is_refused_before_any_verb_runs(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    plan_of: Callable[..., Plan],
+    step_id: str,
+) -> None:
+    plan = plan_of(plan_for, decision)
+    surface = await _stopped_bilateral(plan, retrieved, surface_for)
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+    assert (outcome.step_id, outcome.requirement_id) == (step_id, "oda")
+    assert [
+        (issue.code.value, issue.required, issue.severity.value) for issue in outcome.issues
+    ] == [("entity_missing", "Germany", "error")]
+    assert plan.workflow is not None
+    assert [name for name, _ in surface.calls] == ["get_data"] * len(
+        plan.workflow.evidence_bindings
+    )
