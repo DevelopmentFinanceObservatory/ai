@@ -38,6 +38,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol
 
 from compiler.evidence import open_axes_for
@@ -385,6 +386,7 @@ def admit(
     measures = measure_choices(
         pins,
         compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
+        offered=chain.from_iterable(referral.offered().values()) if referral else (),
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
@@ -2223,12 +2225,18 @@ class MeasureChoice:
 
 
 def measure_choices(
-    shown: Mapping[str, PinSource], *, compiled: Sequence[SelectedSource] = ()
+    shown: Mapping[str, PinSource],
+    *,
+    compiled: Sequence[SelectedSource] = (),
+    offered: Iterable[SelectedSource] = (),
 ) -> dict[str, MeasureChoice]:
     """The measure choice a pin of each spec_id states, for every measure a settled source shown offers.
 
-    Families from the prior compiled plan are retained on an amendment;
-    a shown source with the same id takes precedence.
+    Families from the prior compiled plan are retained on an amendment, and
+    a source a pending referral offers in place of a pin (`offered`,
+    `translator.referral.Referral.offered`) counts as settled: discovery
+    found it, so its `elected_measure` is search's own. Each overrides the
+    last, and a shown source with the same id takes precedence.
 
     A settled source whose block elects a measure (`SelectedSource.
     elected_measure`) and offers another way of counting it maps to the
@@ -2242,7 +2250,7 @@ def measure_choices(
     source left with one option offers no choice. Price alternatives (axis
     `unit`) count the flow the same way in other prices and offer no choice here.
     """
-    elections = {source.spec_id: source.elected_measure for source in compiled}
+    elections = {source.spec_id: source.elected_measure for source in (*compiled, *offered)}
     for spec_id, source in shown.items():
         block = source.spec_block(spec_id) if source.settled and not source.other_count_of else None
         if block is None:
