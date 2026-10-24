@@ -75,7 +75,9 @@ compile: the readback renders what it renders without a definition.
 
 None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
-is the harness workflow's `approve` node.
+is the harness workflow's `approve` node. The one read of observations is a
+rolling workflow's newest years, below, which shows the user nothing and
+records nothing.
 
 Translation reads the tool surface through a `ToolSurface` (`compiler.surface`),
 the same object the compiler checks against, so what it discovers on and what a
@@ -83,9 +85,10 @@ workflow is compiled against are one surface.
 
 ## The properties that define done
 
-**Observations and computation are out of reach.** The translator's tool
+**Observations and computation are out of a model's reach.** The translator's tool
 wraps `search`; `get_data` and the analysis verbs are not reachable from it,
-so no instruction has to forbid them. `describe` is reached only from code,
+so no instruction has to forbid them. Code reads observations once, for the
+newest years of a rolling workflow. `describe` is reached only from code,
 at compile time or to enrich a candidate, never by a model call.
 
 **Discovery is bounded, per plan revision.** Every `discover_source` call
@@ -176,6 +179,22 @@ planner reads it on its own turn.
 `Plan.with_translation`, which is what moves a `DRAFT` to `PENDING_APPROVAL`.
 Otherwise the plan is untouched and every issue comes back, with an `action`
 when the issues mean the plan rather than the proposal has to change.
+
+**The years approved are the years the run reads.** A workflow with a rolling
+step has each group's newest year read before it reaches the plan, through the
+run's own path (`executor.run.read_anchors`): the retrievals the group rests on,
+whole-history copies included, and `resolve_anchor` over the same populations.
+A group whose newest year is the one its rolling years state, or later, keeps
+its years, since the run reads them moved later (`executor.run`). A group behind
+has its rolling years, in the plan and in the translation, moved to the newest
+year (`planner.plan.restated_to_anchors`, `restated_translation`), and the moved
+plan is compiled again. A plan rule that refuses the moved plan comes back as a
+`rolling_anchor_behind` issue naming the year and quoting the rule, a repair for
+the planner. A read the run would stop on answers `run_would_stop`, whose `detail`
+names the step the run would report (`executor.outcomes.failed_step`): its id,
+the run's own `code`, its message and its requirement. A transient stop refers
+the plan as `surface_unavailable`, any other as `requirement_unmeetable` on that
+requirement, and the referral carries the code as `stop_code`.
 
 **Only a draft is translated.** A plan in any other status is refused, as is one
 that states no evidence requirements.

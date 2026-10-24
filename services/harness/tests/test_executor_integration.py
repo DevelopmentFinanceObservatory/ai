@@ -1231,7 +1231,11 @@ def _rolling_mint_response(last_years: Mapping[str, int]) -> dict[str, Any]:
 
 
 def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
-    """`retrieve -> filter(the last five years) -> growth(over them)`, both planned against 2024."""
+    """`retrieve -> filter(the last five years) -> growth(over them)`, both planned against 2023.
+
+    The dataset runs 2015 to 2024 and two of its six donors report 2024, so the
+    newest year at least half of them hold, and the plan's, is 2023.
+    """
     source = SelectedSource(
         spec_id=ROLLING_SPEC,
         sentence="ODA disbursed by six DAC donors, 2015 to 2024",
@@ -1244,10 +1248,10 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
         coverage_window=Period(start=2015, end=2024),
         identity=TOP_DONOR_IDENTITY,
     )
-    since = (PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5)),)
+    since = (PeriodThreshold(op="gte", year=2018, rolling=RelativePeriod(offset=-5)),)
     window: dict[str, Any] = {
-        "window_start": 2019,
-        "window_end": 2024,
+        "window_start": 2018,
+        "window_end": 2023,
         "rolling": RollingWindow(
             window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
         ),
@@ -1386,7 +1390,7 @@ def run_rolling_plan(
 async def test_a_rolling_plan_runs_from_the_newest_year_half_of_the_series_hold(
     run_rolling_plan: Callable[..., Any],
 ) -> None:
-    """The plan states 2019 to 2024. The run takes the newest year at least half
+    """The plan states 2018 to 2023. The run takes the newest year at least half
     of the retrieved series hold, writes the filter's and the growth's years
     from it, and analysis-mcp accepts both calls against the stored resolution,
     which the final frame's recipe then names."""

@@ -296,6 +296,11 @@ class ExecutorCode(StrEnum):
     # `do_not_retry`, since the same plan resolves the same start over the
     # same data.
     ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    # The newest period a group of rolling steps resolves is before the one
+    # the plan's rolling years state (`executor.run._Run._check_anchor_held`).
+    # It travels with `do_not_retry`: the same plan resolves the same period
+    # over the same data, and the user asks again to plan from it.
+    ROLLING_ANCHOR_BEHIND_PLAN = "rolling_anchor_behind_plan"
     # A fault of the run itself, as both servers report their own.
     INTERNAL_ERROR = "internal_error"
     # The run was stopped before it finished.

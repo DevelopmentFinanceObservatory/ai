@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from common.materialisation import FrameRef
-from compiler.evidence import EvidenceIssue
+from compiler.evidence import EvidenceIssue, errors
 from planner.plan import SessionState
 from planner.records import Identifier, Period, SpecId, StrictModel
 from planner.workflow import ToolId
@@ -41,6 +41,7 @@ class RefusalKind(StrEnum):
     SHAPE_MISMATCH = "shape_mismatch"
     COLUMN_UNBOUND = "column_unbound"
     ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    ROLLING_ANCHOR_BEHIND_PLAN = "rolling_anchor_behind_plan"
     AUTHORISATION_EXPIRED = "authorisation_expired"
     MANIFEST_OUTSIDE_AUTHORISATION = "manifest_outside_authorisation"
     AUTHORISATION_MISMATCH = "authorisation_mismatch"
@@ -272,3 +273,108 @@ def save_outcome(
 ) -> None:
     """Record `outcome` as the latest run in session `state`."""
     state[RUN_STATE_KEY] = outcome.model_dump_json()
+
+
+# What the orchestrator is told of a stop no tool refused and no evidence check
+# explains, by its kind. `Refused.detail` stays out of the hand-back: it can
+# quote an exception, the ledger's failure reason or literal spec ids, so it is
+# logged instead.
+STOP_MESSAGES: dict[RefusalKind, str] = {
+    RefusalKind.NOT_APPROVED: "the calculation was not approved",
+    RefusalKind.STALE_REVISION: "the calculation changed after it was approved",
+    RefusalKind.SURFACE_CHANGED: "a tool the calculation uses changed after it was approved",
+    RefusalKind.TRANSPORT_FAILED: "a data service could not be reached in time",
+    RefusalKind.BINDING_INVALID: "a step's input could not be passed on to the next step",
+    RefusalKind.STEP_REFUSED: "a tool refused the step",
+    RefusalKind.STEP_RESULT_UNUSABLE: "a step returned a result that could not be used",
+    RefusalKind.REQUIREMENT_UNMET: "the data retrieved does not meet what the calculation asked for",
+    RefusalKind.EMPTY_ANSWER: "the step's result holds no rows",
+    RefusalKind.SHAPE_MISMATCH: "a step's result does not have the shape the calculation expects",
+    RefusalKind.COLUMN_UNBOUND: "a step names a column its input does not have",
+    RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET: (
+        "the latest period asked for falls outside the dataset"
+    ),
+    RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN: (
+        "the latest year the data holds is before the one the plan counted from"
+    ),
+    RefusalKind.AUTHORISATION_EXPIRED: "the approval has expired, so the plan needs approving again",
+    RefusalKind.MANIFEST_OUTSIDE_AUTHORISATION: "the run read data the approval does not cover",
+    RefusalKind.AUTHORISATION_MISMATCH: "the approval names other work than the run",
+    RefusalKind.RUN_ABANDONED: "the run failed before it came to a result",
+}
+
+
+def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
+    """The step a stopped run failed at, as its caller is told it: `step_id`, `tool`, `code` and `message`.
+
+    `code` is the run's own: a tool's code when one refused, the specific
+    `EvidenceIssueCode` when the evidence check did, `rediscovery_needed` for
+    a source to discover again, and the stop's kind otherwise.
+    """
+    if isinstance(outcome, MethodChoiceNeeded):
+        return {
+            "step_id": outcome.step_id,
+            "tool": outcome.tool.name,
+            "code": outcome.code,
+            "message": outcome.refusal.message,
+        }
+    if isinstance(outcome, RediscoveryNeeded):
+        return {
+            "step_id": outcome.step_id,
+            "tool": outcome.tool.name,
+            "code": outcome.kind,
+            "message": outcome.refusal.message
+            or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
+        }
+    # `outcome.detail` wraps the tool's own text ("'aggregate' refused:
+    # ..."), but only when the call left one -- with no `result.text`,
+    # `_refused` falls back to `failure.code` instead of `failure.message`
+    # (`executor.run._Run._stopped_by_refusal`), so `detail` is not a
+    # reliable stand-in for what the tool actually said. `payload`, set on
+    # every `STEP_REFUSED` stop, carries the tool's own `code` and
+    # `message` straight from its `ToolFailure`; a `Refused` raised for any
+    # other reason (`EMPTY_ANSWER`, `SHAPE_MISMATCH`, ...) has no tool call
+    # to report and is told by its kind (`STOP_MESSAGES`) -- unless it
+    # carries `issues` (`executor.run._Run._check_evidence`'s
+    # `REQUIREMENT_UNMET`, the only source of them): `outcome.detail`
+    # there is the generic "requirement X is not met by what Y returned",
+    # naming neither which of `check_evidence`'s ten sub-checks fired nor
+    # what it found versus what the plan required, so the specific
+    # `EvidenceIssueCode` and its own expected/actual detail lead instead.
+    if outcome.payload is not None:
+        return _refused_step(step_id=outcome.step_id, failure=outcome.payload)
+    if outcome.issues:
+        failing = errors(list(outcome.issues)) or list(outcome.issues)
+        return {
+            "step_id": outcome.step_id,
+            "tool": None,
+            "code": failing[0].code.value,
+            "message": "; ".join(issue.detail for issue in failing),
+        }
+    return {
+        "step_id": outcome.step_id,
+        "tool": None,
+        "code": outcome.refusal.value,
+        "message": STOP_MESSAGES[outcome.refusal],
+    }
+
+
+def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any]:
+    """`failed_step` for a step the tool itself refused.
+
+    A tool's `fix` can carry its own `remedy`: one sentence written for the
+    end user (`data_mcp.tool_errors`: an `over_ceiling` on
+    `member_cardinality`, and a mint apis refuses `member_not_resolvable`),
+    not the code/detail prose the rest of `fix` holds for a retrying caller.
+    `plan_done` hands it to the orchestrator under `failed_step`.
+    """
+    failed: dict[str, Any] = {
+        "step_id": step_id,
+        "tool": None,
+        "code": failure.code,
+        "message": failure.message,
+    }
+    remedy = failure.fix.get("remedy")
+    if isinstance(remedy, str) and remedy:
+        failed["remedy"] = remedy
+    return failed

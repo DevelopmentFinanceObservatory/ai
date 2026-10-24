@@ -181,6 +181,10 @@ class CompileIssueCode(StrEnum):
     WINDOW_OUTSIDE_PERIOD = "window_outside_period"
     ROLLING_NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
     ROLLING_POPULATION_UNUSABLE = "rolling_population_unusable"
+    # The newest year the data holds for a group of rolling steps is before the
+    # one the plan's rolling years state, and the plan stated from it is
+    # refused (`translator.tool`, which reads the newest year before approval).
+    ROLLING_ANCHOR_BEHIND = "rolling_anchor_behind"
     ENTITY_REQUIRED = "entity_required"
     UNKNOWN_ENTITY = "unknown_entity"
     ENTITY_AMBIGUOUS = "entity_ambiguous"

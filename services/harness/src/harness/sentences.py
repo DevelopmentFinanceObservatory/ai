@@ -162,6 +162,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.ROLLING_POPULATION_UNUSABLE: (
         "the period that follows the newest data cannot be worked out for these series"
     ),
+    CompileIssueCode.ROLLING_ANCHOR_BEHIND: (
+        "the latest year most of these series report leaves the period asked for no years"
+    ),
     CompileIssueCode.ENTITY_REQUIRED: (
         "a calculation needs one country or entity on each side, and the plan named several"
     ),
@@ -493,6 +496,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "rolling_anchor_unresolved",
             "open_role_unavailable",
             ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET,
+            ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
             HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
             HarnessCode.NO_SHARED_PERIOD,
         }
@@ -704,6 +708,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     ),
     ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET: FailureText(
         "The period asked for starts before the data does", "so ask for a later start"
+    ),
+    ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: FailureText(
+        "Fewer than half of these series now report the year the plan counted from",
+        "so ask again to plan from the latest year they report",
     ),
     HarnessCode.EMPTY_RESULT: FailureText(
         "The data holds no figures for the places and period asked",

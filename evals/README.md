@@ -18,6 +18,10 @@ recordings, and pairs an arm against the planner as served, locally or through a
 baseline stored in Langfuse. Only its validation runs in CI. See
 `evals/planner_entry/README.md`.
 
+`evals/rolling_anchor/` counts how seeded rolling plans end over synthetic
+series, as admitted and as translation restates them. It needs no model, and CI
+runs a share of it. See `evals/rolling_anchor/README.md`.
+
 ## Run it
 
 ```

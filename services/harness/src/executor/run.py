@@ -114,6 +114,16 @@ key goes with the call. The call takes the path a step's call takes
 tool is part of the surface check. A plan with no rolling step never calls it.
 The outcome carries each group's answer in `anchors`.
 
+A group's rolling literals, less their offsets, state the newest period the
+plan was checked against. The run reads the plan's years moved later, never
+earlier: a resolved period before the stated one is refused
+`ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN` before the group's first step, with
+a message asking the user to ask again, so the plan is made from the period
+the data now holds. `read_anchors` takes the same path before a plan is
+approved, so translation states the plan's rolling years from the period its
+run will resolve: the retrievals each group rests on and `resolve_anchor`, with
+no ledger, no derived step and no check against the stated period.
+
 A rolled start before the first year its dataset holds is refused
 `ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
 read off the retrieval's own evidence. `resolve_anchor` finding no qualifying
@@ -219,6 +229,7 @@ from data_mcp.series_statistics import (
     find_statistics_artifact,
 )
 from data_mcp.stat_var_list import with_stat_var_list, without_long_stat_var_list
+from dfo_frame_grammar import shift_period
 from fastmcp.exceptions import ResourceError
 from planner.plan import DatasetRequirement, Plan, PlanStatus, plan_revision
 from planner.records import StrictModel
@@ -1084,16 +1095,111 @@ async def _run_workflow(
     try:
         return await run.execute()
     except _Stopped as stopped:
-        if not stopped.siblings:
-            return stopped.outcome
-        return stopped.outcome.model_copy(update={"also_stopped": stopped.siblings})
+        return _stop_outcome(stopped)
+
+
+def _stop_outcome(stopped: _Stopped) -> MethodChoiceNeeded | Refused | RediscoveryNeeded:
+    """The outcome `stopped` carries, its own `also_stopped` naming the rest of its wave's stops."""
+    if not stopped.siblings:
+        return stopped.outcome
+    return stopped.outcome.model_copy(update={"also_stopped": stopped.siblings})
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorRead:
+    """The newest period one group of a workflow's rolling steps stands on, read before a run.
+
+    `steps` are the group's rolling steps (`compiler.rolling.AnchorGroup`),
+    `planned` the newest period their literals state (`planned_anchor`) and
+    `result` what `resolve_anchor` answered over the group's retrievals.
+    """
+
+    steps: tuple[str, ...]
+    planned: str
+    result: AnchorResult
+
+    @property
+    def behind(self) -> bool:
+        """Whether the newest period resolved is before the one the plan states."""
+        return self.result.period < self.planned
+
+
+def planned_anchor(group: AnchorGroup, steps_by_id: Mapping[str, WorkflowStep]) -> str:
+    """The newest period the rolling literals of `group` state.
+
+    A rolling literal less its offset is the newest period the plan was
+    checked against, one for the whole group
+    (`planner.plan._check_rolling_years_agree`). Periods of one grain order
+    by their spelling, so the largest stands for the group.
+    """
+    return max(
+        shift_period(bound.period, -bound.offset)
+        for step_id in group.steps
+        for bound in rolling_bounds(steps_by_id[step_id].args)
+    )
+
+
+async def read_anchors(
+    workflow: Workflow,
+    *,
+    revision: str,
+    requirements: Sequence[DatasetRequirement],
+    surface: ToolSurface,
+    capabilities: Sequence[ToolCapability] = CAPABILITIES,
+    sleep: Sleep = asyncio.sleep,
+    jitter: Jitter = random.uniform,
+    max_concurrent_steps: int = 4,
+    fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded:
+    """Resolve the newest period of each group of `workflow`'s rolling steps, as its run would.
+
+    Takes a run's own path (`_Run.read_anchors`): the surface check, the
+    retrievals the groups rest on, checked against `requirements` as
+    evidence, and `resolve_anchor` for each group, over the same
+    populations and frames. Nothing is admitted to a ledger and nothing is
+    recorded, and no derived step runs. `revision` names the work in a stop's
+    outcome. The other arguments are `execute_approved_plan`'s.
+
+    Returns:
+        Each group's `AnchorRead`, in the order its run resolves them, empty
+        for a workflow with no rolling step; or the outcome a run of
+        `workflow` stops on when a retrieval or a resolution is refused,
+        with no `run_id`.
+    """
+    runtime = _Runtime(
+        surface=surface,
+        capabilities=capabilities,
+        sleep=sleep,
+        jitter=jitter,
+        max_concurrent_steps=max_concurrent_steps,
+        fetch_series_stats=fetch_series_stats,
+        on_progress=None,
+        publisher=None,
+    )
+    submission = Submission.model_construct(
+        revision=revision, workflow=workflow, requirements=tuple(requirements)
+    )
+    run = _Run(submission, run_id=None, ledger=None, runtime=runtime)
+    try:
+        return await run.read_anchors()
+    except _Stopped as stopped:
+        return _stop_outcome(stopped)
 
 
 class _Run:
-    """One run's working state."""
+    """One run's working state.
+
+    A read made before any run is admitted (`read_anchors`) has no `run_id`
+    and no `ledger`, and records nothing.
+    """
 
     def __init__(
-        self, submission: Submission, *, run_id: str, ledger: RunLedger, runtime: _Runtime
+        self,
+        submission: Submission,
+        *,
+        run_id: str | None,
+        ledger: RunLedger | None,
+        runtime: _Runtime,
     ) -> None:
         workflow = submission.workflow
         self.workflow = workflow
@@ -1166,68 +1272,15 @@ class _Run:
             # the first wave holding a derived step seals what they read.
             if not self.sealed and not all(self._retrieves(s) for s in wave):
                 await self._seal()
-            for group in self.anchor_groups:
-                rolling = next((step for step in wave if step.id in group.steps), None)
-                if rolling is None or rolling.id in self.anchored:
-                    continue
-                # Every retrieval of the group is in a wave before this one
-                # (`_waves`), and the wave's steps start only once this returns.
+            # Every retrieval of a group is in a wave before the group's first
+            # step (`_waves`), and the wave's steps start only once these return.
+            for group, first in self._groups_starting(wave):
+                anchor = await self._resolve_group(group, first, schemas)
                 try:
-                    await self._resolve_anchor(group, rolling, schemas[_RESOLVE_ANCHOR.name])
+                    self._check_anchor_held(group, first, anchor)
                 except _Stopped as stopped:
                     raise _Stopped(self._restamped(stopped.outcome)) from stopped
-            # Each step runs as its own task; `asyncio.gather` copies the
-            # calling context per task, so `current_step_id`, set inside
-            # `_run_step`, never leaks between concurrent siblings.
-            # `return_exceptions=True` lets every step in the wave run to
-            # completion even when one of them raises something `_attempt`
-            # did not catch: an exception here is only ever a defect
-            # `_Stopped` was never meant to carry (`_Stopped` itself is
-            # always returned, never raised, out of `_attempt`), and letting
-            # it end the wave at once would abandon that wave's other
-            # in-flight steps unawaited rather than let them finish. A
-            # `BaseException` outside `Exception`, such as `CancelledError`,
-            # is not captured by `return_exceptions` and propagates
-            # regardless.
-            outcomes = await asyncio.gather(
-                *(self._attempt(step, schemas[step.tool.name]) for step in wave),
-                return_exceptions=True,
-            )
-            stopped: _Stopped | None = None
-            other_stops: list[MethodChoiceNeeded | Refused | RediscoveryNeeded] = []
-            for outcome in outcomes:
-                # `_Stopped` is an `Exception` subclass but is always
-                # returned, never raised, out of `_attempt`, so it is read
-                # off first, before the general `BaseException` check below
-                # that re-raises anything else.
-                if isinstance(outcome, _Stopped):
-                    if stopped is None:
-                        stopped = outcome
-                    else:
-                        other_stops.append(outcome.outcome)
-                    continue
-                if isinstance(outcome, BaseException):
-                    # The first such exception in the wave's own step order,
-                    # since `outcomes` keeps `asyncio.gather`'s input order
-                    # regardless of which task finished first.
-                    raise outcome
-                record, evidence = outcome
-                self.records[record.step_id] = record
-                if evidence is not None:
-                    self.evidence_by_step[record.step_id] = evidence
-            if stopped is not None:
-                # The wave has already run every one of its steps to
-                # completion, so `_completed_so_far` names every step that
-                # finished in this wave and in every wave before it,
-                # `_evidence_so_far` the evidence they recorded, and
-                # `_answers` the finished terminal steps that stand as
-                # answers. Re-stamp the outcome, and every sibling stop,
-                # with those rather than whatever each saw at the moment it
-                # stopped.
-                raise _Stopped(
-                    self._restamped(stopped.outcome),
-                    siblings=tuple(self._restamped(sibling) for sibling in other_stops),
-                )
+            await self._run_wave(wave, schemas)
         answers, refused = self._answers(self.workflow.terminal_steps)
         if refused is not None:
             raise _Stopped(self._restamped(refused.outcome))
@@ -1242,9 +1295,114 @@ class _Run:
             anchors=self._anchors_so_far(),
         )
 
+    async def read_anchors(self) -> tuple[AnchorRead, ...]:
+        """Run the retrievals the anchor groups rest on, seal them, and resolve each group.
+
+        The run's own steps for the part of it a group's newest period rests
+        on (`execute`), with each group resolved under its first step to
+        run, and no derived step run and no check of the period against the
+        plan's (`_check_anchor_held`), which the caller makes.
+        """
+        schemas = await self._surface_as_compiled()
+        roots = {root for group in self.anchor_groups for root in group.roots}
+        await self._run_wave(tuple(s for s in self.workflow.steps if s.id in roots), schemas)
+        await self._seal()
+        read: list[AnchorRead] = []
+        for wave in _waves(self.workflow):
+            for group, first in self._groups_starting(wave):
+                anchor = await self._resolve_group(group, first, schemas)
+                read.append(
+                    AnchorRead(
+                        steps=group.steps,
+                        planned=planned_anchor(group, self.steps_by_id),
+                        result=anchor,
+                    )
+                )
+        return tuple(read)
+
+    def _groups_starting(
+        self, wave: Sequence[WorkflowStep]
+    ) -> list[tuple[AnchorGroup, WorkflowStep]]:
+        """Each group not yet resolved whose first step to run is in `wave`, with that step."""
+        starting: list[tuple[AnchorGroup, WorkflowStep]] = []
+        for group in self.anchor_groups:
+            first = next((step for step in wave if step.id in group.steps), None)
+            if first is not None and first.id not in self.anchored:
+                starting.append((group, first))
+        return starting
+
+    async def _resolve_group(
+        self, group: AnchorGroup, first: WorkflowStep, schemas: Mapping[str, ToolSchema]
+    ) -> AnchorResult:
+        """`_resolve_anchor` for `group` under `first`, a stop carrying what the run finished."""
+        try:
+            return await self._resolve_anchor(group, first, schemas[_RESOLVE_ANCHOR.name])
+        except _Stopped as stopped:
+            raise _Stopped(self._restamped(stopped.outcome)) from stopped
+
+    async def _run_wave(
+        self, wave: Sequence[WorkflowStep], schemas: Mapping[str, ToolSchema]
+    ) -> None:
+        """Run every step of `wave` to completion, then raise the first stop among them."""
+        # Each step runs as its own task; `asyncio.gather` copies the
+        # calling context per task, so `current_step_id`, set inside
+        # `_run_step`, never leaks between concurrent siblings.
+        # `return_exceptions=True` lets every step in the wave run to
+        # completion even when one of them raises something `_attempt`
+        # did not catch: an exception here is only ever a defect
+        # `_Stopped` was never meant to carry (`_Stopped` itself is
+        # always returned, never raised, out of `_attempt`), and letting
+        # it end the wave at once would abandon that wave's other
+        # in-flight steps unawaited rather than let them finish. A
+        # `BaseException` outside `Exception`, such as `CancelledError`,
+        # is not captured by `return_exceptions` and propagates
+        # regardless.
+        outcomes = await asyncio.gather(
+            *(self._attempt(step, schemas[step.tool.name]) for step in wave),
+            return_exceptions=True,
+        )
+        stopped: _Stopped | None = None
+        other_stops: list[MethodChoiceNeeded | Refused | RediscoveryNeeded] = []
+        for outcome in outcomes:
+            # `_Stopped` is an `Exception` subclass but is always
+            # returned, never raised, out of `_attempt`, so it is read
+            # off first, before the general `BaseException` check below
+            # that re-raises anything else.
+            if isinstance(outcome, _Stopped):
+                if stopped is None:
+                    stopped = outcome
+                else:
+                    other_stops.append(outcome.outcome)
+                continue
+            if isinstance(outcome, BaseException):
+                # The first such exception in the wave's own step order,
+                # since `outcomes` keeps `asyncio.gather`'s input order
+                # regardless of which task finished first.
+                raise outcome
+            record, evidence = outcome
+            self.records[record.step_id] = record
+            if evidence is not None:
+                self.evidence_by_step[record.step_id] = evidence
+        if stopped is not None:
+            # The wave has already run every one of its steps to
+            # completion, so `_completed_so_far` names every step that
+            # finished in this wave and in every wave before it,
+            # `_evidence_so_far` the evidence they recorded, and
+            # `_answers` the finished terminal steps that stand as
+            # answers. Re-stamp the outcome, and every sibling stop,
+            # with those rather than whatever each saw at the moment it
+            # stopped.
+            raise _Stopped(
+                self._restamped(stopped.outcome),
+                siblings=tuple(self._restamped(sibling) for sibling in other_stops),
+            )
+
     async def _record(self, change: RunChange, *, step_id: str | None = None) -> None:
         """Record `change` to the run, refusing the run when the ledger says
-        the authorisation no longer covers it."""
+        the authorisation no longer covers it. A read with no run records
+        nothing."""
+        if self.ledger is None or self.run_id is None:
+            return
         try:
             await record_change(self.ledger, self.run_id, change)
         except AuthorisationExpiredError as exc:
@@ -1467,7 +1625,7 @@ class _Run:
 
     async def _resolve_anchor(
         self, group: AnchorGroup, step: WorkflowStep, schema: ToolSchema
-    ) -> None:
+    ) -> AnchorResult:
         """Resolve the newest period the rolling steps of `group` stand on, once.
 
         Sends `resolve_anchor` the populations the group's steps carry, with
@@ -1476,7 +1634,8 @@ class _Run:
         and the frame of each retrieval of the group. `step` is the group's
         first step about to run: the call reports and is refused under its id.
 
-        Writes `self.anchored` for every step of the group.
+        Writes `self.anchored` for every step of the group, and returns the
+        period resolved.
         """
         roots: dict[str, list[FrameColumns | None]] = {}
         for root in group.roots:
@@ -1499,7 +1658,7 @@ class _Run:
         sent = json.dumps({"populations": populations, "roots": sorted(frames)}, sort_keys=True)
         if (held := self._resolutions.get(sent)) is not None:
             self.anchored.update(dict.fromkeys(group.steps, held))
-            return
+            return held.result
         self._check_fit(step, _RESOLVE_ANCHOR, arguments, schema)
         token = current_step_id.set(step.id)
         try:
@@ -1519,6 +1678,44 @@ class _Run:
         anchored = _Anchored(result=anchor, columns=roots)
         self._resolutions[sent] = anchored
         self.anchored.update(dict.fromkeys(group.steps, anchored))
+        return anchor
+
+    def _check_anchor_held(
+        self, group: AnchorGroup, step: WorkflowStep, anchor: AnchorResult
+    ) -> None:
+        """Refuse `ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN` for a newest period before the plan's.
+
+        The plan's newest period is the one its literals state
+        (`planned_anchor`). Every rule the plan met holds of its years moved later, so a period
+        on it or after it runs. An earlier one reads years no rule was checked
+        against, which can leave a step no rows or the wrong years.
+
+        The refusal's payload is worded for the user and classifies as a
+        stop, since the same plan resolves the same period over the same data.
+        """
+        planned = planned_anchor(group, self.steps_by_id)
+        if anchor.period >= planned:
+            return
+        raise self._refused(
+            RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN,
+            f"step {step.id!r} counts from {anchor.period}, the newest period resolved, "
+            f"before {planned}, the one the plan states",
+            step_id=step.id,
+            payload=ToolFailure(
+                code=ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
+                message=(
+                    f"The plan counted the period from {planned}, but fewer than half of these "
+                    f"series now report {planned}. The latest year at least half of them "
+                    f"report is {anchor.period}."
+                ),
+                retry_mode="do_not_retry",
+                fix={
+                    "remedy": f"Ask again to plan the period from {anchor.period}.",
+                    "anchor": anchor.period,
+                    "planned_anchor": planned,
+                },
+            ),
+        )
 
     def _stopped_by_anchor_refusal(self, step: WorkflowStep, result: ToolCallResult) -> _Stopped:
         """The stop for a `resolve_anchor` call the tool refused.

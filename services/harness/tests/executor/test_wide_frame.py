@@ -606,11 +606,11 @@ def _growth_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Pl
     )
 
 
-def _rolling_growth_plan(plan_for: PlanFactory) -> Plan:
-    """Growth over the last five years, planned against 2023."""
+def _rolling_growth_plan(plan_for: PlanFactory, *, newest: int = 2023) -> Plan:
+    """Growth over the last five years, planned against `newest`."""
     window: dict[str, Any] = {
-        "window_start": 2018,
-        "window_end": 2023,
+        "window_start": newest - 5,
+        "window_end": newest,
         "rolling": RollingWindow(
             window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
         ),
@@ -1198,11 +1198,11 @@ async def test_a_growth_keys_each_series_by_the_frames_role_columns(
 async def test_a_rolling_growth_is_resolved_and_run_over_the_frames_own_columns(
     plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
 ) -> None:
-    # Planned against 2023, over a frame whose newest year is 2022. The plan's
+    # Planned against 2021, over a frame whose newest year is 2022. The plan's
     # population names `origin` and `destination`; the frame's columns are the
     # declared properties, and analysis-mcp checks each rolling call's
     # population against the one the newest period was resolved over.
-    plan = _rolling_growth_plan(plan_for)
+    plan = _rolling_growth_plan(plan_for, newest=2021)
     assert plan.workflow is not None
     assert plan.workflow.steps[-1].args["rolling"]["population"] == [
         {
@@ -1241,6 +1241,23 @@ async def test_a_rolling_growth_is_resolved_and_run_over_the_frames_own_columns(
         "rolling": {**sent["rolling"], "population": population},
         "anchor_key": anchor.anchor_key,
     }
+
+
+async def test_a_newest_year_before_the_plans_stops_the_run_before_the_growth(
+    plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> None:
+    # Planned against 2023; analysis-mcp resolves 2022 over a frame ending there.
+    surface = surface_for(
+        get_data=[ok(await retrieved(_source(), frame=_family_frame(last_year=2022)))]
+    )
+
+    outcome = await _run(_rolling_growth_plan(plan_for), surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN
+    assert outcome.step_id == "growth_op"
+    assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor"]
+    assert [anchor.period for anchor in outcome.anchors] == ["2022"]
 
 
 async def test_a_rolling_population_the_frame_cannot_spell_refuses_before_it_is_resolved(

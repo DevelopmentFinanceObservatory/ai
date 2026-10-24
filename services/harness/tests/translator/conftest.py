@@ -10,7 +10,7 @@ requirement never named. A phrase in `WARNING_PHRASES` adds that warning to
 whatever the answer is, so a test can have an answer arrive with a dropped
 role or an advisory note. It is served over `fastmcp.Client`'s in-memory
 transport, so the discovery tools are exercised through the MCP protocol.
-`get_data` is there to show the translator never wraps it.
+`get_data` is there to show no translator tool wraps it.
 
 The agent tests compile against the real tool schemas, read once from the real
 in-memory servers, with canned answers for the calls a test makes.
@@ -193,7 +193,8 @@ def data_server(search_calls: list[dict[str, Any]]) -> FastMCP:
 
     @server.tool(name="get_data")
     async def get_data(spec_id: str, scope: dict[str, Any] | None = None) -> str:
-        """Retrieve observations. The translator must never reach this."""
+        """Retrieve observations. Only a rolling workflow's newest-year read reaches this
+        (`executor.run.read_anchors`), and no plan of this suite rolls."""
         return "observations"
 
     return server

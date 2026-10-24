@@ -121,14 +121,21 @@ each group's answer in `anchors`: the key, the year, and the series that hold
 no value at it. The call takes the path a step's call takes, under the id of
 the group's first step to run, and `resolve_anchor` is part of the surface
 check, compared with its row of the capability table. A plan with no rolling
-step never calls it.
+step never calls it. The group's rolling years, less their offsets, state the
+newest year the plan was checked against, and the run reads them moved later
+only: an earlier newest year stops the run, and the user asks again to plan
+from the year the data now holds. Translation reads the same newest years
+before approval (`read_anchors`, the run's own retrievals and `resolve_anchor`
+with no ledger and no derived step) and states the plan from them, so this stop
+fires only when the data changed between approval and the run.
 
-| Stop                                                                                    | Reported as                                                                               |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `resolve_anchor` finds no year half of the series hold (`rolling_anchor_unresolved`)    | `step_refused` with the tool's code, a message for the user and a `fix.remedy`            |
-| `resolve_anchor` finds periods that are no calendar years (`rolling_grain_unsupported`) | the same                                                                                  |
-| A rolled start is before the first year its retrieval's evidence records                | `rolling_window_outside_dataset`, before the step's call, with a payload of the same code |
-| Any other `rolling_anchor_unresolved`, from `resolve_anchor` or a rolling verb          | `step_refused` with an `internal_error` payload; the refusal is logged and kept in `fix`  |
+| Stop                                                                                    | Reported as                                                                                  |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `resolve_anchor` finds no year half of the series hold (`rolling_anchor_unresolved`)    | `step_refused` with the tool's code, a message for the user and a `fix.remedy`               |
+| `resolve_anchor` finds periods that are no calendar years (`rolling_grain_unsupported`) | the same                                                                                     |
+| The newest year is before the one the group's rolling years, less their offsets, state  | `rolling_anchor_behind_plan`, before the group's first step, with a payload of the same code |
+| A rolled start is before the first year its retrieval's evidence records                | `rolling_window_outside_dataset`, before the step's call, with a payload of the same code    |
+| Any other `rolling_anchor_unresolved`, from `resolve_anchor` or a rolling verb          | `step_refused` with an `internal_error` payload; the refusal is logged and kept in `fix`     |
 
 Each of these carries a payload that classifies as a stop, so the turn closes
 on it and spends no replan.

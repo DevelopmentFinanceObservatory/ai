@@ -176,7 +176,9 @@ class EndDrift(StrEnum):
     (`executor.run`, analysis-mcp's `resolve_anchor`), moved by the bound's
     offset; the run resolves one anchor per group of rolling years
     (`planner.plan.rolling_groups`), and every step of one group counts
-    from it. `DATA`
+    from it. That anchor is the plan's stated newest year or later:
+    translation states the rolling years from the anchor it reads, and the
+    run refuses an earlier one (`executor.run._Run._check_anchor_held`). `DATA`
     is each series' own newest year, which a retrieval stating no end year
     holds, so a series reporting past the anchor holds years after it.
     """
@@ -829,8 +831,10 @@ def _stays(
     `anchor_year_stays`, `growth_endpoint_leaves`, `span_end_leaves` and
     `_picked_year_leaves`. Where both years state `today`, `year` has to
     stand there today too. Every other reader has checked that already. A
-    year moves only later, under the stated coverage every rule assumes
-    (planner/README.md, 'Years a step reads'). Every rolling year of one
+    year moves only later: translation states a plan's rolling years from
+    the newest year its run will read (`translator.tool`), and the run
+    refuses a newest year before the stated one
+    (`executor.run._Run._check_anchor_held`). Every rolling year of one
     group counts from one newest year (`planner.plan._check_rolling_years_agree`), and the
     years compared here always fall in one group, since a step reading both
     merges their groups. So the years held today order two years that both
