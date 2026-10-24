@@ -170,8 +170,10 @@ _FETCHES_KEY = "orchestrator:fetches"
 # The ids of the series the canvas drew as a turn began, with the turn's
 # invocation id: {"invocation", "ids"}.
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
-# The cards `make_charts` drew this turn: {"invocation", "drawn"}, `drawn`
-# mapping `_card_identity` to the result entry the card was drawn with.
+# The cards `make_charts` drew this turn that are still on the canvas:
+# {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
+# {"component_id", "entry"}, `entry` the result it was drawn with.
+# `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
@@ -1374,8 +1376,16 @@ def build_orchestrator_tools(
     """
     # One lock per invocation, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
-    # is admitted on exact counts. An entry lasts while a call holds its lock.
+    # is admitted on exact counts, and by remove_cards while it takes cards
+    # off and drops them from the turn's drawn cards. An entry lasts while a
+    # call holds its lock.
     chart_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _canvas_lock(tool_context: ToolContext) -> asyncio.Lock:
+        lock = chart_locks.get(tool_context.invocation_id)
+        if lock is None:
+            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
+        return lock
 
     async def search(
         query: str,
@@ -1847,7 +1857,7 @@ def build_orchestrator_tools(
                 if identity in drawn_cards:
                     # The canvas holds this card, so another write would stack a copy.
                     drawn.append(
-                        drawn_cards[identity]
+                        drawn_cards[identity]["entry"]
                         | {
                             "already_on_canvas": (
                                 "This card is already on the canvas from an earlier call "
@@ -1906,7 +1916,7 @@ def build_orchestrator_tools(
                 if cut is not None:
                     entry["note"] = _cut_note(cut)
                 drawn.append(entry)
-                drawn_cards[identity] = entry
+                drawn_cards[identity] = {"component_id": component["component_id"], "entry": entry}
                 tool_context.state[_DRAWN_CARDS_KEY] = {
                     "invocation": tool_context.invocation_id,
                     "drawn": drawn_cards,
@@ -1926,10 +1936,7 @@ def build_orchestrator_tools(
         values it would accept. A chart drawn whose values could not be read
         back says so under the code `figures_unread`.
         """
-        lock = chart_locks.get(tool_context.invocation_id)
-        if lock is None:
-            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
-        async with lock:
+        async with _canvas_lock(tool_context):
             spent = _charts_spent(tool_context)
             if spent:
                 return spent
@@ -2127,6 +2134,22 @@ def build_orchestrator_tools(
                 "legal": exc.legal,
             }
 
+    def _forget_drawn(tool_context: ToolContext, removed: list[str]) -> None:
+        """Drop the cards `removed` took off from the turn's drawn cards, so a
+        later `make_charts` of one draws it again."""
+        held = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        if not removed or held.get("invocation") != tool_context.invocation_id:
+            return
+        gone = set(removed)
+        tool_context.state[_DRAWN_CARDS_KEY] = {
+            "invocation": tool_context.invocation_id,
+            "drawn": {
+                identity: card
+                for identity, card in held["drawn"].items()
+                if card["component_id"] not in gone
+            },
+        }
+
     async def remove_cards_tool(
         tool_context: ToolContext,
         component_ids: list[str] | None = None,
@@ -2152,9 +2175,11 @@ def build_orchestrator_tools(
                 "Name the cards to take off, or set all_cards. Nothing changed.",
             )
         _canvas_series(tool_context)
-        removed, missing = await remove_cards(
-            component_ids=component_ids or [], all_cards=all_cards
-        )
+        async with _canvas_lock(tool_context):
+            removed, missing = await remove_cards(
+                component_ids=component_ids or [], all_cards=all_cards
+            )
+            _forget_drawn(tool_context, removed)
         if not removed and missing and len(missing) == len(component_ids or []):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,

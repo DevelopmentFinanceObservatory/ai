@@ -2427,6 +2427,56 @@ async def test_make_charts_does_not_draw_a_card_the_canvas_holds(
     assert "already_on_canvas" in card
 
 
+class LandingWideExecutor(WideFrameExecutor):
+    """The wide frame's executor, each write a card with an id of its own
+    that lands on `state`'s canvas."""
+
+    def __init__(self, state: ConversationState) -> None:
+        super().__init__()
+        self.state = state
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        written = await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        if tool != "write_component":
+            return written
+        component_id = f"cmp_{len(_intents(self)):02d}"
+        component = written["component"] | {"component_id": component_id}
+        component["payload"] = component["payload"] | {"component_id": component_id}
+        return written | {"component": component}
+
+    def land_component(self, component: dict[str, Any]) -> None:
+        super().land_component(component)
+        land_component(self.state, component)
+
+
+@pytest.mark.parametrize("all_cards", [False, True], ids=["named", "all_cards"])
+async def test_make_charts_draws_again_a_card_remove_cards_took_off(
+    monkeypatch: pytest.MonkeyPatch, all_cards: bool
+) -> None:
+    """A card taken off the canvas, by its id or with every card, is drawn
+    again by a later call of the turn, and the card left on is not."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    state = ConversationState(conversation_id="c1")
+    executor = LandingWideExecutor(state)
+    tools, ctx = _tools(executor=executor, remove_cards=_remove_seam(state))
+    await tools["fetch"](SPEC_LIFE, ctx)
+    table, bars = _wide_chart(), _wide_chart(type="bar_chart")
+    await tools["make_charts"]([table, bars], ctx)
+
+    removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
+    again = await tools["make_charts"]([table, bars], ctx)
+
+    assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
+    assert [intent["type"] for intent in _intents(executor)] == (
+        ["table", "bar_chart", "table", "bar_chart"]
+        if all_cards
+        else ["table", "bar_chart", "table"]
+    )
+    assert ["already_on_canvas" in card for card in again["charts"]] == [False, not all_cards]
+    assert state.composition is not None
+    assert len(state.composition.blocks) == 2
+
+
 async def test_make_charts_draws_a_card_of_another_kind_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
