@@ -253,8 +253,42 @@ def answer_id(call: str, answer: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical({"call": call, "answer": answer}).encode()).hexdigest()[:16]
 
 
+def _read_answers(task_id: str, names: Sequence[str], directory: Path) -> dict[str, Any]:
+    """The stored answers `names` address, by the call each answers."""
+    answers: dict[str, Any] = {}
+    for name in names:
+        path = _answers_dir(directory) / f"{name}.json"
+        if not path.exists():
+            raise RecordingMismatchError(f"{task_id}: answer {name} is not in answers/")
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if answer_id(stored["call"], stored["answer"]) != name:
+            raise RecordingMismatchError(f"{task_id}: answer {name} does not match its content")
+        answers[stored["call"]] = stored["answer"]
+    return answers
+
+
+def _store_answers(answers: Mapping[str, Any], directory: Path) -> list[str]:
+    """Write each of `answers`, by the call it answers, to the shared store under its
+    `answer_id`; the names, sorted."""
+    store = _answers_dir(directory)
+    store.mkdir(parents=True, exist_ok=True)
+    names = []
+    for call, answer in answers.items():
+        name = answer_id(call, answer)
+        names.append(name)
+        _write_json(store / f"{name}.json", {"call": call, "answer": answer})
+    return sorted(names)
+
+
+def _named_answers(body: Mapping[str, Any]) -> list[str]:
+    """Every stored answer a recording file names: its tool answers, then its
+    translation's."""
+    return [*body["answers"], *(body.get("translation") or {}).get("answers", [])]
+
+
 def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, Any]:
-    """The recording of `task_id`, its tool answers read back in under `tools`.
+    """The recording of `task_id`, its tool answers read back in under `tools`, and its
+    translation's under `translation["calls"]`.
 
     Refuses a recording written under another schema, one naming an answer the store
     lacks, and an answer whose content no longer matches its address.
@@ -262,33 +296,29 @@ def load_recording(task_id: str, directory: Path = RECORDINGS_DIR) -> dict[str, 
     recording = json.loads(recording_path(task_id, directory).read_text(encoding="utf-8"))
     if recording.get("schema") != RECORDING_SCHEMA:
         raise RecordingMismatchError(f"{task_id}: recording schema {recording.get('schema')}")
-    tools: dict[str, Any] = {}
-    for name in recording.pop("answers"):
-        path = _answers_dir(directory) / f"{name}.json"
-        if not path.exists():
-            raise RecordingMismatchError(f"{task_id}: answer {name} is not in answers/")
-        stored = json.loads(path.read_text(encoding="utf-8"))
-        if answer_id(stored["call"], stored["answer"]) != name:
-            raise RecordingMismatchError(f"{task_id}: answer {name} does not match its content")
-        tools[stored["call"]] = stored["answer"]
+    tools = _read_answers(task_id, recording.pop("answers"), directory)
+    if (translation := recording.get("translation")) is not None:
+        recording["translation"] = {
+            "calls": _read_answers(task_id, translation["answers"], directory),
+            "resolved": translation["resolved"],
+        }
     return {**recording, "tools": tools}
 
 
 def save_recording(
     task_id: str, recording: Mapping[str, Any], directory: Path = RECORDINGS_DIR
 ) -> None:
-    """Write `recording`: each tool answer to the shared store under its `answer_id`, and
-    the task's file naming the answers it holds. A rerun that records the same answers
-    writes the same files."""
-    store = _answers_dir(directory)
-    store.mkdir(parents=True, exist_ok=True)
-    names = []
-    for call, answer in recording["tools"].items():
-        name = answer_id(call, answer)
-        names.append(name)
-        _write_json(store / f"{name}.json", {"call": call, "answer": answer})
+    """Write `recording`: each tool answer, and each answer its translation read, to the
+    shared store under its `answer_id`, and the task's file naming the answers it
+    holds. A rerun that records the same answers writes the same files."""
     body = {key: value for key, value in recording.items() if key != "tools"}
-    _write_json(recording_path(task_id, directory), {**body, "answers": sorted(names)})
+    if (translation := recording.get("translation")) is not None:
+        body["translation"] = {
+            "answers": _store_answers(translation["calls"], directory),
+            "resolved": translation["resolved"],
+        }
+    names = _store_answers(recording["tools"], directory)
+    _write_json(recording_path(task_id, directory), {**body, "answers": names})
 
 
 def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR) -> list[Path]:
@@ -299,7 +329,7 @@ def stray_recordings(task_ids: Collection[str], directory: Path = RECORDINGS_DIR
         name
         for path in recordings
         if path.stem in task_ids
-        for name in json.loads(path.read_text(encoding="utf-8"))["answers"]
+        for name in _named_answers(json.loads(path.read_text(encoding="utf-8")))
     }
     return [path for path in recordings if path.stem not in task_ids] + sorted(
         path for path in _answers_dir(directory).glob("*.json") if path.stem not in named
