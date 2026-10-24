@@ -172,7 +172,8 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# component id. `remove_cards` drops the cards it takes off.
+# {"component_id", "revision"}, the revision it was drawn as. `remove_cards`
+# drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
@@ -1761,8 +1762,8 @@ def build_orchestrator_tools(
     async def _stored_card(component_id: str) -> dict[str, Any] | None:
         """The card `component_id` as the platform holds its head revision
         (`describe_component`), shaped as a write reply's component: its
-        resolved payload and its fact summary. None when the read fails or
-        carries no resolved payload."""
+        revision, resolved payload and fact summary. None when the read
+        fails or carries no resolved payload."""
         try:
             described = await executor(
                 tool="describe_component", args={"component_id": component_id}
@@ -1779,7 +1780,11 @@ def build_orchestrator_tools(
             or not isinstance(body, dict)
         ):
             return None
-        return {"payload": payload, "fact_summary": body.get("fact_summary") or {}}
+        return {
+            "revision": body.get("revision"),
+            "payload": payload,
+            "fact_summary": body.get("fact_summary") or {},
+        }
 
     async def _card_entry(
         chart: Chart,
@@ -1813,13 +1818,16 @@ def build_orchestrator_tools(
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
         on_canvas = _canvas_series(tool_context)
         held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
-        drawn_cards: dict[str, str] = (
+        drawn_cards: dict[str, dict[str, Any]] = (
             dict(held_cards["drawn"])
             if held_cards.get("invocation") == tool_context.invocation_id
             else {}
         )
         canvas = {
-            _card_identity(card["intent"]): card["component_id"]
+            _card_identity(card["intent"]): {
+                "component_id": card["component_id"],
+                "revision": card["revision"],
+            }
             for card in (canvas_cards() if canvas_cards is not None else [])
         }
         drawn: list[dict[str, Any]] = []
@@ -1910,21 +1918,26 @@ def build_orchestrator_tools(
                     # newer period.
                     intent["window"] = {"start": cut.period, "end": cut.period}
                 identity = _card_identity(intent)
-                held_id = drawn_cards.get(identity) or canvas.get(identity)
-                if held_id is not None:
+                held = drawn_cards.get(identity) or canvas.get(identity)
+                stored = None if held is None else await _stored_card(held["component_id"])
+                if held is not None and stored is None:
                     # The canvas holds this card, so another write would stack a copy.
-                    stored = await _stored_card(held_id)
-                    if stored is None:
-                        drawn.append(
-                            _not_drawn(
-                                chart,
-                                "This card is already on the canvas, and its figures could "
-                                "not be read back. No copy was drawn; state no value of it "
-                                "in the reply.",
-                                code=HarnessCode.FIGURES_UNREAD,
-                            )
+                    drawn.append(
+                        _not_drawn(
+                            chart,
+                            "This card is already on the canvas, and its figures could "
+                            "not be read back. No copy was drawn; state no value of it "
+                            "in the reply.",
+                            code=HarnessCode.FIGURES_UNREAD,
                         )
-                        continue
+                    )
+                    continue
+                # A card revised since it was drawn no longer draws this intent.
+                if (
+                    held is not None
+                    and stored is not None
+                    and stored["revision"] == held["revision"]
+                ):
                     read = True
                     entry = await _card_entry(
                         chart, stored, title=title, frame=frame, on_canvas=on_canvas, cut=cut
@@ -1981,7 +1994,10 @@ def build_orchestrator_tools(
                         chart, component, title=title, frame=frame, on_canvas=on_canvas, cut=cut
                     )
                 )
-                drawn_cards[identity] = component["component_id"]
+                drawn_cards[identity] = {
+                    "component_id": component["component_id"],
+                    "revision": component["revision"],
+                }
                 tool_context.state[_DRAWN_CARDS_KEY] = {
                     "invocation": tool_context.invocation_id,
                     "drawn": drawn_cards,
@@ -2212,9 +2228,9 @@ def build_orchestrator_tools(
         tool_context.state[_DRAWN_CARDS_KEY] = {
             "invocation": tool_context.invocation_id,
             "drawn": {
-                identity: component_id
-                for identity, component_id in held["drawn"].items()
-                if component_id not in gone
+                identity: card
+                for identity, card in held["drawn"].items()
+                if card["component_id"] not in gone
             },
         }
 

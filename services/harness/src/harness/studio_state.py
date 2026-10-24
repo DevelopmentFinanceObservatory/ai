@@ -724,12 +724,13 @@ class ConversationState:
 
     def canvas_cards(self) -> list[dict[str, Any]]:
         """The cards on the canvas that `make_charts` drew, in canvas order,
-        each its id with the intent it was written from. A card revised since
-        it was drawn keeps no intent, and is not listed."""
+        each its id with the intent it was written from and the revision it
+        was drawn as. A card the canvas holds at another revision, revised
+        since it was drawn, is not listed."""
         cards: list[dict[str, Any]] = []
         for block in self.composition.blocks if self.composition is not None else []:
             drawn = (self.components.get(block.component_id) or {}).get(_DRAWN_CARD)
-            if isinstance(drawn, dict):
+            if isinstance(drawn, dict) and drawn.get("revision") == block.revision:
                 cards.append({"component_id": block.component_id, **drawn})
         return cards
 
@@ -2407,9 +2408,9 @@ def _leading_sentences(text: str, cap: int) -> str:
 # draws. No digest, listing or recall states it, and `canvas_series_ids` reads it.
 _SERIES_IDS = "series_ids"
 # The key of a stored entry holding, for a card `make_charts` drew, the intent
-# it was written from, so a later turn's `make_charts` of the same intent
-# reads the card's figures rather than drawing it again (`canvas_cards`).
-# Dropped when the card is revised or the model takes it off the canvas. No
+# it was written from and the revision it was drawn as, so a later turn's
+# `make_charts` of the same intent reads the card's figures rather than
+# drawing it again while the canvas holds that revision (`canvas_cards`). No
 # digest, listing or recall states it either.
 _DRAWN_CARD = "drawn_card"
 
@@ -2448,12 +2449,6 @@ def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """A stored entry as a model may read it, without its `_SERIES_IDS` and
     `_DRAWN_CARD`."""
     return {key: value for key, value in entry.items() if key not in {_SERIES_IDS, _DRAWN_CARD}}
-
-
-def forget_drawn_card(entry: dict[str, Any]) -> None:
-    """Drop the `_DRAWN_CARD` of a stored entry whose card was revised or
-    taken off the canvas: no later `make_charts` reads it in place of a draw."""
-    entry.pop(_DRAWN_CARD, None)
 
 
 def _turn_component_entry(
@@ -2590,7 +2585,8 @@ def land_component(
     Always records the component's digest entry
     (`conversation.components`), so a card is findable by `recall` and the
     canvas digest whether or not it lands a block, and for a card
-    `make_charts` wrote from `intent`, that intent (`canvas_cards`). `auto_add=False` means
+    `make_charts` wrote from `intent`, that intent with the revision it
+    was drawn as (`canvas_cards`). `auto_add=False` means
     there is no block to append: the component still streams to the
     client, but nothing here composes for it, and the return is `"held"`.
     Otherwise a new block is appended and the return is `"created"`.
@@ -2602,7 +2598,7 @@ def land_component(
     """
     entry = _digest_entry(component)
     if intent is not None:
-        entry[_DRAWN_CARD] = {"intent": intent}
+        entry[_DRAWN_CARD] = {"intent": intent, "revision": int(component["revision"])}
     conversation.components[component["component_id"]] = entry
     conversation.turn_components.append(
         _turn_component_entry(
@@ -2646,8 +2642,7 @@ def remove_cards(
     named ids the conversation never held; a named card already off the
     canvas is neither. Recorded as a replayable op, like `_append_block`, so
     a concurrent `/composition` reconciles with it. The stream is told a
-    removal is unreported (`ConversationState.take_unreported_removal`), and
-    the removed cards' entries keep no drawn intent (`forget_drawn_card`)."""
+    removal is unreported (`ConversationState.take_unreported_removal`)."""
     previous = conversation.composition
     present = [block.component_id for block in previous.blocks] if previous else []
     named = set(component_ids)
@@ -2660,8 +2655,6 @@ def remove_cards(
         conversation.composition = op(previous)
         conversation._composition_ops.append(op)
         conversation._removal_unreported = True
-    for component_id in removed:
-        forget_drawn_card(conversation.components.get(component_id) or {})
     return removed, missing
 
 
@@ -2723,7 +2716,7 @@ def _replace_block(
     component still streams as component.created, but must not sneak onto
     the canvas here. The Edit Card route's recreate (`harness.studio_edit`)
     names the existing component_id whose slot the new component takes
-    over, and whose entry then keeps no drawn intent (`forget_drawn_card`).
+    over.
     """
     previous = conversation.composition
     index = _block_index(previous, old_component_id)
@@ -2739,7 +2732,6 @@ def _replace_block(
     )
     conversation.composition = op(previous)
     conversation._composition_ops.append(op)
-    forget_drawn_card(conversation.components.get(old_component_id) or {})
     return True
 
 

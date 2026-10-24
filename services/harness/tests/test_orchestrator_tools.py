@@ -66,7 +66,14 @@ from harness.orchestrator_tools import (
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
-from harness.studio_state import ConversationState, land_component, remove_cards
+from harness.studio_edit import _revised_frames
+from harness.studio_state import (
+    ConversationState,
+    _apply_operations,
+    _next_manifest,
+    land_component,
+    remove_cards,
+)
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -75,6 +82,7 @@ from harness.tool_contracts import (
     resolver_digest,
 )
 from harness.turn_records import SearchReading, loose_match_notes, render_readings
+from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
@@ -2545,7 +2553,9 @@ async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
         {"component_id": "cmp_01"}
     ]
     # The turn keeps the card's id alone, none of its points.
-    assert set(ctx.state["orchestrator:drawn_cards"]["drawn"].values()) == {"cmp_01"}
+    assert [set(card) for card in ctx.state["orchestrator:drawn_cards"]["drawn"].values()] == [
+        {"component_id", "revision"}
+    ]
     assert card["holds"]["series_count"] == 24
     assert _figures(card) == [("Provider donor/19", 81.0, "2023")] + (
         []
@@ -2641,6 +2651,54 @@ async def test_make_charts_draws_again_a_card_remove_cards_took_off(
     assert ["already_on_canvas" in card for card in again["charts"]] == [False, not all_cards]
     assert executor.state.composition is not None
     assert len(executor.state.composition.blocks) == 2
+
+
+async def test_make_charts_reads_a_card_the_user_added_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card the model took off and the user added back unchanged is the
+    same card, so a later turn's ask for it reads it and writes nothing."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    await tools["remove_cards"](ctx, ["cmp_01"])
+    state = executor.state
+    applied = _apply_operations(
+        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
+    )
+    assert isinstance(applied, tuple)
+    state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
+    ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 1
+    assert "already_on_canvas" in again["charts"][0]
+
+
+@_TURNS
+async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A card the user revised through Edit Card no longer draws the intent
+    it was written from, so asking for that intent draws it anew."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
+    _revised_frames(
+        executor.state, component_id="cmp_01", component=revised, patch={"title": "Renamed"}
+    )
+    executor.cards["cmp_01"] = revised
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 2
+    assert "already_on_canvas" not in again["charts"][0]
 
 
 @_TURNS

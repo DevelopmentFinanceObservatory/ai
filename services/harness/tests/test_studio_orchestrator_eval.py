@@ -1665,8 +1665,9 @@ def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> Non
     a card gives what it gives unasked, and a card whose every series was on
     the canvas as its turn began gives nothing. A card on the canvas that a
     later turn reads again, drawing nothing, gives the figures the case
-    lists. A card removed in between is off the canvas, so drawing its
-    series again is a new card."""
+    lists, and naming a series of a held card is no fault. A card revised
+    in the turn is read at its new revision. A card removed in between is
+    off the canvas, so drawing its series again is a new card."""
     run = _load("run")
     kenya = _card_frame({"Kenya": {"1960": 48.5, "2024": 63.8}})
     again = kenya | {"component_id": "cmp_kenya_again"}
@@ -1701,6 +1702,16 @@ def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> Non
         entries[0]["id"] = "s_kenya_line"
     stood = {"event": "message.complete", "text": "In 2023 Kenya stood at 60.0 years."}
     assert rules(listed, [six, _composed(six), said], [line, _composed(six, line), stood]) == []
+    # A held card the turn did not touch is exempt from the series rule.
+    remains = {"event": "message.complete", "text": "Kenya remains on the canvas."}
+    assert rules(listed, [six, _composed(six), said], [remains]) == []
+
+    # A card revised in the turn is read at its new revision.
+    revised = _card_frame({"Kenya": {"1960": 48.5, "2024": 66.2}}) | {"event": "component.revised"}
+    assert revised["component_id"] == kenya["component_id"]
+    now = {"event": "message.complete", "text": "In 2024 Kenya stood at 66.2 years."}
+    assert rules(last, drawn, [revised, now]) == []
+    assert "figure_missing" in rules(last, drawn, [revised, recap])
 
 
 def test_a_cut_card_is_held_to_its_title_and_its_series_count() -> None:
