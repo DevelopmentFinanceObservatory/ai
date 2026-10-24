@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -31,13 +31,14 @@ from compiler.compile import compile_plan
 from compiler.sources import source_from_spec_block
 from compiler.surface import McpSurface, ToolSchema, ToolSurface
 from data_mcp.server import mcp as data_mcp
-from executor.outcomes import Accepted, EvidenceRecord, StepRecord
+from executor.outcomes import Accepted, AnchorResult, EvidenceRecord, StepRecord
 from harness.conversation import current_conversation_id
 from harness.graph.answer import (
     _carried_parts,
     _carried_retrievals,
     _dropped_key_sentences,
     _group_column,
+    _short_series_sentences,
     _stat_var_totals,
     answer_notes,
     link_evidence_to_terminal_frames,
@@ -88,6 +89,7 @@ from planner.records import (
     Period,
     PeriodThreshold,
     Reduction,
+    SeriesEntity,
     Severity,
     StatVarReading,
 )
@@ -101,6 +103,8 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+
+from .split_plan import FIRST_YEAR, stored_split_plan
 
 _BLOCKS: dict[str, Any] = json.loads(
     (Path(__file__).parent / "fixtures" / "family_spec_blocks.json").read_text()
@@ -752,6 +756,16 @@ _AMONG = _WHAT.model_copy(
         "fixes": DecisionFixes(among=RankAmong.POPULATION),
     }
 )
+_POOLED = _WHAT.model_copy(
+    update={
+        "slot": "pooled",
+        "description": "Whose total each share divides by.",
+        "options": ("all aid the three received together", "each one's own"),
+        "chosen": "all aid the three received together",
+        "rationale": "The question asks for each one's share of the whole.",
+        "fixes": DecisionFixes(denominator_scope=DenominatorScope.POOLED),
+    }
+)
 
 
 def _east_africa(spec_char: str, stat_var: str, role: str, unit_ref: str | None) -> SelectedSource:
@@ -847,6 +861,49 @@ def _aid_per_head(
                 if share
                 else _east_africa("b", "Population", "country", None)
             ),
+        },
+    )
+
+
+def _pooled_share(schemas: Mapping[str, ToolSchema]) -> Plan:
+    """Each of three recipients' share, `share`, of all aid the three received
+    together, retrieved apart and summed each year by `yearly_total`."""
+    period = Period(start=2015, end=2024)
+    recipients = [Entity(name=name, role="recipient") for name in _EAST_AFRICA]
+    aid = _dataset("aid", recipients, period, measure="aid received")
+    all_aid = _dataset("all_aid", recipients, period, measure="all aid")
+    total, total_op = _yearly_total("all_aid", "all_aid_op")
+    keys: dict[str, Any] = {"axis": "recipient", "denominator_scope": DenominatorScope.POOLED}
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure", "pooled"],
+        numerator=RequirementSide(input_id="aid"),
+        denominator=RequirementSide(input_id="yearly_total"),
+        **keys,
+    )
+    share_op = ShareOfOperation(
+        id="share",
+        requirement_id="share",
+        numerator=Side(input="aid_op"),
+        denominator=Side(input="yearly_total"),
+        **keys,
+    )
+    return _compiled(
+        schemas,
+        [aid, all_aid, total, share],
+        [
+            RetrieveOperation(id="aid_op", requirement_id="aid", spec_id="spec_" + "a" * 32),
+            RetrieveOperation(
+                id="all_aid_op", requirement_id="all_aid", spec_id="spec_" + "b" * 32
+            ),
+            total_op,
+            share_op,
+        ],
+        terminal=["share"],
+        decisions=(_WHAT, _POOLED),
+        discovered={
+            "aid": _east_africa("a", "Aid", "recipient", "usd"),
+            "all_aid": _east_africa("b", "AllAid", "recipient", "usd"),
         },
     )
 
@@ -985,6 +1042,336 @@ async def test_an_entity_a_retrieval_left_out_is_named_under_every_answer_it_fee
 
     assert answer_notes(surface, outcome, plan=plan) == stated
     assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+
+
+def _short(
+    *names: str | None,
+    reach: tuple[int, int] | None = None,
+    observations: tuple[int, int] | None = None,
+    asked: tuple[int, int] = (2015, 2024),
+    stat_var: str = "Aid",
+) -> EvidenceIssue:
+    """The `window_short` finding on the `stat_var` series of the entities
+    `names` label, `None` for one labelled none, reaching over `reach`, or
+    the `coverage_gaps` one counting `observations` across a span."""
+    entities = tuple(
+        SeriesEntity(role="recipient", ref=f"country/{name or index}", label=name)
+        for index, name in enumerate(names)
+    )
+    if reach is not None:
+        return EvidenceIssue(
+            code=EvidenceIssueCode.WINDOW_SHORT,
+            severity=Severity.WARNING,
+            requirement_id="aid",
+            detail="",
+            found=Period(start=reach[0], end=reach[1]).model_dump(),
+            required=Period(start=asked[0], end=asked[1]).model_dump(),
+            stat_var=stat_var,
+            entities=entities,
+        )
+    assert observations is not None
+    return EvidenceIssue(
+        code=EvidenceIssueCode.COVERAGE_GAPS,
+        severity=Severity.WARNING,
+        requirement_id="aid",
+        detail="",
+        found=observations[0],
+        required=observations[1],
+        stat_var=stat_var,
+        entities=entities,
+    )
+
+
+_ASKED = Period(start=2015, end=2024)
+
+
+async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """Uganda's series ends in 2021. The pooled share keeps its row, summed
+    over the years it holds, so no key is dropped, and the note states where
+    its series ends."""
+    plan = _pooled_share(schemas)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    outcome = _with_gaps(outcome, "aid_op", _short("Uganda", reach=(2015, 2021)), window=_ASKED)
+
+    assert answer_notes(surface, outcome, plan=plan) == ["Uganda's series ends in 2021."]
+    assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
+
+
+@pytest.mark.parametrize(
+    ("gaps", "stated"),
+    [
+        pytest.param(
+            [_short("Uganda", reach=(2018, 2024))],
+            ["Uganda's series starts in 2018."],
+            id="starts-late",
+        ),
+        pytest.param(
+            [_short("Uganda", reach=(2018, 2018))],
+            ["Uganda's series covers only 2018."],
+            id="one-year-inside",
+        ),
+        pytest.param(
+            [_short("Uganda", "Germany", reach=(2016, 2021))],
+            ["Uganda and Germany's series covers only 2016 to 2021."],
+            id="series-of-two-entities",
+        ),
+        pytest.param(
+            [_short("Philippines", reach=(2015, 2021))],
+            ["Philippines' series ends in 2021."],
+            id="name-ending-in-s",
+        ),
+        pytest.param(
+            [_short("Uganda", reach=(2015, 2021)), _short("Kenya", reach=(2015, 2019))],
+            ["Uganda's series ends in 2021 and Kenya's series ends in 2019."],
+            id="two",
+        ),
+        pytest.param(
+            [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")],
+            [
+                "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
+                "and 1 other series ends before 2024."
+            ],
+            id="one-counted",
+        ),
+        pytest.param(
+            [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D", "E")],
+            [
+                "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
+                "and 2 other series end before 2024."
+            ],
+            id="several-counted",
+        ),
+        pytest.param(
+            [
+                *(_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")),
+                _short("E", reach=(2017, 2024)),
+            ],
+            [
+                "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
+                "and 2 other series cover only part of 2015 to 2024."
+            ],
+            id="counted-short-in-different-ways",
+        ),
+        pytest.param(
+            [_short("Uganda", observations=(8, 10)), _short("Kenya", reach=(2015, 2021))],
+            [
+                "Kenya's series ends in 2021.",
+                "Uganda's series has no data for 2 of its 10 years.",
+            ],
+            id="missing-years-in-a-note-of-their-own",
+        ),
+        pytest.param([_short(reach=(2015, 2021))], [], id="a-finding-naming-no-series"),
+        pytest.param(
+            [_short("Uganda", None, reach=(2015, 2021))],
+            ["1 series ends before 2024."],
+            id="an-unlabelled-entity-is-counted",
+        ),
+        pytest.param(
+            [
+                _short(None, reach=(2015, 2020)),
+                *(_short(name, reach=(2015, 2020)) for name in ("A", "B", "C")),
+            ],
+            [
+                "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
+                "and 1 other series ends before 2024."
+            ],
+            id="labelled-series-are-named-before-an-unlabelled-one",
+        ),
+    ],
+)
+async def test_a_series_short_of_the_users_window_is_named_up_to_three_a_note(
+    schemas: dict[str, ToolSchema], gaps: list[EvidenceIssue], stated: list[str]
+) -> None:
+    plan = _aid_per_head(schemas, ranked=True)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+
+    assert (
+        _short_series_sentences(_with_gaps(outcome, "aid_op", *gaps, window=_ASKED), plan=plan)
+        == stated
+    )
+
+
+@pytest.mark.parametrize(
+    ("debt", "history", "stated"),
+    [
+        # `total` reads `debt` over 2015-2024 and `last_five` reads its copy
+        # from 2000: both read Kenya's series, which ends in 2021.
+        pytest.param(
+            [_short("Kenya", reach=(2015, 2021))],
+            [_short("Kenya", reach=(2000, 2021))],
+            ["Kenya's series ends in 2021."],
+            id="one-series-read-twice-is-stated-once",
+        ),
+        # From 2000 the series starts late, but it covers the 2015-2024 the
+        # model wrote.
+        pytest.param(
+            [],
+            [_short("Kenya", reach=(2005, 2024), asked=(2000, 2024))],
+            [],
+            id="a-whole-history-read-the-series-starts-after",
+        ),
+        # Missing years in 2000-2024 may lie before 2015.
+        pytest.param(
+            [],
+            [_short("Kenya", observations=(20, 25))],
+            [],
+            id="missing-years-of-a-whole-history-read",
+        ),
+        pytest.param(
+            [_short("Kenya", observations=(8, 10))],
+            [],
+            ["Kenya's series has no data for 2 of its 10 years."],
+            id="missing-years-inside-the-users-window",
+        ),
+    ],
+)
+def test_a_series_is_held_to_the_window_the_model_wrote(
+    decision: Callable[..., Decision],
+    debt: list[EvidenceIssue],
+    history: list[EvidenceIssue],
+    stated: list[str],
+) -> None:
+    plan = stored_split_plan(decision)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    outcome = _with_gaps(outcome, "debt", *debt, window=_ASKED)
+    outcome = _with_gaps(
+        outcome, "debt_history", *history, window=Period(start=FIRST_YEAR, end=2024)
+    )
+
+    assert _short_series_sentences(outcome, plan=plan) == stated
+
+
+@pytest.mark.parametrize(
+    ("newest", "stated"),
+    [
+        # Uganda's series reaches 2023, the newest year read, and Kenya's
+        # stops two years before it.
+        pytest.param(2023, ["Kenya's series ends in 2021."], id="open-end-at-the-newest-year"),
+        pytest.param(
+            2024,
+            ["Uganda's series ends in 2023 and Kenya's series ends in 2021."],
+            id="open-end-a-year-on",
+        ),
+    ],
+)
+def test_a_period_open_to_the_newest_data_ends_at_the_newest_year_read(
+    decision: Callable[..., Decision], newest: int, stated: list[str]
+) -> None:
+    """`debt` states 2015-2024 with `period_end_open`, and both its series
+    fall short of 2024. The user asked to the newest year, so only a series
+    ending before the newest year its retrieval read is named."""
+    plan = stored_split_plan(decision)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    gaps = (_short("Uganda", reach=(2015, 2023)), _short("Kenya", reach=(2015, 2021)))
+    outcome = _with_gaps(outcome, "debt", *gaps, window=Period(start=2015, end=newest))
+
+    assert _short_series_sentences(outcome, plan=plan, terminals=["total"]) == stated
+
+
+def _anchored(outcome: Accepted, year: int, *roots: str) -> Accepted:
+    """`outcome` with one group of rolling steps over `roots` standing on `year`."""
+    anchor = AnchorResult(anchor_key="rak_" + "7" * 32, period=str(year), roots=roots)
+    return outcome.model_copy(update={"anchors": (anchor,)})
+
+
+@pytest.mark.parametrize(
+    ("anchor", "stated"),
+    [
+        # Seven of ten series end in 2023, so the anchor is 2023, and
+        # `last_five` covers 2018-2023 on every one of them.
+        pytest.param(2023, [], id="the-series-the-anchor-stands-on"),
+        pytest.param(
+            None,
+            [
+                "A's series ends in 2023, B's series ends in 2023, C's series ends in 2023, "
+                "and 4 other series end before 2024."
+            ],
+            id="no-anchor-reads-the-newest-year-held",
+        ),
+    ],
+)
+def test_an_open_period_under_rolling_steps_ends_at_their_anchor(
+    decision: Callable[..., Decision], anchor: int | None, stated: list[str]
+) -> None:
+    plan = stored_split_plan(decision)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    gaps = [_short(name, reach=(FIRST_YEAR, 2023)) for name in "ABCDEFG"]
+    outcome = _with_gaps(outcome, "debt_history", *gaps, window=Period(start=FIRST_YEAR, end=2024))
+    if anchor is not None:
+        outcome = _anchored(outcome, anchor, "debt_history")
+
+    assert _short_series_sentences(outcome, plan=plan, terminals=["last_five"]) == stated
+
+
+def test_an_anchor_after_the_stated_end_holds_a_series_to_it(
+    decision: Callable[..., Decision],
+) -> None:
+    """Most series reach 2025, past the 2024 `debt` states, so `last_five`
+    ends in 2025, and Kenya's series, ending in 2024, falls short of it."""
+    plan = stored_split_plan(decision)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    gap = _short("Kenya", reach=(FIRST_YEAR, 2024), asked=(2015, 2025))
+    outcome = _with_gaps(outcome, "debt_history", gap, window=Period(start=FIRST_YEAR, end=2025))
+    outcome = _anchored(outcome, 2025, "debt_history")
+
+    assert _short_series_sentences(outcome, plan=plan, terminals=["last_five"]) == [
+        "Kenya's series ends in 2024."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "stated"),
+    [
+        pytest.param(
+            [_short("Kenya", reach=(2015, 2022))],
+            [_short("Kenya", reach=(2015, 2019))],
+            ["Kenya's series for grants ends in 2022 and Kenya's series for loans ends in 2019."],
+            id="one-entity-in-two-datasets",
+        ),
+        # A family read `StatVarReading.SEPARATE` holds a series per StatVar
+        # for Kenya; one name cannot tell them apart, so they are counted.
+        pytest.param(
+            [
+                _short("Kenya", reach=(2015, 2022), stat_var="Grants"),
+                _short("Kenya", reach=(2015, 2019), stat_var="Loans"),
+            ],
+            [],
+            ["2 series end before 2024."],
+            id="one-entity-in-each-statvar-of-a-separate-family",
+        ),
+    ],
+)
+async def test_each_series_of_one_entity_is_stated(
+    schemas: dict[str, ToolSchema],
+    left: list[EvidenceIssue],
+    right: list[EvidenceIssue],
+    stated: list[str],
+) -> None:
+    plan = _two_sided(schemas, "join", _family("a", "Grants"), _family("b", "Loans"))
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    outcome = _with_gaps(outcome, "left_op", *left, window=_ASKED)
+    outcome = _with_gaps(outcome, "right_op", *right, window=_ASKED)
+
+    assert _short_series_sentences(outcome, plan=plan) == stated
+
+
+async def test_a_closed_period_holds_a_series_to_its_stated_end(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """`aid` states 2015-2024 closed: a series reaching 2023, the newest
+    year its retrieval read, still ends before the year asked."""
+    plan = _aid_per_head(schemas)
+    _surface, outcome = _run(plan, summed={}, role_keys={})
+    outcome = _with_gaps(
+        outcome,
+        "aid_op",
+        _short("Uganda", reach=(2015, 2023)),
+        window=Period(start=2015, end=2023),
+    )
+
+    assert _short_series_sentences(outcome, plan=plan) == ["Uganda's series ends in 2023."]
 
 
 async def test_a_rank_states_the_period_note_of_the_retrieval_under_it(

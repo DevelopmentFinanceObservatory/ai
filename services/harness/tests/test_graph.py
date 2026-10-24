@@ -2838,6 +2838,8 @@ def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retriev
     refusal = _planner_refusal(stop, plan=plan)
 
     (gap,) = [issue for issue in refusal["issues"] if issue["code"] == "window_short"]
+    # A finding naming no series reads as it did before findings could name one.
+    assert set(gap) == {"code", "severity", "requirement_id", "detail", "found", "required"}
     assert gap["requirement_id"] == "debt"
     assert gap["detail"] == (
         "the source covers 2000-2023, the requirement asks for 2015-2024, "

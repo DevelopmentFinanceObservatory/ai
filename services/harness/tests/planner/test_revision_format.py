@@ -32,7 +32,13 @@ from typing import Any
 import pytest
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from planner.plan import DatasetRequirement, Plan, RankRequirement, plan_revision
-from planner.records import PlaceLevel, PlaceType
+from planner.records import (
+    EvidenceIssue,
+    EvidenceIssueCode,
+    PlaceLevel,
+    PlaceType,
+    Severity,
+)
 from pydantic import BaseModel
 from translator.discovery import requirement_revision
 
@@ -131,6 +137,15 @@ def test_the_recorded_plans_hold_every_field_added_since_the_base_format() -> No
     # PlaceLevel pre-dates the base format but no recorded plan happens to
     # use one. Exercise its newly added defaults explicitly.
     walk(PlaceLevel(level=PlaceType.COUNTRY))
+    # Nor does any hold a compile warning: exercise an `EvidenceIssue`'s.
+    walk(
+        EvidenceIssue(
+            code=EvidenceIssueCode.WINDOW_SHORT,
+            severity=Severity.WARNING,
+            requirement_id="debt",
+            detail="the source starts after the years asked.",
+        )
+    )
     added = {
         (key, name)
         for key, model in _hashed_models().items()

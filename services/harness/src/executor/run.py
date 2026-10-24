@@ -1748,6 +1748,10 @@ class _Run:
         # each over the one retrieval, share one resolution.
         sent = json.dumps({"populations": populations, "roots": sorted(frames)}, sort_keys=True)
         if (held := self._resolutions.get(sent)) is not None:
+            shared = held.result.roots
+            shared = (*shared, *(root for root in group.roots if root not in shared))
+            held = replace(held, result=held.result.model_copy(update={"roots": shared}))
+            self._resolutions[sent] = held
             self.anchored.update(dict.fromkeys(group.steps, held))
             return held.result
         self._check_fit(step, _RESOLVE_ANCHOR, arguments, schema)
@@ -1759,7 +1763,9 @@ class _Run:
         if result.is_error:
             raise self._stopped_by_anchor_refusal(step, result)
         try:
-            anchor = AnchorResult.model_validate(result.structured_content)
+            anchor = AnchorResult.model_validate(result.structured_content).model_copy(
+                update={"roots": group.roots}
+            )
         except ValidationError as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE,

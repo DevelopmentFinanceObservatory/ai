@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from common.materialisation import FrameRef
 from executor.classify import ToolFailure
@@ -10,6 +12,7 @@ from executor.outcomes import (
     STOP_CAUSES,
     Accepted,
     AnchorResult,
+    EvidenceRecord,
     LeftOutSeries,
     RediscoveryNeeded,
     RefusalKind,
@@ -18,6 +21,7 @@ from executor.outcomes import (
     load_outcome,
     save_outcome,
 )
+from planner.records import EvidenceIssue, EvidenceIssueCode, Period, Severity
 from planner.workflow import ToolId
 from pydantic import ValidationError
 
@@ -73,6 +77,41 @@ def test_a_rolling_runs_anchor_survives_a_round_trip() -> None:
     save_outcome(state, outcome)
 
     assert load_outcome(state) == outcome
+
+
+def test_an_outcome_stored_before_a_gap_named_its_series_still_loads() -> None:
+    """A run recorded before `EvidenceIssue.stat_var` and `entities` existed
+    holds gaps without them; it loads with the gap naming no series. A gap
+    naming none is stored the same way."""
+    frame = FrameRef(spec_id="spec_" + "a" * 32, content_version="cv_" + "1" * 32)
+    gap = EvidenceIssue(
+        code=EvidenceIssueCode.WINDOW_SHORT,
+        severity=Severity.WARNING,
+        requirement_id="aid",
+        detail="series ODA for ['country/DEU'] covers 2015-2021",
+        found={"start": 2015, "end": 2021},
+        required={"start": 2015, "end": 2023},
+    )
+    record = EvidenceRecord(
+        requirement_id="aid",
+        step_id="aid",
+        frame_ref=frame,
+        spec_id=frame.spec_id,
+        stat_vars=("ODA",),
+        window=Period(start=2015, end=2023),
+        gaps=(gap,),
+        citation="OECD",
+    )
+    outcome = Accepted(revision="r" * 64, evidence=(record,), steps=(), results={"aid": frame})
+    state = {RUN_STATE_KEY: outcome.model_dump_json()}
+
+    loaded = load_outcome(state)
+
+    (stored,) = json.loads(state[RUN_STATE_KEY])["evidence"][0]["gaps"]
+    assert set(stored) == {"code", "severity", "requirement_id", "detail", "found", "required"}
+    assert loaded == outcome
+    assert isinstance(loaded, Accepted)
+    assert loaded.evidence[0].gaps[0].entities == ()
 
 
 def test_a_rediscovery_must_name_what_to_rediscover() -> None:

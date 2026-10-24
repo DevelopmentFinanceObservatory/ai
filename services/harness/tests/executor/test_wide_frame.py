@@ -2368,6 +2368,8 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
 
     assert isinstance(read.result, AnchorResult)
     assert (read.planned, read.result.period) == ("2024", "2023")
+    # Translation's read and the run each name the group's retrievals.
+    assert read.result.roots == outcome.anchors[0].roots == ("crs", "crs_health")
     bindings = {PROVIDER: sorted(donor.ref for donor in _MATCHED_DONORS), RECIPIENT: [KENYA.ref]}
     assert _analysis_call(reading, "resolve_anchor")["populations"] == [
         {

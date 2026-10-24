@@ -67,12 +67,15 @@ class AnchorResult(StrictModel):
     `anchor_key` names the stored resolution every rolling call of the group
     was sent, `period` is the newest period held by at least half of the
     series of each population, and `left_out` the series that hold no value
-    at it.
+    at it. `roots` are the retrieval steps of every group that stands on it
+    (`AnchorGroup.roots`), which the run writes; `resolve_anchor` does not
+    send them.
     """
 
     anchor_key: str
     period: str
     left_out: tuple[LeftOutSeries, ...] = ()
+    roots: tuple[str, ...] = ()
 
 
 class StepRecord(StrictModel):

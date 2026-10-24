@@ -303,6 +303,11 @@
     "window_start",
     "window_end"
   ],
+  "planner.records.SeriesEntity": [
+    "role",
+    "ref",
+    "label"
+  ],
   "planner.records.ValueThreshold": [
     "kind",
     "op",

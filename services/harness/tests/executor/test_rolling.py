@@ -342,7 +342,8 @@ async def test_the_newest_period_is_resolved_once_over_the_retrievals_the_rollin
     # The population retrieval no rolling step reads is no part of the period.
     assert sent["roots"] == [manifest()["frame_ref"]]
     assert {population["spec_id"] for population in sent["populations"]} == {SPEC_KENYA}
-    assert len(outcome.anchors) == 1
+    # Both groups rest on the debt retrieval, named once.
+    assert [anchor.roots for anchor in outcome.anchors] == [("debt",)]
     # The wave's two rolling steps were in flight together.
     assert surface.max_concurrency == 2
 
@@ -381,6 +382,8 @@ async def test_a_rolling_steps_years_are_written_from_the_newest_period(
             anchor_key=ANCHOR_KEY,
             period=newest,
             left_out=(LeftOutSeries.model_validate(LEFT_OUT),),
+            # The run writes the retrievals the group rests on.
+            roots=("debt",),
         ),
     )
 
