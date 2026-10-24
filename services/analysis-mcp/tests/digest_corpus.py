@@ -641,6 +641,7 @@ def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> J
         "right_facet_selections": (),
         "warnings": (),
         "join_keys": ("reporter",),
+        "right_key_columns": ("reporter",),
         "left_dropped_key_count": 0,
         "right_dropped_key_count": 0,
     }
@@ -650,7 +651,6 @@ def _join_result(matched_keys: tuple[MatchedKey, ...], **overrides: object) -> J
 
 def _join_digest_kwargs(result: JoinResult) -> dict:
     return {
-        "join_keys": result.join_keys,
         "result": result,
         "op_spec_hash": "ops_" + "a" * 32,
         "content_version": "ocv_" + "b" * 32,

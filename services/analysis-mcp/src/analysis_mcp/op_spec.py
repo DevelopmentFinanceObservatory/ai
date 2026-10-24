@@ -771,7 +771,16 @@ class JoinOpSpec(_OpSpecBase):
     a non-empty tuple pins the key list explicitly instead of relying on
     that auto-detection. The key list stays minimal and closed: no facet
     or unit column may be named here, only a role column present on both
-    sides.
+    sides, or, under `right_keys`, a left column and its right counterpart.
+
+    `right_keys` pairs each `join_keys` column with the right frame's own
+    column holding the same entities, by name, as `denominator_by` does for
+    `numerator_by`: `{"observationAbout": "destination"}` matches a WHO
+    series' Kenya with a CRS series' Kenya by value, and the output's key
+    column takes the left name. Left empty, each `join_keys` column keys
+    both sides under its own name. When non-empty it names every
+    `join_keys` column and nothing else. A partial mapping pairs the columns
+    it leaves out with nothing, so it is refused here.
 
     `left_unit`/`right_unit` pin each side's unit independently, the same
     shape `CompareOpSpec.left_unit`/`right_unit` use.
@@ -782,8 +791,32 @@ class JoinOpSpec(_OpSpecBase):
     join_keys: tuple[
         Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...
     ] = ()
+    right_keys: Annotated[
+        dict[
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+        ],
+        HASHED_WHEN_SET,
+    ] = Field(default_factory=dict)
     left_unit: PinnedUnit | None = None
     right_unit: PinnedUnit | None = None
+
+    @model_validator(mode="after")
+    def _right_keys_name_every_join_key(self) -> Self:
+        unknown = sorted(set(self.right_keys) - set(self.join_keys))
+        if unknown:
+            raise ValueError(
+                f"right_keys names column(s) join_keys does not carry: {unknown}. "
+                f"join_keys: {list(self.join_keys)}."
+            )
+        missing = sorted(set(self.join_keys) - set(self.right_keys))
+        if self.right_keys and missing:
+            raise ValueError(
+                f"right_keys leaves out join_keys column(s): {missing}. Name the right "
+                "frame's column for each, or leave right_keys empty to match every key "
+                "under its own name."
+            )
+        return self
 
 
 class FilterOpSpec(_OpSpecBase):

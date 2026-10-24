@@ -97,9 +97,9 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     """Map one of `run_join`'s typed exceptions to its refusal.
 
     `JoinUnknownKeyError` and `JoinAmbiguousKeyError` both reuse
-    `role_ambiguous` -- the first because `join_keys` names a column at
-    least one frame has no grain for, the same shape `aggregate`'s
-    `group_by` refusal already covers; the second because a key that fails
+    `role_ambiguous` -- the first because `join_keys` (or `right_keys`)
+    names a column a frame it keys has no grain for, the same shape
+    `aggregate`'s `group_by` refusal already covers; the second because a key that fails
     to uniquely identify one row per side is, in the same sense, the wrong
     key list for what the caller is asking. `JoinOutputCollisionError` is
     one condition genuinely specific to `join`: no other verb pairs two
@@ -117,7 +117,7 @@ def _refusal_for_engine_error(exc: _EngineError) -> ToolRefusal:
     # own shape (which the workspace's `PLR0911` complexity gate requires).
     if isinstance(exc, JoinUnknownKeyError):
         refusal = ToolRefusal.role_ambiguous(
-            parameter="join_keys", columns=list(exc.columns), available=list(exc.available)
+            parameter=exc.parameter, columns=list(exc.columns), available=list(exc.available)
         )
     elif isinstance(exc, JoinAmbiguousKeyError):
         refusal = ToolRefusal.role_ambiguous(
@@ -200,6 +200,19 @@ async def join(
             ),
         ),
     ] = (),
+    right_keys: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "{join_keys column: right frame's column holding the same entities}, "
+                "pairing the two sides by name, so Kenya under observationAbout on the left "
+                "matches Kenya under destination on the right. Every join_keys column must "
+                "be a key here. The output keeps the left names. Omit (the default) to match "
+                "each join_keys column under its own name on both sides."
+            ),
+        ),
+    ] = None,
     left_unit: Annotated[
         PinnedUnit | None,
         Field(
@@ -226,6 +239,14 @@ async def join(
     """Inner-join `frame_ref` and `right_frame_ref` on `join_keys` (or every
     shared role column, auto-detected) plus `time_period`.
 
+    `right_keys` pairs a left column with a right column of another name
+    holding the same entities, as `quotient_of`'s `denominator_by` does:
+    `join_keys=["observationAbout"]`, `right_keys={"observationAbout":
+    "destination"}` joins a WHO series to a CRS series where both name
+    Kenya. Values match by equality, so Kenya against Uganda matches
+    nothing and both sides' keys are dropped. Auto-detection pairs
+    same-name columns only.
+
     A joined pair of rows never collapses into one row: the result frame is
     long-format, one row per matched key per side, `stat_var` distinguishing
     which side a row's own value came from -- `Frame` allows exactly one
@@ -246,6 +267,7 @@ async def join(
         frame_ref: The left side's frame_ref.
         right_frame_ref: The right side's frame_ref.
         join_keys: Role columns to match on, beyond time_period; empty auto-detects.
+        right_keys: {join_keys column: right column}, pairing by name.
         left_unit: Pins the left side's unit.
         right_unit: Pins the right side's unit.
 
@@ -260,6 +282,8 @@ async def join(
             frame_ref=frame_ref,
             right_frame_ref=right_frame_ref,
             join_keys=tuple(join_keys),
+            # See `compare_tool.compare` for why `None` maps to `{}` here.
+            right_keys={} if right_keys is None else right_keys,
             left_unit=left_unit,
             right_unit=right_unit,
         )
@@ -296,6 +320,7 @@ async def join(
             left_frame,
             right_frame,
             join_keys=join_keys_canonical,
+            right_keys=op_spec.right_keys,
             left_pinned_unit=op_spec.left_unit,
             right_pinned_unit=op_spec.right_unit,
             max_output_rows=settings.max_frame_rows,
@@ -391,7 +416,6 @@ async def join(
             ratio=(holds_ratio(left_trace), holds_ratio(right_trace)),
         ),
         digest=lambda: render_join_digest(
-            join_keys=result.join_keys,
             result=result,
             op_spec_hash=op_spec_hash,
             content_version=content_version,
