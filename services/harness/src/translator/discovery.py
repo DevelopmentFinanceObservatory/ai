@@ -277,7 +277,8 @@ class DiscoveryRecord(StrictModel):
     `status` and one `spec_ids` entry records the pin's source read and set
     aside, because it holds closed the side the requirement's `across` asks for every member of: no
     retrieval may take it, and the sources the fresh search finds in its
-    place are offered only when they keep its scope (`DiscoveryLog.scope_kept`).
+    place are offered only when they keep its scope or a reader reads that
+    side per member (`DiscoveryLog.scope_kept`).
 
     `tool == "resolve"` records the graph resolve of the requirement's
     entity names that match no label of its one `spec_ids` source
@@ -548,18 +549,25 @@ class DiscoveryLog(StrictModel):
         return None
 
     def scope_kept(
-        self, requirement: DatasetRequirement, sources: Sequence[SelectedSource]
+        self, plan: Plan, requirement: DatasetRequirement, sources: Sequence[SelectedSource]
     ) -> ScopeKept:
-        """`sources`, found in place of `requirement`'s pin, split into those a referral offers and those it withholds.
+        """`sources`, found in place of `requirement`'s pin in `plan`, split into those a referral offers and those it withholds.
 
-        A source that drops the scope of the pin's source set aside
-        (`set_aside_pin`, `translator.referral.dropped_scope`) is withheld,
-        and the change that keeps that scope is stated when the requirement
-        can name it (`translator.referral.scope_repair`). With no source set
-        aside, every source is offered.
+        The pin's source was set aside (`set_aside_pin`) because it holds
+        closed a side `across` asks for every member of. When every
+        requirement of `plan` reading `requirement` sums that side away
+        (`_sums_its_sides_away`), the pin's scope is the figure the plan asks
+        for: a source that drops it (`translator.referral.dropped_scope`) is
+        withheld, and the change that keeps that scope is stated when the
+        requirement can name it (`translator.referral.scope_repair`). Any
+        other reader, such as a rank or a filter, reads the side per member,
+        and naming the pin's scope would leave one member where the reader
+        needs every one `across` asks for. There the pin gives way and every
+        source is offered, the same sources a search with the pin dropped
+        finds. With no source set aside, every source is offered too.
         """
         held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
-        if held is None:
+        if held is None or not _sums_its_sides_away(plan, requirement.id):
             return ScopeKept(offered=tuple(sources))
         offered: list[SelectedSource] = []
         withheld: list[WithheldSource] = []
@@ -1586,8 +1594,8 @@ async def resolve_entity_refs(
 
 def _ready_to_search(
     tool_context: ToolContext, requirement_id: str, reservations: _Reservations
-) -> tuple[DatasetRequirement, str, str] | dict[str, object]:
-    """Return the requirement to search for, its revision, and its key; or the problem.
+) -> tuple[Plan, DatasetRequirement, str, str] | dict[str, object]:
+    """Return the draft plan, the requirement to search for, its revision, and its key; or the problem.
 
     Needs a draft plan, a dataset requirement the plan states by
     `requirement_id`, and budget left for the plan's revision and for this
@@ -1610,7 +1618,7 @@ def _ready_to_search(
     blocked = _requirement_budget_error(log, revision, requirement_id, reservations)
     if blocked is not None:
         return blocked
-    return requirement, revision, key
+    return plan, requirement, revision, key
 
 
 async def _record_search(
@@ -2112,7 +2120,8 @@ async def _source_from_resolve_pin(
     and the fresh `search` asks for the side as an open role, which elects
     a source broken down by it where one exists. A source that search finds
     in the pin's place and that drops the set-aside source's scope is
-    withheld from the referral (`DiscoveryLog.scope_kept`).
+    withheld from the referral when every reader sums the side away
+    (`DiscoveryLog.scope_kept`).
 
     When none of the readers above holds the pin's source, the source a
     search recorded for its `spec_id` (`DiscoveryLog.recorded_source`) is
@@ -2278,7 +2287,9 @@ async def name_pinned_groups(
     (`_summed_by_every_reader`), and only when the plan still validates with
     it rewritten: a decision the requirement cites may fix its `across` or
     `entities`. A requirement left as it is, with the reason logged, takes
-    discovery's set-aside path and the referral that withholds the pin.
+    discovery's set-aside path, and its referral withholds the sources that
+    drop the pin's scope only when every reader sums the side away
+    (`DiscoveryLog.scope_kept`).
 
     The draft is saved in place, at its version, so the plan the user
     approves names the group. A pin whose source is honoured is recorded
@@ -2328,6 +2339,17 @@ async def name_pinned_groups(
     for requirement, source in honoured:
         await _record_honoured_pin(tool_context, plan=plan, requirement=requirement, source=source)
     return tuple(named)
+
+
+def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
+    """Whether every reader of `requirement_id` in `plan` sums its sides away (`_summed_by_every_reader`).
+
+    Judged on the plan as the model wrote it (`authored`), so a copy of a
+    requirement's whole history (`Plan.rolling_copies`) is judged with the
+    readers of the requirement it copies, as `name_pinned_groups` judges it.
+    """
+    origin = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    return _summed_by_every_reader(authored(plan), origin.get(requirement_id, requirement_id))
 
 
 def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
@@ -2419,8 +2441,8 @@ async def _discovery_start(
     reservations: _Reservations,
     *,
     surface: ToolSurface,
-) -> dict[str, object] | tuple[DatasetRequirement, str, str]:
-    """Ready to search: the requirement, its revision, and its key, with
+) -> dict[str, object] | tuple[Plan, DatasetRequirement, str, str]:
+    """Ready to search: the draft plan, the requirement, its revision, and its key, with
     this call's reservation already made; the source already honoured from
     this turn's own resolve pin, with no `search` spent; or the problem
     that stopped either.
@@ -2451,9 +2473,9 @@ async def _discovery_start(
         ready = _ready_to_search(tool_context, requirement_id, reservations)
         if isinstance(ready, dict):
             return ready
-        requirement, revision, key = ready
+        plan, requirement, revision, key = ready
         reservations.reserve(revision, requirement_id)
-    return requirement, revision, key
+    return plan, requirement, revision, key
 
 
 def _referred_answer(
@@ -2575,7 +2597,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         )
         if isinstance(started, dict):
             return started
-        requirement, revision, key = started
+        plan, requirement, revision, key = started
 
         variable = requirement.measure
         part = _search_part(requirement, variable)
@@ -2763,7 +2785,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             # two-plus sources are the real alternative worth naming when
             # this action replaces the `source_ambiguous` hint.
             instead = f" This search found {len(honoured)} source(s) instead." if honoured else ""
-            scope = log.scope_kept(requirement, [s for s in sources if s.spec_id in honoured])
+            scope = log.scope_kept(plan, requirement, [s for s in sources if s.spec_id in honoured])
             if scope.withheld:
                 instead += (
                     f" {len(scope.withheld)} of them drop the scope the pinned source held and "

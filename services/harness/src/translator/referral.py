@@ -58,11 +58,16 @@ pin a change such as a moved period left stale.
 
 A source found in place of a pin whose own source discovery read and set
 aside, because it held the requirement's `across` side closed, is offered
-only when it keeps that source's scope (`dropped_scope`). One that drops it,
+only when it keeps that source's scope (`dropped_scope`), or when a
+requirement reading the pinned one reads that side per member. One that drops it,
 leaving open a role the pinned source closed to a named group or named
 members, is listed under `withheld` with the scope it drops, and never under
 `candidates`, so `offered` does not name it and the planner cannot pin it.
-"France to Africa", re-searched as "France to every recipient", is the case.
+"France to Africa", re-searched as "France to every recipient" for a total,
+is the case. A rank, a filter or any other reader that reads the side per
+member needs every member `across` asks for, so there the pin gives way and
+the source is offered: "top donors to Malawi" pinned to the total of official
+donors (DAC) is that case (`translator.discovery.DiscoveryLog.scope_kept`).
 
 `save_referral`, `load_referral` and `clear_referral` keep the last referral in
 session state, under `REFERRAL_STATE_KEY`, so the planner can read why the
@@ -263,6 +268,8 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     requirement can name that member under the side's `PARTY_ROLES` word and
     drop the word from `across`, which brings the pinned source's scope back.
     Several named members, or a word naming no single role, give `None`.
+    The repair leaves one member on the side, so it answers only a plan whose
+    readers sum the side away (`translator.discovery.DiscoveryLog.scope_kept`).
     """
     role = party_role(across)
     side = flow_side(across)
