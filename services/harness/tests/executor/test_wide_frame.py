@@ -16,23 +16,25 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import pytest
 from analysis_mcp import server as analysis_server
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, MaterialisationTrace
-from compiler.compile import compile_plan
+from compiler.compile import CompileResult, compile_plan
 from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.frame_materialisation import observed_shape
 from dfo_frame_grammar import Frame
 from executor.outcomes import (
     Accepted,
+    AnchorResult,
     MethodChoiceNeeded,
     RefusalKind,
     Refused,
 )
-from executor.run import execute_approved_plan
+from executor.run import AnchorRead, execute_approved_plan, read_anchors
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -68,6 +70,7 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     SumOfRequirement,
+    plan_revision,
 )
 from planner.records import (
     Breakdown,
@@ -85,6 +88,7 @@ from planner.records import (
     StatVarReading,
 )
 from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from translator.tool import restated_to_the_data
 
 from .conftest import ScriptedSurface, ok
 
@@ -408,7 +412,13 @@ def _scripted_result(*role_keys: str, stat_var_count: int = 1) -> dict[str, Any]
 
 @pytest.fixture
 def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) -> PlanFactory:
-    """Return a factory compiling and approving a plan over CRS family sources."""
+    """Return a factory compiling and approving a plan over CRS family sources.
+
+    With `anchors_read`, the newest years `executor.run.read_anchors` read over
+    the compiled workflow, the plan and translation are restated from them as
+    translation restates them (`translator.tool.restated_to_the_data`) and
+    compiled again before approval.
+    """
 
     def _plan(
         requirements: Sequence[EvidenceRequirement],
@@ -417,6 +427,7 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
         terminal: str,
         discovered: dict[str, SelectedSource] | None = None,
         decisions: Sequence[Decision] = (),
+        anchors_read: Sequence[AnchorRead] = (),
     ) -> Plan:
         draft = Plan(
             question="How much bilateral ODA do Germany and France give Kenya?",
@@ -430,13 +441,25 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             status=PlanStatus.DRAFT,
         )
         translation = Translation(operations=list(operations), terminal=[terminal])
-        compiled = compile_plan(
-            plan=draft,
-            translation=translation,
-            schemas={schema.name: schema for schema in real_schemas},
-            discovered=discovered or {"oda": _source()},
-        )
-        assert compiled.workflow is not None, compiled.issues
+
+        def compiled_from(plan: Plan, translation: Translation) -> CompileResult:
+            result = compile_plan(
+                plan=plan,
+                translation=translation,
+                schemas={schema.name: schema for schema in real_schemas},
+                discovered=discovered or {"oda": _source()},
+            )
+            assert result.workflow is not None, result.issues
+            return result
+
+        compiled = compiled_from(draft, translation)
+        if anchors_read:
+            assert compiled.workflow is not None
+            restated = restated_to_the_data(draft, translation, compiled.workflow, anchors_read)
+            assert not isinstance(restated, CompileResult), restated.issues
+            draft, translation = restated
+            compiled = compiled_from(draft, translation)
+        assert compiled.workflow is not None
         return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
             at=datetime.now(UTC)
         )
@@ -2041,8 +2064,32 @@ _MATCHED_GROWTH: dict[str, Any] = {
 }
 
 
-def _rolling_share_plan(plan_for: PlanFactory) -> Plan:
-    """Growth over the last five years of each donor's health share of its ODA."""
+async def _restated_from_the_data(
+    planned: Callable[..., Plan],
+    *,
+    results: dict[str, dict[str, Any]],
+    surface_for: Callable[..., FrameSurface],
+) -> tuple[AnchorRead, FrameSurface, Plan]:
+    """The one group's newest year as translation reads it over the workflow
+    `planned()` compiles (`read_anchors`), the surface it read on, and the plan
+    `planned` compiles restated from it."""
+    plan = planned()
+    assert plan.workflow is not None
+    reading = surface_for(get_data=_get_data_answers(plan, results))
+    read = await read_anchors(
+        plan.workflow,
+        revision=plan_revision(plan),
+        requirements=[r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)],
+        surface=reading,
+    )
+    assert isinstance(read, tuple), read
+    (group,) = read
+    return group, reading, planned(anchors_read=read)
+
+
+def _rolling_share_plan(plan_for: PlanFactory, **restated: Any) -> Plan:
+    """Growth over the last five years of each donor's health share of its ODA,
+    planned against 2024."""
     share = ShareOfRequirement(
         id="share",
         decision_ids=["measure"],
@@ -2080,6 +2127,7 @@ def _rolling_share_plan(plan_for: PlanFactory) -> Plan:
             "oda": _matched_source(SPEC_CRS),
             "oda_health": _matched_source(SPEC_CRS_HEALTH),
         },
+        **restated,
     )
 
 
@@ -2090,11 +2138,12 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
     frame_store: InMemoryMaterialisationStore,
 ) -> None:
     # Half the donors report 2024 on each side, and they are different halves,
-    # so no donor's share holds 2024. Counted per side, the newest year is 2024
-    # and the growth refuses a window no share reaches (`growth_gap_year`).
-    # Counted over the donors both sides hold, it is 2023.
+    # so no donor's share holds 2024. Counted over the donors both sides hold,
+    # the newest year is 2023, so translation restates the plan's 2019 to 2024
+    # as 2018 to 2023 and the run of it answers. Counted per side, as at
+    # cd1f7289, it was 2024, and the run stopped at the growth with
+    # `growth_gap_year`, since no share has a row in 2024.
     first, second = _MATCHED_DONORS[:2], _MATCHED_DONORS[2:]
-    plan = _rolling_share_plan(plan_for)
     results = {
         SPEC_CRS: await retrieved(
             _matched_source(SPEC_CRS),
@@ -2116,15 +2165,19 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
             providers=_MATCHED_DONORS,
         ),
     }
+    read, reading, plan = await _restated_from_the_data(
+        lambda **restated: _rolling_share_plan(plan_for, **restated),
+        results=results,
+        surface_for=surface_for,
+    )
     surface = surface_for(get_data=_get_data_answers(plan, results))
 
     outcome = await _run(plan, surface)
 
-    assert isinstance(outcome, Accepted), outcome
-    (anchor,) = outcome.anchors
-    assert anchor.period == "2023"
+    assert isinstance(read.result, AnchorResult)
+    assert (read.planned, read.result.period) == ("2024", "2023")
     bindings = {PROVIDER: sorted(donor.ref for donor in _MATCHED_DONORS), RECIPIENT: [KENYA.ref]}
-    assert _analysis_call(surface, "resolve_anchor")["populations"] == [
+    assert _analysis_call(reading, "resolve_anchor")["populations"] == [
         {
             "pair": [
                 [{"spec_id": SPEC_CRS_HEALTH, "bindings": bindings}],
@@ -2133,6 +2186,8 @@ async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys
             "keys": {PROVIDER: PROVIDER},
         }
     ]
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2023"]
     sent = _analysis_call(surface, "growth")
     assert (sent["window_start"], sent["window_end"]) == ("2018", "2023")
     held, _trace = await frame_store.get(outcome.results["growth_op"])
@@ -2157,8 +2212,10 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
     # The growth of a place series on `observationAbout` joined to the growth of
     # the aid each place receives, summed over donors on `financingRecipient`.
     # Half the places report 2024 on each side, and they are different halves.
-    # Counted per side, the newest year is 2024 and the join matches no place
-    # (`empty_answer`). Counted over the places both sides hold, it is 2023.
+    # Counted over the places both sides hold, the newest year is 2023, so
+    # translation restates 2019 to 2024 as 2018 to 2023 and the run answers.
+    # Counted per side, as at cd1f7289, it was 2024, and the join matched no
+    # place (`empty_answer`).
     first, second = _MATCHED_PLACES[:2], _MATCHED_PLACES[2:]
     spending = DatasetRequirement(
         id="spending",
@@ -2205,7 +2262,8 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
     oda_source = _source(entities=_MATCHED_PLACES).model_copy(
         update={"coverage_window": _MATCHED_WINDOW}
     )
-    plan = plan_for(
+    planned = partial(
+        plan_for,
         [spending, oda, total, spending_growth, oda_growth, joined],
         [
             RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
@@ -2284,15 +2342,17 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
             ),
         ),
     }
+    read, reading, plan = await _restated_from_the_data(
+        planned, results=results, surface_for=surface_for
+    )
     surface = surface_for(get_data=_get_data_answers(plan, results))
 
     outcome = await _run(plan, surface)
 
-    assert isinstance(outcome, Accepted), outcome
-    (anchor,) = outcome.anchors
-    assert anchor.period == "2023"
+    assert isinstance(read.result, AnchorResult)
+    assert (read.planned, read.result.period) == ("2024", "2023")
     refs = sorted(place.ref for place in _MATCHED_PLACES)
-    assert _analysis_call(surface, "resolve_anchor")["populations"] == [
+    assert _analysis_call(reading, "resolve_anchor")["populations"] == [
         {
             "pair": [
                 [{"spec_id": SPEC_CRS_HEALTH, "bindings": {"observationAbout": refs}}],
@@ -2301,6 +2361,14 @@ async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_place
             "keys": {"observationAbout": RECIPIENT},
         }
     ]
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2023"]
+    windows = [
+        (sent["window_start"], sent["window_end"])
+        for name, sent in surface.calls
+        if name == "growth"
+    ]
+    assert windows == [("2018", "2023")] * 2
     held, _trace = await frame_store.get(outcome.results["joined_op"])
     # Each place's growth on each side, every place matched.
     assert held.num_rows == 2 * len(_MATCHED_PLACES)
