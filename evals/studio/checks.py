@@ -1184,10 +1184,11 @@ def _read(
         for spec, found in required
         if found and not any(key(entry) in stated or key(entry) in maybe_stated for entry in found)
     ]
-    for index, card in enumerate(cards):
+    # A series some card gives a figure of may be named beside any card.
+    may = {figure["series"].casefold() for _, figure in allowed}
+    for card in cards:
         if len(card.series) <= _NAMED_SERIES_CAP:
             continue
-        may = {figure["series"].casefold() for at, figure in allowed if at == index}
         outside = [one.label for one in card.series if one.label.casefold() in named_anywhere - may]
         if outside:
             faults.append(
@@ -1225,7 +1226,7 @@ def check_reply(
       a value never passes by default. A figure of `states` that it writes
       is not reported missing, since it may be stated there.
     - `series_outside_reply_figures`: a card of more than four series, one of
-      which the message names though no figure of it may be stated.
+      which the message names though no card gives a figure of it.
     - `number_in_no_frame`: with `turns`, the conversation's frames by turn
       up to this one, a number `check_grounding` finds in no fact frame and
       among no figure the cards supplied (`stated_values`).

@@ -42,6 +42,7 @@ from harness.studio_state import (
     _replace_block,
     _turn_component_entry,
     drawn_series_ids,
+    forget_drawn_card,
 )
 from harness.studio_translate import _RecordingExecutor, _stream_fatal, failure_detail
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -326,6 +327,7 @@ def _revised_frames(
     entry["revision"] = revision
     entry["fact_summary"] = component.get("fact_summary") or entry.get("fact_summary")
     entry.update(drawn_series_ids(component))
+    forget_drawn_card(entry)
     if patch.get("title"):
         entry["title"] = patch["title"]
     conversation.turn_components.append(

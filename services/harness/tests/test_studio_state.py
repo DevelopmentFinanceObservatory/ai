@@ -381,11 +381,13 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         drawn_cards.chart("bar_chart", series), drawn_cards.stored(codes)
     )
     state = ConversationState(conversation_id=CONVERSATION)
-    land_component(state, card)
+    intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
+    land_component(state, card, intent=intent)
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
     assert state.canvas_series_ids() == ids
+    assert state.canvas_cards() == [{"component_id": card_id, "intent": intent}]
     assert len(state.components[card_id]["fact_summary"]["series"]) == 12
     model_facing = json.dumps(
         [
@@ -399,6 +401,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         ]
     )
     assert "series_ids" not in model_facing
+    assert "drawn_card" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -408,6 +411,20 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     state.components[card_id].update(studio_state.drawn_series_ids(fewer))
     assert state.canvas_series_ids() == ids[:1]
+
+
+def test_a_card_the_model_takes_off_the_canvas_keeps_no_drawn_intent() -> None:
+    """`remove_cards` drops the intent a removed card was drawn from, and the
+    card left on keeps its own."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    for card_id in ("cmp_one", "cmp_two"):
+        card = {"component_id": card_id, "type": "line_chart", "revision": 1}
+        land_component(state, card, intent={"title": card_id})
+
+    assert studio_state.remove_cards(state, ["cmp_one"], all_cards=False)[0] == ["cmp_one"]
+
+    assert state.canvas_cards() == [{"component_id": "cmp_two", "intent": {"title": "cmp_two"}}]
+    assert "drawn_card" not in state.components["cmp_one"]
 
 
 def test_an_entry_stored_without_series_ids_gives_those_its_fact_summary_lists() -> None:

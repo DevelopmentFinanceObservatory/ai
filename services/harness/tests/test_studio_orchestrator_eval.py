@@ -1655,11 +1655,18 @@ def _composed(*frames: dict[str, Any]) -> dict[str, Any]:
     return {"event": "composition.updated", "manifest": {"blocks": blocks}}
 
 
+# Six places, Kenya among them, so a card of them is past the four series a
+# message may name without a figure.
+SIX_COUNTRIES = ("Kenya", "Ghana", "Uganda", "Senegal", "Malawi", "Zambia")
+
+
 def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> None:
     """With no `reply` expectation any drawn point may be stated. With one,
     a card gives what it gives unasked, and a card whose every series was on
-    the canvas as its turn began gives nothing. A card removed in between
-    is off the canvas, so drawing its series again is a new card."""
+    the canvas as its turn began gives nothing. A card on the canvas that a
+    later turn reads again, drawing nothing, gives the figures the case
+    lists. A card removed in between is off the canvas, so drawing its
+    series again is a new card."""
     run = _load("run")
     kenya = _card_frame({"Kenya": {"1960": 48.5, "2024": 63.8}})
     again = kenya | {"component_id": "cmp_kenya_again"}
@@ -1681,6 +1688,19 @@ def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> Non
         "value_outside_reply_figures"
     ]
     assert rules(listed, drawn, removed, [again, _composed(again), recap]) == []
+    last = {"reply": {"states": [{"series": "Kenya", "which": "last"}]}}
+    assert rules(last, drawn, [recap]) == []
+    assert rules(last, drawn, removed, [recap]) == ["figure_missing"]
+
+    # A held card of six series names Kenya too, and the new Kenya card's
+    # own figure may be stated beside its name.
+    six = _card_frame({name: {"2023": 70.0 + n} for n, name in enumerate(SIX_COUNTRIES)})
+    line = _card_frame({"Kenya": {"2000": 52.0, "2023": 60.0}}, title="Kenya")
+    line["component_id"] = "cmp_kenya_line"
+    for entries in (line["payload"]["component"]["series"], line["fact_summary"]["series"]):
+        entries[0]["id"] = "s_kenya_line"
+    stood = {"event": "message.complete", "text": "In 2023 Kenya stood at 60.0 years."}
+    assert rules(listed, [six, _composed(six), said], [line, _composed(six, line), stood]) == []
 
 
 def test_a_cut_card_is_held_to_its_title_and_its_series_count() -> None:

@@ -172,8 +172,7 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# {"component_id", "entry"}, `entry` the result it was drawn with.
-# `remove_cards` drops the cards it takes off.
+# component id. `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
@@ -620,13 +619,13 @@ def _cut_title(title: str, cut: TopMembers) -> str:
     return f"{base[: 117 - len(suffix)]} ({suffix})"
 
 
-def _card_identity(chart: Chart, intent: Mapping[str, Any]) -> str:
+def _card_identity(intent: Mapping[str, Any]) -> str:
     """What a drawn card is: the intent the platform renders and checks it
-    from (kind, frame, select, window, title) and the figures `chart` asks the
-    result to state. The title stays in, so a title the platform would refuse
-    is checked afresh rather than answered from a card drawn under another."""
-    asked = chart.model_dump(include={"state_values_for", "state_span", "state_period"})
-    return json.dumps({"intent": intent, "asked": asked}, sort_keys=True)
+    from (kind, frame, select, window, title). The figures a chart asks to be
+    stated are no part of it, so asking a drawn card for other figures reads
+    them from it. The title stays in, so a title the platform would refuse is
+    checked afresh rather than answered from a card drawn under another."""
+    return json.dumps(intent, sort_keys=True)
 
 
 async def _top_select(
@@ -1355,6 +1354,7 @@ def build_orchestrator_tools(
     definition_surface: ToolSurface | None = None,
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     canvas_series: Callable[[], list[str]] | None = None,
+    canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
     remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
@@ -1370,7 +1370,9 @@ def build_orchestrator_tools(
     `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
     unset, `recall` says there is nothing to recall from. `canvas_series` is
     `harness.studio_state.make_canvas_series`'s seam; left unset, no series
-    counts as on the canvas. `remove_cards` is
+    counts as on the canvas. `canvas_cards` is
+    `harness.studio_state.make_canvas_cards`' seam; left unset, only the
+    cards drawn this turn are known to be on the canvas. `remove_cards` is
     `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
     says it is not available.
     """
@@ -1732,12 +1734,13 @@ def build_orchestrator_tools(
         on_canvas: list[str],
         cut: TopMembers | None,
     ) -> dict[str, Any]:
-        """What a drawn card holds and the figures a reply may state of it
-        (`harness.reply_figures.card_result`), from the drawn payload of its
-        write reply. The rows of the frame the card draws (`_drawn_store_ref`)
-        are read only for a name in `chart.state_values_for` that matches no
-        series while some state no coordinates: the platform's summary lists
-        the coordinates of twelve."""
+        """What a drawn card holds and the figures `chart` asks a reply to
+        state of it (`harness.reply_figures.card_result`), from the drawn
+        payload of `component`, a write reply's component or `_stored_card`.
+        The rows of the frame the card draws (`_drawn_store_ref`) are read
+        only for a name in `chart.state_values_for` that matches no series
+        while some state no coordinates: the platform's summary lists the
+        coordinates of twelve."""
         payload = component.get("payload") or {}
         series = drawn_series(payload.get("component") or {}, component.get("fact_summary") or {})
         if unplaced_names(series, chart.state_values_for):
@@ -1755,19 +1758,72 @@ def build_orchestrator_tools(
             cut=cut,
         )
 
+    async def _stored_card(component_id: str) -> dict[str, Any] | None:
+        """The card `component_id` as the platform holds its head revision
+        (`describe_component`), shaped as a write reply's component: its
+        resolved payload and its fact summary. None when the read fails or
+        carries no resolved payload."""
+        try:
+            described = await executor(
+                tool="describe_component", args={"component_id": component_id}
+            )
+        except Exception:
+            logger.exception("make_charts: reading back card %r failed", component_id)
+            return None
+        payload = described.get("resolved_payload")
+        body = described.get("component_body")
+        if (
+            described.get("outcome") != "ok"
+            or not isinstance(payload, dict)
+            or not isinstance(payload.get("component"), dict)
+            or not isinstance(body, dict)
+        ):
+            return None
+        return {"payload": payload, "fact_summary": body.get("fact_summary") or {}}
+
+    async def _card_entry(
+        chart: Chart,
+        component: Mapping[str, Any],
+        *,
+        title: str,
+        frame: Mapping[str, Any],
+        on_canvas: list[str],
+        cut: TopMembers | None,
+    ) -> dict[str, Any]:
+        """What `make_charts` returns of a card on the canvas: its title,
+        `_card_result` and, on a cut card, what the cut leaves out."""
+        try:
+            held = await _card_result(chart, component, frame=frame, on_canvas=on_canvas, cut=cut)
+        except Exception:
+            # The card is on the canvas, so only what a reply may state of
+            # it is lost, and the charts after it are still drawn.
+            logger.exception("make_charts: reading the figures of %r failed", title)
+            held = _figures_unread()
+        entry = {"title": title, **held}
+        if cut is not None:
+            entry["note"] = _cut_note(cut)
+        return entry
+
     async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
         """Draw `charts`, up to `MAX_CHARTS_PER_CALL`, and count the call as one
-        that drew a chart or one that drew none."""
+        that drew or read a chart or one that did neither. A chart whose card
+        is on the canvas, drawn this turn or an earlier one, is not drawn
+        again: its figures are read from the card's head revision
+        (`_stored_card`), and a card that cannot be read is refused."""
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
         on_canvas = _canvas_series(tool_context)
         held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
-        drawn_cards: dict[str, dict[str, Any]] = (
+        drawn_cards: dict[str, str] = (
             dict(held_cards["drawn"])
             if held_cards.get("invocation") == tool_context.invocation_id
             else {}
         )
+        canvas = {
+            _card_identity(card["intent"]): card["component_id"]
+            for card in (canvas_cards() if canvas_cards is not None else [])
+        }
         drawn: list[dict[str, Any]] = []
-        landed = False
+        landed = read = False
         try:
             for chart in charts[:MAX_CHARTS_PER_CALL]:
                 frame = frames.get(chart.frame)
@@ -1853,17 +1909,34 @@ def build_orchestrator_tools(
                     # window, which without one moves when the frame gains a
                     # newer period.
                     intent["window"] = {"start": cut.period, "end": cut.period}
-                identity = _card_identity(chart, intent)
-                if identity in drawn_cards:
+                identity = _card_identity(intent)
+                held_id = drawn_cards.get(identity) or canvas.get(identity)
+                if held_id is not None:
                     # The canvas holds this card, so another write would stack a copy.
+                    stored = await _stored_card(held_id)
+                    if stored is None:
+                        drawn.append(
+                            _not_drawn(
+                                chart,
+                                "This card is already on the canvas, and its figures could "
+                                "not be read back. No copy was drawn; state no value of it "
+                                "in the reply.",
+                                code=HarnessCode.FIGURES_UNREAD,
+                            )
+                        )
+                        continue
+                    read = True
+                    entry = await _card_entry(
+                        chart, stored, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                    )
                     drawn.append(
-                        drawn_cards[identity]["entry"]
+                        entry
                         | {
                             "already_on_canvas": (
-                                "This card is already on the canvas from an earlier call "
-                                "this turn, and no copy was drawn. Use its figures; draw "
-                                "a chart again only with a different kind, frame, select "
-                                "or period."
+                                "This card is already on the canvas, and no copy was "
+                                "drawn. Its reply_figures are those this call asks for; "
+                                "draw a chart again only with a different kind, frame, "
+                                "select or period."
                             )
                         }
                     )
@@ -1903,20 +1976,12 @@ def build_orchestrator_tools(
                     )
                     break
                 landed = True
-                try:
-                    held = await _card_result(
-                        chart, component, frame=frame, on_canvas=on_canvas, cut=cut
+                drawn.append(
+                    await _card_entry(
+                        chart, component, title=title, frame=frame, on_canvas=on_canvas, cut=cut
                     )
-                except Exception:
-                    # The card is on the canvas, so only what a reply may state of
-                    # it is lost, and the charts after it are still drawn.
-                    logger.exception("make_charts: reading the figures of %r failed", title)
-                    held = _figures_unread()
-                entry = {"title": title, **held}
-                if cut is not None:
-                    entry["note"] = _cut_note(cut)
-                drawn.append(entry)
-                drawn_cards[identity] = {"component_id": component["component_id"], "entry": entry}
+                )
+                drawn_cards[identity] = component["component_id"]
                 tool_context.state[_DRAWN_CARDS_KEY] = {
                     "invocation": tool_context.invocation_id,
                     "drawn": drawn_cards,
@@ -1924,8 +1989,11 @@ def build_orchestrator_tools(
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
-            # `try`. A failed write is caught above.
-            count_call(tool_context.state, "make_charts" if landed else "make_charts_failed")
+            # `try`. A failed write is caught above. A call that read a card
+            # on the canvas gave figures, so it counts as one that drew.
+            count_call(
+                tool_context.state, "make_charts" if landed or read else "make_charts_failed"
+            )
         return drawn
 
     async def make_charts(charts: list[Chart], tool_context: ToolContext) -> dict[str, Any]:
@@ -2144,9 +2212,9 @@ def build_orchestrator_tools(
         tool_context.state[_DRAWN_CARDS_KEY] = {
             "invocation": tool_context.invocation_id,
             "drawn": {
-                identity: card
-                for identity, card in held["drawn"].items()
-                if card["component_id"] not in gone
+                identity: component_id
+                for identity, component_id in held["drawn"].items()
+                if component_id not in gone
             },
         }
 
