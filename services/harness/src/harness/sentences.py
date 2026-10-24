@@ -140,7 +140,7 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SHARE_KEY_UNKNOWN: "a share names a part the data does not hold",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: "a division needs to know which values to pair",
     CompileIssueCode.QUOTIENT_KEY_UNKNOWN: "a division names a value the data does not hold",
-    CompileIssueCode.KEYS_DISJOINT: "the two sides of a division share nothing to pair",
+    CompileIssueCode.KEYS_DISJOINT: "the two sides being paired share no place or party",
     CompileIssueCode.CYCLE: _PLAN_FAULT,
     CompileIssueCode.UNKNOWN_TERMINAL: _PLAN_FAULT,
     CompileIssueCode.OPERATION_UNREACHABLE: _PLAN_FAULT,
@@ -198,7 +198,6 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
         "the figures being combined are in units that cannot be converted to one another"
     ),
     CompileIssueCode.PERIODS_DISJOINT: "the figures being compared share no year",
-    CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS: "the tables being joined share nothing to join on",
     CompileIssueCode.NO_CAPABILITY: "the calculation service has no tool for one of the steps",
     CompileIssueCode.AMBIGUOUS_CAPABILITY: _TOOLS_FAULT,
     CompileIssueCode.UNKNOWN_TOOL: _TOOLS_FAULT,

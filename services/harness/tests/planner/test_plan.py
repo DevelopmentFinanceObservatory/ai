@@ -91,6 +91,7 @@ from planner.plan import (
 from planner.proof import mismatches
 from planner.records import (
     MAX_RANK_LIMIT,
+    Breakdown,
     DenominatorScope,
     EntityIn,
     EvidenceIssue,
@@ -188,10 +189,11 @@ def _every_kind_plan(decision: Decision) -> Plan:
     and also feeds `rank_a` (rank, among='population', reducing the decade to
     one value per entity -- `decision` has to cite `fixes.among='population'`
     for `rank_a`'s population claim to validate). `dataset_b` feeds
-    `filtered_b` (filter). `joined` (join), `share_a` (share_of),
-    `quotient_a` (quotient_of), `comparison_a` (comparison) and `sum_a`
-    (sum_of) each read both `totals_a` and `filtered_b`; `comparison_a` is
-    terminal.
+    `filtered_b` (filter). `joined` (join) reads `filtered_b` and
+    `dataset_a`, the one creditor and the one debtor each keeps paired
+    (`planner.shapes.join_key_pairs`). `share_a` (share_of), `quotient_a`
+    (quotient_of), `comparison_a` (comparison) and `sum_a` (sum_of) each
+    read both `totals_a` and `filtered_b`; `comparison_a` is terminal.
     """
     dataset_a = DatasetRequirement(
         id="dataset_a",
@@ -236,7 +238,7 @@ def _every_kind_plan(decision: Decision) -> Plan:
         reduction=Reduction.MEAN,
     )
     joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="totals_a"
+        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="dataset_a"
     )
     share_a = ShareOfRequirement(
         id="share_a",
@@ -1399,6 +1401,82 @@ def test_a_comparison_reading_a_join_is_rejected(
             evidence_requirements=[dataset_a, dataset_b, agg_a, agg_b, joined, comparison],
         )
     assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
+
+
+_KENYA_RECEIVES = Entity(name="Kenya", role="recipient")
+
+
+@pytest.mark.parametrize(
+    ("aid_fields", "totalled", "refused"),
+    [
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "across": ["donor"]},
+            True,
+            None,
+            id="one-recipient-each",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES, Entity(name="Germany", role="donor")]},
+            True,
+            "one side keeps ['country'] while the other keeps ['donor', 'recipient']",
+            id="flow-side-keeps-both-parties",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "across": ["donor"]},
+            False,
+            "one side keeps ['country'] while the other keeps ['donor', 'recipient']",
+            id="flow-side-keeps-every-donor",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "breakdown": Breakdown(dimension="sector", level=0)},
+            False,
+            "'aid' keeps the breakdown by 'sector', one row per code",
+            id="a-breakdown-outside-the-pair",
+        ),
+    ],
+)
+def test_a_join_pairs_one_place_on_each_side_and_refuses_a_key_that_repeats(
+    decision: DecisionFactory, aid_fields: dict[str, Any], totalled: bool, refused: str | None
+) -> None:
+    # Kenya's domestic malaria spending, a place series, beside the aid Kenya
+    # receives summed over its donors: the two places sit on different roles,
+    # so the join pairs them. A flow side keeping its donor too leaves two
+    # roles the place could stand for, whether it names the donor or keeps
+    # every one, and one keeping every sector beside the pair holds several
+    # rows for each key.
+    domestic = DatasetRequirement(
+        id="domestic",
+        decision_ids=["measure"],
+        measure="domestic spending on malaria",
+        entities=[Entity(name="Kenya")],
+        period=Period(start=2015, end=2024),
+    )
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="ODA for malaria control",
+        period=Period(start=2015, end=2024),
+        **aid_fields,
+    )
+    aid_total = AggregateRequirement(
+        id="aid_total",
+        decision_ids=["measure"],
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    right = aid_total.id if totalled else aid.id
+    both = JoinRequirement(id="both", decision_ids=["measure"], left_id="domestic", right_id=right)
+    requirements = [domestic, aid, *([aid_total] if totalled else []), both]
+
+    if refused is None:
+        _plan(decision(), evidence_requirements=requirements)
+        return
+    with pytest.raises(ValidationError) as rejected:
+        _plan(decision(), evidence_requirements=requirements)
+    message = str(rejected.value)
+    assert refused in message
+    assert "sum it away first" in message or "keep one entity role on each side" in message
 
 
 def test_growth_window_must_fit_the_upstream_dataset_period(

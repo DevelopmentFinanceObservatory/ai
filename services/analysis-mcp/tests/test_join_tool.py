@@ -177,6 +177,125 @@ async def test_duplicate_join_key_refuses_op_spec_invalid_rather_than_crashing(s
     assert result.structured_content["code"] == "op_spec_invalid"
 
 
+# Cross-column keys (`right_keys`) ----------------------------------------------
+
+
+def _place_series(*, stat_var: str, role: str, place: str, years: tuple[str, ...]) -> Frame:
+    return Frame.build(
+        role_keys=[role],
+        rows=[
+            {"stat_var": stat_var, role: place, "time_period": year, "value": float(position)}
+            for position, year in enumerate(years, start=1)
+        ],
+    )
+
+
+async def _who_and_crs(
+    store: InMemoryMaterialisationStore, *, crs_place: str
+) -> tuple[dict[str, str], dict[str, str]]:
+    """A WHO series on `observationAbout` for Kenya and a CRS series on
+    `destination` for `crs_place`, seeded into `store`."""
+    who = _place_series(
+        stat_var="dcid:WHO_MortalityUnder5",
+        role="observationAbout",
+        place="dcid:country/KEN",
+        years=("2020", "2021"),
+    )
+    crs = _place_series(
+        stat_var="dcid:ODA_Health", role="destination", place=crs_place, years=("2020", "2021")
+    )
+    return await _seed_custom_frame(store, who), await _seed_custom_frame(store, crs)
+
+
+async def test_right_keys_joins_a_who_series_to_a_crs_series_naming_the_same_place(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert result.structured_content["role_keys"] == ["observationAbout"]
+    assert "2 matched key(s)" in result.content[0].text
+    assert "observationAbout=destination" in result.content[0].text
+
+
+async def test_right_keys_with_different_places_matches_nothing_and_reports_dropped_keys(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/UGA")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert result.structured_content["rows"] == 0
+    assert [
+        (exclusion["side"], exclusion["reason"], exclusion["rows"], exclusion["entities"])
+        for exclusion in result.structured_content["exclusions"]
+    ] == [
+        ("left", "unmatched_key", 2, {"observationAbout": ["dcid:country/KEN"]}),
+        ("right", "unmatched_key", 2, {"destination": ["dcid:country/UGA"]}),
+    ]
+    assert "0 matched key(s) (2 left-only, 2 right-only, dropped)" in result.content[0].text
+
+
+async def test_right_keys_naming_a_column_the_right_frame_lacks_refuses_role_ambiguous(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "origin"},
+    )
+
+    assert result.structured_content["code"] == "role_ambiguous"
+    assert result.structured_content["fix"] == {
+        "parameter": "right_keys",
+        "columns": ["origin"],
+        "available": ["destination"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("join_keys", "right_keys"),
+    [
+        pytest.param((), {"observationAbout": "destination"}, id="key-outside-join-keys"),
+        pytest.param(
+            ("observationAbout", "sector"),
+            {"observationAbout": "destination"},
+            id="join-key-left-out",
+        ),
+    ],
+)
+async def test_right_keys_that_disagrees_with_join_keys_refuses_op_spec_invalid(
+    seeded, join_keys: tuple[str, ...], right_keys: dict[str, str]
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref, right_frame_ref=crs_ref, join_keys=join_keys, right_keys=right_keys
+    )
+
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
 # Success: one real analyst question end to end, through the registered tool ----
 
 

@@ -156,9 +156,15 @@ reviewed change here, which is the point.
 orders `RankRequirement`'s entities and writes the requirement's own role
 columns as `rank_by`; `sum_of`, `share_of`, `quotient_of` and `join` are two-sided
 like a comparison, writing
-`{role_column: ref}` entity bindings the same way and, for `join`, the role
-columns both upstream sources resolve in common as `join_keys` (else
-`join_no_common_key_columns`); `filter` writes each `Predicate` as the frame
+`{role_column: ref}` entity bindings the same way and, for `join`, every key
+explicitly: `join_keys` in the left frame's names and `right_keys` mapping each
+to the right frame's column. The keys are the role pairs
+`planner.shapes.join_key_pairs` finds, the roles both sides carry under one
+name plus, where they share no entity role and each keeps one, those two
+matched by value (WHO's `observationAbout` against CRS's `destination`). A join
+with no pair, or one side keeping a breakdown or an open party outside its pairs,
+is refused by that rule's `rejects`, at `propose_plan` and as
+`input_shape_unsupported` here alike; `filter` writes each `Predicate` as the frame
 grammar's own `ordered_threshold` or `category_match` shape, resolving an
 `EntityIn`'s names against the upstream requirement's entities and the
 source, the same way a comparison's side does. A `PlaceLevel` becomes a

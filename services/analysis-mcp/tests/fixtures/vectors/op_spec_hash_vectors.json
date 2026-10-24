@@ -473,6 +473,53 @@
       }
     },
     {
+      "name": "join-cross-column-keys",
+      "description": "right_keys pairs a left key column with a differently named right column; an unset right_keys leaves join-two-frames' hash as it was",
+      "classification": "positive",
+      "op_spec": {
+        "verb": "join",
+        "frame_ref": {
+          "spec_id": "spec_11111111111111111111111111111111",
+          "content_version": "cv_22222222222222222222222222222222"
+        },
+        "right_frame_ref": {
+          "spec_id": "spec_33333333333333333333333333333333",
+          "content_version": "cv_44444444444444444444444444444444"
+        },
+        "join_keys": [
+          "observationAbout"
+        ],
+        "right_keys": {
+          "observationAbout": "destination"
+        }
+      },
+      "expected_op_spec_hash": "ops_6ec7deb798d4c5296dc7371020767088"
+    },
+    {
+      "name": "join-right-keys-partial",
+      "description": "a right_keys that leaves a join_keys column out refuses at schema validation",
+      "classification": "negative",
+      "expected_failure_kind": "schema_violation",
+      "op_spec": {
+        "verb": "join",
+        "frame_ref": {
+          "spec_id": "spec_11111111111111111111111111111111",
+          "content_version": "cv_22222222222222222222222222222222"
+        },
+        "right_frame_ref": {
+          "spec_id": "spec_33333333333333333333333333333333",
+          "content_version": "cv_44444444444444444444444444444444"
+        },
+        "join_keys": [
+          "observationAbout",
+          "sector"
+        ],
+        "right_keys": {
+          "observationAbout": "destination"
+        }
+      }
+    },
+    {
       "name": "aggregate-duplicate-group-by-column",
       "description": "the same column named twice in group_by refuses at minting",
       "classification": "negative",
