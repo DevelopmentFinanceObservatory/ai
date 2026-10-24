@@ -8,13 +8,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
+from analysis_mcp import rolling_tool
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.fixtures import seed_fixture_store
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
 from analysis_mcp.rank_tool import rank
-from analysis_mcp.rolling_tool import resolve_anchor
+from analysis_mcp.rolling_tool import MAX_DISTINCT_POPULATIONS, resolve_anchor
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -1245,3 +1246,47 @@ async def test_a_join_pairs_through_right_keys_and_leaves_out_the_keys_that_lack
     refused = await resolve_anchor(populations=apart, roots=roots)
     assert _refused(refused) == ("rolling_anchor_unresolved", "pairing_shares_no_key")
     assert refused.structured_content["fix"]["keys"] == {"reporter": "observationAbout"}
+
+
+def _counting_groupings(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many tables `resolve_anchor` groups into series, from now on."""
+    grouped = [0]
+    series = rolling_tool._series
+
+    def _counted(table: Any) -> Any:
+        grouped[0] += 1
+        return series(table)
+
+    monkeypatch.setattr(rolling_tool, "_series", _counted)
+    return grouped
+
+
+async def test_a_population_repeated_across_branches_is_grouped_once(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # share_of(s, filter(s)) by reporter four times over, from
+    # s = share_of(aid, gni): 32 root leaves over two frames.
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)), gni=(_GNI, _keyed(_GNI_HALF)))
+    nested = _pairing([{"spec_id": _AID}], [{"spec_id": _GNI}], reporter="reporter")
+    for _ in range(4):
+        nested = _pairing([nested], [nested], reporter="reporter")
+    grouped = _counting_groupings(monkeypatch)
+
+    assert await _period([nested], roots) == "2023"
+    assert grouped == [2]
+
+
+async def test_populations_past_the_distinct_ceiling_refuse_before_any_frame_is_read(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)))
+    populations = [
+        {"spec_id": _AID, "bindings": {"reporter": [f"dcid:D{index}"]}}
+        for index in range(MAX_DISTINCT_POPULATIONS + 1)
+    ]
+    grouped = _counting_groupings(monkeypatch)
+
+    refused = await resolve_anchor(populations=populations, roots=roots)
+
+    assert _refused(refused) == ("rolling_anchor_unresolved", "populations_too_many")
+    assert grouped == [0]

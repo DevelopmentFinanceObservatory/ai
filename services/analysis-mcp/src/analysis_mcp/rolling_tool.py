@@ -34,6 +34,15 @@ side or the other, its coordinates the pairing's left key columns. A key column 
 and a pairing whose sides share no key refuses `pairing_shares_no_key`, with
 the pairing's `keys`.
 
+A population stated several times, on several branches of the expression, is
+read once: each distinct flat population narrows and groups each root frame of
+its dataset once, and each distinct pairing is paired once for each set of
+columns it is read by, each identified by its content (`_content`). An
+expression of more than `MAX_DISTINCT_POPULATIONS` distinct populations, flat
+and pairing, refuses `populations_too_many` before any frame is read, so the
+work stays within that many readings of the admitted rows however often the
+expression repeats them.
+
 A population names its dataset and no frame, so it is counted over every root
 frame given with its `spec_id`. Every population needs at least one such
 frame and every root frame at least one such population. A binding or a level
@@ -140,6 +149,12 @@ RESOLVE_ANCHOR_VERSION = "1"
 # How many periods a `rolling_grain_unsupported` refusal names.
 _NAMED_PERIODS = 3
 
+# The most distinct populations, flat and pairing, one `resolve_anchor` call
+# reads. Each is one reading of the admitted rows of its datasets, and a
+# compiled plan states one for each root dataset binding and keyed verb, which
+# its at most 24 requirements keep well under this.
+MAX_DISTINCT_POPULATIONS = 64
+
 
 class _AnchorRequest(BaseModel):
     """`resolve_anchor`'s arguments, the populations in their one spelling."""
@@ -187,6 +202,34 @@ def _flat(populations: Iterable[Population]) -> Iterator[RootPopulation]:
                 yield from _flat(side)
         else:
             yield population
+
+
+def _content(population: Population) -> str:
+    """`population`'s identity: its JSON text, one for each content since a
+    population is held in its one spelling."""
+    return population.model_dump_json()
+
+
+def _too_many(request: _AnchorRequest) -> ToolResult | None:
+    """The refusal for populations of more than `MAX_DISTINCT_POPULATIONS`
+    distinct entries, `None` otherwise. A repeated entry is walked once."""
+    seen: set[str] = set()
+    pending: list[Population] = list(request.populations)
+    while pending:
+        population = pending.pop()
+        if (key := _content(population)) in seen:
+            continue
+        seen.add(key)
+        if len(seen) > MAX_DISTINCT_POPULATIONS:
+            return _unresolved(
+                "populations_too_many",
+                f"the populations hold more than {MAX_DISTINCT_POPULATIONS} distinct entries",
+                ceiling=MAX_DISTINCT_POPULATIONS,
+            )
+        if isinstance(population, PairingPopulation):
+            for side in population.pair:
+                pending.extend(side)
+    return None
 
 
 def _unmatched(request: _AnchorRequest) -> ToolResult | None:
@@ -321,9 +364,15 @@ def _held_by_key(units: Sequence[_Grouped]) -> dict[tuple[str, ...], set[str]]:
     return {key: set.intersection(*(_half_held(unit[key]) for unit in units)) for key in keys}
 
 
+type _Frames = list[tuple[frozenset[str], list[tuple[dict[str, str], set[str]]]]]
+type _Pseudo = tuple[tuple[str, ...], dict[tuple[str, ...], set[str]]]
+
+
 class _Reading:
     """The series `resolve_anchor` counts, read from the admitted root frames.
-    `held` gathers every period read, which must all be calendar years."""
+    `held` gathers every period read, which must all be calendar years. Each
+    reading is kept by the content of its population, so a population stated
+    on several branches is read once; the kept values are shared, never changed."""
 
     def __init__(
         self,
@@ -333,18 +382,17 @@ class _Reading:
         self.roots = roots
         self.admitted = admitted
         self.held: set[str] = set()
-        self._frames: dict[
-            int, list[tuple[frozenset[str], list[tuple[dict[str, str], set[str]]]]]
-        ] = {}
+        self._frames: dict[str, _Frames] = {}
+        self._carried: dict[str, frozenset[str]] = {}
+        self._pseudo: dict[tuple[str, tuple[str, ...]], _Pseudo] = {}
 
-    def frames(
-        self, population: RootPopulation
-    ) -> list[tuple[frozenset[str], list[tuple[dict[str, str], set[str]]]]] | ToolResult:
+    def frames(self, population: RootPopulation) -> _Frames | ToolResult:
         """The series `population` keeps of each root frame of its dataset, in
         the call's root order, beside that frame's column names. Read once."""
-        if (read := self._frames.get(id(population))) is not None:
+        key = _content(population)
+        if (read := self._frames.get(key)) is not None:
             return read
-        found: list[tuple[frozenset[str], list[tuple[dict[str, str], set[str]]]]] = []
+        found: _Frames = []
         for root in self.roots:
             if root.spec_id != population.spec_id:
                 continue
@@ -354,7 +402,7 @@ class _Reading:
             series = list(_series(table))
             self.held.update(period for _, periods in series for period in periods)
             found.append((frozenset(table.column_names), series))
-        self._frames[id(population)] = found
+        self._frames[key] = found
         return found
 
     def carried(self, populations: Sequence[Population]) -> frozenset[str] | ToolResult:
@@ -364,14 +412,18 @@ class _Reading:
         found: frozenset[str] | None = None
         for population in populations:
             if isinstance(population, PairingPopulation):
-                left = self.carried(population.pair[0])
-                if isinstance(left, ToolResult):
-                    return left
-                right = self.carried(population.pair[1])
-                if isinstance(right, ToolResult):
-                    return right
-                left_name = {paired: name for name, paired in population.keys.items()}
-                units = [left | {left_name.get(column, column) for column in right}]
+                key = _content(population)
+                if (pairing_columns := self._carried.get(key)) is None:
+                    left = self.carried(population.pair[0])
+                    if isinstance(left, ToolResult):
+                        return left
+                    right = self.carried(population.pair[1])
+                    if isinstance(right, ToolResult):
+                        return right
+                    left_name = {paired: name for name, paired in population.keys.items()}
+                    pairing_columns = left | {left_name.get(column, column) for column in right}
+                    self._carried[key] = pairing_columns
+                units = [pairing_columns]
             else:
                 frames = self.frames(population)
                 if isinstance(frames, ToolResult):
@@ -423,16 +475,27 @@ class _Reading:
 
     def pseudo_series(
         self, pairing: PairingPopulation, columns: tuple[str, ...] = ()
-    ) -> tuple[tuple[str, ...], dict[tuple[str, ...], set[str]]] | ToolResult:
+    ) -> _Pseudo | ToolResult:
         """The pseudo-series of `pairing`: one for each key both sides hold,
         over the pairing's left key columns and then each of `columns` it does
         not key on, with the periods at which at least half of that key's
         series hold them on each side. Returned beside those column names.
+        Paired once for each `columns`.
 
         The pairing's frame keeps the left name of each key and any other column
         of either side under its own name, so such a column is read on each side
         that carries it, and matched where both do.
         """
+        key = (_content(pairing), columns)
+        if (read := self._pseudo.get(key)) is not None:
+            return read
+        pseudo = self._paired(pairing, columns)
+        if not isinstance(pseudo, ToolResult):
+            self._pseudo[key] = pseudo
+        return pseudo
+
+    def _paired(self, pairing: PairingPopulation, columns: tuple[str, ...]) -> _Pseudo | ToolResult:
+        """`pseudo_series`, computed."""
         keys = tuple(pairing.keys)
         extra = tuple(column for column in columns if column not in pairing.keys)
         left_side, right_side = pairing.pair
@@ -609,7 +672,7 @@ async def resolve_anchor(
     if isinstance(request, ToolResult):
         return request
 
-    if (refusal := _unmatched(request)) is not None:
+    if (refusal := _too_many(request) or _unmatched(request)) is not None:
         return refusal
 
     distinct = [
