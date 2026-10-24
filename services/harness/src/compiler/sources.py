@@ -527,6 +527,30 @@ def _binds_unlisted(source: SelectedSource, other: SelectedSource) -> bool:
     return any(prop in own and prop not in listed for prop in source.slot_codes or {})
 
 
+def bound_codes(source: SelectedSource, prop: str) -> tuple[str, ...]:
+    """The codes `source`'s identity binds `prop` to, in identity order.
+
+    A `value` binding names one code and a `set` binding each of its refs, once;
+    an unbound property, one the identity does not list, and a source with
+    no identity name none. These are the codes the question named, before
+    the code index widened them to their descendants (`slot_codes`).
+    """
+    slots = (source.identity or {}).get("slots")
+    for slot in slots if isinstance(slots, list) else ():
+        if not isinstance(slot, Mapping) or slot.get("property") != prop:
+            continue
+        binding = _mapping(slot.get("binding"))
+        match binding.get("state"):
+            case "value":
+                refs: Sequence[object] = [binding.get("ref")]
+            case "set":
+                refs = _sequence_of_any(binding.get("refs"))
+            case _:
+                refs = []
+        return tuple(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref))
+    return ()
+
+
 def _listed_properties(source: SelectedSource) -> set[object] | None:
     """The properties `source`'s identity lists a slot for, or `None` when it lists none."""
     slots = (source.identity or {}).get("slots")

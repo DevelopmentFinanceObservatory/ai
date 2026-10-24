@@ -15,6 +15,7 @@ every name `needs` lists. Each asserts the replayed call is accepted
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +26,8 @@ from compiler.compile import compile_plan
 from compiler.sources import DiscoveryStatus, source_from_spec_block
 from compiler.surface import FixtureSurface, McpSurface, ToolSchema
 from data_mcp.digest import render_answer
+from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import CodeNode
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
@@ -42,12 +45,21 @@ from planner.plan import (
     Plan,
     RankRequirement,
     Unit,
+    current_discovery_time_left,
     plan_revision,
     save_pin_sources,
 )
-from planner.records import GroupBy, RankAmong, RankDirection, Reduction
+from planner.records import (
+    Breakdown,
+    BreakdownDimension,
+    GroupBy,
+    RankAmong,
+    RankDirection,
+    Reduction,
+    StatVarReading,
+)
 from planner.tool_results import ProblemCode
-from planner.workflow import SelectedSource
+from planner.workflow import OpenAxis, SelectedSource
 from submission.service import _choice_not_offered
 from translator.discovery import (
     DISCOVERY_CALL_BUDGET_PER_REQUIREMENT,
@@ -671,6 +683,136 @@ async def test_requirement_unmeetable_action_refers(
     referred = await _replay_action(core, result["action"], context)
 
     assert referred["outcome"] == "referred"
+
+
+# A breakdown by sector of a family whose purpose slot Search bound to health
+# (120) and population (130).
+def _by_sector(
+    draft: DraftFactory,
+    source: SourceFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> Any:
+    by_sector = requirement(
+        stat_vars=StatVarReading.SEPARATE,
+        breakdown=Breakdown(dimension=BreakdownDimension.SECTOR, level=0),
+    )
+    context = context_holding(draft(evidence_requirements=[by_sector, derived_requirement()]))
+    refs = ["CRSPurposeCode120", "CRSPurposeCode130"]
+    family = source(
+        identity={"slots": [{"property": "crsPurpose", "binding": {"state": "set", "refs": refs}}]},
+        open_axes=(OpenAxis(property="crsPurpose", summable=True),),
+        served_count=None,
+        stat_var_member_count=30,
+    )
+    _discovered(context, family, status=DiscoveryStatus.DEFINITE)
+    return context
+
+
+async def test_a_node_door_that_does_not_answer_is_transient(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    source: SourceFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """The breakdown's level waits on the hierarchy read, so a failed read ends the
+    proposal as a surface failure, before compile can call the source unusable."""
+    context = _by_sector(draft, source, requirement, derived_requirement, context_holding)
+
+    async def down(dcids: Any) -> Any:
+        raise UpstreamError(status=None, code=None, detail="the node door timed out")
+
+    core = build_translator_core(surface=FixtureSurface(schemas=real_schemas), describe_nodes=down)
+
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
+
+    assert (result["outcome"], result["code"]) == ("refused", ProblemCode.SURFACE_UNAVAILABLE)
+
+
+async def test_a_code_climb_the_entrys_time_cuts_short_is_transient(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    source: SourceFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """The first level answers and the second never does: the climb stops at the
+    time the planner entry had left, not at the upstream client's own timeout."""
+    context = _by_sector(draft, source, requirement, derived_requirement, context_holding)
+    batches: list[list[str]] = []
+
+    async def stalls_above_the_first_level(dcids: Any) -> Any:
+        batches.append(list(dcids))
+        if len(batches) > 1:
+            await asyncio.Event().wait()
+        return {dcid: _code_node(dcid, "CRSPurposeCode100") for dcid in dcids}
+
+    core = build_translator_core(
+        surface=FixtureSurface(schemas=real_schemas), describe_nodes=stalls_above_the_first_level
+    )
+    token = current_discovery_time_left.set(lambda: 0.05)
+    try:
+        async with asyncio.timeout(5):
+            result = await core.propose_operations(
+                translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+            )
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert len(batches) == 2
+    assert (result["outcome"], result["code"]) == ("refused", ProblemCode.SURFACE_UNAVAILABLE)
+    (record,) = [r for r in load_log(context.state).records if r.tool == "code_paths"]
+    assert record.transport_failed is True
+
+
+def _code_node(dcid: str, parent: str) -> CodeNode:
+    """`dcid` as the graph's node door answers a CRS purpose code with children."""
+    return CodeNode.model_validate(
+        {
+            "built_from": {},
+            "code": {
+                "code": dcid.removeprefix("CRSPurposeCode"),
+                "code_system": {"ref": "CRSPurposeCodeEnum", "label": "CRS Purpose"},
+                "parent": {"ref": parent, "label": None},
+                "property": "crsPurpose",
+                "synonyms": [],
+            },
+            "description": None,
+            "gaps": [],
+            "kind": "code",
+            "label": None,
+            "links": {"children": f"/api/graph/node/{dcid}/children"},
+            "ref": dcid,
+            "types": ["CRSPurposeCodeEnum"],
+        }
+    )
+
+
+async def test_a_code_the_graph_holds_no_path_to_leaves_the_source_unusable(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    source: SourceFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """The conftest's node door holds no node, so neither code has a path."""
+    context = _by_sector(draft, source, requirement, derived_requirement, context_holding)
+    core = _core(FixtureSurface(schemas=real_schemas))
+
+    result = await core.propose_operations(
+        translation=Translation.model_validate(GOOD_TRANSLATION), tool_context=context
+    )
+
+    assert result["code"] == ProblemCode.COMPILE_FAILED
+    assert [issue["code"] for issue in result["detail"]["issues"]] == ["source_unusable"]
+    assert result["action"]["arguments"]["kind"] == "requirement_unmeetable"
 
 
 async def test_no_operation_covers_action_refers(

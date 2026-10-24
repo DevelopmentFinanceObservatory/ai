@@ -1118,7 +1118,9 @@ _EVERY_SECTOR = Decision(
 
 
 def _compile_top_sectors(
-    compile_question: Callable[..., CompileResult], source: SelectedSource
+    compile_question: Callable[..., CompileResult],
+    source: SelectedSource,
+    breakdown: Breakdown = _TOP_SECTORS,
 ) -> CompileResult:
     """ "Which sectors received the most of Germany's ODA to Kenya in 2024?"."""
     oda = _dataset(
@@ -1126,7 +1128,7 @@ def _compile_top_sectors(
         [Entity(name="Germany", role="donor"), Entity(name="Kenya", role="recipient")],
         Period(start=2024, end=2024),
         stat_vars=StatVarReading.SEPARATE,
-        breakdown=_TOP_SECTORS,
+        breakdown=breakdown,
     )
     by_sector: dict[str, Any] = {
         "reduction": Reduction.SUM,
@@ -1179,6 +1181,154 @@ def test_a_breakdown_by_sector_retrieves_sector_totals_and_ranks_them_by_their_c
     assert result.workflow is not None
     keys = {step.id: step.expected_role_keys for step in result.workflow.steps}
     assert keys["by_sector_op"] == keys["top_op"] == ("stat_var_crsPurpose",)
+
+
+# Paths from the root of the CRS purpose hierarchy, as the graph's
+# `specializationOf` parents give them.
+_HEALTH_PATH = ("CRSPurposeCode100", "CRSPurposeCode120")
+_POPULATION_PATH = ("CRSPurposeCode100", "CRSPurposeCode130")
+_BASIC_HEALTH_CARE_PATH = (*_HEALTH_PATH, "CRSPurposeCode122", "CRSPurposeCode12220")
+
+
+# The CRS purpose codes the graph holds nothing below.
+_LEAVES = ("CRSPurposeCode12220",)
+
+
+def _naming_sectors(
+    codes: tuple[str, ...],
+    paths: dict[str, tuple[str, ...]],
+    *,
+    binding: str = "value",
+    expanded: bool = True,
+) -> SelectedSource:
+    """Germany's ODA to Kenya with its purpose slot bound to `codes`, and the paths and
+    leaves the hierarchy read found for them.
+
+    Several codes bind as a set, as Search binds "health and population ODA". One code
+    binds as `binding`: Search binds health alone as one value its expansion widens to
+    general health (121), and basic health care (12220), a leaf, as one value with no
+    expansion, which closes the slot. `expanded` false states no expansion."""
+    block = _block("germany_oda_to_kenya")
+    identity_slot = next(
+        slot
+        for slot in block["definition"]["identity"]["slots"]
+        if slot["property"] == "crsPurpose"
+    )
+    one_value = len(codes) == 1 and binding == "value"
+    identity_slot["binding"] = (
+        {"state": "value", "ref": codes[0]} if one_value else {"state": "set", "refs": list(codes)}
+    )
+    values = [{"ref": {"ref": code}, "value_kind": "enum_value"} for code in codes]
+    slot = _slot(block, "crsPurpose")
+    slot["binding"] = (
+        {"kind": "value", "value": values[0]} if one_value else {"kind": "set", "values": values}
+    )
+    if expanded:
+        slot["expansion"] = {"added": [{"ref": "CRSPurposeCode121"}]}
+    else:
+        slot.pop("expansion", None)
+    return source_from_spec_block(block).model_copy(
+        update={"code_paths": paths, "leaf_codes": tuple(c for c in codes if c in _LEAVES)}
+    )
+
+
+_PATHS = {
+    "CRSPurposeCode120": _HEALTH_PATH,
+    "CRSPurposeCode130": _POPULATION_PATH,
+    "CRSPurposeCode12220": _BASIC_HEALTH_CARE_PATH,
+}
+
+
+@pytest.mark.parametrize(
+    ("codes", "binding", "expanded", "stated", "level"),
+    [
+        (("CRSPurposeCode120", "CRSPurposeCode130"), "set", True, 0, 1),
+        (("CRSPurposeCode120", "CRSPurposeCode130"), "set", False, 0, 1),
+        (("CRSPurposeCode120", "CRSPurposeCode130"), "set", True, 2, 2),
+        (("CRSPurposeCode120",), "value", True, 0, 2),
+        (("CRSPurposeCode120",), "set", False, 0, 2),
+        (("CRSPurposeCode12220",), "set", False, 0, 3),
+        (("CRSPurposeCode120", "CRSPurposeCode12220"), "set", True, 0, 2),
+        ((), "value", True, 0, 0),
+    ],
+    ids=[
+        "health-and-population-part-below-their-shared-parent",
+        "health-and-population-with-no-expansion-stated",
+        "a-finer-stated-level-is-kept",
+        "one-code-reads-its-children",
+        "one-code-with-no-expansion-stated-reads-its-children",
+        "a-leaf-in-an-open-slot-reads-its-own-level",
+        "a-code-under-another-parts-below-it",
+        "no-code-keeps-the-stated-level",
+    ],
+)
+def test_a_breakdown_reads_the_level_its_named_sectors_part_at(
+    compile_question: Callable[..., CompileResult],
+    codes: tuple[str, ...],
+    binding: str,
+    expanded: bool,
+    stated: int,
+    level: int,
+) -> None:
+    """ "Health and population ODA to Kenya by sector": the two share social
+    infrastructure (100) at the top level, so a breakdown there is one total; it reads
+    level 1, where they are two sectors. "Health ODA by sector" reads health's
+    subsectors, whether or not Search states the expansion, since the graph says health
+    has children; a leaf has none and reads itself."""
+    source = (
+        _naming_sectors(
+            codes,
+            {code: _PATHS[code] for code in codes},
+            binding=binding,
+            expanded=expanded,
+        )
+        if codes
+        else _source("germany_oda_to_kenya")
+    )
+
+    result = _compile_top_sectors(
+        compile_question,
+        source,
+        Breakdown(dimension=BreakdownDimension.SECTOR, level=stated),
+    )
+
+    assert _step_args(result, "oda_op")["breakdown"] == {
+        "code_system": "crsPurpose",
+        "level": level,
+    }
+
+
+def test_a_breakdown_of_one_leaf_as_search_binds_it_is_unusable(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """ "Basic health care ODA by sector": Search binds the leaf as one value with no
+    expansion, so the family holds one sector and has nothing to break down by."""
+    source = _naming_sectors(
+        ("CRSPurposeCode12220",), {"CRSPurposeCode12220": _BASIC_HEALTH_CARE_PATH}, expanded=False
+    )
+
+    result = _compile_top_sectors(compile_question, source)
+
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (CompileIssueCode.SOURCE_UNUSABLE, "oda")
+    ]
+
+
+def test_a_breakdown_whose_named_sectors_have_no_path_is_unusable(
+    compile_question: Callable[..., CompileResult],
+) -> None:
+    """With the graph holding no path to health, no level of the breakdown is known."""
+    source = _naming_sectors(
+        ("CRSPurposeCode120", "CRSPurposeCode130"),
+        {"CRSPurposeCode130": _POPULATION_PATH},
+        binding="set",
+    )
+
+    result = _compile_top_sectors(compile_question, source)
+
+    assert [(issue.code, issue.requirement_id) for issue in result.issues] == [
+        (CompileIssueCode.SOURCE_UNUSABLE, "oda")
+    ]
 
 
 def test_a_breakdown_over_a_source_that_does_not_vary_by_sector_is_unusable(

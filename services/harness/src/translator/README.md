@@ -73,6 +73,17 @@ revision reads what an earlier call already fetched rather than
 re-describing the same source. A missing or failed fetch never fails the
 compile: the readback renders what it renders without a definition.
 
+A requirement stating a breakdown reads its source's named codes up the code
+hierarchy, through the graph's node door
+(`translator.discovery.fetch_code_paths`), immediately before compiling. The
+paths set the level the breakdown reads (`compiler.shapes.breakdown_level`):
+health (120) and population (130) share social infrastructure (100) at level
+0, so a breakdown of the two reads level 1, and health alone reads level 2,
+its subsectors. A node door that does not answer ends the proposal as
+`surface_unavailable`, a transient referral, and the next translate reads
+again. A code the graph holds no path for leaves the breakdown without a
+level, and compile refuses it as `source_unusable`.
+
 None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
 is the harness workflow's `approve` node. The one read of observations is a

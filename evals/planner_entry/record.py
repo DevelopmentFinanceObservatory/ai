@@ -8,7 +8,8 @@ recording holds exactly the calls a replay makes. Then every skill a search name
 `propose_plan` can make for a dataset the planner is shown (`submission.service.first_year_reads`).
 Last, every call production's translation makes for each of the task's payloads: the
 search `discover_source` sends for each dataset requirement, with its warnings, each
-definition it resolves or describes, and each entity name it resolves.
+definition it resolves or describes, each entity name it resolves, and each code node
+it reads to climb a breakdown's named codes up their hierarchy.
 
     just eval-planner-entry-record                   # tasks with no recording, a stale one,
                                                      # or one lacking a first-year read or

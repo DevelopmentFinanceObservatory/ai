@@ -14627,6 +14627,102 @@
     "answers": [
       "aaa42c719ab84e39"
     ],
+    "nodes": {
+      "CRSPurposeCode100": {
+        "built_from": {
+          "code_index": "034d370b9bb5c96d8098c1c4b008b1f044aa847ce1d8a8582daceae6b769fdcf"
+        },
+        "code": {
+          "code": "100",
+          "code_system": {
+            "label": "CRS Purpose",
+            "ref": "CRSPurposeCodeEnum"
+          },
+          "parent": null,
+          "property": "crsPurpose",
+          "synonyms": [
+            "SOCIAL INFRASTRUCTURE AND SERVICES"
+          ]
+        },
+        "description": "A broad category covering social infrastructure and services, including education, health, population and reproductive health, water supply and sanitation, and government and civil society.",
+        "gaps": [],
+        "kind": "code",
+        "label": "social infrastructure and services (CRS Purpose)",
+        "links": {
+          "children": "/api/graph/node/CRSPurposeCode100/members?relation=children"
+        },
+        "ref": "CRSPurposeCode100",
+        "types": [
+          "CRSPurposeCodeEnum"
+        ]
+      },
+      "CRSPurposeCode120": {
+        "built_from": {
+          "code_index": "034d370b9bb5c96d8098c1c4b008b1f044aa847ce1d8a8582daceae6b769fdcf"
+        },
+        "code": {
+          "code": "120",
+          "code_system": {
+            "label": "CRS Purpose",
+            "ref": "CRSPurposeCodeEnum"
+          },
+          "parent": {
+            "label": "social infrastructure and services",
+            "ref": "CRSPurposeCode100"
+          },
+          "property": "crsPurpose",
+          "synonyms": [
+            "Health"
+          ]
+        },
+        "description": "A sector grouping encompassing general health, basic health, and noncommunicable disease programmes, including health policy, infrastructure, services, and research.",
+        "gaps": [],
+        "kind": "code",
+        "label": "health (CRS Purpose)",
+        "links": {
+          "children": "/api/graph/node/CRSPurposeCode120/members?relation=children"
+        },
+        "ref": "CRSPurposeCode120",
+        "types": [
+          "CRSPurposeCodeEnum"
+        ]
+      },
+      "CRSPurposeCode130": {
+        "built_from": {
+          "code_index": "034d370b9bb5c96d8098c1c4b008b1f044aa847ce1d8a8582daceae6b769fdcf"
+        },
+        "code": {
+          "code": "130",
+          "code_system": {
+            "label": "CRS Purpose",
+            "ref": "CRSPurposeCodeEnum"
+          },
+          "parent": {
+            "label": "social infrastructure and services",
+            "ref": "CRSPurposeCode100"
+          },
+          "property": "crsPurpose",
+          "synonyms": [
+            "Population policies/programmes and reproductive health",
+            "population and reproductive health",
+            "population programmes",
+            "reproductive health",
+            "reproductive health programmes"
+          ]
+        },
+        "description": "A sector grouping covering policies, programmes, and activities related to population dynamics and reproductive health, including population policy, family planning, reproductive health care, sexually transmitted disease control, and related personnel development.",
+        "gaps": [],
+        "kind": "code",
+        "label": "population policy, programme, and reproductive health (CRS Purpose)",
+        "links": {
+          "children": "/api/graph/node/CRSPurposeCode130/members?relation=children"
+        },
+        "ref": "CRSPurposeCode130",
+        "types": [
+          "CRSPurposeCodeEnum"
+        ]
+      }
+    },
     "resolved": {}
   }
 }

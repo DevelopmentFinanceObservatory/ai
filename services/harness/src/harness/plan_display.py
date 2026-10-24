@@ -43,6 +43,7 @@ import typing
 from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
+from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count, stat_var_count_is_floor
 from planner.parties import across_party, singular
 from planner.phrasing import (
@@ -446,12 +447,19 @@ def _breakdown_of(requirement: EvidenceRequirement, plan: Plan) -> Breakdown | N
     return breakdowns.pop() if len(breakdowns) == 1 else None
 
 
-def _breakdown_clause(breakdown: Breakdown) -> str:
-    """How a retrieval breaks its total down, in words."""
+def _breakdown_clause(breakdown: Breakdown, source: SelectedSource | None) -> str:
+    """How a retrieval breaks its total down, in words, at the level it reads.
+
+    With a selected source that is the level the codes it names set
+    (`compiler.shapes.breakdown_level`); before compile, or with a named
+    code's path unread, the plan's own.
+    """
+    read = None if source is None else breakdown_level(breakdown, source)
+    depth = breakdown.level if read is None else read
     level = (
         "the top level of its hierarchy"
-        if breakdown.level == 0
-        else f"level {breakdown.level} below the top of its hierarchy"
+        if depth == 0
+        else f"level {depth} below the top of its hierarchy"
     )
     return f"broken down by {breakdown.dimension.value}, each code rolled up to {level}"
 
@@ -781,7 +789,7 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     source = _selected_source(requirement.id, plan)
     clauses: list[str] = []
     if requirement.breakdown is not None:
-        clauses.append(_breakdown_clause(requirement.breakdown))
+        clauses.append(_breakdown_clause(requirement.breakdown, source))
     # A breakdown sums the family within each code, so no reading of its members applies.
     elif source is not None and (reading := _reading_clause(source)):
         clauses.append(reading)
