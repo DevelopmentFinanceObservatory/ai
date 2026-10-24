@@ -553,6 +553,12 @@ def test_a_failed_skill_read_shows_and_a_successful_one_does_not():
 
 
 _FAULT = {"error": "boom", "code": "internal_error"}
+# data-mcp's refusal of a call whose arguments the model must correct.
+_SLIP = {
+    "error": "open_roles word 'purpose' names no recognised role",
+    "code": "request_invalid",
+    "retry_mode": "correct_and_retry",
+}
 _SEARCH = {"query": "ODA to Kenya"}
 
 
@@ -611,6 +617,20 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
             _call("c2", "search", _SEARCH),
             _response("c2", "search", {"parts": []}),
         ],
+        # A refusal that asked for a corrected call, then the corrected call.
+        lambda: [
+            _call("c1", "search", {**_SEARCH, "open_roles": ["purpose"]}),
+            _response("c1", "search", _SLIP),
+            _call("c2", "search", _SEARCH),
+            _response("c2", "search", {"parts": []}),
+        ],
+        # The same for a quiet call: a skill read under a wrong name.
+        lambda: [
+            _call("c1", "get_skill", {"name": "wrong"}),
+            _response("c1", "get_skill", {**_SLIP, "code": "skill_not_found"}),
+            _call("c2", "get_skill", {"name": "right"}),
+            _response("c2", "get_skill", {"skill": "text"}),
+        ],
         # f6a: a hand-off that hit a fault, then one the planner took.
         lambda: [
             _call("c1", "plan", {"brief": "b", "asks": ["a"]}),
@@ -626,7 +646,13 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
             _plan_card(),
         ],
     ],
-    ids=["search-retried", "hand-off-retried", "replanned"],
+    ids=[
+        "search-retried",
+        "search-corrected",
+        "skill-read-corrected",
+        "hand-off-retried",
+        "replanned",
+    ],
 )
 def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
     """A failed line standing beside an answer reads as a failure the user
@@ -666,7 +692,12 @@ def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
         # A failure no later step tried again: the turn ends on it.
         lambda: [_call("c1", "search", _SEARCH), _response("c1", "search", _FAULT)],
     ],
-    ids=["other-search", "answered-without-a-plan", "no-plan-after-hand-off", "terminal"],
+    ids=[
+        "other-search",
+        "answered-without-a-plan",
+        "no-plan-after-hand-off",
+        "terminal",
+    ],
 )
 def test_a_failure_no_later_try_made_good_stays_failed(events):
     translator = _translator()
@@ -675,6 +706,148 @@ def test_a_failure_no_later_try_made_good_stays_failed(events):
 
     settled = _settled_failures([*frames, *translator.finish()])
     assert [frame.status for frame in settled] == [StepStatus.FAILED] * len(settled)
+
+
+_SLIPPED = {**_SEARCH, "open_roles": ["purpose"]}
+_FOUND = {"parts": []}
+_CHARTS = {"charts": [{"title": "Aid to Kenya"}]}
+_OTHER_CHARTS = {"charts": [{"title": "Aid to Kenya by donor"}]}
+
+
+def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Event:
+    """One model call that makes several tool calls at once."""
+    return _event(
+        *(
+            types.Part(function_call=types.FunctionCall(id=call_id, name=name, args=args))
+            for call_id, name, args in calls
+        )
+    )
+
+
+def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
+    return _event(
+        *(
+            types.Part(
+                function_response=types.FunctionResponse(id=call_id, name=name, response=answer)
+            )
+            for call_id, name, answer in responses
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("events", "settled"),
+    [
+        # Two refusals asking for a correction, then a call that completes.
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _call("c2", "search", {**_SEARCH, "open_roles": ["sector"]}),
+                _response("c2", "search", _SLIP),
+                _call("c3", "search", _SEARCH),
+                _response("c3", "search", _FOUND),
+            ],
+            [StepStatus.COMPLETE, StepStatus.COMPLETE],
+        ),
+        # A correction that hits a fault leaves the slip waiting; the fault
+        # itself is keyed by its own arguments.
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _call("c2", "search", {**_SEARCH, "open_roles": ["sector"]}),
+                _response("c2", "search", _FAULT),
+                _call("c3", "search", _SEARCH),
+                _response("c3", "search", _FOUND),
+            ],
+            [StepStatus.COMPLETE, StepStatus.FAILED],
+        ),
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _call("c2", "search", _SEARCH),
+                _response("c2", "search", _FAULT),
+            ],
+            [StepStatus.FAILED, StepStatus.FAILED],
+        ),
+        # Parallel corrections, one failing and one completing, either order.
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _calls(("c2", "search", _SEARCH), ("c3", "search", {"query": "FDI to Kenya"})),
+                _responses(("c2", "search", _FAULT), ("c3", "search", _FOUND)),
+            ],
+            [StepStatus.COMPLETE, StepStatus.FAILED],
+        ),
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _calls(("c2", "search", _SEARCH), ("c3", "search", {"query": "FDI to Kenya"})),
+                _responses(("c2", "search", _FOUND), ("c3", "search", _FAULT)),
+            ],
+            [StepStatus.COMPLETE, StepStatus.FAILED],
+        ),
+        # Another tool's call corrects nothing.
+        (
+            lambda: [
+                _call("c1", "search", _SLIPPED),
+                _response("c1", "search", _SLIP),
+                _call("c2", "recall", {}),
+                _response("c2", "recall", {"turns": []}),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A call made beside the refused one, in the same batch, is no
+        # correction of it.
+        (
+            lambda: [
+                _calls(("c1", "search", _SLIPPED), ("c2", "search", {"query": "FDI to Kenya"})),
+                _responses(("c1", "search", _SLIP), ("c2", "search", _FOUND)),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A correction failed by its outcome, with no error in its answer,
+        # leaves the slip waiting too.
+        (
+            lambda: [
+                _call("c1", "make_charts", {"charts": "Aid to Kenya"}),
+                _response("c1", "make_charts", {**_SLIP, "code": "tool_arguments_invalid"}),
+                _call("c2", "make_charts", _OTHER_CHARTS),
+                _response(
+                    "c2",
+                    "make_charts",
+                    {"charts": [{"title": "Aid to Kenya by donor", **_FAULT}]},
+                ),
+                _call("c3", "make_charts", _CHARTS),
+                _response("c3", "make_charts", _CHARTS),
+            ],
+            [StepStatus.COMPLETE, StepStatus.FAILED],
+        ),
+    ],
+    ids=[
+        "slip-slip-success",
+        "slip-fault-success",
+        "slip-fault-end",
+        "parallel-fault-first",
+        "parallel-success-first",
+        "other-tool",
+        "beside-the-slip",
+        "keyless-failure-then-success",
+    ],
+)
+def test_a_later_call_of_its_tool_that_completes_settles_a_slip(events, settled):
+    """A refusal that asks the model to correct its call is settled by any
+    later call of the same tool that completes, whatever its arguments."""
+    translator = _translator()
+
+    frames = _frames(translator, *events())
+
+    steps = _settled_failures([*frames, *translator.finish()])
+    assert [frame.status for frame in steps] == settled
 
 
 def test_a_fetch_names_the_measure_its_search_found_and_carries_its_summary():
