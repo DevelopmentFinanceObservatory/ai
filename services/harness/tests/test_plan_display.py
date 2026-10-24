@@ -110,9 +110,10 @@ def _population_decision(decision: DecisionFactory, **overrides: object) -> Deci
 #
 # Mirrors `tests/planner/test_plan.py::_every_kind_plan`: `dataset_a` feeds
 # `totals_a` (aggregate), which feeds `growth_a` (growth) and `rank_a` (rank);
-# `dataset_b` feeds `filtered_b` (filter); `joined` (join), `share_a`
-# (share_of), `quotient_a` (quotient_of), `comparison_a` (comparison) and
-# `sum_a` (sum_of) each read `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
+# `dataset_b` feeds `filtered_b` (filter); `joined` (join) reads `filtered_b`
+# and `dataset_a`; `share_a` (share_of), `quotient_a` (quotient_of),
+# `comparison_a` (comparison) and `sum_a` (sum_of) each read `totals_a` and
+# `filtered_b`. Every requirement id below is also its operation id and its
 # workflow step id, so the same id names one thing throughout a row.
 
 _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
@@ -173,7 +174,7 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         reduction=Reduction.MEAN,
     )
     joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="totals_a"
+        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="dataset_a"
     )
     share_a = ShareOfRequirement(
         id="share_a",
@@ -257,7 +258,7 @@ def _every_kind_translation() -> Translation:
                 reduction=Reduction.MEAN,
             ),
             JoinOperation(
-                id="joined", requirement_id="joined", left="filtered_b", right="totals_a"
+                id="joined", requirement_id="joined", left="filtered_b", right="dataset_a"
             ),
             ShareOfOperation(
                 id="share_a",
@@ -325,7 +326,7 @@ def _every_kind_workflow() -> Workflow:
             _step("growth_a", tool="growth", from_steps=("totals_a",)),
             _step("filtered_b", tool="filter", from_steps=("dataset_b",)),
             _step("rank_a", tool="rank", from_steps=("dataset_a",)),
-            _step("joined", tool="join", from_steps=("filtered_b", "totals_a")),
+            _step("joined", tool="join", from_steps=("filtered_b", "dataset_a")),
             _step("share_a", tool="share_of", from_steps=("totals_a", "filtered_b")),
             _step("quotient_a", tool="quotient_of", from_steps=("totals_a", "filtered_b")),
             _step("comparison_a", tool="compare", from_steps=("totals_a", "filtered_b")),

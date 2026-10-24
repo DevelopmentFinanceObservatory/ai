@@ -249,7 +249,6 @@ def issue_resolution(code: CompileIssueCode) -> IssueResolution:
             | CompileIssueCode.FRAME_UNIT_FORMS_DIFFER
             | CompileIssueCode.FRAME_PRICE_BASES_DIFFER
             | CompileIssueCode.PERIODS_DISJOINT
-            | CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS
             | CompileIssueCode.BAD_ARGS
         ):
             return IssueResolution.REPAIR
@@ -301,9 +300,9 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
         "entities, or leave `denominator_axis` out to divide every key by one total"
     ),
     CompileIssueCode.KEYS_DISJOINT: (
-        "state at least one entity both keyed sides hold on each side's requirement, or divide "
-        "every key by one total: a quotient with no `denominator_axis`, a share with a "
-        "`pooled` denominator"
+        "state at least one entity both keyed sides hold on each side's requirement; a "
+        "division can instead divide every key by one total: a quotient with no "
+        "`denominator_axis`, a share with a `pooled` denominator"
     ),
     CompileIssueCode.SOURCE_WIDER_THAN_REQUIREMENT: (
         "name the entities the requirement needs, or filter the series to them before the "
@@ -373,9 +372,6 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.PERIODS_DISJOINT: (
         "give the two sides' requirements periods that share at least one year"
-    ),
-    CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS: (
-        "join requirements that share a role, or compare them instead"
     ),
     CompileIssueCode.BAD_ARGS: (
         "change the requirement field the refused argument is written from to a value the "

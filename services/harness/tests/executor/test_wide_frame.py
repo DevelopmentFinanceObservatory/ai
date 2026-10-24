@@ -294,7 +294,8 @@ def retrieved(
     reads them (`data_mcp.frame_materialisation.observed_shape`), and
     `dimensions` are what apis reports. `role_keys` overrides the
     reported keys. `frame_read=False` leaves both out, as `get_data` does
-    when it could not read the frame.
+    when it could not read the frame. `statistics` replaces the per-series
+    statistics, one per provider and recipient by default.
     """
 
     async def _retrieved(
@@ -306,6 +307,7 @@ def retrieved(
         role_keys: Sequence[str] | None = None,
         dimensions: list[dict[str, Any]] | None = None,
         frame_read: bool = True,
+        statistics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if providers is None:
             providers = [entity for entity in source.entities if entity.role == "origin"]
@@ -328,7 +330,7 @@ def retrieved(
             ),
             writer="tests",
         )
-        statistics = [
+        statistics = statistics or [
             {
                 "stat_var": f"dcid:{_pinned(source)}",
                 "entities": [
@@ -1461,10 +1463,13 @@ async def test_a_join_keys_both_frames_by_their_shared_role_columns(
 
     assert isinstance(outcome, Accepted), outcome
     assert outcome.steps[-1].stat_var_count == 2
-    assert _analysis_call(surface, "join") == {"join_keys": [PROVIDER, RECIPIENT]}
+    assert _analysis_call(surface, "join") == {
+        "join_keys": [PROVIDER, RECIPIENT],
+        "right_keys": {PROVIDER: PROVIDER, RECIPIENT: RECIPIENT},
+    }
 
 
-async def test_a_join_key_the_two_frames_spell_differently_refuses_before_the_call(
+async def test_a_join_key_the_two_frames_spell_differently_is_sent_in_each_frames_spelling(
     plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
 ) -> None:
     plan = _join_plan(plan_for)
@@ -1480,11 +1485,116 @@ async def test_a_join_key_the_two_frames_spell_differently_refuses_before_the_ca
 
     outcome = await _run(plan, surface)
 
-    assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.COLUMN_UNBOUND
-    assert outcome.step_id == "joined_op"
-    assert "origin" in outcome.detail
-    assert [name for name, _ in surface.calls] == ["get_data", "get_data"]
+    assert isinstance(outcome, Accepted), outcome
+    assert _analysis_call(surface, "join") == {
+        "join_keys": [PROVIDER, RECIPIENT],
+        "right_keys": {PROVIDER: "provider", RECIPIENT: RECIPIENT},
+    }
+
+
+_WHO_KENYA = ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya")
+
+
+async def test_a_place_series_joins_the_aid_its_place_receives_by_value(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # A place series on `observationAbout` beside the aid Kenya receives,
+    # summed over its donors on `financingRecipient`, matched by value: Kenya
+    # matches Kenya each year, so no key is dropped.
+    place = _WHO_KENYA
+    spending = DatasetRequirement(
+        id="spending",
+        decision_ids=["measure"],
+        measure="domestic health spending",
+        entities=[Entity(name=place.label)],
+        period=Period(start=2000, end=2023),
+    )
+    oda = _requirement(donors=())
+    total = AggregateRequirement(
+        id="oda_total",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="oda_total"
+    )
+    spending_source = _source(spec_id=SPEC_CRS_HEALTH, entities=(place,)).model_copy(
+        update={"identity": _pinning("HealthSpending", SPEC_CRS_HEALTH)}
+    )
+    plan = plan_for(
+        [spending, oda, total, joined],
+        [
+            RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
+            _RETRIEVE,
+            AggregateOperation(
+                id="oda_total_op",
+                requirement_id="oda_total",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+            ),
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left="who", right="oda_total_op"
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"spending": spending_source, "oda": _source(entities=(KENYA,))},
+    )
+    place_frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:HealthSpending",
+                "observationAbout": place.ref,
+                "time_period": str(year),
+                "value": 10.0 + year,
+                "unit": "usd",
+            }
+            for year in range(2000, 2024)
+        ],
+    )
+    results = {
+        SPEC_CRS_HEALTH: await retrieved(
+            spending_source,
+            frame=place_frame,
+            dimensions=[{"label": "observationAbout", "count": 1}, DIMENSIONS[-1]],
+            statistics=[
+                {
+                    "stat_var": "dcid:HealthSpending",
+                    "entities": [{"role": "observationAbout", "ref": place.ref}],
+                    "facet": {"unit": "usd"},
+                    "observations": 24,
+                    "first": {"value": 2010.0, "period": "2000"},
+                    "latest": {"value": 2033.0, "period": "2023"},
+                    "minimum": {"value": 2010.0, "period": "2000"},
+                    "maximum": {"value": 2033.0, "period": "2023"},
+                }
+            ],
+        ),
+        SPEC_CRS: await retrieved(
+            _source(entities=(KENYA,)), providers=(GERMANY, FRANCE), frame=_family_frame(kinds=True)
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert _analysis_call(surface, "join") == {
+        "join_keys": ["observationAbout"],
+        "right_keys": {"observationAbout": RECIPIENT},
+    }
+    records = outcome.steps if isinstance(outcome, Accepted) else outcome.completed
+    (join,) = [record for record in records if record.step_id == "joined_op"]
+    dropped = [line for line in join.digest.splitlines() if "unmatched_key" in line]
+    assert isinstance(outcome, Accepted), outcome
+    held, _trace = await frame_store.get(outcome.results["joined_op"])
+    assert held.num_rows == 48
+    assert dropped == []
 
 
 async def test_a_role_the_frame_has_no_column_for_refuses_before_the_call(

@@ -79,6 +79,7 @@ from planner.records import (
 from planner.shapes import (
     PLACE_PHRASE,
     ValueKind,
+    join_key_pairs,
     level_roles,
     open_on_whole_side,
     open_whole_side_reason,
@@ -197,7 +198,6 @@ class CompileIssueCode(StrEnum):
     FRAME_PRICE_BASES_DIFFER = "frame_price_bases_differ"
     FRAME_UNITS_IRRECONCILABLE = "frame_units_irreconcilable"
     PERIODS_DISJOINT = "periods_disjoint"
-    JOIN_NO_COMMON_KEY_COLUMNS = "join_no_common_key_columns"
     NO_CAPABILITY = "no_capability"
     AMBIGUOUS_CAPABILITY = "ambiguous_capability"
     UNKNOWN_TOOL = "unknown_tool"
@@ -693,7 +693,8 @@ class _Build:
                 self._check_key_axes(operation)
                 self._check_quotient_parts(operation)
             elif isinstance(operation, JoinOperation):
-                self._check_join(operation)
+                self._check_join_keys_overlap(operation)
+                self._check_join_keys_unique(operation)
             else:
                 self._check_filter(operation)
             self._check_rolling_reads_open_periods(operation)
@@ -937,15 +938,100 @@ class _Build:
         the entity the side itself names.
         """
         role = self._key_column(side, axis)
-        source = self._role_source(role) if role is not None else None
-        if role is None or role.open or source is None:
+        return {} if role is None else self._column_members(side.input, role, side=side)
+
+    def _column_members(
+        self, op_id: str, role: ResolvedRole, *, side: Side | None = None
+    ) -> dict[str, str]:
+        """The label of each entity the frame at `op_id` holds under `role`'s column, by ref.
+
+        Empty when the column is open or its source is missing. The members
+        are those the column's source resolves, narrowed by any upstream
+        filter (`_retained_labels`) and by the entity `side`, when given,
+        names.
+        """
+        source = self._role_source(role)
+        if role.open or source is None:
             return {}
-        retained = _narrowed_by_side(side, role, source, self._retained_labels(side.input, role))
+        retained = self._retained_labels(op_id, role)
+        if side is not None:
+            retained = _narrowed_by_side(side, role, source, retained)
         return {
             entity.ref: entity.label
             for entity in source.entities
             if entity.role == role.column and entity.label.casefold() in retained
         }
+
+    def _check_join_keys_overlap(self, operation: JoinOperation) -> None:
+        """Report `KEYS_DISJOINT` when a join key's two columns hold no entity in common.
+
+        analysis-mcp matches a key pair by value (`planner.shapes.join_key_pairs`),
+        so WHO's Kenya on `observationAbout` against CRS's Uganda on
+        `destination` matches no row. Each side's members are the refs its
+        source resolves under the key column that still reach the join
+        (`_column_members`). An open column, or one whose members cannot be
+        read, is left to analysis-mcp.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
+        if left is None or right is None:
+            return
+        for left_role, right_role in join_key_pairs(left.columns, right.columns):
+            if left_role.breakdown:
+                continue
+            held = self._column_members(operation.left, left_role)
+            other = self._column_members(operation.right, right_role)
+            if not held or not other or held.keys() & other.keys():
+                continue
+            self._issue(
+                CompileIssueCode.KEYS_DISJOINT,
+                f"operation {operation.id!r} joins key by key, and its left side holds "
+                f"{sorted(held.values())!r} under {left_role.column!r} while its right side "
+                f"holds {sorted(other.values())!r} under {right_role.column!r}: no entity is on "
+                "both sides, so the join would match no row",
+                operation_id=operation.id,
+            )
+            return
+
+    def _check_join_keys_unique(self, operation: JoinOperation) -> None:
+        """Report `INPUT_SHAPE_UNSUPPORTED` when a side holds several entities on a column outside its keys.
+
+        analysis-mcp joins one row per key on each side, and refuses a key
+        that repeats (`role_ambiguous`). `planner.shapes.rejects` refuses a
+        breakdown or an open party outside the keys. It cannot refuse a named
+        role, since the plan does not count the entities it names. Here the
+        resolved members do (`_column_members`): Germany and France as
+        donors beside Kenya as recipient, joined on the recipient alone,
+        repeat each key twice.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
+        if left is None or right is None:
+            return
+        pairs = join_key_pairs(left.columns, right.columns)
+        if not pairs:
+            return
+        sides = (
+            (operation.left, left, [key for key, _ in pairs]),
+            (operation.right, right, [key for _, key in pairs]),
+        )
+        for op_id, resolved, keys in sides:
+            for role in resolved.columns:
+                if role.breakdown or role.open or any(role is key for key in keys):
+                    continue
+                members = self._column_members(op_id, role)
+                if len(members) < 2:
+                    continue
+                self._issue(
+                    CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
+                    f"operation {operation.id!r} joins one row per key on each side, and "
+                    f"{op_id!r} holds {sorted(members.values())!r} under {role.column!r} beside "
+                    "its keys, so each key repeats once per member; keep one of them, with a "
+                    "`filter` or in its requirement's `entities`, or name the same entities "
+                    "under that role on the other side's requirement so the join keys on it too",
+                    operation_id=operation.id,
+                )
+                return
 
     def _check_needs_axis(self, operation: ShareOfOperation | QuotientOfOperation) -> None:
         """Report an un-keyed numerator that still carries several members.
@@ -1180,21 +1266,6 @@ class _Build:
             return None
         open_entity_axes = source.open_entity_axes or ()
         return next((axis for axis in open_entity_axes if axis.column == role.column), None)
-
-    def _check_join(self, operation: JoinOperation) -> None:
-        left = self._columns_of(operation.left)
-        right = self._columns_of(operation.right)
-        if left is None or right is None:
-            return
-        left_columns = set(left)
-        right_columns = set(right)
-        if not (left_columns & right_columns):
-            self._issue(
-                CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS,
-                f"operation {operation.id!r} joins sources that share no role column: "
-                f"{sorted(left_columns)!r} and {sorted(right_columns)!r}",
-                operation_id=operation.id,
-            )
 
     def _check_filter(self, operation: FilterOperation) -> None:
         for predicate in operation.predicates:
@@ -2321,13 +2392,28 @@ class _Build:
         return args, {"frame_ref": _frame_from(operation.input)}
 
     def _join_arguments(self, operation: JoinOperation) -> Arguments | None:
-        left = self._columns_of(operation.left)
-        right = self._columns_of(operation.right)
+        """Write every key explicitly, as `join_keys` in the left frame's names and `right_keys` mapping each to the right's.
+
+        One key per `planner.shapes.join_key_pairs` pair of the two sides'
+        resolved roles, the rule `compiler.shapes` refuses a join with none
+        on. Written for a same-name key too, so analysis-mcp matches exactly
+        the pairs that rule checked.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
         if left is None or right is None:
             return None
-        right_columns = set(right)
-        join_keys = [column for column in left if column in right_columns]
-        args: dict[str, JsonValue] = {"join_keys": join_keys}
+        columns = [
+            (left_role.column, right_role.column)
+            for left_role, right_role in join_key_pairs(left.columns, right.columns)
+        ]
+        if not columns:
+            # Already reported: `INPUT_SHAPE_UNSUPPORTED` from the same rule.
+            return None
+        args: dict[str, JsonValue] = {
+            "join_keys": [left for left, _ in columns],
+            "right_keys": dict(columns),
+        }
         bindings = {
             "frame_ref": _frame_from(operation.left),
             "right_frame_ref": _frame_from(operation.right),

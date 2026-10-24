@@ -171,15 +171,16 @@ class _Form(Enum):
 
 @dataclass(frozen=True, slots=True)
 class _ColumnSite:
-    """One argument naming role columns, and the frame parameters whose columns it names.
+    """One argument naming role columns, and the frame parameter whose columns it names.
 
-    A join key names a column on both sides, so it lists both frames and must
-    bind to one spelling on each.
+    A two-sided verb names each side's columns in an argument, or a part of
+    one, of its own: a join's `join_keys` and `right_keys`' keys on the left
+    frame, and `right_keys`' values on the right.
     """
 
     parameter: str
     form: _Form
-    frames: tuple[str, ...]
+    frame: str
 
 
 def _analysis(name: str) -> ToolId:
@@ -190,28 +191,30 @@ def _analysis(name: str) -> ToolId:
 # entity binding, the numerator's key columns, and `denominator_by`, whose keys
 # are the numerator's columns and whose values are the denominator's.
 _DIVIDING_SITES = (
-    _ColumnSite("numerator_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_entity", _Form.KEYS, ("denominator_frame_ref",)),
-    _ColumnSite("numerator_by", _Form.NAMES, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_by", _Form.KEYS, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_by", _Form.VALUES, ("denominator_frame_ref",)),
+    _ColumnSite("numerator_entity", _Form.KEYS, FRAME_PARAMETER),
+    _ColumnSite("denominator_entity", _Form.KEYS, "denominator_frame_ref"),
+    _ColumnSite("numerator_by", _Form.NAMES, FRAME_PARAMETER),
+    _ColumnSite("denominator_by", _Form.KEYS, FRAME_PARAMETER),
+    _ColumnSite("denominator_by", _Form.VALUES, "denominator_frame_ref"),
 )
 
 _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
-    _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("rank"): (_ColumnSite("rank_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("filter"): (_ColumnSite("predicates", _Form.PREDICATES, (FRAME_PARAMETER,)),),
+    _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("rank"): (_ColumnSite("rank_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("filter"): (_ColumnSite("predicates", _Form.PREDICATES, FRAME_PARAMETER),),
     _analysis("join"): (
-        _ColumnSite("join_keys", _Form.NAMES, (FRAME_PARAMETER, "right_frame_ref")),
+        _ColumnSite("join_keys", _Form.NAMES, FRAME_PARAMETER),
+        _ColumnSite("right_keys", _Form.KEYS, FRAME_PARAMETER),
+        _ColumnSite("right_keys", _Form.VALUES, "right_frame_ref"),
     ),
     _analysis("compare"): (
-        _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
+        _ColumnSite("left_entity", _Form.KEYS, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.KEYS, "right_frame_ref"),
     ),
     _analysis("sum_of"): (
-        _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
+        _ColumnSite("left_entity", _Form.KEYS, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.KEYS, "right_frame_ref"),
     ),
     _analysis("share_of"): _DIVIDING_SITES,
     _analysis("quotient_of"): _DIVIDING_SITES,
@@ -246,19 +249,15 @@ def bound_arguments(
 
     Raises:
         UnboundColumnError: If an argument names a role its frame carries no
-            column for, or a join key the two frames spell differently; or if
-            the step is rolling and `roots` is left out.
+            column for, or if the step is rolling and `roots` is left out.
     """
     rewritten = dict(arguments)
     for site in _COLUMN_SITES.get(tool, ()):
         value = rewritten.get(site.parameter)
         if value is None:
             continue
-        sides = tuple(
-            frames[parameter] if parameter in frames else frames.get(FRAME_PARAMETER)
-            for parameter in site.frames
-        )
-        rewritten[site.parameter] = _rewrite(value, site.form, partial(_spelling, sides=sides))
+        side = frames[site.frame] if site.frame in frames else frames.get(FRAME_PARAMETER)
+        rewritten[site.parameter] = _rewrite(value, site.form, partial(_spelling, sides=(side,)))
     population = rolling_population(rewritten)
     if population is not None:
         if roots is None:

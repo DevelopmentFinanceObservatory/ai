@@ -1362,7 +1362,7 @@ def test_a_join_step_writes_the_role_columns_both_sources_share(
     assert result.workflow is not None
     step = result.workflow.steps[-1]
     assert step.tool.name == "join"
-    assert step.args == {"join_keys": ["destination"]}
+    assert step.args == {"join_keys": ["destination"], "right_keys": {"destination": "destination"}}
     assert step.bindings == {
         "frame_ref": Binding(from_step="debt", output=ArtifactKind.FRAME_REF),
         "right_frame_ref": Binding(from_step="gdp", output=ArtifactKind.FRAME_REF),
@@ -4199,33 +4199,262 @@ def test_a_sum_of_a_sum_is_checked_through_to_every_source(
         assert result.ok, result.issues
 
 
-def test_join_needs_two_sources_that_share_a_role_column(
+_WHO_KENYA = ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya")
+_WHO_UGANDA = ResolvedEntity(role="observationAbout", ref="country/UGA", label="Uganda")
+
+
+@pytest.mark.parametrize(
+    "place", [_WHO_KENYA, _WHO_UGANDA], ids=["kenya-beside-kenya", "uganda-beside-kenya"]
+)
+def test_a_join_pairs_a_place_with_the_one_flow_party_the_other_side_keeps(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    place: ResolvedEntity,
+) -> None:
+    # A place series on `observationAbout` beside the debt Kenya pays on
+    # `destination`: the join keys the one column each side keeps, matched
+    # by value. Uganda beside Kenya would match no row, so it is
+    # `keys_disjoint`, as two keyed division sides holding no entity in
+    # common are.
+    spending = requirement(
+        id="spending", measure="domestic health spending", entities=[Entity(name=place.label)]
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="annual_debt_service"
+    )
+    plan = _draft([decision()], [spending, requirement(), joined])
+    join_op = JoinOperation(id="joined", requirement_id="joined", left="health", right="debt")
+    retrieve_spending = _retrieve(id="health", requirement_id="spending", spec_id=SPEC_OTHER)
+
+    result = build(
+        plan,
+        _translation(retrieve_spending, _retrieve(), join_op, terminal=["joined"]),
+        discovered={
+            "spending": source(spec_id=SPEC_OTHER, entities=(place,)),
+            "annual_debt_service": source(),
+        },
+    )
+
+    if place is _WHO_UGANDA:
+        (issue,) = result.issues
+        assert issue.code is Code.KEYS_DISJOINT
+        assert "['Uganda'] under 'observationAbout'" in issue.reason
+        assert "['Kenya'] under 'destination'" in issue.reason
+        return
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    step = result.workflow.steps[-1]
+    assert step.args == {
+        "join_keys": ["observationAbout"],
+        "right_keys": {"observationAbout": "destination"},
+    }
+    assert step.expected_role_keys == _frame_role_columns(["observationAbout"])
+
+
+def test_a_join_pairs_a_place_with_a_group_holding_it(
     build: Callable[..., CompileResult],
     decision: DecisionFactory,
     requirement: RequirementFactory,
     source: SourceFactory,
 ) -> None:
-    gdp = requirement(id="annual_gdp", measure="gross domestic product")
-    joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="annual_debt_service", right_id="annual_gdp"
+    # "Africa" names a set whose members, Kenya among them, the CRS source
+    # binds on `destination`, so Kenya's place series shares Kenya with it.
+    spending = requirement(
+        id="spending", measure="domestic health spending", entities=[Entity(name="Kenya")]
     )
-    plan = _draft([decision()], [requirement(), gdp, joined])
-    join_op = JoinOperation(id="joined", requirement_id="joined", left="debt", right="gdp")
-    retrieve_gdp = _retrieve(id="gdp", requirement_id="annual_gdp", spec_id=SPEC_OTHER)
+    aid = requirement(id="aid", measure="ODA", entities=[Entity(name="Africa", role="recipient")])
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="aid"
+    )
+    plan = _draft([decision()], [spending, aid, joined])
+    join_op = JoinOperation(id="joined", requirement_id="joined", left="health", right="oda")
 
     result = build(
         plan,
-        _translation(_retrieve(), retrieve_gdp, join_op, terminal=["joined"]),
+        _translation(
+            _retrieve(id="health", requirement_id="spending", spec_id=SPEC_OTHER),
+            _retrieve(id="oda", requirement_id="aid"),
+            join_op,
+            terminal=["joined"],
+        ),
         discovered={
-            "annual_debt_service": source(),
-            "annual_gdp": source(
-                spec_id=SPEC_OTHER,
-                entities=(ResolvedEntity(role="creditor", ref="country/CHN", label="China"),),
+            "spending": source(spec_id=SPEC_OTHER, entities=(_WHO_KENYA,)),
+            "aid": source(
+                entities=_AFRICAN_RECIPIENTS,
+                groups=(ResolvedGroup(role="destination", label="Africa", ref="africa"),),
             ),
         },
     )
 
-    assert Code.JOIN_NO_COMMON_KEY_COLUMNS in _codes(result)
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    assert result.workflow.steps[-1].args == {
+        "join_keys": ["observationAbout"],
+        "right_keys": {"observationAbout": "destination"},
+    }
+
+
+_DONORS = {
+    "Germany": ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),
+    "France": ResolvedEntity(role="origin", ref="country/FRA", label="France"),
+}
+
+
+@pytest.mark.parametrize(
+    ("donors", "refused"),
+    [(["Germany", "France"], True), (["Germany"], False)],
+    ids=["two-donors-beside-the-key", "one-donor-beside-the-key"],
+)
+def test_a_join_refuses_a_side_holding_several_entities_beside_its_keys(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    donors: list[str],
+    refused: bool,
+) -> None:
+    # CRS aid to Kenya from the named donors against the debt Kenya pays,
+    # joined on Kenya alone: two donors put two rows under each key.
+    kenya = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
+    aid = requirement(
+        id="aid",
+        measure="bilateral ODA",
+        entities=[
+            Entity(name="Kenya", role="recipient"),
+            *(Entity(name=d, role="donor") for d in donors),
+        ],
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="aid", right_id="annual_debt_service"
+    )
+    plan = _draft([decision()], [aid, requirement(), joined])
+    join_op = JoinOperation(id="joined", requirement_id="joined", left="oda", right="debt")
+
+    result = build(
+        plan,
+        _translation(
+            _retrieve(id="oda", requirement_id="aid", spec_id=SPEC_OTHER),
+            _retrieve(),
+            join_op,
+            terminal=["joined"],
+        ),
+        discovered={
+            "aid": source(spec_id=SPEC_OTHER, entities=(kenya, *(_DONORS[d] for d in donors))),
+            "annual_debt_service": source(),
+        },
+    )
+
+    if not refused:
+        assert result.ok, result.issues
+        return
+    (issue,) = result.issues
+    assert issue.code is Code.INPUT_SHAPE_UNSUPPORTED
+    assert "'oda' holds ['France', 'Germany'] under 'origin'" in issue.reason
+
+
+def test_a_join_whose_columns_leave_no_pair_is_refused_by_the_shared_rule(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # The plan pairs Kenya's place with Uganda's place, but the flow source
+    # resolves no Uganda, so the side keeps every column it carries: both
+    # parties of the flow, against one place.
+    spending = requirement(
+        id="spending", measure="domestic health spending", entities=[Entity(name="Kenya")]
+    )
+    gdp = requirement(
+        id="annual_gdp", measure="gross domestic product", entities=[Entity(name="Uganda")]
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="annual_gdp"
+    )
+    plan = _draft([decision()], [spending, gdp, joined])
+    join_op = JoinOperation(id="joined", requirement_id="joined", left="health", right="gdp")
+
+    result = build(
+        plan,
+        _translation(
+            _retrieve(id="health", requirement_id="spending", spec_id=SPEC_OTHER),
+            _retrieve(id="gdp", requirement_id="annual_gdp"),
+            join_op,
+            terminal=["joined"],
+        ),
+        discovered={
+            "spending": source(spec_id=SPEC_OTHER, entities=(_WHO_KENYA,)),
+            "annual_gdp": source(
+                entities=(
+                    ResolvedEntity(role="origin", ref="country/CHN", label="China"),
+                    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+                )
+            ),
+        },
+    )
+
+    (issue,) = [issue for issue in result.issues if issue.operation_id == "joined"]
+    assert issue.code is Code.INPUT_SHAPE_UNSUPPORTED
+    assert (
+        "one side keeps ['observationAbout'] while the other keeps ['destination', 'origin']"
+        in (issue.reason)
+    )
+
+
+def test_a_place_word_across_names_one_join_key_in_the_plan_and_the_compile(
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    # "countries" covers WHO's `observationAbout` and, on the CRS side, the
+    # one open flow axis, `destination`. The plan marks both a place; the
+    # compiler keeps the flow axis's party unmarked under the same word. Both
+    # name it the place, so the plan admitted is the plan compiled.
+    countries = ["countries"]
+    spending = requirement(
+        id="spending", measure="domestic health spending", entities=[], across=countries
+    )
+    aid = requirement(
+        id="aid",
+        measure="bilateral ODA",
+        entities=[Entity(name="Germany", role="donor")],
+        across=countries,
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="aid"
+    )
+    plan = _draft([decision()], [spending, aid, joined])
+    join_op = JoinOperation(id="joined", requirement_id="joined", left="health", right="oda")
+
+    result = build(
+        plan,
+        _translation(
+            _retrieve(id="health", requirement_id="spending", spec_id=SPEC_OTHER),
+            _retrieve(id="oda", requirement_id="aid"),
+            join_op,
+            terminal=["joined"],
+        ),
+        discovered={
+            "spending": source(
+                spec_id=SPEC_OTHER,
+                entities=(),
+                open_entity_axes=(OpenEntityAxis(column="observationAbout", member_count=193),),
+            ),
+            "aid": source(
+                entities=(ResolvedEntity(role="origin", ref="country/DEU", label="Germany"),),
+                open_entity_axes=(OpenEntityAxis(column="destination", member_count=30),),
+            ),
+        },
+    )
+
+    assert Code.INPUT_SHAPE_UNSUPPORTED not in _codes(result), result.issues
+    assert result.workflow is not None, result.issues
+    assert result.workflow.steps[-1].args == {
+        "join_keys": ["observationAbout"],
+        "right_keys": {"observationAbout": "destination"},
+    }
 
 
 def test_join_keys_fall_back_to_every_role_column_when_the_requirement_resolves_none(
@@ -4252,7 +4481,7 @@ def test_join_keys_fall_back_to_every_role_column_when_the_requirement_resolves_
     )
 
     assert Code.SOURCE_UNUSABLE in _codes(result)
-    assert Code.JOIN_NO_COMMON_KEY_COLUMNS not in _codes(result)
+    assert not [issue for issue in result.issues if issue.operation_id == "joined"]
 
 
 def test_filter_entity_names_must_be_an_entity_of_the_upstream_requirement(

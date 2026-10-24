@@ -1326,8 +1326,9 @@ class QuotientRequirement(TaggedModel):
         return self
 
 
-# analysis-mcp inner-joins on `time_period` and whatever role columns the two
-# sources share. The compiler writes those keys.
+# analysis-mcp inner-joins on `time_period` and the keys the compiler writes,
+# the role pairs `planner.shapes.join_key_pairs` finds. `_join_shape` refuses
+# a join with none.
 class JoinRequirement(TaggedModel):
     """Join two requirements' results into one frame.
 

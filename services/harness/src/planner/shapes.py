@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final, Literal, Protocol
 
-from planner.parties import across_party
+from planner.parties import across_party, flow_side
 from planner.records import (
     DenominatorScope,
     GrowthChange,
@@ -378,7 +378,7 @@ class LevelRole(NamedRole, Protocol):
 
 
 class SideRole(NamedRole, Protocol):
-    """What `open_on_whole_side` reads of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
+    """What `open_on_whole_side` and `join_key_pairs` read of a role dimension: a `RoleDimension`, or the compiler's wrapper of one."""
 
     @property
     def open(self) -> bool: ...
@@ -452,6 +452,58 @@ def open_whole_side_reason(role: SideRole, *, one_figure: bool, keyable: bool = 
         f"cannot say which it reads; {key}name them in the requirement's `entities`, or "
         f"{pooling_remedy(one_figure=one_figure, each_side=True)}"
     )
+
+
+def _join_name(role: SideRole) -> str | None:
+    """The name `join_key_pairs` matches `role` under on the other side, `None` for none.
+
+    Every place dimension is one name, whatever word states it, and so is
+    every dimension a place word states (`across_party`). The plan marks an
+    `across` of "countries" a place, while the compiler, which knows the
+    axis it covers, keeps a flow axis's party unmarked under the same word.
+    A flow party is named by its side of the flow
+    (`planner.parties.flow_side`), since "donor" and "creditor" both sit in
+    the giving column (`origin`). Any other dimension, a breakdown's above
+    all, is named by its role.
+    """
+    if role.place or (role.role is not None and across_party(role.role) == "place"):
+        return PLACE_PHRASE
+    if role.role is None:
+        return None
+    return flow_side(role.role) or role.role
+
+
+def _named_once(names: Sequence[str | None]) -> dict[str, int]:
+    """The position of each name `names` holds exactly once."""
+    return {
+        name: at for at, name in enumerate(names) if name is not None and names.count(name) == 1
+    }
+
+
+def join_key_pairs[R: SideRole](left: Sequence[R], right: Sequence[R]) -> tuple[tuple[R, R], ...]:
+    """The pairs of role dimensions `join` matches `left`'s rows to `right`'s on, empty for none.
+
+    A pair is a dimension each side carries under one name (`_join_name`),
+    in `left`'s order. Where the two share no entity dimension and each
+    keeps exactly one entity dimension, those two are one more pair: one
+    place each, read on different columns, such as WHO's `observationAbout`
+    against CRS's `destination`, matched by value. A side keeping both
+    parties of a flow leaves no such pair, since only the question says
+    which party the other side's place stands for. An entity dimension is
+    any but a breakdown's. `planner.plan` and `compiler.shapes` refuse a
+    join with no pair (`rejects`), and `compiler.compile` writes each pair's
+    columns as the join's keys.
+    """
+    left_names = [_join_name(role) for role in left]
+    right_names = [_join_name(role) for role in right]
+    left_at, right_at = _named_once(left_names), _named_once(right_names)
+    pairs = [(left_at[name], right_at[name]) for name in left_at if name in right_at]
+    if all(left[at].breakdown for at, _ in pairs):
+        left_rest = [at for at, role in enumerate(left) if not role.breakdown]
+        right_rest = [at for at, role in enumerate(right) if not role.breakdown]
+        if len(left_rest) == 1 and len(right_rest) == 1:
+            pairs.append((left_rest[0], right_rest[0]))
+    return tuple((left[at], right[other]) for at, other in pairs)
 
 
 def place_role(role: str | None) -> bool:
@@ -1670,20 +1722,19 @@ def summed_sides(left: FrameShape, right: FrameShape) -> FrameShape:
 
 
 def joined(left: FrameShape, right: FrameShape) -> FrameShape:
-    """The shape `join` produces: the two sides' shared role dimensions, two measures.
+    """The shape `join` produces: `left`'s dimension of each key pair, two measures.
 
     Terminal by contract, so nothing downstream reads this shape and the
     one-side lineage rule does not apply to it -- a joined frame's role
     dimensions may, unlike every non-terminal verb's, name more than one
-    requirement. `left`'s own `RoleDimension` is kept for each shared role,
-    sorted by role name for a deterministic result.
+    requirement. `left`'s own `RoleDimension` is kept for each pair
+    (`join_key_pairs`), as analysis-mcp names each key column by the left
+    side's, sorted by role name for a deterministic result.
     """
-    left_by_role = {role.role: role for role in left.roles if role.role is not None}
-    right_role_names = {role.role for role in right.roles if role.role is not None}
     shared_roles = tuple(
         sorted(
             _without_level_filterability(
-                tuple(role for name, role in left_by_role.items() if name in right_role_names)
+                tuple(role for role, _ in join_key_pairs(left.roles, right.roles))
             ),
             key=lambda role: role.role or "",
         )
@@ -2696,8 +2747,61 @@ def _rejects_sum_of(shape: FrameShape, *, other: FrameShape | None = None) -> st
     return None
 
 
+def _rejects_join_keys(shape: FrameShape, other: FrameShape | None) -> str | None:
+    """Why `join` cannot match `shape`'s rows one to one with `other`'s, or `None` when it can.
+
+    With no pair (`join_key_pairs`) nothing says which rows match. A
+    breakdown or an open party `shape` keeps outside its pairs holds several
+    rows for each key, which analysis-mcp refuses as an ambiguous key: the
+    open party holds every member of a party nobody named, at least two,
+    and a breakdown every code.
+    """
+    if other is None:
+        return None
+    pairs = join_key_pairs(shape.roles, other.roles)
+    if not pairs:
+        kept, other_kept = (
+            axis_phrases([role for role in side.roles if not role.breakdown])
+            for side in (shape, other)
+        )
+        return (
+            "join matches the two sides' rows on an entity role both carry, or on the one "
+            f"entity role each side keeps, and one side keeps {kept!r} while the other keeps "
+            f"{other_kept!r}; keep one entity role on each side, summing an `across` party "
+            "away with an `aggregate` or leaving a named party out of its requirement's "
+            "`entities`, or name the shared entity under one role on both requirements; or "
+            "compare them instead"
+        )
+    paired = [role for role, _ in pairs]
+    extra = next(
+        (
+            role
+            for role in shape.roles
+            if (role.breakdown or role.open) and all(role is not key for key in paired)
+        ),
+        None,
+    )
+    if extra is None:
+        return None
+    held = (
+        f"the breakdown by {extra.role!r}, one row per code"
+        if extra.breakdown
+        else f"every {extra.role!r}, a party nobody named"
+    )
+    return (
+        f"join matches one row on each side per key, and {extra.requirement_id!r} keeps "
+        f"{held}, beyond the keys it shares with the other side, so each key holds several "
+        "rows; sum it away first with an `aggregate` whose `group_by` leaves it out, or "
+        "state the same on the other side's requirement so the two match on it"
+    )
+
+
 def _rejects_join(shape: FrameShape, *, other: FrameShape | None = None) -> str | None:
-    return _several_measures("join", shape) or _rejects_paired_periods("join", shape, other)
+    return (
+        _several_measures("join", shape)
+        or _rejects_paired_periods("join", shape, other)
+        or _rejects_join_keys(shape, other)
+    )
 
 
 _REJECT_RULES: dict[ShapeVerb, Callable[..., str | None]] = {

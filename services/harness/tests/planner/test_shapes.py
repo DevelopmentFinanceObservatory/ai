@@ -31,6 +31,7 @@ from planner.shapes import (
     compared,
     filtered,
     grown,
+    join_key_pairs,
     joined,
     quotiented,
     ranked,
@@ -51,8 +52,17 @@ def _role(
     narrowed: bool = False,
     *,
     open: bool = False,
+    place: bool = False,
+    breakdown: bool = False,
 ) -> RoleDimension:
-    return RoleDimension(role=role, requirement_id=requirement_id, narrowed=narrowed, open=open)
+    return RoleDimension(
+        role=role,
+        requirement_id=requirement_id,
+        narrowed=narrowed,
+        open=open,
+        place=place,
+        breakdown=breakdown,
+    )
 
 
 def _shape(
@@ -571,6 +581,104 @@ def test_joined_keeps_only_the_shared_role_dimensions_from_the_left_side():
     assert out.value is ValueKind.MEASURED
     assert out.time is TimeLabel.OBSERVATION
     assert out.roots == ("req_a", "req_b")
+
+
+_PLACE = _role(role=None, place=True)
+_SECTOR = _role(role="sector", breakdown=True)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "pairs"),
+    [
+        pytest.param((_role(),), (_role(),), [("donor", "donor")], id="same-role"),
+        pytest.param(
+            (_role(role="creditor"),),
+            (_role(role="donor"),),
+            [("creditor", "donor")],
+            id="same-side-of-a-flow",
+        ),
+        pytest.param(
+            (_PLACE,), (_role(role="recipient"),), [(None, "recipient")], id="one-place-each"
+        ),
+        pytest.param(
+            (_SECTOR, _PLACE),
+            (_role(role="recipient"), _SECTOR),
+            [("sector", "sector"), (None, "recipient")],
+            id="a-shared-breakdown-and-one-place-each",
+        ),
+        pytest.param(
+            (_PLACE, _role()),
+            (_PLACE, _role(role="recipient")),
+            [(None, None)],
+            id="a-shared-place-leaves-the-parties-unpaired",
+        ),
+        pytest.param(
+            (_PLACE,), (_role(), _role(role="recipient")), [], id="flow-side-keeps-both-parties"
+        ),
+        pytest.param((_PLACE,), (), [], id="a-side-keeping-no-entity"),
+        pytest.param((_PLACE, _PLACE), (_PLACE,), [], id="one-name-twice-on-a-side"),
+    ],
+)
+def test_join_key_pairs_match_one_name_or_the_one_entity_role_each_side_keeps(
+    left: tuple[RoleDimension, ...],
+    right: tuple[RoleDimension, ...],
+    pairs: list[tuple[str | None, str | None]],
+):
+    found = join_key_pairs(left, right)
+    assert [(one.role, other.role) for one, other in found] == pairs
+    reason = rejects(ShapeVerb.JOIN, _shape(roles=left), other=_shape(roles=right))
+    assert (reason is None) is bool(pairs)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "held"),
+    [
+        pytest.param(
+            (_PLACE,),
+            (_role(role="recipient"), _SECTOR),
+            "the breakdown by 'sector'",
+            id="a-breakdown-beside-an-inferred-pair",
+        ),
+        pytest.param(
+            (_role(role="recipient"),),
+            (
+                _role(role="recipient", requirement_id="req_b"),
+                _role(open=True, requirement_id="req_b"),
+            ),
+            "every 'donor'",
+            id="an-open-party-beside-a-shared-role",
+        ),
+        pytest.param((_SECTOR, _PLACE), (_SECTOR, _PLACE), None, id="every-breakdown-paired"),
+    ],
+)
+def test_a_join_refuses_a_breakdown_or_open_party_outside_its_pairs(
+    left: tuple[RoleDimension, ...], right: tuple[RoleDimension, ...], held: str | None
+):
+    left_shape, right_shape = _shape(roles=left), _shape(roles=right)
+    reasons = [
+        rejects(ShapeVerb.JOIN, shape, other=other)
+        for shape, other in ((left_shape, right_shape), (right_shape, left_shape))
+    ]
+    if held is None:
+        assert reasons == [None, None]
+        return
+    assert reasons[0] is None
+    assert reasons[1] is not None
+    assert held in reasons[1]
+
+
+def test_a_place_word_names_the_place_whichever_layer_marks_it():
+    # The plan marks an `across` of "countries" a place; the compiler keeps it
+    # unmarked when the word covers a flow axis.
+    unmarked = _role(role="countries", open=True)
+    assert [
+        (one.role, other.role) for one, other in join_key_pairs((_PLACE,), (unmarked, _role()))
+    ] == [(None, "countries")]
+
+
+def test_joined_keeps_the_left_dimension_of_a_pair_on_different_roles():
+    out = joined(_shape(roles=(_PLACE,)), _shape(roles=(_role(role="recipient"),)))
+    assert out.roles == (_PLACE,)
 
 
 # --- the narrow-lineage invariant ---------------------------------------------

@@ -42,9 +42,10 @@ side, not landing in the stop bucket by omission:
 - `TRANSIENT_CODES`: waiting helps; retried up to the attempt limit.
 - `COMPILER_PROVABLE_CODES`: stops, because the compiler already rules them
   out. It writes every column list (`group_by`, `entity_by`, `rank_by`,
-  `join_keys`) from the source's own roles, validates every argument against
-  the tool's live schema, checks the capability implements the operation
-  kind, reports `join_no_common_key_columns` itself, and writes every
+  `join_keys`, `right_keys`) from the source's own roles, validates every
+  argument against the tool's live schema, checks the capability implements
+  the operation kind, writes every join key explicitly, so analysis-mcp has no
+  keys to detect (`join_no_common_key_columns`), and writes every
   predicate in the frame grammar's own shape. One of these reaching the
   executor is a compiler bug, not a choice for the user. `share_of_key_unknown`
   belongs here too: the compiler writes `denominator_by` either empty

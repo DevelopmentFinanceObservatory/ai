@@ -212,7 +212,6 @@ def test_a_failure_code_sits_in_one_class_and_in_no_other_table() -> None:
     assert not (classed - seam) & (sentenced | {str(code) for code in ProblemCode})
     assert classed & {str(code) for code in CompileIssueCode} == {
         "entity_ambiguous",
-        "join_no_common_key_columns",
         "unknown_tool",
     }
 
