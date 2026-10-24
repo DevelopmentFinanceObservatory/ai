@@ -94,9 +94,18 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34",
+        "source_spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623",
         "across": [
           "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "all_by_year",
+        "input_id": "all_oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
         ]
       },
       {
@@ -106,7 +115,7 @@
           "input_id": "germany"
         },
         "denominator": {
-          "input_id": "all_oda"
+          "input_id": "all_by_year"
         }
       }
     ],
@@ -119,82 +128,5 @@
       }
     ]
   },
-  "alternative_payloads": [
-    {
-      "description": "Total all donors by year first, then take Germany's share.",
-      "payload": {
-        "question": "What share of all ODA to Ethiopia came from Germany in each year from 2015 to 2022?",
-        "answer_mode": "computed",
-        "decisions": [],
-        "evidence_requirements": [
-          {
-            "kind": "dataset",
-            "id": "germany",
-            "measure": "ODA from Germany",
-            "entities": [
-              {
-                "name": "Germany",
-                "role": "donor"
-              },
-              {
-                "name": "Ethiopia",
-                "role": "recipient"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2022
-            },
-            "source_spec_id": "spec_7260efcbb3415bb4165b132109c153eb"
-          },
-          {
-            "kind": "dataset",
-            "id": "all_oda",
-            "measure": "all ODA",
-            "entities": [
-              {
-                "name": "Ethiopia",
-                "role": "recipient"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2022
-            },
-            "source_spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34",
-            "across": [
-              "donor"
-            ]
-          },
-          {
-            "kind": "aggregate",
-            "id": "all_by_year",
-            "input_id": "all_oda",
-            "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
-          },
-          {
-            "kind": "share_of",
-            "id": "share",
-            "numerator": {
-              "input_id": "germany"
-            },
-            "denominator": {
-              "input_id": "all_by_year"
-            }
-          }
-        ],
-        "answered": [
-          {
-            "ask": 0,
-            "outputs": [
-              "share"
-            ]
-          }
-        ]
-      }
-    }
-  ]
+  "alternative_payloads": []
 }

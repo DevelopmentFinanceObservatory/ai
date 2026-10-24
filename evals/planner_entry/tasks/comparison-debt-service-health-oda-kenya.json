@@ -1,0 +1,116 @@
+{
+  "id": "comparison-debt-service-health-oda-kenya",
+  "kind": "comparison",
+  "origin": "pilot",
+  "question": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
+  "searches": [
+    {
+      "query": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
+      "parts": [
+        {
+          "variable": "external debt service",
+          "entities": [
+            {
+              "text": "Kenya"
+            }
+          ],
+          "time": "2016 to 2021"
+        },
+        {
+          "variable": "ODA for health",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "time": "2016 to 2021"
+        }
+      ]
+    }
+  ],
+  "brief": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
+  "asks": [
+    "How much larger Kenya's external debt service was than the ODA it received for health, each year 2016 to 2021"
+  ],
+  "required_kinds": [
+    "dataset",
+    "comparison"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "comparison"
+  ],
+  "neighbour": {
+    "kind": "join",
+    "distinction": "comparison, not join: the question asks how much larger one measure is than another"
+  },
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "How much larger was Kenya's external debt service than the ODA it received for health in each year from 2016 to 2021?",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "debt_service",
+        "measure": "external debt service",
+        "entities": [
+          {
+            "name": "Kenya"
+          }
+        ],
+        "period": {
+          "start": 2016,
+          "end": 2021
+        }
+      },
+      {
+        "kind": "dataset",
+        "id": "health",
+        "measure": "ODA for health received",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2016,
+          "end": 2021
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "health_total",
+        "input_id": "health",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "comparison",
+        "id": "gap",
+        "minuend": {
+          "input_id": "debt_service"
+        },
+        "subtrahend": {
+          "input_id": "health_total"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "gap"
+        ]
+      }
+    ]
+  }
+}

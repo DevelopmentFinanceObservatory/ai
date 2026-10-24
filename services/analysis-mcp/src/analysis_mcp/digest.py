@@ -1363,7 +1363,6 @@ def _matched_key_line(matched: MatchedKey) -> str:
 
 def render_join_digest(
     *,
-    join_keys: Sequence[str],
     result: JoinResult,
     op_spec_hash: str,
     content_version: str,
@@ -1374,7 +1373,13 @@ def render_join_digest(
 ) -> str:
     """Render `result` (from `analysis_mcp.engine.join.run_join`) into the
     digest text a successful `join` tool call returns."""
-    join_keys_text = ", ".join(join_keys) if join_keys else "(none -- time_period only)"
+    join_keys_text = (
+        ", ".join(
+            left if left == right else f"{left}={right}"
+            for left, right in zip(result.join_keys, result.right_key_columns, strict=True)
+        )
+        or "(none -- time_period only)"
+    )
     header = (
         f"join: on {join_keys_text} + time_period, {len(result.matched_keys)} matched key(s) "
         f"({result.left_dropped_key_count} left-only, {result.right_dropped_key_count} "

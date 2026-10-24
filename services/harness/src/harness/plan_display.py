@@ -43,7 +43,8 @@ import typing
 from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
-from compiler.sources import stat_var_count
+from compiler.shapes import breakdown_level
+from compiler.sources import stat_var_count, stat_var_count_is_floor
 from planner.parties import across_party, singular
 from planner.phrasing import (
     among_phrase,
@@ -446,12 +447,19 @@ def _breakdown_of(requirement: EvidenceRequirement, plan: Plan) -> Breakdown | N
     return breakdowns.pop() if len(breakdowns) == 1 else None
 
 
-def _breakdown_clause(breakdown: Breakdown) -> str:
-    """How a retrieval breaks its total down, in words."""
+def _breakdown_clause(breakdown: Breakdown, source: SelectedSource | None) -> str:
+    """How a retrieval breaks its total down, in words, at the level it reads.
+
+    With a selected source that is the level the codes it names set
+    (`compiler.shapes.breakdown_level`); before compile, or with a named
+    code's path unread, the plan's own.
+    """
+    read = None if source is None else breakdown_level(breakdown, source)
+    depth = breakdown.level if read is None else read
     level = (
         "the top level of its hierarchy"
-        if breakdown.level == 0
-        else f"level {breakdown.level} below the top of its hierarchy"
+        if depth == 0
+        else f"level {depth} below the top of its hierarchy"
     )
     return f"broken down by {breakdown.dimension.value}, each code rolled up to {level}"
 
@@ -781,7 +789,7 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     source = _selected_source(requirement.id, plan)
     clauses: list[str] = []
     if requirement.breakdown is not None:
-        clauses.append(_breakdown_clause(requirement.breakdown))
+        clauses.append(_breakdown_clause(requirement.breakdown, source))
     # A breakdown sums the family within each code, so no reading of its members applies.
     elif source is not None and (reading := _reading_clause(source)):
         clauses.append(reading)
@@ -840,11 +848,14 @@ def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) ->
 def _reading_clause(source: SelectedSource) -> str | None:
     """How the retrieval reads `source`'s family of StatVars, or `None` for a source binding one.
 
-    Counts the family as the source does (`stat_var_count`). A family
-    counted at fewer than two members is named without a count, since its
-    retrieval holds every member with data. Says when the reading is the
-    compiler's default (`ReadingSetBy.RULE`), so the user knows the plan can
-    be amended to read it the other way.
+    The user reads a StatVar as an indicator, the noun the card attribution
+    counts them by. Counts the family as the source does (`stat_var_count`).
+    A family counted at fewer than two members, or at a floor
+    (`stat_var_count_is_floor`), is named without a count: its retrieval
+    holds every member with data, which can be more or fewer than the
+    members `search` confirmed. Says when the reading is the compiler's
+    default (`ReadingSetBy.RULE`), so the user knows the plan can be amended
+    to read it the other way.
 
     A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
@@ -857,13 +868,13 @@ def _reading_clause(source: SelectedSource) -> str | None:
     if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
     summed = source.stat_var_reading is StatVarReading.SUM
-    if count < 2:
-        clause = "summed over its StatVars" if summed else "kept as separate StatVars"
+    if count < 2 or stat_var_count_is_floor(source):
+        clause = "summed over its indicators" if summed else "kept as separate indicators"
     else:
         clause = (
-            f"summed over its {count:,} StatVars"
+            f"summed over its {count:,} indicators"
             if summed
-            else f"kept as {count:,} separate StatVars"
+            else f"kept as {count:,} separate indicators"
         )
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 

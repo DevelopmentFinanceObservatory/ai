@@ -1,39 +1,65 @@
 {
   "answers": [
     "7b4aa87b07e431e3",
-    "7b9ab0b7935329e7",
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
     "b74643ca4ed0103c",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:47+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T12:02:34+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "f471c26c842ce8082b9678204b2ce7ac664ff260",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
+            "jev_input_tokens": 3881,
+            "jev_output_tokens": 740,
             "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
             "by_step": {
-              "response_cache_layer2": 1
+              "coverage": 0
             },
-            "total": 4
+            "total": 1102
           },
-          "trace_id": "b04e8fcccb944b44a4f506f13962f385",
+          "trace_id": "25dcad397ebb493eafdce8792f3833ee",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [
+              {
+                "binding_ref": "how:dac2aAidType",
+                "kind": "declared_default",
+                "refs": [
+                  "DAC2aAidType206"
+                ],
+                "text": "official development assistance"
+              }
+            ],
             "departures": [],
+            "entity_refs": [
+              {
+                "refs": [
+                  "GroupOfSeven"
+                ],
+                "text": "G7"
+              },
+              {
+                "refs": [
+                  "DACAfrica"
+                ],
+                "text": "Africa"
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -209,7 +235,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -234,7 +260,7 @@
                     "start_year": 1965
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "45bdd65f2fd33ac77a897180047080d33ed9db812afe0cbb887bf22e2ac52690",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -269,7 +295,9 @@
                     "total": "DACAfrica"
                   },
                   "origin": {
-                    "label": "G7",
+                    "entity_type": "Grouping",
+                    "label": "Group of Seven",
+                    "ref": "GroupOfSeven",
                     "total": "GroupOfSeven"
                   }
                 },
@@ -316,6 +344,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -890,7 +919,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_9deef72763b45f40",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -915,6 +944,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2750,7 +2780,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -2998,20 +3028,35 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 9,
-                "bind": 873,
-                "materialise": 32,
-                "options": 12,
-                "recall": 362,
-                "shape": 583
+                "answer": 251,
+                "bind": 96,
+                "materialise": 15,
+                "options": 7,
+                "phase_bind": 25,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 41,
+                "phase_place_bindings": 1,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 92,
+                "phase_settle": 8,
+                "recall": 258,
+                "shape": 304,
+                "shape_admission": 206,
+                "shape_arcs": 2,
+                "shape_groups": 4,
+                "shape_labels": 0,
+                "shape_probe": 0
               },
-              "total": 1871
+              "total": 1098
             },
             "variable_text": "Total aid",
             "warnings": [
               {
                 "code": "slot_defaulted",
-                "message": "No aid type was named, so the answer covers official development assistance.",
+                "message": "The answer covers official development assistance of every aid type.",
                 "severity": "warn"
               }
             ]
@@ -3022,7 +3067,7 @@
           "extract_skipped": true,
           "raw_query": "Total aid from G7 to Africa since 1965"
         },
-        "rendered_sentence": "Gross disbursements to Africa (DAC) from Group of Seven for official development assistance, 1965 to 2024. Current US dollars \u00b7 OECD DAC2a.",
+        "rendered_sentence": "Gross disbursements to Africa (DAC) from Group of Seven for official development assistance, 1965 to 2024. Current US dollars \u00b7 OECD DAC2a. Assumed: official development assistance.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -3205,11 +3250,43 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "official development assistance"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -3239,23 +3316,43 @@
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "f471c26c842ce8082b9678204b2ce7ac664ff260",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 3234,
-            "output_tokens": 161
+            "input_tokens": 0,
+            "jev_input_tokens": 7495,
+            "jev_output_tokens": 1822,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 4436
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 3127
           },
-          "trace_id": "9e7a9218b0d74425ba9c9caf9200a35d",
+          "trace_id": "0573a6f1358c48c1b074aa42c08f16ea",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
+            "entity_refs": [
+              {
+                "refs": [
+                  "GroupOfSeven"
+                ],
+                "text": "G7"
+              },
+              {
+                "refs": [
+                  "DACAfrica"
+                ],
+                "text": "Africa"
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -3477,7 +3574,7 @@
                     "start_year": 1965
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "45bdd65f2fd33ac77a897180047080d33ed9db812afe0cbb887bf22e2ac52690",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -3512,7 +3609,9 @@
                     "total": "DACAfrica"
                   },
                   "origin": {
-                    "label": "G7",
+                    "entity_type": "Grouping",
+                    "label": "Group of Seven",
+                    "ref": "GroupOfSeven",
                     "total": "GroupOfSeven"
                   }
                 },
@@ -3559,6 +3658,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -4138,7 +4238,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_9deef72763b45f40",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -4176,6 +4276,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -6011,7 +6112,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -6259,14 +6360,29 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 165,
-                "bind": 1493,
-                "materialise": 66,
-                "options": 9,
-                "recall": 647,
-                "shape": 1386
+                "answer": 193,
+                "bind": 132,
+                "materialise": 15,
+                "options": 6,
+                "phase_bind": 636,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 25,
+                "phase_materialise": 0,
+                "phase_outcome": 280,
+                "phase_place_bindings": 565,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 11,
+                "recall": 470,
+                "shape": 791,
+                "shape_admission": 1,
+                "shape_arcs": 1,
+                "shape_groups": 40,
+                "shape_labels": 0,
+                "shape_probe": 0
               },
-              "total": 3766
+              "total": 3124
             },
             "variable_text": "Gross disbursements of official development assistance",
             "warnings": []
@@ -6464,7 +6580,7 @@
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -6493,5 +6609,9 @@
       "raw_text": false
     }
   ],
-  "task": "aggregate-cumulative-oda-g7-africa"
+  "task": "aggregate-cumulative-oda-g7-africa",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

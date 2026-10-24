@@ -86,16 +86,17 @@
           {
             "name": "Kenya",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_3f7b3554eab4eda5544d04deec5fd71a",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3"
       },
       {
         "kind": "aggregate",
@@ -121,10 +122,10 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_4256dc4098cfbfde4f19ba4554c4c6f1",
         "across": [
           "creditor"
-        ]
+        ],
+        "source_code": "DT.DIS.DLTF.CD"
       },
       {
         "kind": "aggregate",

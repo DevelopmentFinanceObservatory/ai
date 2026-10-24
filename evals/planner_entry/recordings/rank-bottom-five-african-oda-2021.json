@@ -1,19 +1,19 @@
 {
   "answers": [
-    "7b9ab0b7935329e7",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692",
-    "fc6f989b332d5ec0"
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
+    "c2ffed250abb8895",
+    "da003404ef8f2a6a"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:47+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:19+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
             "input_tokens": 0,
@@ -21,26 +21,36 @@
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 3272
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 4
           },
-          "trace_id": "4e9e21146f4a467593065a493a21e0b9",
+          "trace_id": "70406771b4874a489f970179004b9095",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [
               {
                 "asked": "Africa",
                 "binding_ref": "where:",
                 "code": "entity_unavailable",
-                "text": "The data holds no values for 5 of the 59 countries and territories in Africa."
+                "text": "The data holds no values for 1 of the 54 countries in Africa."
               },
               {
                 "asked": "Africa",
                 "binding_ref": "where:",
                 "code": "group_read_as_members",
-                "text": "You asked for Africa. This shows the countries and territories in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC)."
+                "text": "You asked for Africa. This shows the countries in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC)."
+              },
+              {
+                "binding_ref": "origin:",
+                "code": "whole_total_read",
+                "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
               }
             ],
             "operations": [],
@@ -63,7 +73,6 @@
                   "entities": {
                     "destination": [
                       "country/AGO",
-                      "country/ATF",
                       "country/BDI",
                       "country/BEN",
                       "country/BFA",
@@ -79,7 +88,6 @@
                       "country/DZA",
                       "country/EGY",
                       "country/ERI",
-                      "country/ESH",
                       "country/ETH",
                       "country/GAB",
                       "country/GHA",
@@ -98,15 +106,12 @@
                       "country/MRT",
                       "country/MUS",
                       "country/MWI",
-                      "country/MYT",
                       "country/NAM",
                       "country/NER",
                       "country/NGA",
-                      "country/REU",
                       "country/RWA",
                       "country/SDN",
                       "country/SEN",
-                      "country/SHN",
                       "country/SLE",
                       "country/SOM",
                       "country/SSD",
@@ -121,6 +126,9 @@
                       "country/ZAF",
                       "country/ZMB",
                       "country/ZWE"
+                    ],
+                    "origin": [
+                      "DACOfficialDonors"
                     ]
                   },
                   "identity_version": "spec1",
@@ -167,7 +175,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d"
+                "spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b"
               },
               "resolved": {
                 "alternative_measures": [
@@ -178,7 +186,6 @@
                         "entities": {
                           "destination": [
                             "country/AGO",
-                            "country/ATF",
                             "country/BDI",
                             "country/BEN",
                             "country/BFA",
@@ -194,7 +201,6 @@
                             "country/DZA",
                             "country/EGY",
                             "country/ERI",
-                            "country/ESH",
                             "country/ETH",
                             "country/GAB",
                             "country/GHA",
@@ -213,15 +219,12 @@
                             "country/MRT",
                             "country/MUS",
                             "country/MWI",
-                            "country/MYT",
                             "country/NAM",
                             "country/NER",
                             "country/NGA",
-                            "country/REU",
                             "country/RWA",
                             "country/SDN",
                             "country/SEN",
-                            "country/SHN",
                             "country/SLE",
                             "country/SOM",
                             "country/SSD",
@@ -236,6 +239,9 @@
                             "country/ZAF",
                             "country/ZMB",
                             "country/ZWE"
+                          ],
+                          "origin": [
+                            "DACOfficialDonors"
                           ]
                         },
                         "identity_version": "spec1",
@@ -282,7 +288,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_639df8b3facecce31a50220c3e233581"
+                      "spec_id": "spec_b4c3403fface6550813cfe653b9a2e3b"
                     },
                     "label": "net disbursements",
                     "measure_axis_values": [
@@ -322,12 +328,12 @@
                         }
                       }
                     ],
-                    "served_rows": 4120,
+                    "served_rows": 53,
                     "served_rows_exact": true
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -346,20 +352,20 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 4047,
+                  "observation_count": 53,
                   "window": {
                     "end_year": 2021,
                     "start_year": 2021
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 4047,
+                  "rows": 53,
                   "rows_exact": true,
-                  "series": 4047,
+                  "series": 53,
                   "window": {
                     "end_year": 2021,
                     "start_year": 2021
@@ -370,12 +376,6 @@
                     "entity_type": "Country",
                     "label": "Angola",
                     "ref": "country/AGO",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "Country",
-                    "label": "French Southern Territories",
-                    "ref": "country/ATF",
                     "role": "destination"
                   },
                   {
@@ -466,12 +466,6 @@
                     "entity_type": "Country",
                     "label": "Eritrea",
                     "ref": "country/ERI",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "Country",
-                    "label": "Western Sahara",
-                    "ref": "country/ESH",
                     "role": "destination"
                   },
                   {
@@ -583,12 +577,6 @@
                     "role": "destination"
                   },
                   {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "Mayotte",
-                    "ref": "country/MYT",
-                    "role": "destination"
-                  },
-                  {
                     "entity_type": "Country",
                     "label": "Namibia",
                     "ref": "country/NAM",
@@ -607,12 +595,6 @@
                     "role": "destination"
                   },
                   {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "R\u00e9union",
-                    "ref": "country/REU",
-                    "role": "destination"
-                  },
-                  {
                     "entity_type": "Country",
                     "label": "Rwanda",
                     "ref": "country/RWA",
@@ -628,12 +610,6 @@
                     "entity_type": "Country",
                     "label": "Senegal",
                     "ref": "country/SEN",
-                    "role": "destination"
-                  },
-                  {
-                    "entity_type": "AdministrativeArea1",
-                    "label": "Saint Helena, Ascension and Tristan da Cunha",
-                    "ref": "country/SHN",
                     "role": "destination"
                   },
                   {
@@ -719,6 +695,12 @@
                     "label": "Zimbabwe",
                     "ref": "country/ZWE",
                     "role": "destination"
+                  },
+                  {
+                    "entity_type": "DACGroup",
+                    "label": "official donors (DAC)",
+                    "ref": "DACOfficialDonors",
+                    "role": "origin"
                   }
                 ],
                 "entity_groups": {
@@ -726,16 +708,21 @@
                     "entity_type": "Continent",
                     "label": "Africa",
                     "ref": "africa"
+                  },
+                  "origin": {
+                    "label": "official donors (DAC)",
+                    "side_classes": [
+                      "official",
+                      "private",
+                      "residual"
+                    ],
+                    "total": "DACOfficialDonors",
+                    "whole_of": [
+                      "official"
+                    ]
                   }
                 },
-                "entity_options": [
-                  {
-                    "options": [],
-                    "role": "origin",
-                    "source": "observed",
-                    "truncated": true
-                  }
-                ],
+                "entity_options": [],
                 "facet_options": [
                   {
                     "axis": "provenance",
@@ -778,6 +765,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -797,41 +785,41 @@
                     "end_year": 2021,
                     "start_year": 2021
                   },
-                  "observations": 4047,
+                  "observations": 53,
                   "recent_years": [
                     {
-                      "observations": 4047,
+                      "observations": 53,
                       "role_counts": {
-                        "financingProvider": 137,
-                        "financingRecipient": 54
+                        "financingProvider": 1,
+                        "financingRecipient": 53
                       },
-                      "series": 4047,
+                      "series": 53,
                       "year": 2021
                     },
                     {
-                      "observations": 3791,
+                      "observations": 53,
                       "role_counts": {
-                        "financingProvider": 128,
-                        "financingRecipient": 54
+                        "financingProvider": 1,
+                        "financingRecipient": 53
                       },
-                      "series": 3791,
+                      "series": 53,
                       "year": 2020
                     },
                     {
-                      "observations": 3680,
+                      "observations": 53,
                       "role_counts": {
-                        "financingProvider": 126,
-                        "financingRecipient": 54
+                        "financingProvider": 1,
+                        "financingRecipient": 53
                       },
-                      "series": 3680,
+                      "series": 53,
                       "year": 2019
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 137,
-                    "financingRecipient": 54
+                    "financingProvider": 1,
+                    "financingRecipient": 53
                   },
-                  "series": 4047,
+                  "series": 53,
                   "year": 2021,
                   "year_named": true
                 },
@@ -884,14 +872,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Gross disbursements to the 59 countries and territories in Africa from 160 providers for official development assistance in 2021. Current US dollars \u00b7 OECD DAC2a.",
-                "role_axis_facts": [
-                  {
-                    "member_count": 160,
-                    "members_available": true,
-                    "role": "origin"
-                  }
-                ],
+                "rendered_sentence": "Gross disbursements to the 54 countries in Africa from official donors (DAC) for official development assistance in 2021. Current US dollars \u00b7 OECD DAC2a.",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -918,7 +899,6 @@
                     "binding_ref": "where:",
                     "entity_refs": [
                       "country/AGO",
-                      "country/ATF",
                       "country/BDI",
                       "country/BEN",
                       "country/BFA",
@@ -934,7 +914,6 @@
                       "country/DZA",
                       "country/EGY",
                       "country/ERI",
-                      "country/ESH",
                       "country/ETH",
                       "country/GAB",
                       "country/GHA",
@@ -953,15 +932,12 @@
                       "country/MRT",
                       "country/MUS",
                       "country/MWI",
-                      "country/MYT",
                       "country/NAM",
                       "country/NER",
                       "country/NGA",
-                      "country/REU",
                       "country/RWA",
                       "country/SDN",
                       "country/SEN",
-                      "country/SHN",
                       "country/SLE",
                       "country/SOM",
                       "country/SSD",
@@ -983,7 +959,7 @@
                     "states": [
                       "where:"
                     ],
-                    "text": "the 59 countries and territories in Africa"
+                    "text": "the 54 countries in Africa"
                   },
                   {
                     "entity_refs": [],
@@ -994,14 +970,16 @@
                   },
                   {
                     "binding_ref": "origin:",
-                    "entity_refs": [],
+                    "entity_refs": [
+                      "DACOfficialDonors"
+                    ],
                     "kind": "slot",
                     "role": "origin",
                     "segment": "heading",
                     "states": [
                       "origin:"
                     ],
-                    "text": "160 providers"
+                    "text": "official donors (DAC)"
                   },
                   {
                     "entity_refs": [],
@@ -1215,7 +1193,7 @@
                         "member_count": 2,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 826,
+                        "served_rows": 49,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -1229,7 +1207,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 3937,
+                        "served_rows": 53,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -1242,7 +1220,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 1632,
+                        "served_rows": 53,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -1255,7 +1233,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 476,
+                        "served_rows": 51,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -1268,7 +1246,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 1443,
+                        "served_rows": 53,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -1374,13 +1352,6 @@
                         },
                         {
                           "ref": {
-                            "label": "French Southern Territories",
-                            "ref": "country/ATF"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
                             "label": "Burundi",
                             "ref": "country/BDI"
                           },
@@ -1481,13 +1452,6 @@
                           "ref": {
                             "label": "Eritrea",
                             "ref": "country/ERI"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "Western Sahara",
-                            "ref": "country/ESH"
                           },
                           "value_kind": "entity"
                         },
@@ -1619,13 +1583,6 @@
                         },
                         {
                           "ref": {
-                            "label": "Mayotte",
-                            "ref": "country/MYT"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
                             "label": "Namibia",
                             "ref": "country/NAM"
                           },
@@ -1647,13 +1604,6 @@
                         },
                         {
                           "ref": {
-                            "label": "R\u00e9union",
-                            "ref": "country/REU"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
                             "label": "Rwanda",
                             "ref": "country/RWA"
                           },
@@ -1670,13 +1620,6 @@
                           "ref": {
                             "label": "Senegal",
                             "ref": "country/SEN"
-                          },
-                          "value_kind": "entity"
-                        },
-                        {
-                          "ref": {
-                            "label": "Saint Helena, Ascension and Tristan da Cunha",
-                            "ref": "country/SHN"
                           },
                           "value_kind": "entity"
                         },
@@ -1824,7 +1767,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -1851,10 +1794,6 @@
                     {
                       "label": "Angola",
                       "ref": "country/AGO"
-                    },
-                    {
-                      "label": "French Southern Territories",
-                      "ref": "country/ATF"
                     },
                     {
                       "label": "Burundi",
@@ -1915,10 +1854,6 @@
                     {
                       "label": "Eritrea",
                       "ref": "country/ERI"
-                    },
-                    {
-                      "label": "Western Sahara",
-                      "ref": "country/ESH"
                     },
                     {
                       "label": "Ethiopia",
@@ -1993,10 +1928,6 @@
                       "ref": "country/MWI"
                     },
                     {
-                      "label": "Mayotte",
-                      "ref": "country/MYT"
-                    },
-                    {
                       "label": "Namibia",
                       "ref": "country/NAM"
                     },
@@ -2009,10 +1940,6 @@
                       "ref": "country/NGA"
                     },
                     {
-                      "label": "R\u00e9union",
-                      "ref": "country/REU"
-                    },
-                    {
                       "label": "Rwanda",
                       "ref": "country/RWA"
                     },
@@ -2023,10 +1950,6 @@
                     {
                       "label": "Senegal",
                       "ref": "country/SEN"
-                    },
-                    {
-                      "label": "Saint Helena, Ascension and Tristan da Cunha",
-                      "ref": "country/SHN"
                     },
                     {
                       "label": "Sierra Leone",
@@ -2083,6 +2006,10 @@
                     {
                       "label": "Zimbabwe",
                       "ref": "country/ZWE"
+                    },
+                    {
+                      "label": "official donors (DAC)",
+                      "ref": "DACOfficialDonors"
                     }
                   ],
                   "resolved_sources": [
@@ -2091,6 +2018,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2180,10 +2108,6 @@
                           "ref": "country/AGO"
                         },
                         {
-                          "label": "French Southern Territories",
-                          "ref": "country/ATF"
-                        },
-                        {
                           "label": "Burundi",
                           "ref": "country/BDI"
                         },
@@ -2242,10 +2166,6 @@
                         {
                           "label": "Eritrea",
                           "ref": "country/ERI"
-                        },
-                        {
-                          "label": "Western Sahara",
-                          "ref": "country/ESH"
                         },
                         {
                           "label": "Ethiopia",
@@ -2320,10 +2240,6 @@
                           "ref": "country/MWI"
                         },
                         {
-                          "label": "Mayotte",
-                          "ref": "country/MYT"
-                        },
-                        {
                           "label": "Namibia",
                           "ref": "country/NAM"
                         },
@@ -2336,10 +2252,6 @@
                           "ref": "country/NGA"
                         },
                         {
-                          "label": "R\u00e9union",
-                          "ref": "country/REU"
-                        },
-                        {
                           "label": "Rwanda",
                           "ref": "country/RWA"
                         },
@@ -2350,10 +2262,6 @@
                         {
                           "label": "Senegal",
                           "ref": "country/SEN"
-                        },
-                        {
-                          "label": "Saint Helena, Ascension and Tristan da Cunha",
-                          "ref": "country/SHN"
                         },
                         {
                           "label": "Sierra Leone",
@@ -4143,7 +4051,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -4386,19 +4294,34 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_4c87b686d6ef85e8d1ea3e16d319592d"
+              "spec_id": "spec_55d8689f3c2e76ecf93572f4c30a127b"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 13,
-                "bind": 12,
-                "materialise": 325,
-                "options": 60,
-                "recall": 0,
-                "shape": 2433
+                "answer": 208,
+                "bind": 123,
+                "materialise": 92,
+                "options": 17,
+                "phase_bind": 689,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 1,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 131,
+                "phase_place_bindings": 75,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 66,
+                "phase_settle": 11,
+                "recall": 72,
+                "shape": 874,
+                "shape_admission": 223,
+                "shape_arcs": 1,
+                "shape_groups": 57,
+                "shape_labels": 0,
+                "shape_probe": 0
               },
-              "total": 2843
+              "total": 2359
             },
             "variable_text": "official development assistance",
             "warnings": [
@@ -4406,11 +4329,6 @@
                 "code": "retrieval_score_weak",
                 "message": "the chosen reading's match to the query is weak; treat it with less confidence than a strong match.",
                 "severity": "info"
-              },
-              {
-                "code": "role_scope_defaulted",
-                "message": "no provider was named; the answer was resolved across every provider with data.",
-                "severity": "warn"
               }
             ]
           }
@@ -4420,7 +4338,7 @@
           "extract_skipped": true,
           "raw_query": "Which five African countries received the least ODA in 2021?"
         },
-        "rendered_sentence": "Gross disbursements to the 59 countries and territories in Africa from 160 providers for official development assistance in 2021. Current US dollars \u00b7 OECD DAC2a. The data holds no values for 5 of the 59 countries and territories in Africa. You asked for Africa. This shows the countries and territories in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC).",
+        "rendered_sentence": "Gross disbursements to the 54 countries in Africa from official donors (DAC) for official development assistance in 2021. Current US dollars \u00b7 OECD DAC2a. The data holds no values for 1 of the 54 countries in Africa. You asked for Africa. This shows the countries in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC). No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor'].",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -4450,7 +4368,6 @@
             "binding_ref": "where:",
             "entity_refs": [
               "country/AGO",
-              "country/ATF",
               "country/BDI",
               "country/BEN",
               "country/BFA",
@@ -4466,7 +4383,6 @@
               "country/DZA",
               "country/EGY",
               "country/ERI",
-              "country/ESH",
               "country/ETH",
               "country/GAB",
               "country/GHA",
@@ -4485,15 +4401,12 @@
               "country/MRT",
               "country/MUS",
               "country/MWI",
-              "country/MYT",
               "country/NAM",
               "country/NER",
               "country/NGA",
-              "country/REU",
               "country/RWA",
               "country/SDN",
               "country/SEN",
-              "country/SHN",
               "country/SLE",
               "country/SOM",
               "country/SSD",
@@ -4516,7 +4429,7 @@
             "states": [
               "where:"
             ],
-            "text": "the 59 countries and territories in Africa"
+            "text": "the 54 countries in Africa"
           },
           {
             "entity_refs": [],
@@ -4528,7 +4441,9 @@
           },
           {
             "binding_ref": "origin:",
-            "entity_refs": [],
+            "entity_refs": [
+              "DACOfficialDonors"
+            ],
             "kind": "slot",
             "part_index": 0,
             "role": "origin",
@@ -4536,7 +4451,7 @@
             "states": [
               "origin:"
             ],
-            "text": "160 providers"
+            "text": "official donors (DAC)"
           },
           {
             "entity_refs": [],
@@ -4674,7 +4589,7 @@
             "part_index": 0,
             "segment": "departure",
             "states": [],
-            "text": "The data holds no values for 5 of the 59 countries and territories in Africa."
+            "text": "The data holds no values for 1 of the 54 countries in Africa."
           },
           {
             "entity_refs": [],
@@ -4690,12 +4605,28 @@
             "part_index": 0,
             "segment": "departure",
             "states": [],
-            "text": "You asked for Africa. This shows the countries and territories in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC)."
+            "text": "You asked for Africa. This shows the countries in it, each on its own, and leaves out what the data allocates to no single country: Africa, unallocated by country (DAC); Eastern Africa, unallocated by country (DAC); Middle Africa, unallocated by country (DAC); North of Sahara, unallocated by country (DAC); South of Sahara, unallocated by country (DAC); Southern Africa, unallocated by country (DAC); Western Africa, unallocated by country (DAC)."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
           }
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -4720,5 +4651,9 @@
       "raw_text": false
     }
   ],
-  "task": "rank-bottom-five-african-oda-2021"
+  "task": "rank-bottom-five-african-oda-2021",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

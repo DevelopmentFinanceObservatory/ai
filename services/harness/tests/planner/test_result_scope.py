@@ -140,16 +140,6 @@ def _requirements(variant: str) -> list[EvidenceRequirement]:
             _kept(("Ghana",), None),
             _growth("kept"),
         ],
-        "donors-filtered-roleless": [
-            _aid(recipients=()),
-            _kept(("France",), None),
-            _growth("kept"),
-        ],
-        "donors-filtered-by-role": [
-            _aid(recipients=("Ghana", "Kenya")),
-            _kept(("France",), "donor"),
-            _growth("kept"),
-        ],
         "summed": [_aid(), _TOTAL, _growth("total")],
         "per-donor-stated": [_aid(("measure", "per_donor")), _growth("aid")],
         "ranked-over-donors": [
@@ -213,10 +203,6 @@ SERIES = AnswerMode.SERIES
         pytest.param(
             "recipient-filtered-roleless", COMPUTED, [ASK], True, id="roleless-filter-two-roles"
         ),
-        pytest.param(
-            "donors-filtered-roleless", COMPUTED, [ASK], False, id="roleless-filter-one-role"
-        ),
-        pytest.param("donors-filtered-by-role", COMPUTED, [ASK], False, id="filter-naming-donor"),
     ],
 )
 def test_a_result_per_donor_rests_on_a_decision_stating_it(

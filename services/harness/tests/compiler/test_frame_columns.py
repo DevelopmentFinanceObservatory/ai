@@ -81,6 +81,85 @@ def test_a_strict_population_level_is_rebound_with_its_type_column() -> None:
     ]
 
 
+def test_a_pairings_keys_are_spelled_by_the_frames_each_is_read_from() -> None:
+    # aid names the recipient under its flow axis, WHO as observationAbout.
+    # The outer join's key reads the inner pairing's left side, aid, and debt,
+    # never WHO, which holds that key under the inner pairing's own map.
+    aid, who, debt = ("spec_" + letter * 32 for letter in "abc")
+    flow = frame_columns(
+        role_keys=("financingRecipient",),
+        axis_by_column={"financingRecipient": "destination"},
+        compiled=("destination",),
+    )
+    place = frame_columns(
+        role_keys=("observationAbout",),
+        axis_by_column={"observationAbout": None},
+        compiled=("observationAbout",),
+    )
+    inner = {
+        "pair": [[{"spec_id": aid, "bindings": {}}], [{"spec_id": who, "bindings": {}}]],
+        "keys": {"destination": "observationAbout"},
+    }
+    nested = {
+        "pair": [[inner], [{"spec_id": debt, "bindings": {"destination": ["dcid:KEN"]}}]],
+        "keys": {"destination": "destination"},
+    }
+
+    bound = bound_populations([nested], roots={aid: [flow], who: [place], debt: [flow]})
+
+    assert bound == [
+        {
+            "pair": [
+                [
+                    {
+                        "pair": [
+                            [{"spec_id": aid, "bindings": {}}],
+                            [{"spec_id": who, "bindings": {}}],
+                        ],
+                        "keys": {"financingRecipient": "observationAbout"},
+                    }
+                ],
+                [{"spec_id": debt, "bindings": {"financingRecipient": ["dcid:KEN"]}}],
+            ],
+            "keys": {"financingRecipient": "financingRecipient"},
+        }
+    ]
+
+
+def test_an_outer_key_is_spelled_by_the_inner_sides_that_carry_it() -> None:
+    # join(join(aid by donor and recipient, gni by donor) on donor, WHO) on the
+    # recipient: gni carries no recipient, so only aid spells the outer key.
+    aid, gni, who = ("spec_" + letter * 32 for letter in "abc")
+    flow = frame_columns(
+        role_keys=("financingProvider", "financingRecipient"),
+        axis_by_column={"financingProvider": "origin", "financingRecipient": "destination"},
+        compiled=("origin", "destination"),
+    )
+    donor = frame_columns(
+        role_keys=("financingProvider",),
+        axis_by_column={"financingProvider": "origin"},
+        compiled=("origin",),
+    )
+    place = frame_columns(
+        role_keys=("observationAbout",),
+        axis_by_column={"observationAbout": None},
+        compiled=("observationAbout",),
+    )
+    inner = {
+        "pair": [[{"spec_id": aid, "bindings": {}}], [{"spec_id": gni, "bindings": {}}]],
+        "keys": {"origin": "origin"},
+    }
+    nested = {
+        "pair": [[inner], [{"spec_id": who, "bindings": {}}]],
+        "keys": {"destination": "observationAbout"},
+    }
+
+    (bound,) = bound_populations([nested], roots={aid: [flow], gni: [donor], who: [place]})
+
+    assert bound["keys"] == {"financingRecipient": "observationAbout"}
+    assert bound["pair"][0][0]["keys"] == {"financingProvider": "financingProvider"}
+
+
 def test_a_compiled_name_the_frame_carries_binds_to_itself() -> None:
     columns = frame_columns(
         role_keys=("observationAbout",),
@@ -222,17 +301,16 @@ def test_a_dividing_verb_binds_each_sides_columns_against_its_own_frame(verb: st
     }
 
 
-def test_a_join_key_needs_one_spelling_on_both_frames() -> None:
+def test_a_join_spells_each_sides_keys_the_way_its_own_frame_does() -> None:
     other = frame_columns(
         role_keys=("provider",), axis_by_column={"provider": "origin"}, compiled=("origin",)
     )
 
-    with pytest.raises(UnboundColumnError, match="every side"):
-        bound_arguments(
-            _analysis("join"),
-            {"join_keys": ["origin"]},
-            frames={"frame_ref": _family(), "right_frame_ref": other},
-        )
+    assert bound_arguments(
+        _analysis("join"),
+        {"join_keys": ["origin"], "right_keys": {"origin": "origin"}},
+        frames={"frame_ref": _family(), "right_frame_ref": other},
+    ) == {"join_keys": ["financingProvider"], "right_keys": {"financingProvider": "provider"}}
 
 
 def test_a_frame_whose_columns_are_unknown_keeps_the_plans_spelling() -> None:

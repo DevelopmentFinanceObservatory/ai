@@ -77,6 +77,9 @@ class ProblemCode(StrEnum):
     QUESTION_FIXED = "question_fixed"
     SEARCH_REFUSED = "search_refused"
     SURFACE_UNAVAILABLE = "surface_unavailable"
+    # Reading the newest year a plan's rolling years count from, before
+    # approval, stopped where the plan's run would (`translator.tool`).
+    RUN_WOULD_STOP = "run_would_stop"
     NO_CANDIDATES_RECORDED = "no_candidates_recorded"
     ASK_NOT_UNDERSTOOD = "ask_not_understood"
     SOURCE_NOT_OFFERED = "source_not_offered"

@@ -628,6 +628,20 @@ class EvidenceIssueCode(TitlelessEnum):
     GRAIN_AMBIGUOUS = "grain_ambiguous"
 
 
+class SeriesEntity(StrictModel):
+    """One entity of a retrieved series, as its statistics name it.
+
+    `role` and `ref` are the series' own; `label` is the name the approved
+    source gives `ref`, `None` where it gives none.
+    """
+
+    role: str = Field(description="The series' role column for this entity.")
+    ref: str = Field(description="The entity's value in that column.")
+    label: str | None = Field(
+        default=None, description="The approved source's name for `ref`, when it names one."
+    )
+
+
 class EvidenceIssue(StrictModel):
     """One finding about one requirement."""
 
@@ -644,6 +658,33 @@ class EvidenceIssue(StrictModel):
     required: JsonValue = Field(
         default=None,
         description="What was required, when this finding compares an expectation to an observation.",
+    )
+    # `stat_var`, `entities` and `magnitude` are left out of a dump while unset, which
+    # keeps the findings a model reads, and every stored one, unchanged.
+    stat_var: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda stat_var: stat_var is None,
+        description=(
+            "The StatVar of the one retrieved series a `window_short` or `coverage_gaps` "
+            "finding is about."
+        ),
+    )
+    entities: Annotated[tuple[SeriesEntity, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        exclude_if=lambda entities: not entities,
+        description=(
+            "The entities of the one retrieved series a `window_short` or `coverage_gaps` "
+            "finding is about."
+        ),
+    )
+    magnitude: Annotated[float | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The largest absolute value the one retrieved series a `window_short` or "
+            "`coverage_gaps` finding is about holds in any period, which ranks the series "
+            "an answer names."
+        ),
     )
 
 

@@ -143,6 +143,27 @@ def source_constraint_matches(
     )
 
 
+def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """The refs Search bound for each entity text of `part`, by the text case-folded.
+
+    Search states, beside the part's `restatement`, one `entity_refs` row
+    per entity text it restates: the text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
+    bound to nothing, being ambiguous, not held or not found, states no
+    refs and is left out, and so is every text of a part without
+    `entity_refs`, from a Search that predates the field. Such a name is
+    matched by label or through the graph's resolve door. A text stated
+    twice binds every ref either row states.
+    """
+    refs: dict[str, tuple[str, ...]] = {}
+    for row in _sequence(part.get("entity_refs")):
+        text, bound = _text(row.get("text")), _strings(row.get("refs"))
+        if text is not None and bound:
+            key = text.casefold()
+            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
+    return refs
+
+
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
 
@@ -163,8 +184,10 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     warnings = _warnings(envelope, part)
     mentions = resolved_source_mentions(part)
 
+    bound = bound_refs(part)
+
     def constrained(source: SelectedSource) -> SelectedSource:
-        return source.model_copy(update={"resolved_sources": mentions})
+        return source.model_copy(update={"resolved_sources": mentions, "bound_refs": bound})
 
     if status is DiscoveryStatus.DEFINITE:
         spec = _mapping(part.get("spec"))
@@ -248,6 +271,11 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
+            bound_refs={
+                text: tuple(refs)
+                for text, raw in _mapping(block.get("_bound_refs")).items()
+                if (refs := _strings(raw))
+            },
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -419,7 +447,12 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     families are `DISJOINT` when a shape field differs as both state it, or
     when a property both bind to stated codes admits no code in common.
     Health and education aid bind `crsPurpose` to two subtrees of the code
-    index that share no code.
+    index that share no code. They are `DISJOINT` too when one binds a
+    property its own identity lists and the other's does not, since a member
+    carries a code only on a property its family's schema lists. DAC2a aid
+    binds `dac2aAidType`, which no IDS debt family lists, so no StatVar is
+    both. A bound slot no identity lists, a where-classed constraint such as
+    `comparisonRegion`, proves nothing (`_binds_unlisted`).
 
     A shape field differs only when both sides state it as a dcid string, or
     both as `{"ref": dcid}`, and the dcids differ. A field one side leaves out
@@ -438,9 +471,10 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     Everything else is `UNDECIDED`. That covers a side with no described shape
     or no `slot_codes`, a property bound to codes not stated (a `None` entry)
     where the verdict would rest on it, two families that each bind a property
-    the other leaves open, and two that would nest but whose shapes differ in
-    a field one side leaves out, leaves unresolved, or spells another way,
-    since the open fields may name different nodes.
+    the other leaves open or whose identity lists no slots, and two that would
+    nest but whose shapes differ in a field one side leaves out, leaves
+    unresolved, or spells another way, since the open fields may name
+    different nodes.
     """
     pinned = [pinned_stat_var(source.identity) for source in (left, right)]
     if pinned[0] is not None and pinned[1] is not None:
@@ -460,17 +494,69 @@ def _described_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOve
         return FamilyOverlap.DISJOINT
     if left.slot_codes is None or right.slot_codes is None:
         return FamilyOverlap.UNDECIDED
-    if any(
-        codes is not None
-        and (other := right.slot_codes.get(prop)) is not None
-        and set(codes).isdisjoint(other)
-        for prop, codes in left.slot_codes.items()
+    if (
+        any(
+            codes is not None
+            and (other := right.slot_codes.get(prop)) is not None
+            and set(codes).isdisjoint(other)
+            for prop, codes in left.slot_codes.items()
+        )
+        or _binds_unlisted(left, right)
+        or _binds_unlisted(right, left)
     ):
         return FamilyOverlap.DISJOINT
     nested = _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes)
     if nested and _same_shape(left_shape, right_shape):
         return FamilyOverlap.NESTED
     return FamilyOverlap.UNDECIDED
+
+
+def _binds_unlisted(source: SelectedSource, other: SelectedSource) -> bool:
+    """Whether `source` binds a property both identities could list and `other`'s does not.
+
+    An identity lists the what and how slots alone: apis leaves every when,
+    where and source slot out, a constraint property classed `where` such as
+    `comparisonRegion` included (`search.engine.spec_id._EXCLUDED_SLOT_AXES`).
+    So only a property `source`'s own identity lists counts, and a slot
+    missing from both identities never reads as a binding difference.
+    Proves nothing when either identity states no slot list.
+    """
+    own, listed = _listed_properties(source), _listed_properties(other)
+    if own is None or listed is None:
+        return False
+    return any(prop in own and prop not in listed for prop in source.slot_codes or {})
+
+
+def bound_codes(source: SelectedSource, prop: str) -> tuple[str, ...]:
+    """The codes `source`'s identity binds `prop` to, in identity order.
+
+    A `value` binding names one code and a `set` binding each of its refs, once;
+    an unbound property, one the identity does not list, and a source with
+    no identity name none. These are the codes the question named, before
+    the code index widened them to their descendants (`slot_codes`).
+    """
+    slots = (source.identity or {}).get("slots")
+    for slot in slots if isinstance(slots, list) else ():
+        if not isinstance(slot, Mapping) or slot.get("property") != prop:
+            continue
+        binding = _mapping(slot.get("binding"))
+        match binding.get("state"):
+            case "value":
+                refs: Sequence[object] = [binding.get("ref")]
+            case "set":
+                refs = _sequence_of_any(binding.get("refs"))
+            case _:
+                refs = []
+        return tuple(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref))
+    return ()
+
+
+def _listed_properties(source: SelectedSource) -> set[object] | None:
+    """The properties `source`'s identity lists a slot for, or `None` when it lists none."""
+    slots = (source.identity or {}).get("slots")
+    if not isinstance(slots, list):
+        return None
+    return {slot.get("property") for slot in slots if isinstance(slot, Mapping)}
 
 
 def _same_shape(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
@@ -550,6 +636,11 @@ def stat_var_count(source: SelectedSource) -> int:
     if source.served_count is not None:
         return source.served_count
     return source.stat_var_member_count or 0
+
+
+def stat_var_count_is_floor(source: SelectedSource) -> bool:
+    """Whether `stat_var_count(source)` is a floor: no served count, and `search` states its confirmed members as one."""
+    return source.served_count is None and source.stat_var_member_count_exact is False
 
 
 def member_digest(dcids: Iterable[str]) -> str:

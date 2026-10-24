@@ -42,9 +42,10 @@ side, not landing in the stop bucket by omission:
 - `TRANSIENT_CODES`: waiting helps; retried up to the attempt limit.
 - `COMPILER_PROVABLE_CODES`: stops, because the compiler already rules them
   out. It writes every column list (`group_by`, `entity_by`, `rank_by`,
-  `join_keys`) from the source's own roles, validates every argument against
-  the tool's live schema, checks the capability implements the operation
-  kind, reports `join_no_common_key_columns` itself, and writes every
+  `join_keys`, `right_keys`) from the source's own roles, validates every
+  argument against the tool's live schema, checks the capability implements
+  the operation kind, writes every join key explicitly, so analysis-mcp has no
+  keys to detect (`join_no_common_key_columns`), and writes every
   predicate in the frame grammar's own shape. One of these reaching the
   executor is a compiler bug, not a choice for the user. `share_of_key_unknown`
   belongs here too: the compiler writes `denominator_by` either empty
@@ -97,8 +98,9 @@ reproducing the identical failing call.
 
 `rolling_anchor_unresolved` stops under every `fix.detail`, and the detail
 says whose stop it is. `no_qualifying_period` is `resolve_anchor` finding no
-year that half of the series hold, which the user is told. Every other detail
-says the populations, root frames, key or periods the executor itself sent do
+year that half of the series hold, and `pairing_shares_no_key` a keyed verb
+whose two sides name no entity in common. The user is told of both. Every other
+detail says the populations, root frames, key or periods the executor itself sent do
 not fit together (`is_anchor_fault`); the run reports that as an
 `internal_error`, since nothing the user asked for is wrong.
 
@@ -180,10 +182,12 @@ STOP_CODES = frozenset(
         "default_facet_undefined",
         "over_ceiling",
         # The spec mints no dataset as posted: it describes a family with
-        # nothing to export, or the graph cannot resolve its StatVars.
-        # `do_not_retry` on the wire, and no scope edit reaches it: a
-        # different spec is a different plan.
+        # nothing to export (`spec_not_exportable`), or the graph cannot
+        # resolve its StatVars (`member_not_resolvable`). `do_not_retry` on
+        # the wire, and no scope edit reaches it: a different spec is a
+        # different plan.
         "spec_not_exportable",
+        "member_not_resolvable",
         "capability_unavailable",
         "entity_not_found",
         "node_not_held",
@@ -295,6 +299,11 @@ class ExecutorCode(StrEnum):
     # `do_not_retry`, since the same plan resolves the same start over the
     # same data.
     ROLLING_WINDOW_OUTSIDE_DATASET = "rolling_window_outside_dataset"
+    # The newest period a group of rolling steps resolves is before the one
+    # the plan's rolling years state (`executor.run._Run._check_anchor_held`).
+    # It travels with `do_not_retry`, since the same plan resolves the same
+    # period over the same data, and the user asks again to plan from it.
+    ROLLING_ANCHOR_BEHIND_PLAN = "rolling_anchor_behind_plan"
     # A fault of the run itself, as both servers report their own.
     INTERNAL_ERROR = "internal_error"
     # The run was stopped before it finished.
@@ -313,10 +322,22 @@ class ExecutorCode(StrEnum):
     LEDGER_UNAVAILABLE = "ledger_unavailable"
 
 
-# analysis-mcp's code for a newest period that is not established, and the one
-# `fix.detail` of it that states a fact of the data.
+# The codes that say the harness wrote a call wrong or a server failed of
+# itself, so nothing the user asked for is wrong. They are a compiler-provable
+# code, a payload that did not parse, and an internal error, the run's own
+# (`executor.run._Run._anchor_fault`) or a server's.
+HARNESS_FAULT_CODES = COMPILER_PROVABLE_CODES | {
+    ExecutorCode.MALFORMED_REFUSAL,
+    ExecutorCode.INTERNAL_ERROR,
+}
+
+
+# analysis-mcp's code for a newest period that is not established, and the
+# `fix.detail`s of it that state a fact of the data: no year that half of the
+# series hold, and a pairing whose two sides name no entity in common.
 ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
-_NO_QUALIFYING_PERIOD = "no_qualifying_period"
+PAIRING_SHARES_NO_KEY = "pairing_shares_no_key"
+_DATA_DETAILS = frozenset({"no_qualifying_period", PAIRING_SHARES_NO_KEY})
 
 
 class ToolFailure(StrictModel):
@@ -385,12 +406,17 @@ def is_anchor_fault(failure: ToolFailure) -> bool:
     together, and a rolling `growth`, `rank` or `filter` refuses a key,
     population, root or period that its stored resolution does not cover. The
     executor writes all of them, so either is its own fault. Only a refusal
-    whose `fix.detail` says no period qualified is about the data.
+    whose `fix.detail` says no period qualified, or that a pairing's two sides
+    share no key, is about the data.
     """
     return (
-        failure.code == ROLLING_ANCHOR_UNRESOLVED
-        and failure.fix.get("detail") != _NO_QUALIFYING_PERIOD
+        failure.code == ROLLING_ANCHOR_UNRESOLVED and failure.fix.get("detail") not in _DATA_DETAILS
     )
+
+
+def is_harness_fault(failure: ToolFailure) -> bool:
+    """Whether `failure` is the harness's own fault (`HARNESS_FAULT_CODES`, `is_anchor_fault`)."""
+    return failure.code in HARNESS_FAULT_CODES or is_anchor_fault(failure)
 
 
 def retry_delay(payload: Mapping[str, object], attempt: int) -> float:

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -190,6 +191,7 @@ _TOOL_LABELS = {
     "join": "Joining data",
     "resolve_anchor": "Finding the latest year",
     "describe_frame": "Checking data",
+    "describe_component": "Reading a card",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
 }
@@ -938,12 +940,22 @@ def _refused_detail(record: _ExecutorRecord) -> str:
     return failure_detail(refusal if isinstance(refusal, Mapping) else {})
 
 
-def _answer_failure(answer: Mapping[str, Any]) -> str:
-    """The line of an agent tool's failed answer. A tool states its `code`
+def _answer_refusal(answer: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The refusal of an agent tool's failed answer. A tool states its `code`
     and `retry_mode` beside its `error` or `refusal` prose, or inside a
     `refusal` that is a refusal body."""
     refusal = answer.get("refusal")
-    return failure_detail(refusal if isinstance(refusal, Mapping) else answer)
+    return refusal if isinstance(refusal, Mapping) else answer
+
+
+def _answer_failure(answer: Mapping[str, Any]) -> str:
+    """The line of an agent tool's failed answer."""
+    return failure_detail(_answer_refusal(answer))
+
+
+def _asks_correction(answer: Mapping[str, Any]) -> bool:
+    """Whether a failed answer's refusal asks the model to correct its call."""
+    return _answer_refusal(answer).get("retry_mode") == RetryMode.CORRECT_AND_RETRY
 
 
 def _step_label(tool: str, plan_label: str | None = None) -> str:
@@ -1068,7 +1080,14 @@ class _Translator:
       running step until the next thing happens; a plan hand-back shows a
       failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
-      opened at the execute node's result so it covers `plan_done` too.
+      opened at the execute node's result so it covers `plan_done` too;
+    - a `complete` frame on a failed step's own wire id once a later try of
+      the same step succeeds (`_retry_key`): the same tool with the same
+      arguments, a later hand-off the planner takes for a failed hand-off,
+      and a plan made, ready for approval, for either plan failure. A
+      refusal whose `retry_mode` is `correct_and_retry` asks the model to
+      change the call, so any later call of the tool that completes settles
+      that step whatever its arguments; one that fails leaves it waiting.
     """
 
     def __init__(
@@ -1092,8 +1111,20 @@ class _Translator:
         # Each open call's wire step id, label, arguments and monotonic
         # start, by call id.
         self._open_calls: dict[str, tuple[str, str, dict[str, Any], float]] = {}
-        # Calls that show only if they fail, by call id: the tool's name.
-        self._quiet_calls: dict[str, str] = {}
+        # Calls that show only if they fail, by call id: the tool's name and
+        # arguments.
+        self._quiet_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The failed steps a later try can still recover, by `_retry_key`:
+        # each one's wire step id, label and tool.
+        self._failed: dict[tuple[str, str], list[_FailedStep]] = {}
+        # Failed steps whose refusal asked for a corrected call, by tool, each
+        # with the number of calls made before it: a later call of the tool
+        # that completes corrects them.
+        self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # The number of agent tool calls made so far, and each open call's
+        # place among them, by call id.
+        self._calls = 0
+        self._call_order: dict[str, int] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
         self._handed_off: str | None = None
         # The highest composition revision this stream has sent.
@@ -1118,6 +1149,8 @@ class _Translator:
         if interrupt is not None:
             adk_id, args = interrupt
             frames.extend(self._close_status())
+            if adk_id == APPROVE_INTERRUPT:
+                frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._interrupt_frames(adk_id, args))
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
@@ -1139,6 +1172,7 @@ class _Translator:
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
+            frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
             frames.extend(self._close_status())
@@ -1333,16 +1367,29 @@ class _Translator:
                 )
             )
             if isinstance(component, dict):
-                frames.extend(self._component_frames(component, step_id=step_id, land=record.land))
+                frames.extend(
+                    self._component_frames(
+                        component,
+                        step_id=step_id,
+                        land=record.land,
+                        intent=record.args.get("intent"),
+                    )
+                )
         return frames
 
     def _component_frames(
-        self, component: dict[str, Any], *, step_id: str, land: bool
+        self,
+        component: dict[str, Any],
+        *,
+        step_id: str,
+        land: bool,
+        intent: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Validate `component` against the `component.created` wire
         contract, then, only for a component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
         after the write returned), land it: append its block to the canvas
+        and keep the `intent` it was written from with it
         (`harness.studio_state.land_component`). A component that fails
         validation here never lands and produces no frame at all. For an
         unstamped record (`land=False`) this is the expected outcome:
@@ -1377,7 +1424,7 @@ class _Translator:
             return []
         if not land:
             return [created]
-        if state_land_component(self._conversation, component) != "created":
+        if state_land_component(self._conversation, component, intent=intent) != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
@@ -1653,10 +1700,46 @@ class _Translator:
             **extra,
         )
 
+    def _failed_step(
+        self, key: tuple[str, str], frame: ActivityStep, *, correctable: bool = False
+    ) -> ActivityStep:
+        """`frame`, a failed step, kept under `key` for a later try to
+        recover, or under its tool for any later call of it when its refusal
+        asked the model to correct the call (`correctable`)."""
+        step = (frame.step_id, frame.label, frame.tool)
+        if correctable and frame.tool:
+            self._uncorrected.setdefault(frame.tool, []).append((self._calls, step))
+        else:
+            self._failed.setdefault(key, []).append(step)
+        return frame
+
+    def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
+        """The steps awaiting correction under `tool` that a completed call,
+        the `order`th made, corrects: those refused before it was made. A
+        call made beside a refused one, in the same batch, corrects nothing."""
+        queued = self._uncorrected.pop(tool, [])
+        if kept := [entry for entry in queued if entry[0] >= order]:
+            self._uncorrected[tool] = kept
+        return [step for before, step in queued if before < order]
+
+    def _recover(
+        self, *keys: tuple[str, str], corrected: Sequence[_FailedStep] = ()
+    ) -> list[ActivityStep]:
+        """A `complete` frame on each failed step kept under `keys`, and on
+        each in `corrected`, which a later try just made good. Studio keeps a
+        step's latest status, so the failed line settles instead of standing
+        beside the answer."""
+        steps = [*corrected, *(step for key in keys for step in self._failed.pop(key, []))]
+        return [
+            self._step(step_id, label, StepStatus.COMPLETE, tool=tool, detail=_RECOVERED)
+            for step_id, label, tool in steps
+        ]
+
     def _unshown(self, record: _ExecutorRecord) -> bool:
         """A successful call no plan step made, to a tool whose work an
         agent tool call's own line already stands for: the data a fetch
-        retrieved and checked, or a skill it read. Failures always show."""
+        retrieved and checked, a skill it read, or a card `make_charts` read
+        back. Failures always show."""
         return (
             record.step_id is None
             and record.tool in _UNSHOWN_RECORDED_TOOLS
@@ -1681,7 +1764,11 @@ class _Translator:
                 failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
                 code = failure.get("code") if isinstance(failure, Mapping) else None
                 detail = failure_detail({"code": code})
-                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail))
+                frames.append(
+                    self._failed_step(
+                        _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
+                    )
+                )
                 # The agent reads the planner's answer under its own line.
                 frames.extend(self._open_status(status))
             else:
@@ -1733,8 +1820,10 @@ class _Translator:
         for call in event.get_function_calls():
             name = call.name or ""
             args = call.args or {}
+            self._calls += 1
+            self._call_order[call.id or ""] = self._calls
             if name in _QUIET_CALLS:
-                self._quiet_calls[call.id or ""] = name
+                self._quiet_calls[call.id or ""] = (name, args)
                 continue
             measure = self._measure(args.get("spec_id")) if name == "fetch" else None
             label = _tool_call_label(name, args, measure)
@@ -1761,18 +1850,27 @@ class _Translator:
             # A failure's reason is written for the model, so its line
             # shows the sentence for its code.
             failed = "error" in answer or "refusal" in answer
+            order = self._call_order.pop(response.id or "", 0)
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
+                name, args = quiet
                 if failed:
                     frames.append(
-                        self._step(
-                            None,
-                            _tool_call_label(quiet, {}),
-                            StepStatus.FAILED,
-                            tool=quiet,
-                            detail=_answer_failure(answer),
+                        self._failed_step(
+                            _retry_key(name, args),
+                            self._step(
+                                None,
+                                _tool_call_label(name, {}),
+                                StepStatus.FAILED,
+                                tool=name,
+                                detail=_answer_failure(answer),
+                            ),
+                            correctable=_asks_correction(answer),
                         )
                     )
+                else:
+                    corrected = self._corrected(name, order)
+                    frames.extend(self._recover(_retry_key(name, args), corrected=corrected))
                 continue
             opened = self._open_calls.get(response.id or "")
             if opened is None:
@@ -1789,9 +1887,15 @@ class _Translator:
                 if status is StepStatus.PENDING
                 else {}
             )
-            frames.append(
-                self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
-            )
+            frame = self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
+            key = _retry_key(response.name or "", args)
+            if status is StepStatus.FAILED:
+                frames.append(self._failed_step(key, frame, correctable=_asks_correction(answer)))
+            else:
+                frames.append(frame)
+                if status is StepStatus.COMPLETE:
+                    corrected = self._corrected(response.name or "", order)
+                    frames.extend(self._recover(key, corrected=corrected))
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -1968,6 +2072,24 @@ class _Translator:
 # could not be calculated.
 _PLAN_FAILED = "No plan could be made"
 
+# The `detail` of a failed step a later try of the same step made good.
+_RECOVERED = "This worked on a later try."
+# The key of a plan hand-back with no plan, which a later plan made recovers.
+_PLAN_MADE = ("plan", "made")
+
+
+# A failed step a later try can recover: its wire step id, label and tool.
+type _FailedStep = tuple[str, str, str | None]
+
+
+def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
+    """What makes a later call the same step tried again: the same tool with
+    the same arguments. A plan hand-off is keyed by its tool alone, since a
+    turn plans one question and the agent rewords its brief on a retry."""
+    if name == "plan":
+        return (name, "")
+    return (name, json.dumps(args, sort_keys=True, default=str))
+
 
 # Agent tools whose calls show only when they fail.
 _QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
@@ -1985,9 +2107,11 @@ _READING_CANVAS = "Going over your canvas"
 _READING_ABOUT_DFO = "Going over the notes on DFO"
 _WORKING_OUT_NEXT_STEP = "Working out the next step"
 # Recorded calls an agent tool makes on its own behalf (`fetch` retrieves
-# and checks its data, a skill read goes through the surface), shown only
-# when they fail.
-_UNSHOWN_RECORDED_TOOLS = frozenset({"get_data", "describe_frame", "get_skill", "get_skill_file"})
+# and checks its data, a skill read goes through the surface, `make_charts`
+# reads back a card on the canvas), shown only when they fail.
+_UNSHOWN_RECORDED_TOOLS = frozenset(
+    {"get_data", "describe_frame", "describe_component", "get_skill", "get_skill_file"}
+)
 
 _ORCHESTRATOR_TOOL_LABELS = {
     "search": "Searching for data",

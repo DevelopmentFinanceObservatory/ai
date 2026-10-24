@@ -69,13 +69,13 @@ an attempt the retry policy would have made, plus `EVIDENCE_ALLOWANCE_S` on
 an evidence-bearing step. Each call runs inside it, so its timeout is clipped
 to what remains. The evidence check's own statistics fetch runs under a
 deadline built from what is left of the step budget once the check starts,
-capped at `EVIDENCE_ALLOWANCE_S` (`default_fetch_series_stats`); a fetch that
-outruns it degrades the requirement to `STATISTICS_UNAVAILABLE` rather than
-spending the rest of the step's own budget. A step that runs past that
-budget stops as `TRANSPORT_FAILED`, the same refusal a call that ran past its
-own deadline gets. A tool with no pinned timeout runs at the surface's
-default per call and has no statistics fetch, so each of its attempts is
-already bounded and no step budget applies.
+capped at `EVIDENCE_ALLOWANCE_S` (`default_fetch_series_stats`). A fetch that
+outruns it, or fails in transit, stops the step `TRANSPORT_FAILED`, the same
+refusal a step that runs past its own budget gets, and a statistics artifact
+the run cannot trust stops it `STEP_RESULT_UNUSABLE`; neither is a fact of
+the data, so neither is reported as an unmet requirement. A tool with no
+pinned timeout runs at the surface's default per call and has no statistics
+fetch, so each of its attempts is already bounded and no step budget applies.
 
 The compiler names role columns in the approved source's vocabulary (a flow
 axis such as `origin`), while a retrieved frame names them by the dataset's
@@ -114,6 +114,17 @@ key goes with the call. The call takes the path a step's call takes
 tool is part of the surface check. A plan with no rolling step never calls it.
 The outcome carries each group's answer in `anchors`.
 
+A group's rolling literals, less their offsets, state the newest period the
+plan was checked against. The run reads the plan's years moved later. A
+resolved period before the stated one is refused
+`ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN` before the group's first step, with
+a message asking the user to ask again, so the plan is made from the period
+the data holds. `read_anchors` takes the same path before a plan is
+approved, so translation states the plan's rolling years from the period its
+run will resolve. It runs the retrievals each group rests on and
+`resolve_anchor`, with no ledger, no derived step and no check against the
+stated period.
+
 A rolled start before the first year its dataset holds is refused
 `ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET` before the step's call, with the first year
 read off the retrieval's own evidence. `resolve_anchor` finding no qualifying
@@ -123,9 +134,11 @@ detail says the run's own populations, roots, key or periods do not fit
 (`executor.classify.is_anchor_fault`) and stops it as an `internal_error`.
 
 A keyed `quotient_of` or `share_of` leaves out each numerator key it finds
-nothing to divide by, and its result declares how many
-(`dropped_key_count`). The step's `StepRecord` carries that count, so an
-answer resting on the step can say its population lost members.
+nothing to divide by, and a `join` each entity of either side that matches
+in no period. The result declares how many (`dropped_key_count`, and
+`right_dropped_key_count` for a join's right side). The step's `StepRecord`
+carries both counts, so an answer resting on the step can say its
+population lost members.
 
 Three checks run on what a step's own result declares, in `structured_content`
 rather than the digest prose, which the executor never reads for anything
@@ -181,6 +194,9 @@ from compiler.evidence import (
     check_evidence,
     errors,
     evidence_from_manifest,
+    left_out_entities,
+    unlabelled_series_refs,
+    with_series_labels,
 )
 from compiler.frame_columns import (
     FRAME_PARAMETER,
@@ -190,6 +206,7 @@ from compiler.frame_columns import (
     bound_populations,
     bound_role_keys,
     bound_stat_var_count,
+    entity_narrowings,
 )
 from compiler.rolling import (
     AnchorGroup,
@@ -209,8 +226,10 @@ from compiler.surface import (
     UnhashableSchemaError,
     deliver_progress,
 )
+from data_mcp.artifact_resource import ArtifactRefusalError
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import Manifest
+from data_mcp.node_lookup import describe_nodes
 from data_mcp.series_statistics import (
     SERIES_STATISTICS_ARROW_SCHEMA,
     SeriesStatisticsSchemaError,
@@ -219,6 +238,7 @@ from data_mcp.series_statistics import (
     find_statistics_artifact,
 )
 from data_mcp.stat_var_list import with_stat_var_list, without_long_stat_var_list
+from dfo_frame_grammar import shift_period
 from fastmcp.exceptions import ResourceError
 from planner.plan import DatasetRequirement, Plan, PlanStatus, plan_revision
 from planner.records import StrictModel
@@ -234,7 +254,7 @@ from pydantic import JsonValue, ValidationError
 
 from executor.artifacts import (
     ArtifactError,
-    declared_dropped_key_count,
+    declared_dropped_key_counts,
     declared_ranked_before_limit,
     declared_shape,
     extract_frame_ref,
@@ -246,7 +266,9 @@ from executor.classify import (
     BACKOFF_SECONDS,
     MAX_ATTEMPTS_PER_STEP,
     MAX_RETRY_AFTER_SECONDS,
+    PAIRING_SHARES_NO_KEY,
     ROLLING_ANCHOR_UNRESOLVED,
+    TRANSIENT_CODES,
     Disposition,
     ExecutorCode,
     Jitter,
@@ -313,7 +335,8 @@ EVIDENCE_ALLOWANCE_S = 30.0
 # a cancellation into `TimeoutError` for the context whose own deadline fired,
 # so two deadlines landing at the same instant could let the outer budget's
 # cancellation reach `_check_evidence` as a bare `CancelledError` instead of
-# something `default_fetch_series_stats` can catch.
+# the `TimeoutError` `default_fetch_series_stats` reports as
+# `StatisticsUnreachableError`.
 _EVIDENCE_DEADLINE_MARGIN_S = 1.0
 
 # What the user reads when a retrieval asked to sum its family of StatVars
@@ -343,6 +366,15 @@ _ANCHOR_REFUSAL_MESSAGES = {
     ),
 }
 _NAMED_YEARS_REMEDY = "Ask for the period in named years instead."
+# The message and remedy for a `rolling_anchor_unresolved` whose `fix.detail`
+# says more than its code.
+_ANCHOR_DETAIL_WORDING = {
+    PAIRING_SHARES_NO_KEY: (
+        "The two sides this question pairs name no place or party in common, so "
+        "nothing can be matched across them in any year.",
+        "Ask about a place or party both sides report on.",
+    ),
+}
 
 # The comparisons under which a rolled period threshold is where a filter's
 # rows start, and how far past the threshold the first year kept is.
@@ -411,6 +443,52 @@ Sleep = Callable[[float], Awaitable[None]]
 # already supplies its own `surface`/`executor`/`resolver` in place of the real ones.
 FetchSeriesStats = Callable[[Manifest], Awaitable[pa.Table | None]]
 
+# The names the graph gives each of some entity refs, keyed by ref; a ref it
+# names none for is absent. Injectable as `FetchSeriesStats` is. One that
+# raises or runs past its deadline names nothing (`_series_labels`).
+LabelRefs = Callable[[Sequence[str]], Awaitable[Mapping[str, str]]]
+
+# The most entity refs one evidence check asks names for: two requests of
+# `describe_nodes`' 50. The largest short series' come first
+# (`unlabelled_series_refs`), and an answer names three of them.
+LABELLED_REFS = 100
+
+# The most seconds that lookup may take. Past it the series stay unlabelled,
+# and an answer counts them as it would without the lookup.
+LABEL_ALLOWANCE_S = 5.0
+
+
+class StatisticsUnreachableError(Exception):
+    """A manifest's statistics artifact could not be fetched this time.
+
+    A timeout, a failed connection, an HTTP 429 or 5xx, or a link lookup the
+    data service refused with a transient code (`TRANSIENT_CODES`). A later
+    try can get past it, so `_Run._check_evidence` stops the step
+    `TRANSPORT_FAILED`.
+    """
+
+
+class StatisticsUnusableError(Exception):
+    """A manifest's statistics metadata cannot be trusted or read.
+
+    The manifest names series but carries no statistics artifact, the
+    artifact fails its digest, size, schema or series-count check, or the data
+    service refused its link or download for good. Nothing the user asked for
+    is wrong, so `_Run._check_evidence` stops the step
+    `STEP_RESULT_UNUSABLE`.
+    """
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether a failed statistics fetch is one a later try can get past."""
+    if isinstance(exc, ArtifactRefusalError):
+        return exc.code in TRANSIENT_CODES
+    if isinstance(exc, httpx2.HTTPStatusError):
+        status = exc.response.status_code
+        return status == httpx2.codes.TOO_MANY_REQUESTS or status >= 500
+    return isinstance(exc, (TimeoutError, httpx2.TransportError))
+
+
 # What `execute_approved_plan` hands each progress report to, with the id of
 # the plan step it describes: a wave's steps run concurrently, so a report
 # means nothing without its step. `_Run._call` binds the step id and passes
@@ -442,16 +520,18 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     with no cap: unlike the MCP digest's own `_STATISTICS_SERIES_CAP`,
     which only bounds what a model reads, `_series_issues` is a bulk
     coverage check that reads every series a retrieval carries, as Arrow
-    columns rather than one model a series. A fetch or read failure is not
-    raised: it degrades to `None`, which
-    `_series_issues` already reports as `STATISTICS_UNAVAILABLE` --
-    failing the requirement closed rather than passing it unverified,
-    `TimeoutError` included. The fetch runs under its own deadline --
-    `current_step_deadline`'s remaining seconds, capped at
+    columns rather than one model a series. The fetch runs under its own
+    deadline -- `current_step_deadline`'s remaining seconds, capped at
     `EVIDENCE_ALLOWANCE_S` and reduced by `_EVIDENCE_DEADLINE_MARGIN_S` -- so
-    a `get_data` call that used most of the step's own budget still degrades
-    the requirement alone rather than failing the whole step
-    `transport_failed` once the outer budget catches up.
+    it gives up before the step's outer budget does and its failure is
+    reported as its own.
+
+    Raises:
+        StatisticsUnreachableError: the fetch timed out or failed in transit
+            (`_is_transient`).
+        StatisticsUnusableError: the manifest names series but no statistics
+            artifact, or the artifact's link, download or contents failed
+            for any other reason.
     """
     if manifest.series_count == 0:
         return SERIES_STATISTICS_ARROW_SCHEMA.empty_table()
@@ -461,13 +541,10 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
     if artifact is None:
         if manifest.series_count is None:
             return None
-        logger.warning(
-            "executor: manifest for %s/%s names series_count=%d but carries no statistics artifact",
-            manifest.definition.spec_id,
-            manifest.content_version,
-            manifest.series_count,
+        raise StatisticsUnusableError(
+            f"the manifest for {manifest.definition.spec_id}/{manifest.content_version} names "
+            f"series_count={manifest.series_count} but carries no statistics artifact"
         )
-        return None
     step_deadline = current_step_deadline.get()
     remaining_s = step_deadline.remaining() if step_deadline is not None else EVIDENCE_ALLOWANCE_S
     fetch_deadline = CallDeadline.after(
@@ -491,13 +568,57 @@ async def default_fetch_series_stats(manifest: Manifest) -> pa.Table | None:
         KeyError,
         TimeoutError,
     ) as exc:
+        # The detail leaves `exc` out: an `httpx2` error names the artifact link it failed on.
         logger.warning(
             "executor: could not fetch or decode the statistics artifact for %s/%s: %s",
             manifest.definition.spec_id,
             manifest.content_version,
             exc,
         )
-        return None
+        detail = (
+            f"the statistics artifact for {manifest.definition.spec_id}/"
+            f"{manifest.content_version} could not be fetched or read"
+        )
+        if _is_transient(exc):
+            raise StatisticsUnreachableError(detail) from exc
+        raise StatisticsUnusableError(detail) from exc
+
+
+async def default_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+    """The names the graph gives `refs`, through `data_mcp.node_lookup.describe_nodes`:
+    `execute_approved_plan`'s default `label_refs`."""
+    nodes = await describe_nodes(refs)
+    return {ref: label for ref, node in nodes.items() if (label := getattr(node, "label", None))}
+
+
+async def no_label_refs(refs: Sequence[str]) -> Mapping[str, str]:
+    """The `LabelRefs` that names nothing, for a read no answer is written from
+    (`read_anchors`) and a caller that makes no upstream call."""
+    del refs
+    return {}
+
+
+async def _series_labels(label_refs: LabelRefs, refs: Sequence[str]) -> Mapping[str, str]:
+    """The names `label_refs` gives `refs`, or none where it fails or outruns its deadline.
+
+    A name labels a series in an answer's notes and nothing else, so the
+    step goes on without it, and its series are counted. The deadline is
+    what remains of the step's budget (`current_step_deadline`), less
+    `_EVIDENCE_DEADLINE_MARGIN_S`, capped at `LABEL_ALLOWANCE_S`, so the
+    lookup gives up before the step's own budget does.
+    """
+    allowance_s = LABEL_ALLOWANCE_S
+    if (step_deadline := current_step_deadline.get()) is not None:
+        allowance_s = min(step_deadline.remaining() - _EVIDENCE_DEADLINE_MARGIN_S, allowance_s)
+    if allowance_s <= 0:
+        return {}
+    # Whatever an injected seam raises, only the names go unread, so the catch is broad.
+    try:
+        async with asyncio.timeout(allowance_s):
+            return await label_refs(refs)
+    except Exception as exc:
+        logger.warning("executor: could not read names for %d entity refs: %r", len(refs), exc)
+        return {}
 
 
 class _Stopped(Exception):  # noqa: N818 -- a control-flow signal carrying an outcome, not an error
@@ -604,6 +725,7 @@ class _Runtime:
     jitter: Jitter
     max_concurrent_steps: int
     fetch_series_stats: FetchSeriesStats
+    label_refs: LabelRefs
     on_progress: StepProgressCallback | None
     publisher: ResultPublisher | None
 
@@ -621,6 +743,7 @@ async def execute_authorised(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
 ) -> RunOutcome:
     """Run `submission` under `authorisation`, a plan's approval, as one run of `ledger`.
@@ -638,9 +761,9 @@ async def execute_authorised(
     with its replay recipe through `publisher`
     (`executor.completion.publish_results`); a stopped one is recorded failed.
 
-    `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats` and
-    `on_progress` are `execute_approved_plan`'s own. With no `publisher`, a run
-    with a derived result stays `publishing`.
+    `sleep`, `jitter`, `max_concurrent_steps`, `fetch_series_stats`,
+    `label_refs` and `on_progress` are `execute_approved_plan`'s own. With no
+    `publisher`, a run with a derived result stays `publishing`.
 
     `authorisation` must approve the work `submission` is: its approved
     revision is `submission.revision`. One that names other work admits no run.
@@ -668,6 +791,7 @@ async def execute_authorised(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=on_progress,
         publisher=publisher,
     )
@@ -740,6 +864,7 @@ async def resume_run(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
 ) -> RunOutcome:
     """Carry an unfinished `run` of `ledger` on from `submission`, the one
     stored with it (`load_submission`), as `execute_authorised` carries on a
@@ -751,6 +876,7 @@ async def resume_run(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=None,
         publisher=publisher,
     )
@@ -955,6 +1081,7 @@ async def execute_approved_plan(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    label_refs: LabelRefs = default_label_refs,
     on_progress: StepProgressCallback | None = None,
 ) -> tuple[Plan, RunOutcome]:
     """Run an approved plan through `execute_authorised` and record the run in its status.
@@ -985,9 +1112,14 @@ async def execute_approved_plan(
     semaphore). `fetch_series_stats`
     resolves a dataset step's manifest into the rows `evidence_from_manifest`
     checks coverage against; the real fetch by default, injectable for a
-    caller whose `surface` is itself fully virtualised. `on_progress` hears
-    every progress report a step's tool call sends, and a report naming the
-    next attempt each time a step is retried, tagged with the step's id.
+    caller whose `surface` is itself fully virtualised, which raises
+    `StatisticsUnreachableError` or `StatisticsUnusableError` the way the real
+    one does. `label_refs` names the entities of the series a retrieval holds
+    short of its period that the approved source names none for, so an
+    answer can name the largest (`default_label_refs` by default).
+    `on_progress` hears every progress report a step's tool call sends, and
+    a report naming the next attempt each time a step is retried, tagged
+    with the step's id.
 
     Returns:
         The plan as the run left it, or unchanged when it could not start,
@@ -1051,6 +1183,7 @@ async def execute_approved_plan(
         jitter=jitter,
         max_concurrent_steps=max_concurrent_steps,
         fetch_series_stats=fetch_series_stats,
+        label_refs=label_refs,
         on_progress=on_progress,
     )
     run = None
@@ -1084,16 +1217,116 @@ async def _run_workflow(
     try:
         return await run.execute()
     except _Stopped as stopped:
-        if not stopped.siblings:
-            return stopped.outcome
-        return stopped.outcome.model_copy(update={"also_stopped": stopped.siblings})
+        return _stop_outcome(stopped)
+
+
+def _stop_outcome(stopped: _Stopped) -> MethodChoiceNeeded | Refused | RediscoveryNeeded:
+    """The outcome `stopped` carries, its own `also_stopped` naming the rest of its wave's stops."""
+    if not stopped.siblings:
+        return stopped.outcome
+    return stopped.outcome.model_copy(update={"also_stopped": stopped.siblings})
+
+
+@dataclass(frozen=True, slots=True)
+class AnchorRead:
+    """The newest period one group of a workflow's rolling steps stands on, read before a run.
+
+    `steps` are the group's rolling steps (`compiler.rolling.AnchorGroup`),
+    `planned` the newest period their literals state (`planned_anchor`) and
+    `result` what `resolve_anchor` answered over the group's retrievals, or
+    the stop its run would meet on one of them or on `resolve_anchor`.
+    """
+
+    steps: tuple[str, ...]
+    planned: str
+    result: AnchorResult | MethodChoiceNeeded | Refused | RediscoveryNeeded
+
+    @property
+    def behind(self) -> bool:
+        """Whether the newest period resolved is before the one the plan states."""
+        return isinstance(self.result, AnchorResult) and self.result.period < self.planned
+
+
+def planned_anchor(group: AnchorGroup, steps_by_id: Mapping[str, WorkflowStep]) -> str:
+    """The newest period the rolling literals of `group` state.
+
+    A rolling literal less its offset is the newest period the plan was
+    checked against, one for the whole group
+    (`planner.plan._check_rolling_years_agree`). Periods of one grain order
+    by their spelling, so the largest stands for the group.
+    """
+    return max(
+        shift_period(bound.period, -bound.offset)
+        for step_id in group.steps
+        for bound in rolling_bounds(steps_by_id[step_id].args)
+    )
+
+
+async def read_anchors(
+    workflow: Workflow,
+    *,
+    revision: str,
+    requirements: Sequence[DatasetRequirement],
+    surface: ToolSurface,
+    capabilities: Sequence[ToolCapability] = CAPABILITIES,
+    sleep: Sleep = asyncio.sleep,
+    jitter: Jitter = random.uniform,
+    max_concurrent_steps: int = 4,
+    fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded:
+    """Resolve the newest period of each group of `workflow`'s rolling steps, as its run would.
+
+    Takes a run's own path (`_Run.read_anchors`): the surface check, the
+    retrievals the groups rest on, checked against `requirements` as
+    evidence, and `resolve_anchor` for each group, over the same
+    populations and frames. Nothing is admitted to a ledger and nothing is
+    recorded, and no derived step runs. `revision` names the work in a stop's
+    outcome. The other arguments are `execute_approved_plan`'s. No answer is
+    written from the read, so it asks no names for its series (`no_label_refs`).
+
+    Returns:
+        Each group's `AnchorRead`, in the order its run resolves them, empty
+        for a workflow with no rolling step, each holding the stop a run
+        would meet on the group's retrievals or its resolution, with no
+        `run_id`; or the outcome a run of `workflow` stops on before any
+        retrieval, on a retrieval whose stop names no step, or on a step
+        reading only entities the retrievals left out.
+    """
+    runtime = _Runtime(
+        surface=surface,
+        capabilities=capabilities,
+        sleep=sleep,
+        jitter=jitter,
+        max_concurrent_steps=max_concurrent_steps,
+        fetch_series_stats=fetch_series_stats,
+        label_refs=no_label_refs,
+        on_progress=None,
+        publisher=None,
+    )
+    submission = Submission.model_construct(
+        revision=revision, workflow=workflow, requirements=tuple(requirements)
+    )
+    run = _Run(submission, run_id=None, ledger=None, runtime=runtime)
+    try:
+        return await run.read_anchors()
+    except _Stopped as stopped:
+        return _stop_outcome(stopped)
 
 
 class _Run:
-    """One run's working state."""
+    """One run's working state.
+
+    A read made before any run is admitted (`read_anchors`) has no `run_id`
+    and no `ledger`, and records nothing.
+    """
 
     def __init__(
-        self, submission: Submission, *, run_id: str, ledger: RunLedger, runtime: _Runtime
+        self,
+        submission: Submission,
+        *,
+        run_id: str | None,
+        ledger: RunLedger | None,
+        runtime: _Runtime,
     ) -> None:
         workflow = submission.workflow
         self.workflow = workflow
@@ -1103,6 +1336,7 @@ class _Run:
         self.sleep = runtime.sleep
         self.jitter = runtime.jitter
         self.fetch_series_stats = runtime.fetch_series_stats
+        self.label_refs = runtime.label_refs
         self.on_progress = runtime.on_progress
         # Bounds how many steps of one wave may have their tool call in
         # flight at once, acquired in `_attempt` around `_run_step`; a wave
@@ -1126,10 +1360,14 @@ class _Run:
             for b in workflow.evidence_bindings
         }
         self.steps_by_id: dict[str, WorkflowStep] = {s.id: s for s in workflow.steps}
+        # The entities each retrieval left out, by the role and ref its
+        # approved source resolved them to, with their findings
+        # (`_check_left_out_narrowings`).
+        self.left_out: dict[str, dict[tuple[str, str], EvidenceIssue]] = {}
         self.frames: dict[str, FrameRef] = {}
         self.row_counts: dict[str, int | None] = {}
         self.stat_var_counts: dict[str, int | None] = {}
-        self.dropped_key_counts: dict[str, int] = {}
+        self.dropped_key_counts: dict[str, tuple[int, int]] = {}
         self.ranked_before_limit: dict[str, int | None] = {}
         # Per step that produced a frame: the role keys its result declared,
         # and the columns of the retrieval it rests on, which the plan's role
@@ -1166,68 +1404,16 @@ class _Run:
             # the first wave holding a derived step seals what they read.
             if not self.sealed and not all(self._retrieves(s) for s in wave):
                 await self._seal()
-            for group in self.anchor_groups:
-                rolling = next((step for step in wave if step.id in group.steps), None)
-                if rolling is None or rolling.id in self.anchored:
-                    continue
-                # Every retrieval of the group is in a wave before this one
-                # (`_waves`), and the wave's steps start only once this returns.
+                self._check_left_out_narrowings()
+            # Every retrieval of a group is in a wave before the group's first
+            # step (`_waves`), and the wave's steps start only once these return.
+            for group, first in self._groups_starting(wave):
+                anchor = await self._resolve_group(group, first, schemas)
                 try:
-                    await self._resolve_anchor(group, rolling, schemas[_RESOLVE_ANCHOR.name])
+                    self._check_anchor_held(group, first, anchor)
                 except _Stopped as stopped:
                     raise _Stopped(self._restamped(stopped.outcome)) from stopped
-            # Each step runs as its own task; `asyncio.gather` copies the
-            # calling context per task, so `current_step_id`, set inside
-            # `_run_step`, never leaks between concurrent siblings.
-            # `return_exceptions=True` lets every step in the wave run to
-            # completion even when one of them raises something `_attempt`
-            # did not catch: an exception here is only ever a defect
-            # `_Stopped` was never meant to carry (`_Stopped` itself is
-            # always returned, never raised, out of `_attempt`), and letting
-            # it end the wave at once would abandon that wave's other
-            # in-flight steps unawaited rather than let them finish. A
-            # `BaseException` outside `Exception`, such as `CancelledError`,
-            # is not captured by `return_exceptions` and propagates
-            # regardless.
-            outcomes = await asyncio.gather(
-                *(self._attempt(step, schemas[step.tool.name]) for step in wave),
-                return_exceptions=True,
-            )
-            stopped: _Stopped | None = None
-            other_stops: list[MethodChoiceNeeded | Refused | RediscoveryNeeded] = []
-            for outcome in outcomes:
-                # `_Stopped` is an `Exception` subclass but is always
-                # returned, never raised, out of `_attempt`, so it is read
-                # off first, before the general `BaseException` check below
-                # that re-raises anything else.
-                if isinstance(outcome, _Stopped):
-                    if stopped is None:
-                        stopped = outcome
-                    else:
-                        other_stops.append(outcome.outcome)
-                    continue
-                if isinstance(outcome, BaseException):
-                    # The first such exception in the wave's own step order,
-                    # since `outcomes` keeps `asyncio.gather`'s input order
-                    # regardless of which task finished first.
-                    raise outcome
-                record, evidence = outcome
-                self.records[record.step_id] = record
-                if evidence is not None:
-                    self.evidence_by_step[record.step_id] = evidence
-            if stopped is not None:
-                # The wave has already run every one of its steps to
-                # completion, so `_completed_so_far` names every step that
-                # finished in this wave and in every wave before it,
-                # `_evidence_so_far` the evidence they recorded, and
-                # `_answers` the finished terminal steps that stand as
-                # answers. Re-stamp the outcome, and every sibling stop,
-                # with those rather than whatever each saw at the moment it
-                # stopped.
-                raise _Stopped(
-                    self._restamped(stopped.outcome),
-                    siblings=tuple(self._restamped(sibling) for sibling in other_stops),
-                )
+            await self._run_wave(wave, schemas)
         answers, refused = self._answers(self.workflow.terminal_steps)
         if refused is not None:
             raise _Stopped(self._restamped(refused.outcome))
@@ -1242,9 +1428,139 @@ class _Run:
             anchors=self._anchors_so_far(),
         )
 
+    async def read_anchors(self) -> tuple[AnchorRead, ...]:
+        """Run the retrievals the anchor groups rest on, seal them, and resolve each group.
+
+        The run's own steps for the part of it a group's newest period rests
+        on (`execute`), with each group resolved under its first step to
+        run, and no derived step run and no check of the period against the
+        plan's (`_check_anchor_held`), which the caller makes. A retrieval
+        that stops stops only the groups resting on it, which read as that
+        stop, the first in step order. With no retrieval stopped, a step
+        reading only entities they left out stops the whole read before any
+        group is resolved, as it stops the run (`_check_left_out_narrowings`).
+        A group whose resolution stops reads as that stop too. Every other
+        group is resolved.
+        """
+        schemas = await self._surface_as_compiled()
+        roots = {root for group in self.anchor_groups for root in group.roots}
+        stops: dict[str, MethodChoiceNeeded | Refused | RediscoveryNeeded] = {}
+        try:
+            await self._run_wave(tuple(s for s in self.workflow.steps if s.id in roots), schemas)
+        except _Stopped as stopped:
+            for outcome in (stopped.outcome, *stopped.siblings):
+                if outcome.step_id is None:
+                    raise
+                stops.setdefault(outcome.step_id, outcome)
+        await self._seal()
+        # The run meets a retrieval's stop before this check, which it makes
+        # once its retrievals return (`execute`).
+        if not stops:
+            self._check_left_out_narrowings()
+        read: list[AnchorRead] = []
+        for wave in _waves(self.workflow):
+            for group, first in self._groups_starting(wave):
+                if any(read_group.steps == group.steps for read_group in read):
+                    continue
+                stop = next((stops[step] for step in group.roots if step in stops), None)
+                read.append(
+                    AnchorRead(
+                        steps=group.steps,
+                        planned=planned_anchor(group, self.steps_by_id),
+                        result=stop or await self._resolved_or_stop(group, first, schemas),
+                    )
+                )
+        return tuple(read)
+
+    async def _resolved_or_stop(
+        self, group: AnchorGroup, first: WorkflowStep, schemas: Mapping[str, ToolSchema]
+    ) -> AnchorResult | MethodChoiceNeeded | Refused | RediscoveryNeeded:
+        """`_resolve_group`'s period for `group`, or the stop it raised."""
+        try:
+            return await self._resolve_group(group, first, schemas)
+        except _Stopped as stopped:
+            return stopped.outcome
+
+    def _groups_starting(
+        self, wave: Sequence[WorkflowStep]
+    ) -> list[tuple[AnchorGroup, WorkflowStep]]:
+        """Each group not yet resolved whose first step to run is in `wave`, with that step."""
+        starting: list[tuple[AnchorGroup, WorkflowStep]] = []
+        for group in self.anchor_groups:
+            first = next((step for step in wave if step.id in group.steps), None)
+            if first is not None and first.id not in self.anchored:
+                starting.append((group, first))
+        return starting
+
+    async def _resolve_group(
+        self, group: AnchorGroup, first: WorkflowStep, schemas: Mapping[str, ToolSchema]
+    ) -> AnchorResult:
+        """`_resolve_anchor` for `group` under `first`, a stop carrying what the run finished."""
+        try:
+            return await self._resolve_anchor(group, first, schemas[_RESOLVE_ANCHOR.name])
+        except _Stopped as stopped:
+            raise _Stopped(self._restamped(stopped.outcome)) from stopped
+
+    async def _run_wave(
+        self, wave: Sequence[WorkflowStep], schemas: Mapping[str, ToolSchema]
+    ) -> None:
+        """Run every step of `wave` to completion, then raise the first stop among them."""
+        # Each step runs as its own task. `asyncio.gather` copies the
+        # calling context per task, so `current_step_id`, set inside
+        # `_run_step`, stays with its step among concurrent siblings.
+        # `return_exceptions=True` lets every step in the wave run to
+        # completion when one of them raises something `_attempt` did not
+        # catch. Such an exception is a defect, since `_attempt` returns
+        # `_Stopped` and never raises it, and ending the wave at once would
+        # abandon that wave's other in-flight steps unawaited. A
+        # `BaseException` outside `Exception`, such as `CancelledError`,
+        # is not captured by `return_exceptions` and propagates
+        # regardless.
+        outcomes = await asyncio.gather(
+            *(self._attempt(step, schemas[step.tool.name]) for step in wave),
+            return_exceptions=True,
+        )
+        stopped: _Stopped | None = None
+        other_stops: list[MethodChoiceNeeded | Refused | RediscoveryNeeded] = []
+        for outcome in outcomes:
+            # `_attempt` returns `_Stopped`, an `Exception` subclass, and
+            # never raises it, so it is read off first, before the general
+            # `BaseException` check below that re-raises anything else.
+            if isinstance(outcome, _Stopped):
+                if stopped is None:
+                    stopped = outcome
+                else:
+                    other_stops.append(outcome.outcome)
+                continue
+            if isinstance(outcome, BaseException):
+                # The first such exception in the wave's own step order,
+                # since `outcomes` keeps `asyncio.gather`'s input order
+                # regardless of which task finished first.
+                raise outcome
+            record, evidence = outcome
+            self.records[record.step_id] = record
+            if evidence is not None:
+                self.evidence_by_step[record.step_id] = evidence
+        if stopped is not None:
+            # The wave has already run every one of its steps to
+            # completion, so `_completed_so_far` names every step that
+            # finished in this wave and in every wave before it,
+            # `_evidence_so_far` the evidence they recorded, and
+            # `_answers` the finished terminal steps that stand as
+            # answers. Re-stamp the outcome, and every sibling stop,
+            # with those rather than whatever each saw at the moment it
+            # stopped.
+            raise _Stopped(
+                self._restamped(stopped.outcome),
+                siblings=tuple(self._restamped(sibling) for sibling in other_stops),
+            )
+
     async def _record(self, change: RunChange, *, step_id: str | None = None) -> None:
         """Record `change` to the run, refusing the run when the ledger says
-        the authorisation no longer covers it."""
+        the authorisation no longer covers it. A read with no run records
+        nothing."""
+        if self.ledger is None or self.run_id is None:
+            return
         try:
             await record_change(self.ledger, self.run_id, change)
         except AuthorisationExpiredError as exc:
@@ -1467,7 +1783,7 @@ class _Run:
 
     async def _resolve_anchor(
         self, group: AnchorGroup, step: WorkflowStep, schema: ToolSchema
-    ) -> None:
+    ) -> AnchorResult:
         """Resolve the newest period the rolling steps of `group` stand on, once.
 
         Sends `resolve_anchor` the populations the group's steps carry, with
@@ -1476,7 +1792,8 @@ class _Run:
         and the frame of each retrieval of the group. `step` is the group's
         first step about to run: the call reports and is refused under its id.
 
-        Writes `self.anchored` for every step of the group.
+        Writes `self.anchored` for every step of the group, and returns the
+        period resolved.
         """
         roots: dict[str, list[FrameColumns | None]] = {}
         for root in group.roots:
@@ -1498,8 +1815,15 @@ class _Run:
         # each over the one retrieval, share one resolution.
         sent = json.dumps({"populations": populations, "roots": sorted(frames)}, sort_keys=True)
         if (held := self._resolutions.get(sent)) is not None:
+            steps = (*held.result.steps, *group.steps)
+            shared = held.result.roots
+            shared = (*shared, *(root for root in group.roots if root not in shared))
+            held = replace(
+                held, result=held.result.model_copy(update={"steps": steps, "roots": shared})
+            )
+            self._resolutions[sent] = held
             self.anchored.update(dict.fromkeys(group.steps, held))
-            return
+            return held.result
         self._check_fit(step, _RESOLVE_ANCHOR, arguments, schema)
         token = current_step_id.set(step.id)
         try:
@@ -1509,7 +1833,13 @@ class _Run:
         if result.is_error:
             raise self._stopped_by_anchor_refusal(step, result)
         try:
-            anchor = AnchorResult.model_validate(result.structured_content)
+            anchor = AnchorResult.model_validate(result.structured_content).model_copy(
+                update={
+                    "steps": group.steps,
+                    "roots": group.roots,
+                    "populations": tuple(populations),
+                }
+            )
         except ValidationError as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE,
@@ -1519,6 +1849,44 @@ class _Run:
         anchored = _Anchored(result=anchor, columns=roots)
         self._resolutions[sent] = anchored
         self.anchored.update(dict.fromkeys(group.steps, anchored))
+        return anchor
+
+    def _check_anchor_held(
+        self, group: AnchorGroup, step: WorkflowStep, anchor: AnchorResult
+    ) -> None:
+        """Refuse `ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN` for a newest period before the plan's.
+
+        The plan's newest period is the one its literals state
+        (`planned_anchor`). Every rule the plan met holds of its years moved later, so a period
+        on it or after it runs. An earlier one reads years no rule was checked
+        against, which can leave a step no rows or the wrong years.
+
+        The refusal's payload is worded for the user and classifies as a
+        stop, since the same plan resolves the same period over the same data.
+        """
+        planned = planned_anchor(group, self.steps_by_id)
+        if not AnchorRead(steps=group.steps, planned=planned, result=anchor).behind:
+            return
+        raise self._refused(
+            RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN,
+            f"step {step.id!r} counts from {anchor.period}, the newest period resolved, "
+            f"before {planned}, the one the plan states",
+            step_id=step.id,
+            payload=ToolFailure(
+                code=ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
+                message=(
+                    f"The plan counted the period from {planned}, but fewer than half of these "
+                    f"series now report {planned}. The latest year at least half of them "
+                    f"report is {anchor.period}."
+                ),
+                retry_mode="do_not_retry",
+                fix={
+                    "remedy": f"Ask again to plan the period from {anchor.period}.",
+                    "anchor": anchor.period,
+                    "planned_anchor": planned,
+                },
+            ),
+        )
 
     def _stopped_by_anchor_refusal(self, step: WorkflowStep, result: ToolCallResult) -> _Stopped:
         """The stop for a `resolve_anchor` call the tool refused.
@@ -1530,10 +1898,14 @@ class _Run:
         failure = parse_tool_failure(result.structured_content or {})
         if is_anchor_fault(failure):
             return self._anchor_fault(step, failure)
-        message = _ANCHOR_REFUSAL_MESSAGES.get(failure.code)
-        if message is not None:
+        detail = failure.fix.get("detail")
+        worded = _ANCHOR_DETAIL_WORDING.get(detail) if isinstance(detail, str) else None
+        if worded is None and (message := _ANCHOR_REFUSAL_MESSAGES.get(failure.code)):
+            worded = (message, _NAMED_YEARS_REMEDY)
+        if worded is not None:
+            message, remedy = worded
             failure = failure.model_copy(
-                update={"message": message, "fix": failure.fix | {"remedy": _NAMED_YEARS_REMEDY}}
+                update={"message": message, "fix": failure.fix | {"remedy": remedy}}
             )
         return self._step_refused(step.id, _RESOLVE_ANCHOR, result, failure)
 
@@ -1618,6 +1990,68 @@ class _Run:
                 ),
             )
 
+    def _check_left_out_narrowings(self) -> None:
+        """Refuse the run before its first derived step when a step narrows a
+        frame to named entities only, every one of which a retrieval under
+        that frame left out (`compiler.evidence.left_out_entities`).
+
+        Every figure such a step gives for the entity rests on the retrieval
+        that lacks it. A side or filter over that retrieval's own rows keeps
+        no row. A keyed `share_of` or `quotient_of` holds no key for the
+        entity when the retrieval lacking it is the numerator or a keyed
+        denominator, and divides it by a total without the entity's own
+        amounts when that retrieval is a denominator read whole. So the step
+        is refused whichever side of the frame the left-out retrieval sits
+        on. It stops as
+        `REQUIREMENT_UNMET` naming the first such step in plan order, its
+        requirement the left-out entity's, carrying each left-out entity's
+        `ENTITY_MISSING` finding as an error. A narrowing is read off the
+        step's compiled arguments (`compiler.frame_columns.entity_narrowings`),
+        whose columns are the approved source's, as the left-out entities'
+        are.
+        """
+        refused: list[tuple[str, EvidenceIssue]] = []
+        for step in self.workflow.steps:
+            for narrowing in entity_narrowings(step.tool, step.args):
+                binding = step.bindings.get(narrowing.frame) or step.bindings.get(FRAME_PARAMETER)
+                if binding is None or not narrowing.refs:
+                    continue
+                left_out = {
+                    key: issue
+                    for retrieval in sorted(self._retrievals_under(binding.from_step))
+                    for key, issue in self.left_out.get(retrieval, {}).items()
+                }
+                missing = [
+                    left_out[(narrowing.column, ref)]
+                    for ref in sorted(narrowing.refs)
+                    if (narrowing.column, ref) in left_out
+                ]
+                if len(missing) == len(narrowing.refs):
+                    refused.extend((step.id, issue) for issue in missing)
+        if not refused:
+            return
+        step_id, first = refused[0]
+        raise self._refused(
+            RefusalKind.REQUIREMENT_UNMET,
+            "; ".join(
+                f"step {narrowing_step!r} reads {issue.required!r} alone, which the retrieval "
+                "holds no series for"
+                for narrowing_step, issue in refused
+            ),
+            step_id=step_id,
+            requirement_id=first.requirement_id,
+            issues=tuple(
+                issue.model_copy(
+                    update={
+                        "severity": Severity.ERROR,
+                        "detail": f"the retrieval holds no series for {issue.required!r}, "
+                        f"which step {narrowing_step!r} reads alone",
+                    }
+                )
+                for narrowing_step, issue in refused
+            ),
+        )
+
     def _retrievals_under(self, step_id: str) -> frozenset[str]:
         """The retrieval steps `step_id` rests on, through its bindings."""
         if step_id in self.evidence_bindings:
@@ -1691,7 +2125,8 @@ class _Run:
                         row_count=self.row_counts[step.id],
                         role_keys=self.role_keys[step.id],
                         stat_var_count=self.stat_var_counts[step.id],
-                        dropped_key_count=self.dropped_key_counts[step.id],
+                        dropped_key_count=self.dropped_key_counts[step.id][0],
+                        right_dropped_key_count=self.dropped_key_counts[step.id][1],
                         ranked_before_limit=self.ranked_before_limit[step.id],
                     )
                     evidence = (
@@ -1732,7 +2167,7 @@ class _Run:
         produce, refusing `SHAPE_MISMATCH` on a difference, and record the
         declared row count, role keys and StatVar count for `_answer_refusal`,
         the steps reading this one and the step's `StepRecord`, with the keys
-        the result declares it left out (`declared_dropped_key_count`).
+        the result declares it left out (`declared_dropped_key_counts`).
 
         `expected_role_keys` is `None` for a retrieval: the role keys and
         StatVar count its result declares are the frame's own, and stand as
@@ -1753,7 +2188,7 @@ class _Run:
             ) from exc
         self.row_counts[step.id] = row_count
         self.stat_var_counts[step.id] = stat_var_count
-        self.dropped_key_counts[step.id] = declared_dropped_key_count(result.structured_content)
+        self.dropped_key_counts[step.id] = declared_dropped_key_counts(result.structured_content)
         self.ranked_before_limit[step.id] = declared_ranked_before_limit(result.structured_content)
         self.role_keys[step.id] = role_keys
         binding = step.bindings.get(FRAME_PARAMETER)
@@ -2135,7 +2570,9 @@ class _Run:
             manifest = parse_manifest(structured)
             series_stats = await self.fetch_series_stats(manifest)
             evidence = evidence_from_manifest(manifest, series_stats=series_stats)
-        except (ArtifactError, ValueError, ResourceError) as exc:
+        except StatisticsUnreachableError as exc:
+            raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc), step_id=step.id) from exc
+        except (ArtifactError, ValueError, ResourceError, StatisticsUnusableError) as exc:
             raise self._refused(
                 RefusalKind.STEP_RESULT_UNUSABLE, str(exc), step_id=step.id
             ) from exc
@@ -2150,6 +2587,12 @@ class _Run:
                 requirement_id=requirement.id,
                 issues=tuple(findings),
             )
+        if refs := unlabelled_series_refs(findings, limit=LABELLED_REFS):
+            findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
+        self.left_out[step.id] = {
+            (entity.role, entity.ref): issue
+            for entity, issue in left_out_entities(requirement, findings, approved).items()
+        }
         return EvidenceRecord(
             requirement_id=requirement.id,
             step_id=step.id,

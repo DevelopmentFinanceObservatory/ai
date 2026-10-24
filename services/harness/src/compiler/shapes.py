@@ -45,6 +45,7 @@ from planner.plan import (
     EvidenceRequirement,
     anchored_over,
     keeps_one_level,
+    retrieved_period,
     states_period_threshold,
 )
 from planner.records import (
@@ -83,7 +84,7 @@ from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
 from compiler.evidence import named_members, named_refs, open_axes_for, opens_place_axis
-from compiler.sources import stat_var_count
+from compiler.sources import bound_codes, stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
 # `code_system`, the open axis a source's family varies along for it, and the
@@ -96,6 +97,51 @@ BREAKDOWN_CODE_SYSTEMS: Mapping[BreakdownDimension, str] = {
 def breakdown_column(breakdown: Breakdown) -> str:
     """The frame column a retrieval broken down by `breakdown` names each row's code in."""
     return f"stat_var_{BREAKDOWN_CODE_SYSTEMS[breakdown.dimension]}"
+
+
+def breakdown_level(breakdown: Breakdown, source: SelectedSource) -> int | None:
+    """The level a retrieval of `source` broken down by `breakdown` reads.
+
+    With no code of the breakdown's code system named in the source's
+    identity, the level is the plan's own. Named codes set a floor, the
+    shallowest level at which the breakdown holds more than one group. For
+    several codes that is where their paths (`SelectedSource.code_paths`)
+    part: health (120) and population (130) share the parent social
+    infrastructure (100) at level 0 and part at level 1, so a breakdown of
+    the two reads level 1. For one code it is the level below it, its
+    children: health alone reads level 2, its subsectors. A code the graph
+    holds nothing below (`SelectedSource.leaf_codes`) keeps its own level.
+    A level the plan states deeper than the floor is kept.
+    `None` when a named code has no path recorded, so the level cannot be
+    known.
+    """
+    prop = BREAKDOWN_CODE_SYSTEMS[breakdown.dimension]
+    codes = bound_codes(source, prop)
+    if not codes:
+        return breakdown.level
+    paths = [path for code in codes if (path := source.code_paths.get(code))]
+    if len(paths) < len(codes):
+        return None
+    if len(paths) > 1:
+        return max(breakdown.level, _split_level(paths))
+    (path,) = paths
+    leaf = path[-1] in source.leaf_codes
+    return max(breakdown.level, len(path) - 1 if leaf else len(path))
+
+
+def _split_level(paths: Sequence[tuple[str, ...]]) -> int:
+    """The shallowest level at which `paths`, each ending at a different code, name more than one.
+
+    A path shorter than the level stands at its own code, as apis keeps a
+    code above the level it rolls the others up to. Paths to different codes
+    part at the deepest one's level at the latest.
+    """
+    deepest = max(len(path) for path in paths) - 1
+    return next(
+        level
+        for level in range(deepest + 1)
+        if len({path[min(level, len(path) - 1)] for path in paths}) > 1
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,7 +503,7 @@ def _retrieve_resolved(
     place-level filter may read any open role, a flow side included, which
     is the one role `compile` can ask `get_data` for the type column of. Its
     years run on past its period, and start at `first_year` for a read of the
-    dataset's whole history, as `planner.plan._dataset_shape` states them.
+    dataset's whole history (`planner.plan.retrieved_period`).
     """
     source = sources.get(operation.id)
     requirement = requirements.get(operation.requirement_id)
@@ -550,9 +596,7 @@ def _retrieve_resolved(
     shape = _retrieved(
         requirement_id=operation.requirement_id,
         roles=tuple(dims),
-        period=requirement.period
-        if first_year is None
-        else Period(start=first_year, end=requirement.period.end),
+        period=retrieved_period(requirement, first_year=first_year),
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
         end_open=requirement.period_end_open,

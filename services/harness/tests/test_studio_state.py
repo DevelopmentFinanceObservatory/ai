@@ -65,7 +65,14 @@ from harness.studio_state import (
     remove_cards,
 )
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
-from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from harness.wire import (
+    AddOp,
+    ComponentType,
+    CompositionActor,
+    CompositionBlock,
+    CompositionManifest,
+    MutationOp,
+)
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 
@@ -381,11 +388,15 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         drawn_cards.chart("bar_chart", series), drawn_cards.stored(codes)
     )
     state = ConversationState(conversation_id=CONVERSATION)
-    land_component(state, card)
+    intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
+    land_component(state, card, intent=intent)
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
     assert state.canvas_series_ids() == ids
+    assert state.canvas_cards() == [
+        {"component_id": card_id, "intent": intent, "revision": card["revision"]}
+    ]
     assert len(state.components[card_id]["fact_summary"]["series"]) == 12
     model_facing = json.dumps(
         [
@@ -399,6 +410,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         ]
     )
     assert "series_ids" not in model_facing
+    assert "drawn_card" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -408,6 +420,36 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     state.components[card_id].update(studio_state.drawn_series_ids(fewer))
     assert state.canvas_series_ids() == ids[:1]
+
+
+def test_a_drawn_card_is_listed_while_the_canvas_holds_the_revision_it_was_drawn_as() -> None:
+    """A card taken off the canvas is not listed, and listed again once the
+    user adds it back unchanged; one the canvas holds at a later revision is
+    not listed."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    for card_id in ("cmp_one", "cmp_two"):
+        card = {"component_id": card_id, "type": "line_chart", "revision": 1}
+        land_component(state, card, intent={"title": card_id})
+
+    def listed() -> list[str]:
+        return [card["component_id"] for card in state.canvas_cards()]
+
+    assert studio_state.remove_cards(state, ["cmp_one"], all_cards=False)[0] == ["cmp_one"]
+    assert listed() == ["cmp_two"]
+
+    applied = studio_state._apply_operations(
+        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_one")]
+    )
+    assert isinstance(applied, tuple)
+    state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
+    assert listed() == ["cmp_two", "cmp_one"]
+
+    revised = [
+        block.model_copy(update={"revision": 2}) if block.component_id == "cmp_two" else block
+        for block in state.composition.blocks
+    ]
+    state.composition = _next_manifest(state.composition, revised, actor=CompositionActor.USER)
+    assert listed() == ["cmp_one"]
 
 
 def test_an_entry_stored_without_series_ids_gives_those_its_fact_summary_lists() -> None:

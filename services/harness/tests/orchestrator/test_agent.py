@@ -149,6 +149,10 @@ def test_the_instruction_has_a_reply_state_only_the_figures_a_drawn_card_returns
     text = " ".join(INSTRUCTION.split())
     assert "state only the values its reply_figures list, each with its period" in text
     assert "Name in state_values_for only a series whose value the user asked to be told" in text
+    assert (
+        "Calling make_charts again for a card already drawn returns its figures for the "
+        "series it names, without drawing it twice" in text
+    )
     assert "say what the card holds, its measure, places and years, and state no value" in text
     assert "Close with one conclusion drawn from holds" in text
     assert "compute nothing yourself" in text

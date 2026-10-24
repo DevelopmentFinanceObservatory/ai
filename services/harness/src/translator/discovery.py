@@ -107,22 +107,26 @@ from weakref import WeakValueDictionary
 import rfc8785
 from common.hashed_fields import revision_content
 from compiler.evidence import named_members, open_axes_for, source_requirement_matches
+from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
     SOURCE_CODE_REFUSALS,
     DiscoveryStatus,
     PartWarning,
+    bound_codes,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    stat_var_count_is_floor,
     wire_groups,
 )
 from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailableError
-from data_mcp import resolution
+from data_mcp import node_lookup, resolution
 from data_mcp.definition_store import IdentityMismatch
 from data_mcp.definition_writes import IdentityUnusable, caller_definition
 from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
@@ -277,7 +281,8 @@ class DiscoveryRecord(StrictModel):
     `status` and one `spec_ids` entry records the pin's source read and set
     aside, because it holds closed the side the requirement's `across` asks for every member of: no
     retrieval may take it, and the sources the fresh search finds in its
-    place are offered only when they keep its scope (`DiscoveryLog.scope_kept`).
+    place are offered only when they keep its scope or a reader reads that
+    side per member (`DiscoveryLog.scope_kept`).
 
     `tool == "resolve"` records the graph resolve of the requirement's
     entity names that match no label of its one `spec_ids` source
@@ -285,12 +290,18 @@ class DiscoveryRecord(StrictModel):
     found are on that source's `entity_refs`. A resolve that failed, in
     transport or with an unreadable answer, is `transport_failed` too, with
     the error as its `detail`.
+
+    `tool == "code_paths"` records the read of the hierarchy above the codes
+    the requirement's one `spec_ids` source names on its breakdown's code
+    system (`fetch_code_paths`), which spends no budget either; the paths
+    found are on that source's `code_paths`, and a failed read is
+    `transport_failed` with the error as its `detail`.
     """
 
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     sequence: int = 0
     revision: str
-    tool: Literal["search", "describe", "pin", "resolve"]
+    tool: Literal["search", "describe", "pin", "resolve", "code_paths"]
     requirement_id: Identifier | None = None
     requirement_key: str | None = None
     status: DiscoveryStatus | None = None
@@ -548,18 +559,25 @@ class DiscoveryLog(StrictModel):
         return None
 
     def scope_kept(
-        self, requirement: DatasetRequirement, sources: Sequence[SelectedSource]
+        self, plan: Plan, requirement: DatasetRequirement, sources: Sequence[SelectedSource]
     ) -> ScopeKept:
-        """`sources`, found in place of `requirement`'s pin, split into those a referral offers and those it withholds.
+        """`sources`, found in place of `requirement`'s pin in `plan`, split into those a referral offers and those it withholds.
 
-        A source that drops the scope of the pin's source set aside
-        (`set_aside_pin`, `translator.referral.dropped_scope`) is withheld,
-        and the change that keeps that scope is stated when the requirement
-        can name it (`translator.referral.scope_repair`). With no source set
-        aside, every source is offered.
+        The pin's source was set aside (`set_aside_pin`) because it holds
+        closed a side `across` asks for every member of. When every
+        requirement of `plan` reading `requirement` sums that side away
+        (`_sums_its_sides_away`), the pin's scope is the figure the plan asks
+        for: a source that drops it (`translator.referral.dropped_scope`) is
+        withheld, and the change that keeps that scope is stated when the
+        requirement can name it (`translator.referral.scope_repair`). Any
+        other reader, such as a rank or a filter, reads the side per member,
+        and naming the pin's scope would leave one member where the reader
+        needs every one `across` asks for. There the pin gives way and every
+        source is offered, the same sources a search with the pin dropped
+        finds. With no source set aside, every source is offered too.
         """
         held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
-        if held is None:
+        if held is None or not _sums_its_sides_away(plan, requirement.id):
             return ScopeKept(offered=tuple(sources))
         offered: list[SelectedSource] = []
         withheld: list[WithheldSource] = []
@@ -940,8 +958,7 @@ def _measure_count(source: SelectedSource) -> str | None:
     count = stat_var_count(source)
     if count == 0:
         return None
-    floor = source.served_count is None and source.stat_var_member_count_exact is False
-    return stat_var_count_text(count, floor=floor)
+    return stat_var_count_text(count, floor=stat_var_count_is_floor(source))
 
 
 def stat_var_count_text(count: int, *, floor: bool) -> str:
@@ -1491,6 +1508,22 @@ def _unmatched_names(requirement: DatasetRequirement, source: SelectedSource) ->
     )
 
 
+# The graph's resolve door as `resolve_entity_refs` calls it.
+type ResolveEntities = Callable[
+    [Mapping[str, Sequence[str]]], Awaitable[dict[str, dict[str, resolution.ResolutionOutcome]]]
+]
+
+
+async def graph_resolve(
+    scope: Mapping[str, Sequence[str]],
+) -> dict[str, dict[str, resolution.ResolutionOutcome]]:
+    """`data_mcp.resolution.resolve_entities`, the door the served translation resolves through.
+
+    Looked up when called, so a patch of `data_mcp.resolution` reaches it.
+    """
+    return await resolution.resolve_entities(scope)
+
+
 async def resolve_entity_refs(
     log: DiscoveryLog,
     *,
@@ -1498,6 +1531,7 @@ async def resolve_entity_refs(
     requirements: Sequence[DatasetRequirement],
     requirement_keys: Mapping[str, str],
     sources: Mapping[str, SelectedSource],
+    resolve_entities: ResolveEntities = graph_resolve,
 ) -> tuple[DescribedPair, ...]:
     """Resolve the entity names each source matches by no label to graph refs, one pair per source.
 
@@ -1505,8 +1539,8 @@ async def resolve_entity_refs(
     on. A name that names nothing the source holds (`named_members`), such
     as "United States" beside an entity labelled "United States of
     America", is resolved through the graph's resolve door in process
-    (`data_mcp.resolution.resolve_entities`), every requirement's names in
-    one call. Only a `resolved` outcome counts: a region, a group, an
+    (`resolve_entities`, `graph_resolve` when served), every requirement's
+    names in one call. Only a `resolved` outcome counts: a region, a group, an
     ambiguous name or one the graph lacks maps to nothing, and the
     evidence check reports it as missing. The refs found are
     recorded on the source (`SelectedSource.entity_refs`), so compile and
@@ -1542,7 +1576,7 @@ async def resolve_entity_refs(
     failure: str | None = None
     outcomes: dict[str, resolution.ResolutionOutcome] = {}
     try:
-        outcomes = (await resolution.resolve_entities({"names": asked})).get("names", {})
+        outcomes = (await resolve_entities({"names": asked})).get("names", {})
     except UpstreamError as exc:
         failure = str(exc)
         logger.warning(
@@ -1584,10 +1618,153 @@ async def resolve_entity_refs(
     return tuple(pairs)
 
 
+# The graph's node door as `fetch_code_paths` calls it: dcids to node envelopes.
+type DescribeNodes = Callable[[Sequence[str]], Awaitable[Mapping[str, node_lookup.NodeOutcome]]]
+
+
+async def graph_describe(dcids: Sequence[str]) -> Mapping[str, node_lookup.NodeOutcome]:
+    """`data_mcp.node_lookup.describe_nodes`, the door the served translation reads codes through.
+
+    Looked up when called, so a patch of `data_mcp.node_lookup` reaches it.
+    """
+    return await node_lookup.describe_nodes(dcids)
+
+
+async def _paths_to_root(
+    codes: Collection[str], describe_nodes: DescribeNodes
+) -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
+    """Each of `codes`' path from its hierarchy's root down to itself, by `specializationOf`
+    parent, and those of `codes` with no children.
+
+    Reads one batch of nodes per level climbed, each node once. A code
+    whose climb meets a node that is no code, or that the graph does not
+    hold, has no path. A code is a leaf when its node states no `children`
+    link.
+    """
+    parents: dict[str, str | None] = {}
+    leaves: set[str] = set()
+    asked: set[str] = set()
+    frontier = set(codes)
+    while frontier:
+        nodes = await describe_nodes(sorted(frontier))
+        asked |= frontier
+        for dcid in frontier:
+            if isinstance(node := nodes.get(dcid), CodeNode):
+                parent = node.code.parent
+                parents[dcid] = None if parent is None else parent.ref
+                if "children" not in node.links:
+                    leaves.add(dcid)
+        frontier = {parent for parent in parents.values() if parent is not None} - asked
+    paths: dict[str, tuple[str, ...]] = {}
+    for code in codes:
+        path: list[str] = []
+        at: str | None = code
+        while at is not None and at in parents and at not in path:
+            path.append(at)
+            at = parents[at]
+        if at is None:
+            paths[code] = tuple(reversed(path))
+    return paths, frozenset(leaves & set(codes))
+
+
+async def fetch_code_paths(
+    *,
+    revision: str,
+    requirements: Sequence[DatasetRequirement],
+    requirement_keys: Mapping[str, str],
+    sources: Mapping[str, SelectedSource],
+    describe_nodes: DescribeNodes = graph_describe,
+) -> tuple[DescribedPair, ...]:
+    """Read the hierarchy above the codes each breakdown's source names, one pair per source.
+
+    A requirement stating a breakdown reads the level its source's named
+    codes set (`compiler.shapes.breakdown_level`), which needs each named
+    code's path to its root. The codes are those the source's identity
+    binds on the breakdown's code system (`compiler.sources.bound_codes`);
+    every source's codes are read together, through the graph's node door
+    (`describe_nodes`, `graph_describe` when served), and the paths, with
+    the codes found to have no children, are recorded on the source
+    (`SelectedSource.code_paths`, `leaf_codes`). A source that names no code
+    there, or holds every path already, is left out, so a source a fresh
+    search recorded again is read again.
+
+    Inside a planner entry the whole climb may take
+    `planner.plan.discovery_time_left` seconds, as every discovery read may:
+    with no time left no node is asked for, and a climb that time cuts short
+    is a failed read. A read that fails is logged, records the attempt as
+    `transport_failed` with the error as its `detail`, and adds no path; `propose_operations`
+    answers it `surface_unavailable` before compiling, and the next
+    translate reads again. A code the graph holds no path for adds none and
+    fails nothing, and compile refuses the breakdown. Like
+    `resolve_entity_refs`, this returns pairs for `apply_definitions` to
+    apply under `discovery_lock`.
+    """
+    pending = [
+        (requirement, requirement_keys[requirement.id], source, codes)
+        for requirement in requirements
+        if requirement.breakdown is not None
+        and requirement.id in requirement_keys
+        and (source := sources.get(requirement.id)) is not None
+        and (
+            codes := tuple(
+                code
+                for code in bound_codes(
+                    source, BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension]
+                )
+                if code not in source.code_paths
+            )
+        )
+    ]
+    if not pending:
+        return ()
+    asked = list(dict.fromkeys(code for *_, codes in pending for code in codes))
+    failure: str | None = None
+    paths: dict[str, tuple[str, ...]] = {}
+    leaves: frozenset[str] = frozenset()
+    time_left = discovery_time_left()
+    try:
+        if time_left is not None and time_left <= 0:
+            failure = "the node door was not read: the planner entry has no time left for it"
+        else:
+            async with asyncio.timeout(time_left):
+                paths, leaves = await _paths_to_root(asked, describe_nodes)
+    except TimeoutError:
+        failure = (
+            f"the node door did not answer in the {time_left:.0f} s the planner entry had left"
+        )
+    except (UpstreamError, ValidationError, ValueError) as exc:
+        failure = f"{type(exc).__name__}: {exc}"
+    if failure is not None:
+        logger.warning("the hierarchy above codes %s was unread: %s", asked, failure)
+    pairs: list[DescribedPair] = []
+    for requirement, key, source, codes in pending:
+        record = DiscoveryRecord(
+            revision=revision,
+            tool="code_paths",
+            requirement_id=requirement.id,
+            requirement_key=key,
+            spec_ids=(source.spec_id,),
+            detail=failure,
+            transport_failed=failure is not None,
+        )
+        found = {code: paths[code] for code in codes if code in paths}
+        if not found:
+            pairs.append((record, ()))
+            continue
+        updated = source.model_copy(
+            update={
+                "code_paths": {**source.code_paths, **found},
+                "leaf_codes": tuple(sorted({*source.leaf_codes, *(leaves & found.keys())})),
+            }
+        )
+        pairs.append((record, (updated,)))
+    return tuple(pairs)
+
+
 def _ready_to_search(
     tool_context: ToolContext, requirement_id: str, reservations: _Reservations
-) -> tuple[DatasetRequirement, str, str] | dict[str, object]:
-    """Return the requirement to search for, its revision, and its key; or the problem.
+) -> tuple[Plan, DatasetRequirement, str, str] | dict[str, object]:
+    """Return the draft plan, the requirement to search for, its revision, and its key; or the problem.
 
     Needs a draft plan, a dataset requirement the plan states by
     `requirement_id`, and budget left for the plan's revision and for this
@@ -1610,7 +1787,7 @@ def _ready_to_search(
     blocked = _requirement_budget_error(log, revision, requirement_id, reservations)
     if blocked is not None:
         return blocked
-    return requirement, revision, key
+    return plan, requirement, revision, key
 
 
 async def _record_search(
@@ -2112,7 +2289,8 @@ async def _source_from_resolve_pin(
     and the fresh `search` asks for the side as an open role, which elects
     a source broken down by it where one exists. A source that search finds
     in the pin's place and that drops the set-aside source's scope is
-    withheld from the referral (`DiscoveryLog.scope_kept`).
+    withheld from the referral when every reader sums the side away
+    (`DiscoveryLog.scope_kept`).
 
     When none of the readers above holds the pin's source, the source a
     search recorded for its `spec_id` (`DiscoveryLog.recorded_source`) is
@@ -2278,7 +2456,9 @@ async def name_pinned_groups(
     (`_summed_by_every_reader`), and only when the plan still validates with
     it rewritten: a decision the requirement cites may fix its `across` or
     `entities`. A requirement left as it is, with the reason logged, takes
-    discovery's set-aside path and the referral that withholds the pin.
+    discovery's set-aside path, and its referral withholds the sources that
+    drop the pin's scope only when every reader sums the side away
+    (`DiscoveryLog.scope_kept`).
 
     The draft is saved in place, at its version, so the plan the user
     approves names the group. A pin whose source is honoured is recorded
@@ -2328,6 +2508,17 @@ async def name_pinned_groups(
     for requirement, source in honoured:
         await _record_honoured_pin(tool_context, plan=plan, requirement=requirement, source=source)
     return tuple(named)
+
+
+def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
+    """Whether every reader of `requirement_id` in `plan` sums its sides away (`_summed_by_every_reader`).
+
+    Judged on the plan as the model wrote it (`authored`), so a copy of a
+    requirement's whole history (`Plan.rolling_copies`) is judged with the
+    readers of the requirement it copies, as `name_pinned_groups` judges it.
+    """
+    origin = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    return _summed_by_every_reader(authored(plan), origin.get(requirement_id, requirement_id))
 
 
 def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
@@ -2419,8 +2610,8 @@ async def _discovery_start(
     reservations: _Reservations,
     *,
     surface: ToolSurface,
-) -> dict[str, object] | tuple[DatasetRequirement, str, str]:
-    """Ready to search: the requirement, its revision, and its key, with
+) -> dict[str, object] | tuple[Plan, DatasetRequirement, str, str]:
+    """Ready to search: the draft plan, the requirement, its revision, and its key, with
     this call's reservation already made; the source already honoured from
     this turn's own resolve pin, with no `search` spent; or the problem
     that stopped either.
@@ -2451,9 +2642,9 @@ async def _discovery_start(
         ready = _ready_to_search(tool_context, requirement_id, reservations)
         if isinstance(ready, dict):
             return ready
-        requirement, revision, key = ready
+        plan, requirement, revision, key = ready
         reservations.reserve(revision, requirement_id)
-    return requirement, revision, key
+    return plan, requirement, revision, key
 
 
 def _referred_answer(
@@ -2575,7 +2766,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         )
         if isinstance(started, dict):
             return started
-        requirement, revision, key = started
+        plan, requirement, revision, key = started
 
         variable = requirement.measure
         part = _search_part(requirement, variable)
@@ -2763,7 +2954,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             # two-plus sources are the real alternative worth naming when
             # this action replaces the `source_ambiguous` hint.
             instead = f" This search found {len(honoured)} source(s) instead." if honoured else ""
-            scope = log.scope_kept(requirement, [s for s in sources if s.spec_id in honoured])
+            scope = log.scope_kept(plan, requirement, [s for s in sources if s.spec_id in honoured])
             if scope.withheld:
                 instead += (
                     f" {len(scope.withheld)} of them drop the scope the pinned source held and "

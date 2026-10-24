@@ -73,9 +73,22 @@ revision reads what an earlier call already fetched rather than
 re-describing the same source. A missing or failed fetch never fails the
 compile: the readback renders what it renders without a definition.
 
+A requirement stating a breakdown reads its source's named codes up the code
+hierarchy, through the graph's node door
+(`translator.discovery.fetch_code_paths`), immediately before compiling. The
+paths set the level the breakdown reads (`compiler.shapes.breakdown_level`):
+health (120) and population (130) share social infrastructure (100) at level
+0, so a breakdown of the two reads level 1, and health alone reads level 2,
+its subsectors. A node door that does not answer ends the proposal as
+`surface_unavailable`, a transient referral, and the next translate reads
+again. A code the graph holds no path for leaves the breakdown without a
+level, and compile refuses it as `source_unusable`.
+
 None of this is confirmation-gated. Discovery reads metadata; compiling
 writes a workflow that nothing runs before the user approves it. The gate
-is the harness workflow's `approve` node.
+is the harness workflow's `approve` node. The one read of observations is a
+rolling workflow's newest years, below, which shows the user nothing and
+records nothing.
 
 Translation reads the tool surface through a `ToolSurface` (`compiler.surface`),
 the same object the compiler checks against, so what it discovers on and what a
@@ -83,9 +96,10 @@ workflow is compiled against are one surface.
 
 ## The properties that define done
 
-**Observations and computation are out of reach.** The translator's tool
+**Observations and computation are out of a model's reach.** The translator's tool
 wraps `search`; `get_data` and the analysis verbs are not reachable from it,
-so no instruction has to forbid them. `describe` is reached only from code,
+so no instruction has to forbid them. Code reads observations once, for the
+newest years of a rolling workflow. `describe` is reached only from code,
 at compile time or to enrich a candidate, never by a model call.
 
 **Discovery is bounded, per plan revision.** Every `discover_source` call
@@ -130,7 +144,11 @@ members on a role it leaves open or binds in part) goes under the referral's
 `withheld`, never under `candidates`, so the planner cannot pin it. The
 referral's `repair` then names the change that keeps that scope, when the
 pinned source held the side to one group or one entity ("name 'Africa' as
-recipient in `entities` and drop 'recipient' from `across`"). The pin's source is read for
+recipient in `entities` and drop 'recipient' from `across`"). That holds
+only while every requirement reading the pinned one sums the side away. Any
+other reader, such as a rank or a filter, reads the side per member, which
+naming one member cannot answer: the pin gives way, and the referral offers
+the sources found as `candidates`. The pin's source is read for
 this check from the discovery log too, when a search the translator ran found
 it. A pin `propose_plan` moved to a copy over the requirement's period, or a
 pin whose identity a search in the conversation recorded over that period,
@@ -176,6 +194,33 @@ planner reads it on its own turn.
 `Plan.with_translation`, which is what moves a `DRAFT` to `PENDING_APPROVAL`.
 Otherwise the plan is untouched and every issue comes back, with an `action`
 when the issues mean the plan rather than the proposal has to change.
+
+**The years approved are the years the run reads.** A workflow with a rolling
+step has each group's newest year read before it reaches the plan, through the
+run's own path (`executor.run.read_anchors`): the retrievals the group rests on,
+whole-history copies included, and `resolve_anchor` over the same populations.
+The read takes no longer than the planner entry has left
+(`planner.plan.discovery_time_left`).
+A group whose newest year is the one its rolling years state, or later, keeps
+its years, since the run reads them moved later (`executor.run`). So does every
+group when the read runs out of time, which the trace records as
+`translation.anchor_read_skipped`, and a group whose read meets a method choice
+or a source to discover again, since the run meets those as it does for any
+plan and refuses a newest year before the stated one. A group behind has its
+rolling years, in the plan and in the translation, moved to the newest year
+(`planner.plan.restated_to_anchors`, `restated_translation`), and the moved plan
+is compiled again. The `ok` answer then lists each requirement moved under
+`restated`, with the newest year and its years before and after
+(`planner.plan.Restatement`), and the approval card reads the moved plan. A plan
+rule or a compile that refuses the moved plan comes back as a
+`rolling_anchor_behind` issue on the requirement refused, naming the year and
+quoting the refusal, a repair for the planner. A read the run would stop on
+answers `run_would_stop`, whose `detail` names the step the run would report
+(`executor.outcomes.failed_step`): its id, the run's own `code`, its message and
+its requirement. The referral carries the code as `stop_code` and goes by whose
+stop it is (`executor.outcomes.stop_cause`): a transient stop as
+`surface_unavailable`, the harness's own fault as `internal_failure`, and a fact
+of the data as `requirement_unmeetable` on that requirement.
 
 **Only a draft is translated.** A plan in any other status is refused, as is one
 that states no evidence requirements.

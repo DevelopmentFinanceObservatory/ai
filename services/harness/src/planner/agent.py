@@ -199,9 +199,14 @@ _PLANNING = (
     "`origin` is the giving party (an entity `role` of donor, creditor or "
     "exporter), `destination` the receiving party (recipient, debtor or "
     "importer), `observationAbout` the place.\n\n"
-    "For recipient countries, use `across=['recipient']` and a direct filter with "
-    "`{{kind:'place_level', role:'recipient', level:'Country', strict:true}}` in its `predicates`. "
-    "Route calculations through it. Do the same for donor, creditor or debtor countries.\n\n"
+    "A flow side's retrieval holds no group totals (DAC countries, the G7, "
+    'regional totals), so a side left open, such as the donors of "top '
+    'donors", sums and ranks every party, organisations included, with no '
+    "level filter. When the question names a side's countries (\"recipient "
+    'countries", "donor countries"), use `across` with that role, such as '
+    "`across=['recipient']`, and a direct filter with `{kind:'place_level', "
+    "role:'recipient', level:'Country', strict:true}` in its `predicates`, "
+    "naming that role. Route calculations through it.\n\n"
     "A requirement whose `across` is the place, such as `'country'`, "
     "names no place, so its retrieval holds every level (see `level` on "
     "`place_level`). Before a `rank`, an `aggregate` across places, a "
@@ -370,6 +375,10 @@ _TRANSLATING = (
     "patch lands on that plan and is translated in turn. When "
     "`translation` answers that the plan compiled, it goes to the user "
     "for their answer and your turn ends there.\n\n"
+    "When translation answers `restated`, the recorded plan counts each "
+    "listed requirement's rolling years from `anchor`, the newest year at "
+    "least half the series hold: `years_to` where you wrote `years_from`. Amend "
+    "from the plan as recorded, and state those years.\n\n"
     "When translation answers `named_in_place_of_across`, the pinned "
     "dataset covers only that group, so the recorded requirement already "
     "names it in `entities` and has dropped that party from `across`. "

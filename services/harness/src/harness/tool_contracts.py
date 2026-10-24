@@ -20,6 +20,7 @@ from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
     block_groups,
+    bound_refs,
     open_entity_axes_of,
     resolved_source_mentions,
     total_reading,
@@ -479,8 +480,11 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     candidate its digest offers keyed by its spec_id (`_offered_specs`).
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
-    second `search` call. The top-level `spec_block` holds
-    the first part's block the same way. `kind` is what the envelope says
+    second `search` call. Each block a part carries holds the refs the
+    part's entity texts bound (`compiler.sources.bound_refs`) under
+    `_bound_refs`, which `compiler.sources.source_from_spec_block` reads
+    back, so a pin names an entity by the refs its text bound. The
+    top-level `spec_block` holds the first part's block the same way. `kind` is what the envelope says
     of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
     `graph_envelope`'s own `skills`.
@@ -488,14 +492,30 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     digest = graph_envelope(envelope)
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
-    digest["spec_block"] = raw_part.get("spec") if digest.get("status") == "definite" else None
+    digest["spec_block"] = (
+        _with_bound_refs(raw_part, raw_part.get("spec"))
+        if digest.get("status") == "definite"
+        else None
+    )
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
-        summary["spec_block"] = part.get("spec") if summary.get("status") == "definite" else None
+        summary["spec_block"] = (
+            _with_bound_refs(part, part.get("spec"))
+            if summary.get("status") == "definite"
+            else None
+        )
         summary["candidate_blocks"] = {
-            spec["spec_id"]: spec for spec in _offered_specs(part) if spec.get("spec_id")
+            spec["spec_id"]: _with_bound_refs(part, spec)
+            for spec in _offered_specs(part)
+            if spec.get("spec_id")
         }
     digest["kind"] = envelope.get("kind") or "resolution"
     return digest
+
+
+def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
+    """`spec`, a block `part` carries, with the part's `bound_refs` under `_bound_refs` when it has any."""
+    refs = bound_refs(part)
+    return {**spec, "_bound_refs": refs} if refs and isinstance(spec, Mapping) else spec
 
 
 def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:

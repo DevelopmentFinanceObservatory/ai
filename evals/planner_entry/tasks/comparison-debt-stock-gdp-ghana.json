@@ -65,7 +65,10 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_cc34c1cb567ce34e1e378b144378f9a2"
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
       },
       {
         "kind": "dataset",
@@ -80,7 +83,10 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_9c495a2de1bbf6789e34b6100781e71d"
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
       },
       {
         "kind": "comparison",

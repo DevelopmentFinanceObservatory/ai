@@ -74,16 +74,17 @@
           {
             "name": "Ghana",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 1960,
           "end": 2024
         },
-        "source_spec_id": "spec_6a2240ef10e92c927ca5d00e78979a62",
-        "across": [
-          "donor"
-        ],
+        "source_spec_id": "spec_0366a9f38cb7c8cd49f23404a4c86b36",
         "unit": {
           "currency": "USD",
           "prices": "current"
@@ -113,7 +114,7 @@
           "start": 1970,
           "end": 2024
         },
-        "source_spec_id": "spec_edc1dac07f6e951072ec6a2ac2d48852",
+        "source_spec_id": "spec_91b912f26fd6726b58af3535952acf3c",
         "unit": {
           "currency": "USD",
           "prices": "current"

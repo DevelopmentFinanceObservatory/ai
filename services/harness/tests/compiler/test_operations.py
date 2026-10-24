@@ -38,6 +38,7 @@ from planner.plan import (
 from planner.proof import mismatches
 from planner.records import (
     MAX_RANK_LIMIT,
+    DenominatorScope,
     EntityIn,
     RankAmong,
     RankDirection,
@@ -214,6 +215,29 @@ def test_a_share_of_or_quotient_of_sides_must_differ(
             numerator=Side(input="debt"),
             denominator=Side(input="debt"),
         )
+
+
+@pytest.mark.parametrize(
+    ("scope", "allowed"), [(DenominatorScope.POOLED, True), (DenominatorScope.PER_AXIS, False)]
+)
+def test_a_share_of_reads_one_side_twice_only_pooled_across_its_axis(
+    scope: DenominatorScope, allowed: bool
+) -> None:
+    def share() -> ShareOfOperation:
+        return ShareOfOperation(
+            id="share",
+            requirement_id="share",
+            numerator=Side(input="aid"),
+            denominator=Side(input="aid"),
+            axis="donor",
+            denominator_scope=scope,
+        )
+
+    if allowed:
+        share()
+        return
+    with pytest.raises(ValidationError, match="numerator and denominator must differ"):
+        share()
 
 
 def test_a_quotient_of_states_a_denominator_axis_only_with_an_axis() -> None:

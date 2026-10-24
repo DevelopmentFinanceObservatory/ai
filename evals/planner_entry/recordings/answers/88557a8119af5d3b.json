@@ -1,0 +1,1333 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.0.10"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 2
+          },
+          "trace_id": "c62a05b1908e4731bf0269f871a60788",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [],
+            "departures": [],
+            "operations": [],
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/KEN",
+                      "country/NGA"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2025,
+                    "kind": "range",
+                    "start_year": 1960
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "amount",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "EconomicActivity",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "ref": "GrossDomesticProduction",
+                        "state": "value"
+                      },
+                      "property": "activitySource"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "economicSector"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "naics"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "schoolGradeLevel"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_104b3986b41c12dab4a5eec7ed5821f9"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 2,
+                      "label": "countries"
+                    },
+                    {
+                      "count": 66,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 132,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "Creative Commons Attribution License"
+                  },
+                  "rows": 132,
+                  "rows_exact": true,
+                  "series": 2,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Kenya",
+                    "ref": "country/KEN",
+                    "role": "observationAbout"
+                  },
+                  {
+                    "entity_type": "Country",
+                    "label": "Nigeria",
+                    "ref": "country/NGA",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "USDollar",
+                            "ref": "USDollar"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    },
+                    "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                    "label": "World Development Indicators",
+                    "ref": "dc/base/WorldDevelopmentIndicators",
+                    "source": {
+                      "label": "World Bank",
+                      "ref": "dc/s/WorldBank"
+                    }
+                  },
+                  "unit": {
+                    "basis": "fallback",
+                    "currency": "USD",
+                    "label": "USDollar",
+                    "ref": "USDollar"
+                  }
+                },
+                "inapplicable_slots": [
+                  "economicSector",
+                  "naics",
+                  "schoolGradeLevel"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Economic Activity With Activity Source = Gross Domestic Production",
+                  "ref": "dc/g/EconomicActivity_ActivitySource-GrossDomesticProduction"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/KEN",
+                            "country/NGA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "amount",
+                          "population_type": "EconomicActivity",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": [
+                          {
+                            "binding": {
+                              "ref": "GrossDomesticProduction",
+                              "state": "value"
+                            },
+                            "property": "activitySource"
+                          }
+                        ]
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_d4bbe17fa9677a33634d0354c3821f25"
+                    },
+                    "stat_var": {
+                      "label": "Gross domestic product growth rate",
+                      "ref": "GrowthRate_Amount_EconomicActivity_GrossDomesticProduction"
+                    }
+                  }
+                ],
+                "rendered_sentence": "GDP in Kenya and Nigeria, 1960 to 2025. Current US dollars \u00b7 World Development Indicators.",
+                "sentence_plan": [
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:activitySource",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "GDP"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:economicSector",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "economicSector",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:naics",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "naics",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:schoolGradeLevel",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "schoolGradeLevel",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:activitySource",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "activitySource",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " in "
+                  },
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Kenya and Nigeria"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "1960 to 2025"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Current US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Development Indicators"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Nominal gross domestic product",
+                  "measured_property": {
+                    "label": "amount",
+                    "ref": "amount"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 65,
+                  "member_digest": "73519eeb75639bdae33042fc844830cd46becc08e4f9122dfcd0886e9875f657",
+                  "population_type": {
+                    "label": "EconomicActivity",
+                    "ref": "EconomicActivity"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "economicactivity_amount_measuredvalue_nominal",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "GrossDomesticProduction",
+                            "ref": "GrossDomesticProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Accommodation and food sector",
+                            "ref": "AccommodationAndFoodSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Administrative and support services",
+                            "ref": "AdministrativeAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agricultural support activities",
+                            "ref": "AgriculturalSupportActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture",
+                            "ref": "Agriculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Agriculture,Forestry and Fishing Sector",
+                            "ref": "AgricultureForestryFishingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Air transport and support services",
+                            "ref": "AirTransportAndSupportServices"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "All economic activities",
+                            "ref": "AllEconomicActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Animal production",
+                            "ref": "AnimalProduction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Arts entertainment recreation",
+                            "ref": "ArtsEntertainmentRecreation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Construction Sector",
+                            "ref": "ConstructionSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Education",
+                            "ref": "Education"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electricity supply",
+                            "ref": "ElectricitySupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Employer household activities",
+                            "ref": "EmployerHouseholdActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "FinancialActivities",
+                            "ref": "FinancialActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial and insurance activities",
+                            "ref": "FinancialAndInsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Financial intermediation services indirectly measured",
+                            "ref": "FinancialIntermediationServicesIndirectlyMeasured"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Fishing aquaculture",
+                            "ref": "FishingAquaculture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Food beverages tobacco manufacture",
+                            "ref": "FoodBeveragesTobaccoManufacture"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Forestry logging",
+                            "ref": "ForestryLogging"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Human health and social work",
+                            "ref": "HumanHealthAndSocialWork"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Information and communication",
+                            "ref": "InformationAndCommunication"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Insurance activities",
+                            "ref": "InsuranceActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Land transport",
+                            "ref": "LandTransport"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing Sector",
+                            "ref": "ManufacturingSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Mining quarrying",
+                            "ref": "MiningQuarrying"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other manufacturing and repair",
+                            "ref": "OtherManufacturingAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other service sector",
+                            "ref": "OtherServiceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Other transport postal courier activities",
+                            "ref": "OtherTransportPostalCourierActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Product taxes",
+                            "ref": "ProductTaxes"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Professional scientific technical activities",
+                            "ref": "ProfessionalScientificTechnicalActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Public administration and defence",
+                            "ref": "PublicAdministrationAndDefence"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Publishing Broadcasting Information Activities",
+                            "ref": "PublishingBroadcastingInformationActivities"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Real estate",
+                            "ref": "RealEstate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Telecommunications",
+                            "ref": "Telecommunications"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Transport and Storage",
+                            "ref": "TransportStorageSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Water supply sewerage waste management",
+                            "ref": "WaterSupplySewerageWasteManagement"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Wholesale retail trade and repair",
+                            "ref": "WholesaleRetailTradeAndRepair"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Banking And Insurance Sector",
+                            "ref": "BankingAndInsuranceSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Manufacturing",
+                            "ref": "Construction"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Electric Gas Steam Air Condition Supply",
+                            "ref": "ElectricityGasSteamAirConditionSupply"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Higher Secondary Education",
+                            "ref": "HigherSecondaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "PrePrimary and Primary",
+                            "ref": "PrePrimaryAndPrimaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "SecondaryEducation",
+                            "ref": "SecondaryEducation"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "activity source",
+                      "property": {
+                        "label": "activitySource",
+                        "ref": "activitySource"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "naics",
+                      "property": {
+                        "label": "naics",
+                        "ref": "naics"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "set",
+                      "values": [
+                        {
+                          "ref": {
+                            "label": "Kenya",
+                            "ref": "country/KEN"
+                          },
+                          "value_kind": "entity"
+                        },
+                        {
+                          "ref": {
+                            "label": "Nigeria",
+                            "ref": "country/NGA"
+                          },
+                          "value_kind": "entity"
+                        }
+                      ]
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2025,
+                          "start_year": 1960
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2025",
+                    "start": "1960"
+                  },
+                  "member_count": 41,
+                  "member_count_exact": true,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Kenya",
+                      "ref": "country/KEN"
+                    },
+                    {
+                      "label": "Nigeria",
+                      "ref": "country/NGA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "base",
+                        "label": "Data Commons by Google"
+                      },
+                      "documentation": "/api/graph/documentation/dc/base/WorldDevelopmentIndicators",
+                      "label": "World Development Indicators",
+                      "ref": "dc/base/WorldDevelopmentIndicators",
+                      "source": {
+                        "label": "World Bank",
+                        "ref": "dc/s/WorldBank"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "activity source",
+                        "property": {
+                          "label": "activitySource",
+                          "ref": "activitySource"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "GrossDomesticProduction",
+                          "ref": "GrossDomesticProduction"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "economic sector",
+                        "property": {
+                          "label": "economicSector",
+                          "ref": "economicSector"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "naics",
+                        "property": {
+                          "label": "naics",
+                          "ref": "naics"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "school grade level",
+                        "property": {
+                          "label": "schoolGradeLevel",
+                          "ref": "schoolGradeLevel"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "set",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        },
+                        {
+                          "label": "Nigeria",
+                          "ref": "country/NGA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_104b3986b41c12dab4a5eec7ed5821f9"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "response_cache_part_memo": 0
+              },
+              "total": 0
+            },
+            "variable_text": "spec_104b3986b41c12dab4a5eec7ed5821f9",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "dataset_resubmit",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "GDP in Kenya and Nigeria, 1960 to 2025. Current US dollars \u00b7 World Development Indicators.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "how:activitySource",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "GDP"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:economicSector",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "economicSector",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:naics",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "naics",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:schoolGradeLevel",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "schoolGradeLevel",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:activitySource",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "activitySource",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": " in "
+          },
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Kenya and Nigeria"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "1960 to 2025"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Current US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Development Indicators"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "status": "definite"
+      }
+    },
+    "structured_content": {
+      "spec_id": "spec_104b3986b41c12dab4a5eec7ed5821f9",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_104b3986b41c12dab4a5eec7ed5821f9: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"observationAbout\":[\"country/KEN\",\"country/NGA\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"end_year\":2025,\"kind\":\"range\",\"start_year\":1960},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"EconomicActivity\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"GrossDomesticProduction\",\"state\":\"value\"},\"property\":\"activitySource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"economicSector\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"naics\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"schoolGradeLevel\"}]},\"spec_id\":\"spec_104b3986b41c12dab4a5eec7ed5821f9\"}"
+}

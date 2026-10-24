@@ -42,7 +42,8 @@ compared against what was actually retrieved, not only against what
 discovery offered before approval.
 
 Every finding is an `EvidenceIssue` with a severity. An `ERROR` means the
-requirement is not met -- a missing, role-ambiguous or wrong-sided entity, a
+requirement is not met -- a missing entity the run cannot leave out
+(`_left_out_severity`), a role-ambiguous or wrong-sided entity, a
 population of every member that no open axis of the source holds, a currency
 or price basis that names something other than what was asked for, a source
 pinned or stated that does not match what was found, a definition whose
@@ -90,6 +91,7 @@ from planner.records import (
     EvidenceIssueCode,
     Period,
     ResolvedSourceMention,
+    SeriesEntity,
     Severity,
     SpecId,
     StrictModel,
@@ -105,10 +107,11 @@ class SeriesEvidence(StrictModel):
     """One series of a retrieved frame whose coverage `_series_issues` reports on."""
 
     stat_var: str
-    entity_refs: tuple[str, ...]
+    entities: tuple[SeriesEntity, ...]
     first_year: int
     latest_year: int
     observations: int
+    magnitude: float
 
 
 class RetrievalEvidence(StrictModel):
@@ -152,10 +155,10 @@ class RetrievalEvidence(StrictModel):
     without them.
 
     `groups` are the named sets the source binds (`SelectedSource.groups`),
-    and `entity_refs` the refs the graph resolved the requirement's
-    unmatched names to (`SelectedSource.entity_refs`), both discovery's
-    alone: at run time the approved source's are read instead, as its open
-    axes are.
+    `entity_refs` the refs the graph resolved the requirement's unmatched
+    names to (`SelectedSource.entity_refs`), and `bound_refs` the refs
+    Search bound for each entity text (`SelectedSource.bound_refs`), all discovery's alone: at run time
+    the approved source's are read instead, as its open axes are.
 
     `axis_by_column` is the manifest's alone: each coverage dimension's label
     and the flow axis apis states for it. A source names a flow
@@ -186,6 +189,7 @@ class RetrievalEvidence(StrictModel):
     open_entity_axes: tuple[OpenEntityAxis, ...] | None = None
     groups: tuple[ResolvedGroup, ...] = ()
     entity_refs: dict[str, str] = Field(default_factory=dict)
+    bound_refs: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
@@ -209,6 +213,7 @@ def evidence_from_source(source: SelectedSource) -> RetrievalEvidence:
         open_entity_axes=source.open_entity_axes,
         groups=source.groups,
         entity_refs=source.entity_refs,
+        bound_refs=source.bound_refs,
         unit_ref=source.unit_ref,
         unit_label=source.unit_label,
         stated_unit=requested_unit(source.identity),
@@ -250,9 +255,9 @@ def evidence_from_manifest(
     its own and reads whatever the caller resolved. Entities and the unit come
     from it, the window from the earliest first and latest last period
     across it, each read over the columns and their distinct values rather
-    than series by series; `None` (the manifest carries no statistics artifact,
-    or the fetch failed) or a table with no rows (`series_count == 0`) leaves
-    those unknown, and the checks that read `series` treat both the same as
+    than series by series; `None` (the manifest carries no statistics artifact
+    and names no series count, an old record) or a table with no rows
+    (`series_count == 0`) leaves those unknown, and the checks that read `series` treat both the same as
     unavailable, per `_series_issues`. Provenance comes from
     `citation.sources`: one source's `ref`/`label`, several joined with
     `"; "`. `axis_by_column` comes from `coverage.dimensions`, each label with
@@ -352,7 +357,7 @@ def check_evidence(
     if approved is not None:
         issues.extend(_drift_issues(requirement, evidence, approved))
     if not at_discovery:
-        issues.extend(_series_issues(requirement, evidence))
+        issues.extend(_series_issues(requirement, evidence, approved))
     issues.extend(_entity_issues(requirement, evidence, approved))
     issues.extend(_period_issues(requirement, evidence))
     issues.extend(_scope_issues(requirement, evidence))
@@ -397,34 +402,46 @@ def resolve_name(
 ) -> ResolvedEntity | None:
     """Return the one entity of `source` that `entity` names, by label or else by ref.
 
-    A name no label matches (`resolve_entity`) is looked up in the refs the
-    graph resolved the requirement's names to (`SelectedSource.entity_refs`),
-    so "United States" names the entity labelled "United States of
-    America". A stated role tells apart a ref resolved under several role
-    columns, as it does a label.
+    A name no label matches (`resolve_entity`) is looked up in the refs
+    Search bound for it as an entity text (`SelectedSource.bound_refs`),
+    so "G7" names the published total labelled "Group of Seven", and else
+    in the refs the graph resolved the requirement's names to
+    (`SelectedSource.entity_refs`), so "United States" names the entity
+    labelled "United States of America". A stated role tells apart a ref
+    resolved under several role columns, as it does a label.
     """
     resolved = resolve_entity(entity, source.entities)
-    if resolved is not None or (ref := source.entity_refs.get(entity.name.casefold())) is None:
+    if resolved is not None:
         return resolved
-    matches = [one for one in source.entities if one.ref == ref]
+    name = entity.name.casefold()
+    refs = source.bound_refs.get(name) or (
+        (source.entity_refs[name],) if name in source.entity_refs else ()
+    )
+    matches = [one for one in source.entities if one.ref in refs]
     if len(matches) > 1:
         matches = [one for one in matches if _role_fits(entity.role, one.role)]
     return matches[0] if len(matches) == 1 else None
 
 
-def resolve_group(entity: Entity, groups: Sequence[ResolvedGroup]) -> ResolvedGroup | None:
-    """Return the one named set in `groups` that `entity` names, or `None` when none or several do.
+def resolve_group(
+    entity: Entity, source: SelectedSource | RetrievalEvidence
+) -> ResolvedGroup | None:
+    """Return the one named set of `source` that `entity` names, or `None` when none or several do.
 
-    Matches `Entity.name` against the set's `label`, case-folded. A stated
-    role has to name the set's role column or sit on its side of the flow
-    (`donor` and `origin`), so "G7" asked for as a recipient is not the G7
-    whose members give.
+    Matches `Entity.name` against the set's `label`, case-folded, or names
+    the set whose ref or published total Search bound for it as an entity
+    text (`SelectedSource.bound_refs`), so "G7" names the set Search
+    labels "Group of Seven". A stated role has to name the set's role
+    column or sit on its side of the flow (`donor` and `origin`), so "G7"
+    asked for as a recipient is not the G7 whose members give.
     """
     wanted = entity.name.casefold()
+    bound = source.bound_refs.get(wanted, ())
     matches = [
         group
-        for group in groups
-        if group.label.casefold() == wanted and _role_fits(entity.role, group.role)
+        for group in source.groups
+        if (group.label.casefold() == wanted or group.ref in bound or group.total in bound)
+        and _role_fits(entity.role, group.role)
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -442,7 +459,7 @@ def named_members(
     name to. Callers compare the result by `ref`, so a member is named
     whatever label it carries.
     """
-    group = resolve_group(entity, source.groups)
+    group = resolve_group(entity, source)
     if group is not None:
         return tuple(one for one in source.entities if one.role == group.role)
     resolved = resolve_name(entity, source)
@@ -711,8 +728,8 @@ def _named_group(
     so at run time the set is the approved source's.
     """
     if evidence.origin == "discovery":
-        return resolve_group(entity, evidence.groups)
-    return resolve_group(entity, approved.groups) if approved is not None else None
+        return resolve_group(entity, evidence)
+    return resolve_group(entity, approved) if approved is not None else None
 
 
 def _group_present(
@@ -910,8 +927,14 @@ def _named_entity_issues(
     A name is met by a named set the source binds (`_group_present`), as
     its members or, unless the entity asks for its members, as its
     published total (`_group_reading_issues`); by a resolved entity's
-    label; or by the ref the graph resolved the name to, or at run time the
-    ref the approved source resolved it to (`_resolved_by_ref`).
+    label; or, through `resolve_name`, by a ref Search bound for the name
+    as an entity text or the ref the graph resolved the name to, at run
+    time as the approved source resolved it (`_resolved_by_ref`).
+
+    A name the approved source resolves and the retrieval holds no series
+    for, such as a donor whose reporting stopped before the requirement's
+    period, is left out (`_left_out_severity`): the run answers for the
+    entities that remain and the answer names it.
     """
     if not evidence.entities:
         return [
@@ -925,6 +948,7 @@ def _named_entity_issues(
         ]
     labels = [entity.label for entity in evidence.entities]
     issues: list[EvidenceIssue] = []
+    missing: list[Entity] = []
     for entity in requirement.entities:
         group = _named_group(entity, evidence, approved)
         if group is not None and _group_present(entity, evidence, approved):
@@ -936,16 +960,7 @@ def _named_entity_issues(
                 if evidence.origin == "discovery":
                     issues.extend(_role_issues(requirement, entity, by_ref))
                 continue
-            issues.append(
-                EvidenceIssue(
-                    code=EvidenceIssueCode.ENTITY_MISSING,
-                    severity=Severity.ERROR,
-                    requirement_id=requirement.id,
-                    detail=f"the source resolves no entity named {entity.name!r}",
-                    found=labels,
-                    required=entity.name,
-                )
-            )
+            missing.append(entity)
             continue
         resolved = resolve_entity(entity, evidence.entities)
         if resolved is None:
@@ -969,7 +984,80 @@ def _named_entity_issues(
             )
             continue
         issues.extend(_role_issues(requirement, entity, resolved))
+    present = [entity for entity in requirement.entities if entity not in missing]
+    for entity in missing:
+        severity = _left_out_severity(requirement, entity, present, approved)
+        issues.append(
+            EvidenceIssue(
+                code=EvidenceIssueCode.ENTITY_MISSING,
+                severity=severity,
+                requirement_id=requirement.id,
+                detail=(
+                    f"the source resolves no entity named {entity.name!r}"
+                    if severity is Severity.ERROR
+                    else f"the retrieval holds no series for {entity.name!r}, so it is left out"
+                ),
+                found=labels,
+                required=entity.name,
+            )
+        )
     return issues
+
+
+def _left_out_severity(
+    requirement: DatasetRequirement,
+    entity: Entity,
+    present: Sequence[Entity],
+    approved: SelectedSource | None,
+) -> Severity:
+    """How a run-time retrieval holding no series for `entity` bears on `requirement`.
+
+    A `WARNING`, so the run answers for the rest, when `requirement` reports
+    gaps rather than failing on them, the approved source resolved `entity`,
+    and another entity it names that is `present` sits on the same column of
+    the approved source (`_approved_column`). An `ERROR` otherwise: a name
+    the approved source never resolved is not a gap in the data, and a
+    column with no named entity left has nothing to answer for. `approved`
+    is `None` at compile time and at discovery, where a source lacking a
+    name is always an `ERROR`.
+    """
+    if approved is None or requirement.coverage.on_missing == "fail":
+        return Severity.ERROR
+    resolved = resolve_name(entity, approved)
+    if resolved is None:
+        return Severity.ERROR
+    if any(_approved_column(other, approved) == resolved.role for other in present):
+        return Severity.WARNING
+    return Severity.ERROR
+
+
+def _approved_column(entity: Entity, approved: SelectedSource) -> str | None:
+    """The column of `approved` that `entity` names: its resolved entity's,
+    or the named set's (`resolve_group`), or `None`."""
+    if (resolved := resolve_name(entity, approved)) is not None:
+        return resolved.role
+    group = resolve_group(entity, approved)
+    return group.role if group is not None else None
+
+
+def left_out_entities(
+    requirement: DatasetRequirement,
+    issues: Sequence[EvidenceIssue],
+    approved: SelectedSource,
+) -> dict[ResolvedEntity, EvidenceIssue]:
+    """Each entity `requirement` names that a run-time check left out
+    (`_left_out_severity`), as the approved source resolved it, with its
+    finding."""
+    by_name = {entity.name: entity for entity in requirement.entities}
+    left_out: dict[ResolvedEntity, EvidenceIssue] = {}
+    for issue in issues:
+        if issue.code is not EvidenceIssueCode.ENTITY_MISSING or issue.severity is Severity.ERROR:
+            continue
+        entity = by_name.get(str(issue.required))
+        resolved = resolve_name(entity, approved) if entity is not None else None
+        if resolved is not None:
+            left_out[resolved] = issue
+    return left_out
 
 
 def _role_issues(
@@ -1060,6 +1148,18 @@ def _period_issues(
             )
         ]
     return []
+
+
+def _held_period(requirement: DatasetRequirement, evidence: RetrievalEvidence) -> Period:
+    """The years `_series_issues` holds each series to: `requirement.period`,
+    running on, where its end is open (`period_end_open`), to the newest year
+    the retrieval holds (`RetrievalEvidence.window`), so a series the rest
+    outlast is recorded however the run's newest year falls."""
+    period = requirement.period
+    window = evidence.window
+    if not requirement.period_end_open or window is None or window.end <= period.end:
+        return period
+    return Period(start=period.start, end=window.end)
 
 
 def _asked_for(period: Period, evidence: RetrievalEvidence) -> str:
@@ -1997,8 +2097,69 @@ def _membership_unverified(
     )
 
 
+# The findings that name one retrieved series (`EvidenceIssue.entities`).
+_SERIES_CODES = frozenset({EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS})
+
+
+def series_rank(finding: EvidenceIssue) -> tuple[bool, float, str, tuple[str, ...]]:
+    """Where the series `finding` is about sorts among others, largest first.
+
+    A series is as large as its largest absolute value in any period
+    (`EvidenceIssue.magnitude`), so a series of net repayments, negative
+    throughout, ranks by how far it reaches below zero, and a series that
+    stops early keeps the size it reached before. Series of equal size, or
+    of none stated, sort by StatVar and then by their entities' refs.
+    """
+    size = finding.magnitude
+    refs = tuple(entity.ref for entity in finding.entities)
+    return size is None, -(size or 0.0), finding.stat_var or "", refs
+
+
+def unlabelled_series_refs(findings: Iterable[EvidenceIssue], *, limit: int) -> list[str]:
+    """The refs, at most `limit`, of the entities the series findings among
+    `findings` name with no label, the largest series' first (`series_rank`).
+
+    An answer names the largest series that fall short
+    (`harness.graph.answer`), so a lookup bounded this way still labels the
+    series it names.
+    """
+    refs: dict[str, None] = {}
+    for finding in sorted(
+        (one for one in findings if one.code in _SERIES_CODES and one.entities), key=series_rank
+    ):
+        for entity in finding.entities:
+            if len(refs) == limit:
+                return list(refs)
+            if entity.label is None:
+                refs.setdefault(entity.ref)
+    return list(refs)
+
+
+def with_series_labels(
+    findings: Iterable[EvidenceIssue], labels: Mapping[str, str]
+) -> list[EvidenceIssue]:
+    """`findings` with each series entity that has no label labelled by its ref in `labels`."""
+    return [
+        finding.model_copy(
+            update={
+                "entities": tuple(
+                    entity
+                    if entity.label is not None or entity.ref not in labels
+                    else entity.model_copy(update={"label": labels[entity.ref]})
+                    for entity in finding.entities
+                )
+            }
+        )
+        if finding.code in _SERIES_CODES
+        else finding
+        for finding in findings
+    ]
+
+
 def _series_issues(
-    requirement: DatasetRequirement, evidence: RetrievalEvidence
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None = None,
 ) -> list[EvidenceIssue]:
     """Per-series coverage: the requirement's period, one observation per year.
 
@@ -2010,7 +2171,10 @@ def _series_issues(
     the severity the requirement's `coverage` asks for; missing statistics
     are mandatory metadata the manifest failed to carry, and a grain that is
     not annual is never what was asked for, so both are errors whatever it
-    says.
+    says. A period with an open end runs on to the newest year the retrieval
+    holds (`_held_period`), and a series covering the period as stated but
+    stopping before that year is a `WARNING` whatever `coverage` says, since
+    it meets the requirement.
 
     Reading a count above the span as a finer grain rests on one series
     covering one entity per role. `compute_series_statistics` in apis'
@@ -2021,6 +2185,13 @@ def _series_issues(
     population's observations as one series and refuse it here as a grain
     error, which is what a ranking over a definition's full population
     would look like.
+
+    A `window_short` or `coverage_gaps` finding carries its series'
+    entities (`EvidenceIssue.entities`), each with the label `approved`
+    gives its ref, and its largest absolute value (`EvidenceIssue.magnitude`), so
+    an answer can say whose series falls short and name the largest. The
+    executor labels the entities `approved` names none for, such as the
+    members of an open population (`unlabelled_series_refs`).
     """
     if evidence.series is None or not evidence.series.num_rows:
         # `None` (the manifest carries no statistics at all) and a table with
@@ -2037,20 +2208,32 @@ def _series_issues(
         ]
     issues: list[EvidenceIssue] = []
     period = requirement.period
-    for one in _series_off_period(evidence.series, period):
+    held = _held_period(requirement, evidence)
+    labels = {one.ref: one.label for one in approved.entities} if approved is not None else {}
+    for one in _series_off_period(evidence.series, held, labels=labels):
         reach = Period(start=one.first_year, end=one.latest_year)
-        if not reach.covers(period):
+        if not reach.covers(held):
+            met = reach.covers(period)
             issues.append(
                 EvidenceIssue(
                     code=EvidenceIssueCode.WINDOW_SHORT,
-                    severity=_coverage_severity(requirement),
+                    # A series covering the period as stated meets it.
+                    severity=Severity.WARNING if met else _coverage_severity(requirement),
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} covers "
-                        f"{reach.start}-{reach.end}, {_asked_for(period, evidence)}"
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} covers "
+                        f"{reach.start}-{reach.end}, "
+                        + (
+                            f"short of {held.end}, the newest year its retrieval holds"
+                            if met
+                            else _asked_for(period, evidence)
+                        )
                     ),
                     found=reach.model_dump(),
-                    required=period.model_dump(),
+                    required=held.model_dump(),
+                    stat_var=one.stat_var,
+                    entities=one.entities,
+                    magnitude=one.magnitude,
                 )
             )
         span = one.latest_year - one.first_year + 1
@@ -2061,11 +2244,14 @@ def _series_issues(
                     severity=_coverage_severity(requirement),
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} has "
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} has "
                         f"{one.observations} observations across {span} years"
                     ),
                     found=one.observations,
                     required=span,
+                    stat_var=one.stat_var,
+                    entities=one.entities,
+                    magnitude=one.magnitude,
                 )
             )
         elif one.observations > span:
@@ -2075,7 +2261,7 @@ def _series_issues(
                     severity=Severity.ERROR,
                     requirement_id=requirement.id,
                     detail=(
-                        f"series {one.stat_var} for {list(one.entity_refs)!r} has "
+                        f"series {one.stat_var} for {[entity.ref for entity in one.entities]!r} has "
                         f"{one.observations} observations across {span} years; the grain is not annual"
                     ),
                     found=one.observations,
@@ -2196,7 +2382,9 @@ def _series_units(series: pa.Table) -> set[str | Unit]:
     return {unit for facet in facets if (unit := _facet_unit(facet.get("unit")))}
 
 
-def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvidence]:
+def _series_off_period(
+    series: pa.Table, period: Period, *, labels: Mapping[str, str]
+) -> Iterator[SeriesEvidence]:
     """The series whose reach misses `period` or whose count differs from its
     span, in the order of their head rows: the only ones `_series_issues`
     reports on.
@@ -2207,7 +2395,7 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
     held to the period as one. A series with a first or last period that
     names no year is left out, since neither check can run on it. The rest
     are selected column by column, and only the selected series become
-    `SeriesEvidence`.
+    `SeriesEvidence`, each entity labelled by `labels`, keyed by ref.
     """
     unskipped = pc.ScalarAggregateOptions(skip_nulls=False)
     folded = (
@@ -2217,6 +2405,8 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
                 "first_year": _years(_column(series, "first_period")),
                 "latest_year": _years(_column(series, "latest_period")),
                 "observations": _column(series, "observations"),
+                "maximum_value": _column(series, "maximum_value"),
+                "minimum_value": _column(series, "minimum_value"),
             }
         )
         .group_by("series", use_threads=False)
@@ -2225,6 +2415,8 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
                 ("first_year", "min", unskipped),
                 ("latest_year", "max", unskipped),
                 ("observations", "sum"),
+                ("maximum_value", "max"),
+                ("minimum_value", "min"),
             ]
         )
         .sort_by("series")
@@ -2252,13 +2444,21 @@ def _series_off_period(series: pa.Table, period: Period) -> Iterator[SeriesEvide
             "first_year": array_kernel("take", first, rows),
             "latest_year": array_kernel("take", latest, rows),
             "observations": array_kernel("take", observations, rows),
+            "maximum_value": array_kernel("take", _column(folded, "maximum_value_max"), rows),
+            "minimum_value": array_kernel("take", _column(folded, "minimum_value_min"), rows),
         }
     )
     for row in selected.to_pylist():
         yield SeriesEvidence(
             stat_var=_bare_dcid(row["stat_var"]),
-            entity_refs=tuple(entity["ref"] for entity in row["entities"]),
+            entities=tuple(
+                SeriesEntity(
+                    role=entity["role"], ref=entity["ref"], label=labels.get(entity["ref"])
+                )
+                for entity in row["entities"]
+            ),
             first_year=row["first_year"],
             latest_year=row["latest_year"],
             observations=row["observations"],
+            magnitude=max(abs(row["maximum_value"]), abs(row["minimum_value"])),
         )

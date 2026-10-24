@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -152,10 +152,13 @@ class Console:
 class RenderState:
     """Tracks narration in flight across one SSE segment, so a following
     frame starts on its own line and `message.complete` doesn't reprint text
-    its deltas already streamed."""
+    its deltas already streamed. `failed_steps` holds the step ids whose
+    latest frame was `failed`, so a later try's `complete` frame on one of
+    them prints its detail under the failed line it settles."""
 
     mid_line: bool = False
     narrated: bool = False
+    failed_steps: set[str] = field(default_factory=set)
 
     def break_line(self, console: Console) -> None:
         if self.mid_line:
@@ -303,15 +306,21 @@ _STEP_SYMBOL = {
 _STEP_COLOR = {"complete": "32", "failed": "1;31", "running": "33"}
 
 
-def _render_activity_step(frame: ActivityStep, console: Console) -> None:
+def _render_activity_step(frame: ActivityStep, console: Console, state: RenderState) -> None:
     status = frame.status.value
     symbol = _STEP_SYMBOL.get(status, "·")
     progress = f" ({frame.progress.completed}/{frame.progress.total})" if frame.progress else ""
     duration = f" {frame.duration_ms}ms" if frame.duration_ms is not None else ""
     line = f"  {symbol} {frame.label}{progress}{duration}"
     console.line(console.paint(line, _STEP_COLOR.get(status, "2")))
-    if status == "failed" and frame.detail:
-        console.line(console.paint(f"      {frame.detail}", "31"))
+    if status == "failed":
+        state.failed_steps.add(frame.step_id)
+        if frame.detail:
+            console.line(console.paint(f"      {frame.detail}", "31"))
+    elif frame.step_id in state.failed_steps:
+        state.failed_steps.discard(frame.step_id)
+        if status == "complete" and frame.detail:
+            console.line(console.paint(f"      {frame.detail}", "32"))
 
 
 def _render_component_created(frame: ComponentCreated, console: Console) -> None:
@@ -430,7 +439,7 @@ def render_frame(frame: StudioFrame, console: Console, state: RenderState) -> bo
         case PlanVersioned():
             _render_plan_versioned(frame, console)
         case ActivityStep():
-            _render_activity_step(frame, console)
+            _render_activity_step(frame, console, state)
         case ComponentCreated():
             _render_component_created(frame, console)
         case ComponentRevised():

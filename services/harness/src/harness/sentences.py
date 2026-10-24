@@ -140,7 +140,7 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     CompileIssueCode.SHARE_KEY_UNKNOWN: "a share names a part the data does not hold",
     CompileIssueCode.QUOTIENT_AXIS_REQUIRED: "a division needs to know which values to pair",
     CompileIssueCode.QUOTIENT_KEY_UNKNOWN: "a division names a value the data does not hold",
-    CompileIssueCode.KEYS_DISJOINT: "the two sides of a division share nothing to pair",
+    CompileIssueCode.KEYS_DISJOINT: "the two sides being paired share no place or party",
     CompileIssueCode.CYCLE: _PLAN_FAULT,
     CompileIssueCode.UNKNOWN_TERMINAL: _PLAN_FAULT,
     CompileIssueCode.OPERATION_UNREACHABLE: _PLAN_FAULT,
@@ -161,6 +161,9 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.ROLLING_POPULATION_UNUSABLE: (
         "the period that follows the newest data cannot be worked out for these series"
+    ),
+    CompileIssueCode.ROLLING_ANCHOR_BEHIND: (
+        "the latest year most of these series report leaves the period asked for no years"
     ),
     CompileIssueCode.ENTITY_REQUIRED: (
         "a calculation needs one country or entity on each side, and the plan named several"
@@ -198,7 +201,6 @@ COMPILE_REASONS: Mapping[CompileIssueCode, str] = {
         "the figures being combined are in units that cannot be converted to one another"
     ),
     CompileIssueCode.PERIODS_DISJOINT: "the figures being compared share no year",
-    CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS: "the tables being joined share nothing to join on",
     CompileIssueCode.NO_CAPABILITY: "the calculation service has no tool for one of the steps",
     CompileIssueCode.AMBIGUOUS_CAPABILITY: _TOOLS_FAULT,
     CompileIssueCode.UNKNOWN_TOOL: _TOOLS_FAULT,
@@ -494,6 +496,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "rolling_anchor_unresolved",
             "open_role_unavailable",
             ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET,
+            ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN,
             HarnessCode.RELATIVE_PERIOD_ON_CLOSED_WINDOW,
             HarnessCode.NO_SHARED_PERIOD,
         }
@@ -566,6 +569,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "period_unverified",
             "scope_entities_wider",
             "stat_var_unresolved",
+            "member_not_resolvable",
             "open_axis_unresolved",
             "statistics_unavailable",
             "authorisation_mismatch",
@@ -692,6 +696,9 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
         "The data is not broken down the way that was asked",
         "so ask for a breakdown it holds",
     ),
+    "member_not_resolvable": FailureText(
+        "The data holds indicators the system cannot confirm", "so ask for it from another source"
+    ),
     "growth_gap_year": FailureText(
         "The data has no figure in the first or the last year of that period",
         "so name years it holds",
@@ -705,6 +712,10 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     ),
     ExecutorCode.ROLLING_WINDOW_OUTSIDE_DATASET: FailureText(
         "The period asked for starts before the data does", "so ask for a later start"
+    ),
+    ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN: FailureText(
+        "Fewer than half of these series now report the year the plan counted from",
+        "so ask again to plan from the latest year they report",
     ),
     HarnessCode.EMPTY_RESULT: FailureText(
         "The data holds no figures for the places and period asked",

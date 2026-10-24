@@ -71,6 +71,15 @@
         ]
       },
       {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
         "kind": "dataset",
         "id": "population",
         "measure": "population",
@@ -88,7 +97,7 @@
         "kind": "quotient_of",
         "id": "per_head",
         "numerator": {
-          "input_id": "oda"
+          "input_id": "total"
         },
         "denominator": {
           "input_id": "population"
@@ -104,75 +113,5 @@
       }
     ]
   },
-  "alternative_payloads": [
-    {
-      "description": "Total the donors by year first, then divide by the population.",
-      "payload": {
-        "question": "How much ODA per person did Malawi receive in each year from 2015 to 2021?",
-        "answer_mode": "computed",
-        "decisions": [],
-        "evidence_requirements": [
-          {
-            "kind": "dataset",
-            "id": "oda",
-            "measure": "ODA",
-            "entities": [
-              {
-                "name": "Malawi",
-                "role": "recipient"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2021
-            },
-            "across": [
-              "donor"
-            ]
-          },
-          {
-            "kind": "aggregate",
-            "id": "total",
-            "input_id": "oda",
-            "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
-          },
-          {
-            "kind": "dataset",
-            "id": "population",
-            "measure": "population",
-            "entities": [
-              {
-                "name": "Malawi"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2021
-            }
-          },
-          {
-            "kind": "quotient_of",
-            "id": "per_head",
-            "numerator": {
-              "input_id": "total"
-            },
-            "denominator": {
-              "input_id": "population"
-            }
-          }
-        ],
-        "answered": [
-          {
-            "ask": 0,
-            "outputs": [
-              "per_head"
-            ]
-          }
-        ]
-      }
-    }
-  ]
+  "alternative_payloads": []
 }

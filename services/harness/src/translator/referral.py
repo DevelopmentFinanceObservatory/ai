@@ -23,6 +23,9 @@ again cannot search, so retrying cannot succeed. `not_issued` marks a
 `discovery_unavailable` referral for a call the planner entry had no time
 left to issue (`translator.discovery.NoTimeLeftError`): the service was never
 asked, so the entry ran out of time rather than the service failing.
+`stop_code` is the run's own code for a stop found before approval, when
+reading the newest year a plan's rolling years count from stopped where the
+plan's run would (`translator.tool._run_would_stop`).
 
 Four kinds carry `candidates`, for different reasons. `SOURCE_AMBIGUOUS`
 always carries two or more: discovery found a real choice. The planner
@@ -55,11 +58,16 @@ pin a change such as a moved period left stale.
 
 A source found in place of a pin whose own source discovery read and set
 aside, because it held the requirement's `across` side closed, is offered
-only when it keeps that source's scope (`dropped_scope`). One that drops it,
+only when it keeps that source's scope (`dropped_scope`), or when a
+requirement reading the pinned one reads that side per member. One that drops it,
 leaving open a role the pinned source closed to a named group or named
 members, is listed under `withheld` with the scope it drops, and never under
 `candidates`, so `offered` does not name it and the planner cannot pin it.
-"France to Africa", re-searched as "France to every recipient", is the case.
+"France to Africa", re-searched as "France to every recipient" for a total,
+is the case. A rank, a filter or any other reader that reads the side per
+member needs every member `across` asks for, so there the pin gives way and
+the source is offered: "top donors to Malawi" pinned to the total of official
+donors (DAC) is that case (`translator.discovery.DiscoveryLog.scope_kept`).
 
 `save_referral`, `load_referral` and `clear_referral` keep the last referral in
 session state, under `REFERRAL_STATE_KEY`, so the planner can read why the
@@ -260,6 +268,8 @@ def scope_repair(held: SelectedSource, across: str) -> str | None:
     requirement can name that member under the side's `PARTY_ROLES` word and
     drop the word from `across`, which brings the pinned source's scope back.
     Several named members, or a word naming no single role, give `None`.
+    The repair leaves one member on the side, so it answers only a plan whose
+    readers sum the side away (`translator.discovery.DiscoveryLog.scope_kept`).
     """
     role = party_role(across)
     side = flow_side(across)
@@ -310,6 +320,7 @@ class Referral(StrictModel):
     budget_spent: bool = False
     not_issued: bool = False
     source_mismatch: bool = False
+    stop_code: str | None = Field(default=None, min_length=1)
     stale_pins: tuple[StalePin, ...] = ()
     withheld: tuple[WithheldSource, ...] = ()
 

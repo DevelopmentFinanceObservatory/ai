@@ -239,12 +239,17 @@ class DefinitionModel(BaseModel):
 
 
 class PartyTotalsLeftOut(BaseModel):
-    """One party role whose group totals apis left out of a frame minted with
-    `options.without_party_totals`, and the refs of those totals in ref order: one entry
-    of the manifest's `trace.party_totals_left_out` (`party_totals_left_out`)."""
+    """The group totals apis left out of one party role of a frame minted with
+    `options.without_party_totals`, in ref order, within one provenance: one entry of the
+    manifest's `trace.party_totals_left_out` (`party_totals_left_out`). `provenance` is the
+    dcid of the dataset whose rows lost them, and `None` for the rows that carry no
+    provenance. An entry with no `provenance` key comes from a trace recorded before apis
+    keyed the cut on the dataset, whose cut covered every dataset; `model_fields_set` tells
+    that entry from a null one."""
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
     role: str
+    provenance: str | None = None
     entities: list[str]
 
 
@@ -256,7 +261,7 @@ _PARTY_TOTALS_LEFT_OUT = TypeAdapter(list[PartyTotalsLeftOut])
 
 def party_totals_left_out(trace: Mapping[str, object]) -> list[PartyTotalsLeftOut]:
     """The group totals a manifest's `trace` says apis left out of its frame, one entry
-    per party role in role order, and none for a frame that left none out.
+    per party role and provenance in role order, and none for a frame that left none out.
 
     Raises:
         pydantic.ValidationError: When the trace lists them in another shape.

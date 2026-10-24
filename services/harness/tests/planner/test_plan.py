@@ -83,14 +83,18 @@ from planner.plan import (
     load_plan,
     period_window,
     plan_revision,
+    restated_to_anchors,
+    restated_translation,
     retrieves_period,
     rolls_from_its_start,
     settle_decisions,
+    split_of,
     windowed_pin,
 )
 from planner.proof import mismatches
 from planner.records import (
     MAX_RANK_LIMIT,
+    Breakdown,
     DenominatorScope,
     EntityIn,
     EvidenceIssue,
@@ -113,7 +117,7 @@ from planner.records import (
     TaggedModel,
     ValueThreshold,
 )
-from planner.shapes import FrameShape, TimeLabel
+from planner.shapes import FrameShape, TimeLabel, pooling_remedy
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -126,6 +130,7 @@ from planner.workflow import (
 )
 from pydantic import TypeAdapter, ValidationError
 from submission.service import _Patch
+from translator.mechanical import build_translation
 
 from ..context_probe import field_limits_record, plan_record, record_chars, unbounded_paths
 
@@ -188,10 +193,11 @@ def _every_kind_plan(decision: Decision) -> Plan:
     and also feeds `rank_a` (rank, among='population', reducing the decade to
     one value per entity -- `decision` has to cite `fixes.among='population'`
     for `rank_a`'s population claim to validate). `dataset_b` feeds
-    `filtered_b` (filter). `joined` (join), `share_a` (share_of),
-    `quotient_a` (quotient_of), `comparison_a` (comparison) and `sum_a`
-    (sum_of) each read both `totals_a` and `filtered_b`; `comparison_a` is
-    terminal.
+    `filtered_b` (filter). `joined` (join) reads `filtered_b` and
+    `dataset_a`, the one creditor and the one debtor each keeps paired
+    (`planner.shapes.join_key_pairs`). `share_a` (share_of), `quotient_a`
+    (quotient_of), `comparison_a` (comparison) and `sum_a` (sum_of) each
+    read both `totals_a` and `filtered_b`; `comparison_a` is terminal.
     """
     dataset_a = DatasetRequirement(
         id="dataset_a",
@@ -236,7 +242,7 @@ def _every_kind_plan(decision: Decision) -> Plan:
         reduction=Reduction.MEAN,
     )
     joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="totals_a"
+        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="dataset_a"
     )
     share_a = ShareOfRequirement(
         id="share_a",
@@ -1323,6 +1329,48 @@ def test_a_requirement_side_entity_must_name_an_upstream_entity(
         _plan(decision(), evidence_requirements=[dataset, agg, other_agg, comparison])
 
 
+@pytest.mark.parametrize(
+    ("denominator", "refused"),
+    [("all_oda", True), ("pooled", False)],
+    ids=["every-donor-whole", "pooled-per-year"],
+)
+def test_a_whole_side_over_a_party_nobody_named_is_rejected(
+    decision: DecisionFactory, requirement: RequirementFactory, denominator: str, refused: bool
+) -> None:
+    # Germany's share of all ODA to Ethiopia: the denominator covers every
+    # donor and names none, so read whole it is one series per donor. The
+    # compiler refuses that side (`entity_required`) on the same rule, and an
+    # aggregate pooling the donors per year clears both.
+    ethiopia = Entity(name="Ethiopia", role="recipient")
+    germany = requirement(
+        id="germany", measure="ODA", entities=[Entity(name="Germany", role="donor"), ethiopia]
+    )
+    all_oda = requirement(id="all_oda", measure="ODA", entities=[ethiopia], across=["donor"])
+    pooled = AggregateRequirement(
+        id="pooled",
+        decision_ids=["measure"],
+        input_id="all_oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="germany"),
+        denominator=RequirementSide(input_id=denominator),
+    )
+    requirements = [germany, all_oda, *([pooled] if denominator == "pooled" else []), share]
+
+    if not refused:
+        _plan(decision(), evidence_requirements=requirements)
+        return
+    with pytest.raises(ValidationError) as rejected:
+        _plan(decision(), evidence_requirements=requirements)
+    message = str(rejected.value)
+    assert "covers every 'donor'" in message
+    assert pooling_remedy(one_figure=True, each_side=True) in message
+
+
 def test_a_comparison_reading_a_join_is_rejected(
     decision: DecisionFactory,
     requirement: RequirementFactory,
@@ -1357,6 +1405,82 @@ def test_a_comparison_reading_a_join_is_rejected(
             evidence_requirements=[dataset_a, dataset_b, agg_a, agg_b, joined, comparison],
         )
     assert _unsupported_operation(refused.value) is UnsupportedOperation.CALCULATION_OVER_COMBINED
+
+
+_KENYA_RECEIVES = Entity(name="Kenya", role="recipient")
+
+
+@pytest.mark.parametrize(
+    ("aid_fields", "totalled", "refused"),
+    [
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "across": ["donor"]},
+            True,
+            None,
+            id="one-recipient-each",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES, Entity(name="Germany", role="donor")]},
+            True,
+            "one side keeps ['country'] while the other keeps ['donor', 'recipient']",
+            id="flow-side-keeps-both-parties",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "across": ["donor"]},
+            False,
+            "one side keeps ['country'] while the other keeps ['donor', 'recipient']",
+            id="flow-side-keeps-every-donor",
+        ),
+        pytest.param(
+            {"entities": [_KENYA_RECEIVES], "breakdown": Breakdown(dimension="sector", level=0)},
+            False,
+            "'aid' keeps the breakdown by 'sector', one row per code",
+            id="a-breakdown-outside-the-pair",
+        ),
+    ],
+)
+def test_a_join_pairs_one_place_on_each_side_and_refuses_a_key_that_repeats(
+    decision: DecisionFactory, aid_fields: dict[str, Any], totalled: bool, refused: str | None
+) -> None:
+    # Kenya's domestic malaria spending, a place series, beside the aid Kenya
+    # receives summed over its donors: the two places sit on different roles,
+    # so the join pairs them. A flow side keeping its donor too leaves two
+    # roles the place could stand for, whether it names the donor or keeps
+    # every one, and one keeping every sector beside the pair holds several
+    # rows for each key.
+    domestic = DatasetRequirement(
+        id="domestic",
+        decision_ids=["measure"],
+        measure="domestic spending on malaria",
+        entities=[Entity(name="Kenya")],
+        period=Period(start=2015, end=2024),
+    )
+    aid = DatasetRequirement(
+        id="aid",
+        decision_ids=["measure"],
+        measure="ODA for malaria control",
+        period=Period(start=2015, end=2024),
+        **aid_fields,
+    )
+    aid_total = AggregateRequirement(
+        id="aid_total",
+        decision_ids=["measure"],
+        input_id="aid",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    right = aid_total.id if totalled else aid.id
+    both = JoinRequirement(id="both", decision_ids=["measure"], left_id="domestic", right_id=right)
+    requirements = [domestic, aid, *([aid_total] if totalled else []), both]
+
+    if refused is None:
+        _plan(decision(), evidence_requirements=requirements)
+        return
+    with pytest.raises(ValidationError) as rejected:
+        _plan(decision(), evidence_requirements=requirements)
+    message = str(rejected.value)
+    assert refused in message
+    assert "sum it away first" in message or "keep one entity role on each side" in message
 
 
 def test_growth_window_must_fit_the_upstream_dataset_period(
@@ -1685,7 +1809,7 @@ _PEAK_YEAR_FILTERS = {
     "five-years-back-filter": _years_back("gte", -5),
     "after-ten-years-back-filter": _years_back("gt", -10),
     "ten-years-back-filter": _years_back("gte", -10),
-    "entity-filter": EntityIn(names=("France",)),
+    "entity-filter": EntityIn(names=("Kenya",)),
 }
 # Filters in front of the peak: a first year six years back behind a fixed
 # 2018, a first year ten years back, and a last year before the newest.
@@ -2286,6 +2410,95 @@ def test_a_rank_reading_a_share_of_validates(
     plan = _plan(fixed, evidence_requirements=[numerator, denominator, share, rank])
 
     assert plan.requirement("ranked").input_id == "share"
+
+
+@pytest.mark.parametrize(
+    ("axis", "scope", "allowed"),
+    [
+        pytest.param("donor", DenominatorScope.POOLED, True, id="pooled"),
+        pytest.param("donor", DenominatorScope.PER_AXIS, False, id="per-axis"),
+        pytest.param(None, None, False, id="unkeyed"),
+    ],
+)
+def test_a_share_of_reads_one_side_twice_only_pooled_across_its_axis(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    axis: str | None,
+    scope: DenominatorScope | None,
+    allowed: bool,
+) -> None:
+    # Each donor's share of all ODA to Uganda: one dataset keeping donor open,
+    # each donor over every donor's total.
+    dataset = requirement(
+        id="oda_uganda",
+        measure="ODA",
+        entities=[Entity(name="Uganda", role="recipient")],
+        across=("donor",),
+    )
+    side = RequirementSide(input_id=dataset.id)
+
+    def share() -> ShareOfRequirement:
+        return ShareOfRequirement(
+            id="share",
+            decision_ids=["measure"],
+            numerator=side,
+            denominator=side,
+            axis=axis,
+            denominator_scope=scope,
+        )
+
+    if not allowed:
+        with pytest.raises(ValidationError, match="numerator and denominator must differ"):
+            share()
+        return
+    fixed = decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+    plan = _plan(fixed, evidence_requirements=[dataset, share()])
+
+    assert [role.role for role in frame_shapes(plan)["share"].roles] == ["donor"]
+
+
+_UGANDA_RECIPIENT = Entity(name="Uganda", role="recipient")
+
+
+@pytest.mark.parametrize(
+    ("donors", "entity", "refused"),
+    [
+        pytest.param(("France", "Germany"), None, False, id="two-named"),
+        pytest.param(("France", "Germany"), "Uganda", False, id="entity-off-the-axis"),
+        pytest.param(("France",), None, True, id="one-named"),
+        pytest.param(("France", "Germany"), "France", True, id="entity-on-the-axis"),
+    ],
+)
+def test_a_share_pooling_its_own_axis_refuses_a_key_of_one_member(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    donors: tuple[str, ...],
+    entity: str | None,
+    refused: bool,
+) -> None:
+    # One donor over the donors' total is that donor over itself, 100% each year.
+    dataset = requirement(
+        id="oda_uganda",
+        measure="ODA",
+        entities=[*(Entity(name=name, role="donor") for name in donors), _UGANDA_RECIPIENT],
+    )
+    side = RequirementSide(input_id=dataset.id, entity=entity)
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=side,
+        denominator=side,
+        axis="donor",
+        denominator_scope=DenominatorScope.POOLED,
+    )
+    fixed = decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))
+
+    if refused:
+        with pytest.raises(ValidationError, match="divides the member by itself"):
+            _plan(fixed, evidence_requirements=[dataset, share])
+        return
+    plan = _plan(fixed, evidence_requirements=[dataset, share])
+    assert [role.role for role in frame_shapes(plan)["share"].roles] == ["donor"]
 
 
 def test_an_axis_naming_a_role_the_input_does_not_carry_fails(
@@ -5632,6 +5845,164 @@ def test_rolling_years_refused_on_a_copy_name_the_requirement_the_model_wrote(
     error = _rolling_error(raised.value)
     assert (error.issue, error.requirement_ids) == (RollingIssue.YEARS_DISAGREE, ("f", "growth"))
     assert "('f' [2023]; 'growth' [2024])" in str(error)
+
+
+def _draft(
+    decision: DecisionFactory, requirement: RequirementFactory, *steps: EvidenceRequirement
+) -> Plan:
+    """A draft reading 2015-2024, retrieved with no end year, through `steps`."""
+    return _plan(
+        decision(),
+        evidence_requirements=[requirement(period_end_open=True), *steps],
+        status=PlanStatus.DRAFT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stated", "anchor"), [(2024, 2023), (2022, 2023)], ids=["earlier", "later"]
+)
+def test_a_plans_rolling_years_are_restated_from_the_newest_year_its_run_reads(
+    decision: DecisionFactory, requirement: RequirementFactory, stated: int, anchor: int
+) -> None:
+    """Each rolling year moves by the newest year less the one the plan
+    states, and keeps its offset; a predicate on values stays. The
+    translation moves with it, to the one built from the restated plan."""
+    positive = ValueThreshold(op="gt", value=0)
+    plan = _draft(
+        decision,
+        requirement,
+        _rolling_growth(_DATASET, window_start=stated - 5, window_end=stated),
+        _years("recent", _DATASET, _gte(stated - 4, -4), positive),
+    )
+
+    anchors = {"growth": anchor, "recent": anchor}
+    restated = restated_to_anchors(plan, anchors=anchors)
+
+    growth = restated.requirement("growth")
+    recent = restated.requirement("recent")
+    assert isinstance(growth, GrowthRequirement)
+    assert isinstance(recent, FilterRequirement)
+    assert (growth.window_start, growth.window_end, growth.rolling) == (
+        anchor - 5,
+        anchor,
+        _LAST_FIVE,
+    )
+    assert recent.predicates == (_gte(anchor - 4, -4), positive)
+    assert restated.requirement(_DATASET) == plan.requirement(_DATASET)
+    assert plan_revision(restated) != plan_revision(plan)
+    discovered = {_DATASET: "spec_" + "a" * 32}
+    assert restated_translation(
+        build_translation(plan, discovered), plan=plan, anchors=anchors
+    ) == build_translation(restated, discovered)
+
+
+@pytest.mark.parametrize(
+    ("steps", "anchors"),
+    [
+        pytest.param([], {}, id="no-rolling-requirement"),
+        pytest.param([_rolling_growth(_DATASET)], {"growth": 2024}, id="on-the-stated-year"),
+    ],
+)
+def test_a_plan_whose_years_do_not_move_is_restated_as_itself(
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    steps: list[EvidenceRequirement],
+    anchors: dict[str, int],
+) -> None:
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id=_DATASET,
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    plan = _draft(decision, requirement, total, *steps)
+
+    assert restated_to_anchors(plan, anchors=anchors) is plan
+    translation = build_translation(plan, {_DATASET: "spec_" + "a" * 32})
+    assert restated_translation(translation, plan=plan, anchors=anchors) is translation
+
+
+def test_a_restatement_that_empties_a_growth_window_is_refused_as_the_planner_refuses_it(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """Growth from a fixed 2023 to the newest year, planned against 2024,
+    reads one year once the newest year is 2023."""
+    since = _rolling_growth(
+        _DATASET, window_start=2023, rolling=RollingWindow(window_end=_OFFSET[0])
+    )
+    plan = _draft(decision, requirement, since)
+
+    with pytest.raises(ValidationError) as restated:
+        restated_to_anchors(plan, anchors={"growth": 2023})
+    with pytest.raises(ValidationError) as proposed:
+        _rolling_growth(_DATASET, window_start=2023, window_end=2023, rolling=since.rolling)
+
+    def refusal(raised: ValidationError) -> list[Any]:
+        return raised.errors(include_url=False, include_context=False, include_input=False)
+
+    assert refusal(restated.value) == refusal(proposed.value)
+
+
+def test_a_copy_moves_with_the_requirement_it_copies(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    """A total per year and a growth rolling from its start both read 'f', so
+    the growth reads a copy of 'f' over the dataset's whole history. The copy
+    and 'f' state one year, so they move together, and newest years that tear
+    them apart are refused."""
+    draft = _draft(
+        decision,
+        requirement,
+        _years("f", _DATASET, _lte(2024, 0)),
+        AggregateRequirement(
+            id="total",
+            decision_ids=["measure"],
+            input_id="f",
+            reduction=Reduction.SUM,
+            group_by=(GroupBy.PERIOD,),
+        ),
+        _rolling_growth("f"),
+    )
+    split = split_of(draft)
+    plan = Plan.model_validate(
+        {
+            **draft.model_dump(),
+            "evidence_requirements": split.requirements,
+            "rolling_copies": split.copies,
+        }
+    )
+    assert [(c.copy_id, c.origin_id) for c in plan.rolling_copies] == [
+        (f"{_DATASET}_history", _DATASET),
+        ("f_history", "f"),
+    ]
+
+    anchors = {"f": 2023, "f_history": 2023, "growth": 2023}
+    restated = restated_to_anchors(plan, anchors=anchors)
+
+    assert restated.rolling_copies == plan.rolling_copies
+    discovered = dict.fromkeys((_DATASET, f"{_DATASET}_history"), "spec_" + "a" * 32)
+    assert restated_translation(
+        build_translation(plan, discovered), plan=plan, anchors=anchors
+    ) == build_translation(restated, discovered)
+    for copy_id in ("f", "f_history"):
+        kept = restated.requirement(copy_id)
+        assert isinstance(kept, FilterRequirement)
+        assert kept.predicates == (_lte(2023, 0),)
+    with pytest.raises(RollingPlanError) as torn:
+        restated_to_anchors(plan, anchors={"f": 2024, "f_history": 2023, "growth": 2023})
+    assert (torn.value.issue, torn.value.requirement_ids) == (RollingIssue.YEARS_DISAGREE, ("f",))
+
+
+def test_newest_years_for_other_requirements_than_the_rolling_ones_are_a_fault(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    plan = _draft(decision, requirement, _rolling_growth(_DATASET))
+
+    with pytest.raises(KeyError):
+        restated_to_anchors(plan, anchors={})
+    with pytest.raises(KeyError):
+        restated_to_anchors(plan, anchors={"growth": 2024, _DATASET: 2024})
 
 
 def _sum(step_id: str, left: str, right: str) -> SumOfRequirement:

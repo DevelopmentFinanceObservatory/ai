@@ -56,16 +56,17 @@
           {
             "name": "Kenya",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 1960,
           "end": 2025
         },
-        "across": [
-          "donor"
-        ],
-        "source_spec_id": "spec_8b79e7f355cb933a6dc4561836a2c70d"
+        "source_spec_id": "spec_64bd62678d22debf1f39b36eefef98db"
       },
       {
         "kind": "aggregate",

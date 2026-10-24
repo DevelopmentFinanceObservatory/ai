@@ -3397,9 +3397,13 @@ async def test_component_ref_edit_patch_streams_component_revised() -> None:
     )
     async with _client(app) as client:
         await _conversation_with_component(client)
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        drawn = [card["component_id"] for card in conversation.canvas_cards()]
         frames = await _stream(client, "/api/studio/turn", _edit_body("rename it"))
 
     assert _events(frames)[-1] == "done"
+    # A revised card no longer draws the intent make_charts wrote it from.
+    assert (drawn, conversation.canvas_cards()) == (["cmp_01test0001"], [])
     revised = _frame(frames, "component.revised")
     assert revised["component_id"] == "cmp_01test0001"
     assert revised["revision"] == 2

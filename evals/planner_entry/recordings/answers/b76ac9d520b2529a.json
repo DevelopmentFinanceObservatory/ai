@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "is_error": false,
+    "structured_content": {
+      "spec_id": "spec_bf14f4677e976fc4cac192a205d55184",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_bf14f4677e976fc4cac192a205d55184: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"destination\":[\"country/ZMB\"]},\"facets\":{\"unit\":{\"request\":{\"currency\":\"USD\",\"prices\":\"current\"},\"state\":\"value\"}},\"identity_version\":\"spec1\",\"requested_window\":{\"kind\":\"all\"},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"amount\",\"measurement_qualifier\":\"Nominal\",\"population_type\":\"FinancialPosition\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"ref\":\"AmountOutstanding\",\"state\":\"value\"},\"property\":\"financialPositionType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"financingResource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"guaranteeStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsConcessionality\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsCreditorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"idsDebtorType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"includesIMFCredit\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"interestRateVariability\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"maturityBand\"}]},\"spec_id\":\"spec_bf14f4677e976fc4cac192a205d55184\"}"
+}

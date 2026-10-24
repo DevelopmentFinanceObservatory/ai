@@ -288,6 +288,31 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
+    `bound_refs` maps each entity text of the search part, case-folded, to
+    the refs Search states it bound (the part's `entity_refs`,
+    `compiler.sources.bound_refs`), so "G7" names the set Search labels
+    "Group of Seven" by its ref `GroupOfSeven`
+    (`compiler.evidence.named_members`). Empty for a part stating no
+    `entity_refs`, and for a source read from a block no search part
+    carried: a pin copied over another window
+    (`translator.discovery._recorded_source`) is resolved again by its
+    definition, which restates no entity, so its names match by label and
+    the graph's resolve door alone.
+
+    `code_paths` maps each code the identity binds on a breakdown's code
+    system (`compiler.sources.bound_codes`) to its path through the code
+    hierarchy, from the root down to the code itself: `CRSPurposeCode120`
+    (health) reads `("CRSPurposeCode100", "CRSPurposeCode120")`. A path's
+    length less one is the code's level. `translator.discovery.fetch_code_paths`
+    reads them from the graph's `specializationOf` parents for a requirement
+    stating a breakdown, and `compiler.shapes.breakdown_level` sets the level
+    the breakdown reads from them. Empty until that read runs, and for a
+    source no breakdown reads. `leaf_codes` are those of the codes the same
+    read found nothing below (the node states no `children` link): a leaf
+    keeps its own level when named alone. A named code missing from it has
+    children, or was read before the field was recorded, and reads the
+    level below it, which for a leaf apis answers under the code's own label.
+
     `exact_codes` are the publisher series codes the source is exactly:
     the entries of `resolved.stat_vars.source_codes` that Search marks
     `exact`, meaning a `source_code` search for that code would accept this
@@ -328,6 +353,21 @@ class SelectedSource(StrictModel):
     # its serialised form.
     entity_refs: Annotated[dict[str, str], HASHED_WHEN_SET] = Field(
         default_factory=dict, exclude_if=lambda refs: not refs
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    bound_refs: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda refs: not refs
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    code_paths: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda paths: not paths
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    leaf_codes: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda codes: not codes
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
     unit_ref: str | None = None

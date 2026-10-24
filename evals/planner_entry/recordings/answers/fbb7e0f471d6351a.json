@@ -1,0 +1,991 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.0.10"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
+          "llm_usage": {
+            "cached_tokens": 0,
+            "input_tokens": 0,
+            "jev_input_tokens": 13418,
+            "jev_output_tokens": 2748,
+            "output_tokens": 0
+          },
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 793
+          },
+          "trace_id": "a4ae1a3a92b440da909ce37018d73e58",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [],
+            "departures": [],
+            "operations": [],
+            "restatement": {
+              "entities": [
+                {
+                  "text": "Ghana"
+                }
+              ],
+              "operations": [],
+              "sources": [],
+              "time_text": "2010 to 2022",
+              "unit_text": "constant 2015 USD",
+              "variable_text": "GDP"
+            },
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/GHA"
+                    ]
+                  },
+                  "facets": {
+                    "unit": {
+                      "request": {
+                        "base_year": 2015,
+                        "currency": "USD",
+                        "prices": "constant"
+                      },
+                      "state": "value"
+                    }
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2022,
+                    "kind": "range",
+                    "start_year": 2010
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "valueAdded",
+                    "measurement_qualifier": "Nominal",
+                    "population_type": "EconomicProduction",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "currencyConversionBasis"
+                    },
+                    {
+                      "binding": {
+                        "ref": "GrossOfFixedCapitalConsumption",
+                        "state": "value"
+                      },
+                      "property": "fixedCapitalConsumptionBasis"
+                    },
+                    {
+                      "binding": {
+                        "ref": "IncludingProductTaxes",
+                        "state": "value"
+                      },
+                      "property": "productTaxBasis"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_46e43909a72fd4c5910fdb6b7fa4e9e2"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 13,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 13,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "IMF Copyright and Usage"
+                  },
+                  "rows": 13,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Ghana",
+                    "ref": "country/GHA",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "IMF World Economic Outlook (WEO)",
+                            "ref": "provenance/IMFWorldEconomicOutlook"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Ghana Cedi",
+                            "ref": "CurrencyGHS"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "US Dollar",
+                            "ref": "CurrencyUSD"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
+                    "label": "IMF World Economic Outlook (WEO)",
+                    "ref": "provenance/IMFWorldEconomicOutlook",
+                    "source": {
+                      "label": "International Monetary Fund (IMF)",
+                      "ref": "source/InternationalMonetaryFund"
+                    }
+                  },
+                  "unit": {
+                    "basis": "bound",
+                    "currency": "USD",
+                    "label": "US Dollar",
+                    "ref": "CurrencyUSD",
+                    "request_basis": {
+                      "base_year": "bound",
+                      "currency": "bound",
+                      "prices": "bound"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "currencyConversionBasis"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_measures": [],
+                "rendered_sentence": "Ghana's GDP, 2010 to 2022. Constant 2015 US dollars \u00b7 IMF World Economic Outlook (WEO).",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Ghana"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "how:fixedCapitalConsumptionBasis",
+                      "how:productTaxBasis",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "GDP"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:currencyConversionBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "currencyConversionBasis",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:fixedCapitalConsumptionBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "fixedCapitalConsumptionBasis",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:productTaxBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "productTaxBasis",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2010 to 2022"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:",
+                      "axis:measurementQualifier"
+                    ],
+                    "text": "Constant 2015 US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "IMF World Economic Outlook (WEO)"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    }
+                  ],
+                  "label": "Gross domestic product (GDP)",
+                  "measured_property": {
+                    "label": "value added",
+                    "ref": "valueAdded"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "measurement_qualifier": {
+                    "label": "Nominal",
+                    "ref": "Nominal"
+                  },
+                  "member_count": 2,
+                  "member_digest": "ef9c4356618ed98aab762248e68799d78c74ad249a6041dad0e8a345c85ee02f",
+                  "population_type": {
+                    "label": "economic production",
+                    "ref": "EconomicProduction"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "economicproduction_valueadded_measuredvalue_nominal",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "fixed capital consumption basis",
+                      "property": {
+                        "label": "fixed capital consumption basis",
+                        "ref": "fixedCapitalConsumptionBasis"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "product tax basis",
+                      "property": {
+                        "label": "product tax basis",
+                        "ref": "productTaxBasis"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "skills": [
+                  "imf-weo"
+                ],
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "fixed capital consumption basis",
+                      "property": {
+                        "label": "fixed capital consumption basis",
+                        "ref": "fixedCapitalConsumptionBasis"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "gross of fixed capital consumption",
+                            "ref": "GrossOfFixedCapitalConsumption"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "product tax basis",
+                      "property": {
+                        "label": "product tax basis",
+                        "ref": "productTaxBasis"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "including taxes on products",
+                            "ref": "IncludingProductTaxes"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "purchasing power parity rate",
+                            "ref": "PurchasingPowerParityRate"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "gross of fixed capital consumption",
+                          "ref": "GrossOfFixedCapitalConsumption"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "fixed capital consumption basis",
+                      "property": {
+                        "label": "fixed capital consumption basis",
+                        "ref": "fixedCapitalConsumptionBasis"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "including taxes on products",
+                          "ref": "IncludingProductTaxes"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "product tax basis",
+                      "property": {
+                        "label": "product tax basis",
+                        "ref": "productTaxBasis"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "currency conversion basis",
+                      "property": {
+                        "label": "currency conversion basis",
+                        "ref": "currencyConversionBasis"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Ghana",
+                          "ref": "country/GHA"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2022,
+                          "start_year": 2010
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2022",
+                    "start": "2010"
+                  },
+                  "member_count": 2,
+                  "member_count_exact": false,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "default_reading": {
+                    "applied": true,
+                    "removed_stat_vars": [
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAccommodationFoodServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSAgricultureForestryFishingHunting_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSArtsEntertainmentRecreation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSConstruction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSEducationalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSFinanceInsurance_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSInformation_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSManagementOfCompaniesEnterprises_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSMiningQuarryingOilGasExtraction_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSProfessionalScientificTechnicalServices_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSRealEstateRentalLeasing_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSUtilities_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_NAICSWholesaleTrade_RealValue",
+                      "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
+                      "InflationAdjustedGDP",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_AgricultureForestryFishingSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ConstructionSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ElectricityGasSteamAirConditionSupply",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_FinanceService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_MOSPIOtherService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_ManufacturingSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_MiningQuarrying",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_PublicAdministrationAndDefenceOrMOSPIOtherService",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSector",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TradeSectorOrTransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_Amount_EconomicActivity_GrossValueAdded_TransportStorageSectorOrPublishingBroadcastingInformationActivities",
+                      "RealValue_GrowthRate_Amount_EconomicActivity_GrossDomesticProduction",
+                      "dc/qt7ewllmt3826",
+                      "dc/zz6gwv838v9w"
+                    ]
+                  },
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2022,
+                    "start_year": 2010
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Ghana",
+                      "ref": "country/GHA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "dfo",
+                        "label": "Development Finance Observatory"
+                      },
+                      "documentation": "/api/graph/documentation/provenance/IMFWorldEconomicOutlook",
+                      "label": "IMF World Economic Outlook (WEO)",
+                      "ref": "provenance/IMFWorldEconomicOutlook",
+                      "source": {
+                        "label": "International Monetary Fund (IMF)",
+                        "ref": "source/InternationalMonetaryFund"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "fixed capital consumption basis",
+                        "property": {
+                          "label": "fixed capital consumption basis",
+                          "ref": "fixedCapitalConsumptionBasis"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "gross of fixed capital consumption",
+                          "ref": "GrossOfFixedCapitalConsumption"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
+                        "label": "product tax basis",
+                        "property": {
+                          "label": "product tax basis",
+                          "ref": "productTaxBasis"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "including taxes on products",
+                          "ref": "IncludingProductTaxes"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "currency conversion basis",
+                        "property": {
+                          "label": "currency conversion basis",
+                          "ref": "currencyConversionBasis"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Ghana",
+                          "ref": "country/GHA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_46e43909a72fd4c5910fdb6b7fa4e9e2"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 6,
+                "bind": 120,
+                "materialise": 2,
+                "options": 0,
+                "phase_bind": 9,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 1,
+                "phase_materialise": 1,
+                "phase_outcome": 461,
+                "phase_place_bindings": 7,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 22,
+                "recall": 0,
+                "shape": 162,
+                "shape_admission": 0,
+                "shape_arcs": 4,
+                "shape_groups": 45,
+                "shape_labels": 10,
+                "shape_probe": 5,
+                "shape_probe_coverage": 4
+              },
+              "total": 791
+            },
+            "variable_text": "GDP",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "parsed",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "Ghana's GDP, 2010 to 2022. Constant 2015 US dollars \u00b7 IMF World Economic Outlook (WEO).",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Ghana"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "how:fixedCapitalConsumptionBasis",
+              "how:productTaxBasis",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "GDP"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:currencyConversionBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "currencyConversionBasis",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:fixedCapitalConsumptionBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "fixedCapitalConsumptionBasis",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:productTaxBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "productTaxBasis",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2010 to 2022"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "unit:",
+              "axis:measurementQualifier"
+            ],
+            "text": "Constant 2015 US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "IMF World Economic Outlook (WEO)"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "skills": {
+          "imf-weo": {
+            "content_version": "sha256:a6276160a435adad67df2d4122f60d6c35d9139f2a76f899829c12fc6eb5a404",
+            "description": "Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Covers which years are actual and which are projections, which currencies and units can be compared or summed across countries, fiscal-year reporters and level breaks, how IMF country groups are built, countries with suspended data, and how the DFO's version of the data is shaped. The DFO holds the WEO's national accounts series only. Load once WEO has been chosen for an analysis, or when working with WEO figures.",
+            "id": "imf-weo",
+            "name": "imf-weo"
+          }
+        },
+        "status": "definite"
+      }
+    },
+    "structured_content": {
+      "kind": "resolution",
+      "parts": [
+        {
+          "label": "GDP",
+          "specs": [
+            {
+              "label": "Ghana's GDP, 2010 to 2022. Constant 2015 US dollars \u00b7 IMF World Economic Outlook (WEO).",
+              "measure": "Gross domestic product (GDP)",
+              "member_count": 2,
+              "member_count_exact": false,
+              "spec_id": "spec_46e43909a72fd4c5910fdb6b7fa4e9e2"
+            }
+          ],
+          "status": "definite"
+        }
+      ],
+      "skills": [
+        "imf-weo"
+      ],
+      "status": "definite"
+    },
+    "text": "\"Ghana's GDP, 2010 to 2022. Constant 2015 US dollars \u00b7 IMF World Economic Outlook (WEO).\"  [spec_46e43909a72fd4c5910fdb6b7fa4e9e2]\nconfidence high \u00b7 13 observations, 2010-2022 \u00b7 has data\nMeasure: Gross domestic product (GDP) \u00b7 at least 2 StatVars.\nobservationAbout Ghana (country/GHA)\nsource IMF World Economic Outlook (WEO) (fallback) \u00b7 unit US Dollar (bound)\nprovenance options for get_data: provenance/IMFWorldEconomicOutlook (IMF World Economic Outlook (WEO)).\nunit options for get_data: CurrencyGHS (Ghana Cedi), CurrencyUSD (US Dollar).\n\nSkills for these results; get_skill loads one by id:\n- imf-weo: Context for working with the IMF World Economic Outlook (WEO) database, the IMF staff's annual macroeconomic estimates and projections for 197 economies. Cover\u2026"
+  },
+  "call": "search {\"parts\":[{\"entities\":[{\"text\":\"Ghana\"}],\"time\":\"2010 to 2022\",\"unit\":\"constant 2015 USD\",\"variable\":\"GDP\"}]}"
+}

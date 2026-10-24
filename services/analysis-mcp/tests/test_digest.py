@@ -1091,7 +1091,6 @@ def test_quotient_of_digest_has_no_pairs_line_when_no_key_holds_a_one_sided_peri
 
 def test_join_digest_carries_the_identity_block() -> None:
     digest = render_join_digest(
-        join_keys=("reporter",),
         result=JoinResult(
             frame=None,  # type: ignore[arg-type]
             left_resolved_unit="dcid:USDollar",
@@ -1100,6 +1099,7 @@ def test_join_digest_carries_the_identity_block() -> None:
             right_facet_selections=(),
             warnings=(),
             join_keys=("reporter",),
+            right_key_columns=("reporter",),
             matched_keys=matched_keys_of(
                 (
                     MatchedKey(
@@ -1112,6 +1112,8 @@ def test_join_digest_carries_the_identity_block() -> None:
             ),
             left_dropped_key_count=0,
             right_dropped_key_count=0,
+            left_unmatched_entity_count=0,
+            right_unmatched_entity_count=0,
         ),
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,

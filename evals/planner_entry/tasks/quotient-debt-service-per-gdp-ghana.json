@@ -122,6 +122,10 @@
             "period": {
               "start": 2012,
               "end": 2021
+            },
+            "unit": {
+              "currency": "USD",
+              "prices": "current"
             }
           },
           {
@@ -136,6 +140,10 @@
             "period": {
               "start": 2012,
               "end": 2021
+            },
+            "unit": {
+              "currency": "USD",
+              "prices": "current"
             }
           },
           {

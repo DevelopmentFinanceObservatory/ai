@@ -110,9 +110,10 @@ def _population_decision(decision: DecisionFactory, **overrides: object) -> Deci
 #
 # Mirrors `tests/planner/test_plan.py::_every_kind_plan`: `dataset_a` feeds
 # `totals_a` (aggregate), which feeds `growth_a` (growth) and `rank_a` (rank);
-# `dataset_b` feeds `filtered_b` (filter); `joined` (join), `share_a`
-# (share_of), `quotient_a` (quotient_of), `comparison_a` (comparison) and
-# `sum_a` (sum_of) each read `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
+# `dataset_b` feeds `filtered_b` (filter); `joined` (join) reads `filtered_b`
+# and `dataset_a`; `share_a` (share_of), `quotient_a` (quotient_of),
+# `comparison_a` (comparison) and `sum_a` (sum_of) each read `totals_a` and
+# `filtered_b`. Every requirement id below is also its operation id and its
 # workflow step id, so the same id names one thing throughout a row.
 
 _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
@@ -173,7 +174,7 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         reduction=Reduction.MEAN,
     )
     joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="totals_a"
+        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="dataset_a"
     )
     share_a = ShareOfRequirement(
         id="share_a",
@@ -257,7 +258,7 @@ def _every_kind_translation() -> Translation:
                 reduction=Reduction.MEAN,
             ),
             JoinOperation(
-                id="joined", requirement_id="joined", left="filtered_b", right="totals_a"
+                id="joined", requirement_id="joined", left="filtered_b", right="dataset_a"
             ),
             ShareOfOperation(
                 id="share_a",
@@ -325,7 +326,7 @@ def _every_kind_workflow() -> Workflow:
             _step("growth_a", tool="growth", from_steps=("totals_a",)),
             _step("filtered_b", tool="filter", from_steps=("dataset_b",)),
             _step("rank_a", tool="rank", from_steps=("dataset_a",)),
-            _step("joined", tool="join", from_steps=("filtered_b", "totals_a")),
+            _step("joined", tool="join", from_steps=("filtered_b", "dataset_a")),
             _step("share_a", tool="share_of", from_steps=("totals_a", "filtered_b")),
             _step("quotient_a", tool="quotient_of", from_steps=("totals_a", "filtered_b")),
             _step("comparison_a", tool="compare", from_steps=("totals_a", "filtered_b")),
@@ -1139,15 +1140,19 @@ def _pooled_recipient_share_sentence(
     *,
     denominator_entity: str | None = None,
 ) -> str:
-    """The card sentence for ODA per recipient, pooled over the last of `denominator_steps`.
+    """The card sentence for the UK's ODA per recipient, pooled over the last of `denominator_steps`.
 
-    A rank over the population cites the `population` decision.
+    The dataset names six recipients for the steps' filters to keep. A rank
+    over the population cites the `population` decision.
     """
     dataset = DatasetRequirement(
         id="dataset",
         decision_ids=["measure"],
         measure="ODA",
-        entities=[Entity(name="UK", role="donor"), Entity(name="Kenya", role="recipient")],
+        entities=[
+            Entity(name="UK", role="donor"),
+            *(Entity(name=name, role="recipient") for name in _SIX),
+        ],
         period=Period(start=2015, end=2024),
     )
     share = ShareOfRequirement(
@@ -1764,7 +1769,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
         id="share",
         decision_ids=["measure"],
         numerator=RequirementSide(input_id="nigeria"),
-        denominator=RequirementSide(input_id="countries"),
+        denominator=RequirementSide(input_id="world"),
     )
     plan = Plan(
         question="What share of the world's GDP is Nigeria's?",
@@ -1773,6 +1778,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
             nigeria,
             every_place,
             _filter("countries", "gdp", PlaceLevel(level=PlaceType.COUNTRY)),
+            _total("countries", id_="world"),
             share,
         ],
     )
@@ -2028,7 +2034,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its 1,554 StatVars by default",
+            "summed over its 1,554 indicators by default",
         ),
         (
             {
@@ -2036,7 +2042,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 StatVars",
+            "summed over its 3 indicators",
         ),
         (
             {
@@ -2044,7 +2050,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate StatVars",
+            "kept as 2 separate indicators",
         ),
         (
             {
@@ -2053,7 +2059,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its StatVars by default",
+            "summed over its indicators by default",
         ),
         (
             {
@@ -2061,7 +2067,17 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as separate StatVars",
+            "kept as separate indicators",
+        ),
+        (
+            {
+                "served_count": None,
+                "stat_var_member_count": 27,
+                "stat_var_member_count_exact": False,
+                "stat_var_reading": StatVarReading.SEPARATE,
+                "stat_var_reading_set_by": ReadingSetBy.RULE,
+            },
+            "kept as separate indicators by default",
         ),
     ],
     ids=[
@@ -2070,6 +2086,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         "separate-by-the-plan",
         "one-confirmed-summed",
         "uncounted-separate",
+        "floor-count-separate",
     ],
 )
 def test_the_dataset_sentence_states_how_a_family_is_read(
@@ -2139,9 +2156,37 @@ def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
     assert _label(plan.requirement("ranked"), plan) == "Rank the top 10 sectors by the total of aid"
 
 
-def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
-    decision: DecisionFactory,
+# A source naming health (120) and population (130), which share social
+# infrastructure (100) at the top level.
+_HEALTH_AND_POPULATION: dict[str, Any] = {
+    "identity": {
+        "slots": [
+            {
+                "property": "crsPurpose",
+                "binding": {"state": "set", "refs": ["CRSPurposeCode120", "CRSPurposeCode130"]},
+            }
+        ]
+    },
+    "code_paths": {
+        "CRSPurposeCode120": ("CRSPurposeCode100", "CRSPurposeCode120"),
+        "CRSPurposeCode130": ("CRSPurposeCode100", "CRSPurposeCode130"),
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("named", "rolled_up_to"),
+    [
+        ({}, "the top level of its hierarchy"),
+        (_HEALTH_AND_POPULATION, "level 1 below the top of its hierarchy"),
+    ],
+    ids=["no-sector-named", "health-and-population"],
+)
+def test_a_breakdown_states_the_level_it_reads_and_no_reading_of_the_family(
+    decision: DecisionFactory, named: dict[str, Any], rolled_up_to: str
 ) -> None:
+    """The plan states level 0; a source naming two sectors that share their top-level
+    parent reads them where they part, and the card says so."""
     plan = _one_requirement_compiled_plan(
         decision,
         definition=None,
@@ -2150,13 +2195,13 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
         stat_var_member_count=705,
         stat_var_reading=StatVarReading.SEPARATE,
         stat_var_reading_set_by=ReadingSetBy.PLAN,
+        **named,
     )
 
     (dataset_row,) = [row for row in requirement_rows(plan) if row["id"] == "dataset_a"]
 
     assert dataset_row["sentence"] == (
-        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to the top level of "
-        "its hierarchy."
+        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to {rolled_up_to}."
     )
 
 

@@ -117,6 +117,8 @@ from planner.shapes import (
     growth_endpoint_leaves,
     joined,
     level_filter,
+    open_on_whole_side,
+    open_whole_side_reason,
     place_role,
     quotiented,
     ranked,
@@ -125,6 +127,7 @@ from planner.shapes import (
     roles_named,
     shared,
     summed_sides,
+    window_outside,
     windowed,
     year_filter,
     years_run_out,
@@ -1216,7 +1219,11 @@ class ShareOfRequirement(TaggedModel):
     """The share `numerator` holds of `denominator`, at each period.
 
     Both sides cover the same years, because a period only one side covers
-    has no defined share.
+    has no defined share. Each member's share of all of them, as each donor's
+    share of all ODA to one recipient, reads one side as both, keyed by `axis`
+    and 'pooled', from a frame keeping that role open, which an aggregate by
+    entity sums away. One named member's share divides that member's series
+    by every member's total per period.
     """
 
     kind: Literal["share_of"] = Field(
@@ -1246,13 +1253,21 @@ class ShareOfRequirement(TaggedModel):
         ),
     )
 
+    @property
+    def pools_its_own_axis(self) -> bool:
+        """Whether one side is both numerator and denominator, each `axis` member's share of their total."""
+        return self.numerator == self.denominator
+
     @model_validator(mode="after")
     def _sides_differ(self) -> ShareOfRequirement:
-        if (self.numerator.input_id, self.numerator.entity) == (
-            self.denominator.input_id,
-            self.denominator.entity,
-        ):
-            raise ValueError("a share_of's numerator and denominator must differ")
+        # Keyed by `axis` and pooled across it, one side divides each member by
+        # the members' total; read any other way it divides a series by itself.
+        if self.pools_its_own_axis and self.denominator_scope is not DenominatorScope.POOLED:
+            raise ValueError(
+                "a share_of's numerator and denominator must differ, unless it keys that one "
+                "side by `axis` with denominator_scope 'pooled', each member's share of the "
+                "total across them"
+            )
         return self
 
     @model_validator(mode="after")
@@ -1324,8 +1339,9 @@ class QuotientRequirement(TaggedModel):
         return self
 
 
-# analysis-mcp inner-joins on `time_period` and whatever role columns the two
-# sources share. The compiler writes those keys.
+# analysis-mcp inner-joins on `time_period` and the keys the compiler writes,
+# the role pairs `planner.shapes.join_key_pairs` finds. `_join_shape` refuses
+# a join with none.
 class JoinRequirement(TaggedModel):
     """Join two requirements' results into one frame.
 
@@ -2415,8 +2431,9 @@ def _check_rolling_years_agree(requirements_by_id: Mapping[str, EvidenceRequirem
     or window, and across the steps one result reads. That year is one the
     datasets the group rests on hold today: no later than the last year of
     any of their periods, the years Search found them over. A newest year
-    before it stays, since the run's newest year is one at least half the
-    series hold, and the last year can be one few of them hold.
+    before it stays, since translation restates a group's rolling years from
+    the newest year at least half its series hold where that is earlier than
+    the last year Search states (`restated_to_anchors`).
 
     Raises:
         RollingPlanError: `RollingIssue.YEARS_DISAGREE`, naming the group's
@@ -2662,14 +2679,26 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
         roles = (*roles, breakdown)
     separate = requirement.stat_vars is StatVarReading.SEPARATE and requirement.breakdown is None
     measures = None if separate else 1
-    period = requirement.period
     return retrieved(
         requirement_id=requirement.id,
         roles=roles,
-        period=period if first_year is None else Period(start=first_year, end=period.end),
+        period=retrieved_period(requirement, first_year=first_year),
         measures=measures,
         end_open=requirement.period_end_open,
     )
+
+
+def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None) -> Period:
+    """The years a retrieval of `requirement` reads.
+
+    Its stated period, started at `first_year` for a read of its dataset's
+    whole history (`HistorySplit.whole_history`). The plan's shapes and the
+    compiler's both start a retrieval here, so both check a growth window
+    against the same years (`planner.shapes.window_outside`).
+    """
+    if first_year is None:
+        return requirement.period
+    return Period(start=first_year, end=requirement.period.end)
 
 
 def _aggregate_shape(requirement: AggregateRequirement, input_shape: FrameShape) -> FrameShape:
@@ -2701,15 +2730,9 @@ def _growth_shape(requirement: GrowthRequirement, input_shape: FrameShape) -> Fr
     reason = shape_rejects(ShapeVerb.GROWTH, input_shape, change=requirement.change, window=window)
     if reason is not None:
         raise ValueError(f"{requirement.id!r}: {reason}")
-    if input_shape.period is not None and (
-        requirement.window_start < input_shape.period.start
-        or requirement.window_end > input_shape.period.end
-    ):
-        raise ValueError(
-            f"{requirement.id!r}'s growth window ({requirement.window_start}-"
-            f"{requirement.window_end}) falls outside its input's period "
-            f"({input_shape.period.start}-{input_shape.period.end})"
-        )
+    outside = window_outside(input_shape, window)
+    if outside is not None:
+        raise ValueError(f"{requirement.id!r}'s {outside}")
     leaves = growth_endpoint_leaves(input_shape, window, requirement.rolling)
     if leaves is not None:
         raise RollingPlanError(
@@ -2824,10 +2847,117 @@ def _rank_reduction_reason(requirement: RankRequirement, input_shape: FrameShape
     )
 
 
+def stated_under(entity: Entity, role: str | None) -> bool:
+    """Whether the phrase `role` names the dimension `entity` sits on; any does when `role` is `None`.
+
+    The rule is `planner.shapes.roles_named`'s: a phrase names the role it
+    equals, and a place word names the place dimension, whose entities
+    state no role or a place phrase.
+    """
+    if role is None or entity.role == role:
+        return True
+    return across_party(role) == "place" and place_role(entity.role)
+
+
+def entities_named(requirement: DatasetRequirement, name: str, role: str | None) -> list[Entity]:
+    """The entities of `requirement` called `name`, under `role` when one is given (`stated_under`)."""
+    return [
+        entity
+        for entity in requirement.entities
+        if entity.name == name and stated_under(entity, role)
+    ]
+
+
+def unknown_names(
+    names: Iterable[str], role: str | None, requirements: Sequence[DatasetRequirement]
+) -> list[str]:
+    """Each of `names` that none of `requirements` states, under `role` when one is given.
+
+    A filter keeps entities by the names the requirements behind its input
+    state. A name they do not state matches no row the compiler can write,
+    since a breakdown's codes are no entities and analysis-mcp matches the
+    code labels apis decodes, which no plan knows. `_filter_shape` refuses such a
+    filter and `compiler.compile` reports it as `unknown_entity`.
+    """
+    return [
+        name
+        for name in names
+        if not any(entities_named(requirement, name, role) for requirement in requirements)
+    ]
+
+
+def stated_names(requirements: Sequence[DatasetRequirement], role: str | None) -> list[str]:
+    """Every entity name `requirements` state, under `role` when one is given, sorted.
+
+    What a refusal of `unknown_names` lists as the names a filter may keep.
+    """
+    return sorted(
+        {
+            entity.name
+            for requirement in requirements
+            for entity in requirement.entities
+            if stated_under(entity, role)
+        }
+    )
+
+
+def _requirements_behind(
+    shape: FrameShape, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> list[DatasetRequirement]:
+    """The dataset requirements whose entities `shape`'s role dimensions hold, each once.
+
+    A frame with no role dimension resting on one retrieval answers with
+    that retrieval's requirement; one resting on several holds one series
+    and no entity to name.
+    """
+    ids = list(dict.fromkeys(role.requirement_id for role in shape.roles))
+    if not ids and len(shape.roots) == 1:
+        ids = list(shape.roots)
+    return [
+        requirement
+        for requirement_id in ids
+        if isinstance(requirement := requirements_by_id[requirement_id], DatasetRequirement)
+    ]
+
+
+def _check_filter_names_known(
+    requirement: FilterRequirement,
+    input_shape: FrameShape,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject an `EntityIn` naming what no requirement behind the filter's input states (`unknown_names`)."""
+    behind = _requirements_behind(input_shape, requirements_by_id)
+    for predicate in requirement.predicates:
+        if not isinstance(predicate, EntityIn):
+            continue
+        unknown = unknown_names(predicate.names, predicate.role, behind)
+        if not unknown:
+            continue
+        under = f" under role {predicate.role!r}" if predicate.role is not None else ""
+        stated = stated_names(behind, predicate.role)
+        codes = predicate.role is not None and any(
+            role.breakdown for role in roles_named(input_shape.roles, predicate.role)
+        )
+        remedy = (
+            f"; {predicate.role!r} is a breakdown, whose codes are no entities a filter keeps: "
+            "to read one code, state a dataset requirement whose measure names it, or keep "
+            "every code"
+            if codes
+            else ""
+        )
+        raise ValueError(
+            f"{requirement.id!r} keeps {unknown!r}{under}, which no requirement behind "
+            f"{requirement.input_id!r} names; the entities they name{under} are "
+            f"{stated!r}{remedy}"
+        )
+
+
 def _filter_shape(
     requirement: FilterRequirement,
     input_shape: FrameShape,
+    requirements_by_id: Mapping[str, EvidenceRequirement],
 ) -> FrameShape:
+    _check_filter_names_known(requirement, input_shape, requirements_by_id)
     years = year_filter(input_shape.period, requirement.predicates, drift=input_shape.drift)
     if isinstance(years, str):
         raise ValueError(f"{requirement.id!r}: {years}")
@@ -2869,9 +2999,28 @@ def _check_side_entity_is_named(
     side: RequirementSide,
     side_shape: FrameShape,
     requirements_by_id: dict[str, EvidenceRequirement],
+    *,
+    keyed: str | None = None,
+    one_figure: bool = False,
+    keyable: bool = False,
 ) -> None:
-    """Reject `side` narrowed to an entity none of its shape's role dimensions' requirements name."""
+    """Reject `side` narrowed to an entity none of its shape's role dimensions' requirements name,
+    or read whole over a dimension nobody named.
+
+    A side naming no entity is one series on every dimension but the one
+    `keyed` names, so an open dimension left on it is refused
+    (`planner.shapes.open_on_whole_side`), as the compiler refuses it.
+    `one_figure` is whether the reader takes one figure from each side, and
+    `keyable` whether `side` is an un-keyed reader's numerator, which `axis`
+    would key (`planner.shapes.open_whole_side_reason`).
+    """
     if side.entity is None:
+        role = open_on_whole_side(side_shape.roles, keyed=keyed)
+        if role is not None:
+            raise ValueError(
+                f"{requirement_id!r} reads its {field} ({side.input_id!r}) whole, "
+                f"{open_whole_side_reason(role, one_figure=one_figure, keyable=keyable)}"
+            )
         return
     names: set[str] = set()
     for role in side_shape.roles:
@@ -2891,6 +3040,37 @@ def _check_side_entity_is_named(
         )
 
 
+def _pools_one_member(
+    requirement: ShareOfRequirement,
+    shape: FrameShape,
+    requirements_by_id: dict[str, EvidenceRequirement],
+) -> str | None:
+    """Why a share pooling its own axis divides one member by itself, or `None` when it does not.
+
+    Its key holds every member of an open dimension, or the entities its
+    requirement names on that dimension less any the side narrows to. One
+    member is the whole of its own total, 100% every period.
+    """
+    assert requirement.axis is not None
+    role = role_named(shape.roles, requirement.axis)
+    if role is None or role.open:
+        return None
+    dataset = requirements_by_id[role.requirement_id]
+    assert isinstance(dataset, DatasetRequirement)
+    members = [entity.name for entity in dataset.entities if entity.role == role.role]
+    if requirement.numerator.entity in members:
+        held = f"narrows to {requirement.numerator.entity!r} on {requirement.axis!r}"
+    elif len(members) < 2:
+        held = f"names {members!r} alone on {requirement.axis!r}"
+    else:
+        return None
+    return (
+        f"{requirement.id!r} reads one side as both numerator and denominator, and that side "
+        f"{held}, so the share divides the member by itself; for a named member's share, "
+        "divide that member's series by every member's total per period"
+    )
+
+
 def _share_of_shape(
     requirement: ShareOfRequirement,
     shapes_by_id: dict[str, FrameShape],
@@ -2898,8 +3078,21 @@ def _share_of_shape(
 ) -> FrameShape:
     numerator_shape = shapes_by_id[requirement.numerator.input_id]
     denominator_shape = shapes_by_id[requirement.denominator.input_id]
+    one_figure = requirement.axis is None
+    # A per-axis denominator reads one series per member, and one pooling its
+    # own axis sums exactly the members its numerator keeps apart.
+    keys_denominator = (
+        requirement.denominator_scope is DenominatorScope.PER_AXIS or requirement.pools_its_own_axis
+    )
     _check_side_entity_is_named(
-        requirement.id, "numerator", requirement.numerator, numerator_shape, requirements_by_id
+        requirement.id,
+        "numerator",
+        requirement.numerator,
+        numerator_shape,
+        requirements_by_id,
+        keyed=requirement.axis,
+        one_figure=one_figure,
+        keyable=one_figure,
     )
     _check_side_entity_is_named(
         requirement.id,
@@ -2907,7 +3100,13 @@ def _share_of_shape(
         requirement.denominator,
         denominator_shape,
         requirements_by_id,
+        keyed=requirement.axis if keys_denominator else None,
+        one_figure=one_figure,
     )
+    if requirement.pools_its_own_axis:
+        reason = _pools_one_member(requirement, numerator_shape, requirements_by_id)
+        if reason is not None:
+            raise ValueError(reason)
     # The denominator's own *in* rule (measures, time, not ordinal) is
     # checked with no axis: the numerator's side alone gives the output its
     # role lineage, so only the numerator's call states the real axis, with
@@ -2945,8 +3144,16 @@ def _quotient_of_shape(
 ) -> FrameShape:
     numerator_shape = shapes_by_id[requirement.numerator.input_id]
     denominator_shape = shapes_by_id[requirement.denominator.input_id]
+    one_figure = requirement.axis is None
     _check_side_entity_is_named(
-        requirement.id, "numerator", requirement.numerator, numerator_shape, requirements_by_id
+        requirement.id,
+        "numerator",
+        requirement.numerator,
+        numerator_shape,
+        requirements_by_id,
+        keyed=requirement.axis,
+        one_figure=one_figure,
+        keyable=one_figure,
     )
     _check_side_entity_is_named(
         requirement.id,
@@ -2954,6 +3161,8 @@ def _quotient_of_shape(
         requirement.denominator,
         denominator_shape,
         requirements_by_id,
+        keyed=requirement.denominator_axis,
+        one_figure=one_figure,
     )
     # As for a share_of, the denominator's own *in* rule is checked with no
     # axis, and the numerator's call states both, with the denominator passed
@@ -3050,7 +3259,7 @@ def _shape_of(  # noqa: PLR0911 -- one isinstance branch per requirement kind na
     if isinstance(requirement, RankRequirement):
         return _rank_shape(requirement, shapes_by_id[requirement.input_id])
     if isinstance(requirement, FilterRequirement):
-        return _filter_shape(requirement, shapes_by_id[requirement.input_id])
+        return _filter_shape(requirement, shapes_by_id[requirement.input_id], requirements_by_id)
     if isinstance(requirement, ShareOfRequirement):
         return _share_of_shape(requirement, shapes_by_id, requirements_by_id)
     if isinstance(requirement, QuotientRequirement):
@@ -3939,6 +4148,174 @@ def with_authored_requirements(plan: Plan, requirements: Sequence[EvidenceRequir
     )
 
 
+def restated_to_anchors(plan: Plan, *, anchors: Mapping[str, int]) -> Plan:
+    """`plan` with each rolling requirement's years stated from the newest year `anchors` gives it.
+
+    `anchors` holds a newest year for every requirement of `plan` that rolls
+    (`rolls`), copies included, as the run resolves it for the requirement's
+    group. Each rolling year moves by that year less the newest year the
+    requirement states (`RelativePeriod.latest_implied_by`), either way, and
+    keeps its offset. A fixed year stays. A copy moves with the requirement
+    it copies. Where no year moves, `plan` itself comes back, with its
+    revision. Otherwise the result is `plan` stating the moved requirements,
+    split again (`with_authored_requirements`), and so held to every rule a
+    proposal is. `plan` is a draft. A translation states the years too, and
+    `restated_translation` moves them by the same years.
+
+    Raises:
+        KeyError: `anchors` does not name exactly the rolling requirements of
+            `plan`.
+        RollingPlanError: `RollingIssue.YEARS_DISAGREE`, naming each
+            requirement that `anchors` gives one newest year and a copy of it
+            another, since the one year the model wrote cannot state both.
+        ValueError: A moved requirement or the moved plan breaks a plan rule,
+            raised as validating a proposal raises it.
+    """
+    moves = _rolling_moves(plan, anchors=anchors)
+    if not any(moves.values()):
+        return plan
+    return with_authored_requirements(
+        plan,
+        [
+            _moved(requirement, by=moves[requirement.id])
+            if moves.get(requirement.id)
+            else requirement
+            for requirement in authored(plan).evidence_requirements
+        ],
+    )
+
+
+def restated_translation(
+    translation: Translation, *, plan: Plan, anchors: Mapping[str, int]
+) -> Translation:
+    """`translation` of `plan` with each operation's years moved as `restated_to_anchors` moves its requirement's.
+
+    An operation repeats its requirement's years and `rolling`
+    (`planner.proof.mismatches`), so each operation carrying out a rolling
+    requirement, a copy's included, moves by that requirement's years. Where
+    no year moves, `translation` itself comes back.
+
+    Raises:
+        KeyError, RollingPlanError, ValueError: As `restated_to_anchors`.
+    """
+    moves = _rolling_moves(plan, anchors=anchors)
+    if not any(moves.values()):
+        return translation
+    return Translation.model_validate(
+        {
+            **translation.model_dump(),
+            "operations": [
+                _moved(operation, by=moves[operation.requirement_id])
+                if moves.get(operation.requirement_id)
+                else operation
+                for operation in translation.operations
+            ],
+        }
+    )
+
+
+class Restatement(StrictModel):
+    """One requirement's rolling years, as written and as translation stated them from the data.
+
+    `anchor` is the newest year the data holds that they now count from,
+    and `years_from` and `years_to` the years the requirement states that
+    follow the newest data, in the order it states them (a window's first
+    and last, a filter's predicates), before and after.
+    """
+
+    requirement_id: Identifier
+    anchor: Year
+    years_from: tuple[Year, ...]
+    years_to: tuple[Year, ...]
+
+
+def restatements(plan: Plan, restated: Plan) -> tuple[Restatement, ...]:
+    """Each requirement of `plan` whose rolling years `restated` states otherwise, in plan order.
+
+    `restated` is `plan` as `restated_to_anchors` returns it. A copy is left
+    out: it moves with the requirement it copies, and the model wrote only
+    that one.
+    """
+    copies = copy_origins(plan.rolling_copies)
+    moved: list[Restatement] = []
+    for requirement in plan.evidence_requirements:
+        if requirement.id in copies or not rolls(requirement):
+            continue
+        after = restated.requirement(requirement.id)
+        years_from = tuple(year for year, _ in _rolling_years(requirement))
+        years_to = tuple(year for year, _ in _rolling_years(after))
+        if years_from != years_to:
+            moved.append(
+                Restatement(
+                    requirement_id=requirement.id,
+                    anchor=_stated_newest(after),
+                    years_from=years_from,
+                    years_to=years_to,
+                )
+            )
+    return tuple(moved)
+
+
+def _rolling_moves(plan: Plan, *, anchors: Mapping[str, int]) -> dict[str, int]:
+    """How many years each rolling requirement of `plan` moves to the newest year `anchors` gives it.
+
+    Keyed by every rolling requirement's id, each copy's beside its origin's,
+    the two moving alike. Raises as `restated_to_anchors`.
+    """
+    rolling = {requirement.id for requirement in plan.evidence_requirements if rolls(requirement)}
+    if anchors.keys() != rolling:
+        raise KeyError(
+            f"anchors name {sorted(anchors)!r} where the plan's rolling requirements are "
+            f"{sorted(rolling)!r}"
+        )
+    origins = copy_origins(plan.rolling_copies)
+    newest: dict[str, set[int]] = {}
+    for requirement_id, year in anchors.items():
+        newest.setdefault(origins.get(requirement_id, requirement_id), set()).add(year)
+    if torn := sorted(origin for origin, years in newest.items() if len(years) > 1):
+        stated = "; ".join(f"{origin!r} {sorted(newest[origin])!r}" for origin in torn)
+        raise RollingPlanError(
+            RollingIssue.YEARS_DISAGREE,
+            f"{torn!r} and their copies over the dataset's whole history count from different "
+            f"newest years ({stated}), and one requirement states one; read the whole history "
+            "and the stated years through requirements of their own",
+            requirement_ids=torn,
+        )
+    moves: dict[str, int] = {}
+    for requirement in plan.evidence_requirements:
+        if requirement.id in rolling:
+            (year,) = newest[origins.get(requirement.id, requirement.id)]
+            moves[requirement.id] = year - _stated_newest(requirement)
+    return moves
+
+
+def _stated_newest(requirement: EvidenceRequirement) -> int:
+    """The one newest year a rolling `requirement` of a validated plan states."""
+    (year,) = {period.latest_implied_by(year) for year, period in _rolling_years(requirement)}
+    return year
+
+
+def _moved[T: StrictModel](carried: T, *, by: int) -> T:
+    """`carried`, a rolling requirement or the operation carrying one out, with each year that follows the newest data moved `by` years, validated again.
+
+    A growth or a rank states `rolling` beside its window, and a filter on
+    each period predicate.
+    """
+    fields = carried.model_dump()
+    if (rolling := fields.get("rolling")) is not None:
+        for bound in ("window_start", "window_end"):
+            if rolling[bound] is not None:
+                fields[bound] += by
+    else:
+        fields["predicates"] = [
+            {**predicate, "year": predicate["year"] + by}
+            if predicate.get("rolling") is not None
+            else predicate
+            for predicate in fields["predicates"]
+        ]
+    return type(carried).model_validate(fields)
+
+
 def _check_first_years(plan: Plan) -> None:
     """Reject `first_years` naming a requirement twice, or one that is no dataset requirement of `plan`."""
     named = [entry.requirement_id for entry in plan.first_years]
@@ -4076,8 +4453,9 @@ def unstated_result_scopes(plan: Plan) -> list[ResultScopeGap]:
     not want. A result kept per member of such a party passes when the plan
     states that scope: a step on its way to the result operates over the
     role by name (`_operand_roles`: a rank ordering it, a share or quotient
-    keyed on it, a filter naming its role or naming none over an input
-    carrying that role alone), or, like `among='population'`
+    keyed on it, or a place-level filter on it, since `_filter_shape`
+    refuses an `EntityIn` naming a member of an open role, by
+    `unknown_names`), or, like `among='population'`
     (`_check_population_claims_are_cited`), the dataset requirement that
     opened the role cites a decision whose `fixes` states its `across`, every
     word of it. An ask the result answers states the scope too when it
@@ -4638,7 +5016,9 @@ def _operand_roles(
     per member of the numerator's dimension it names. A filter narrows the
     dimensions its `EntityIn` predicates name, and a predicate naming no
     role counts only over an input with one dimension, since its names may
-    sit in any of several. A `PlaceLevel` keeps one level of the place
+    sit in any of several. An `EntityIn` names only what the requirements
+    state (`unknown_names`), so it reaches an open dimension only where a
+    named one shares its role phrase. A `PlaceLevel` keeps one level of the place
     dimension. Each is resolved against its input's shape the way the
     shape transform resolves it (`planner.shapes.roles_named`).
     """

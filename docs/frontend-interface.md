@@ -360,7 +360,9 @@ Notes on specific fields:
   optional. A client that ignores them renders the same plan card it
   always has.
 - `activity.step.status` is one of `pending`, `running`, `complete`,
-  `failed`, `skipped`. A `failed` step is recoverable; the turn continues.
+  `failed`, `skipped`. A `failed` step is recoverable; the turn continues. A
+  failed step can be followed by a `complete` frame on the same `step_id`
+  when a later try succeeds, with `detail` "This worked on a later try."
   `detail` holds a one-line result on success in plain words: a plan's
   fetch step carries the retrieval's summary (observations, years,
   source, series), as a fetch does; a plan's analysis step and a card's

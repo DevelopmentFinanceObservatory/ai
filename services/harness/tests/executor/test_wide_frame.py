@@ -16,23 +16,26 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 import pytest
 from analysis_mcp import server as analysis_server
 from common.materialisation import FrameRef, InMemoryMaterialisationStore, MaterialisationTrace
-from compiler.compile import compile_plan
+from compiler.compile import CompileResult, compile_plan
 from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
 from data_mcp.frame_materialisation import observed_shape
 from dfo_frame_grammar import Frame
 from executor.outcomes import (
     Accepted,
+    AnchorResult,
     MethodChoiceNeeded,
     RefusalKind,
     Refused,
 )
-from executor.run import execute_approved_plan
+from executor.run import AnchorRead, execute_approved_plan, read_anchors
+from harness.graph.answer import answer_notes
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -68,12 +71,14 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     SumOfRequirement,
+    plan_revision,
 )
 from planner.records import (
     Breakdown,
     BreakdownDimension,
     DenominatorScope,
     EntityIn,
+    GrowthChange,
     PeriodThreshold,
     PlaceLevel,
     PlaceType,
@@ -84,6 +89,8 @@ from planner.records import (
     StatVarReading,
 )
 from planner.workflow import OpenAxis, OpenEntityAxis, ResolvedEntity, SelectedSource, ToolId
+from pydantic import JsonValue
+from translator.tool import restated_to_the_data
 
 from .conftest import ScriptedSurface, ok
 
@@ -187,10 +194,12 @@ def _family_frame(
     provider_column: str = PROVIDER,
     unit: str = "usd",
     last_year: int = 2023,
+    last_years: Mapping[ResolvedEntity, int] | None = None,
     kinds: bool = False,
     types: bool = False,
 ) -> Frame:
-    """A CRS family frame for each provider and recipient, yearly from 2000 through `last_year`.
+    """A CRS family frame for each provider and recipient, yearly from 2000 through `last_year`,
+    or through a provider's own year in `last_years`, else its recipient's.
 
     Two declared role columns and the four `stat_var_*` slot columns, whose
     purpose slot tells the family's members apart. With `kinds`, each role's kind
@@ -218,7 +227,14 @@ def _family_frame(
             for member, stat_var in enumerate(stat_vars)
             for provider in providers
             for recipient in recipients
-            for year in range(2000, _LAST_YEAR.get(stat_var, last_year) + 1)
+            for year in range(
+                2000,
+                (last_years or {}).get(
+                    provider,
+                    (last_years or {}).get(recipient, _LAST_YEAR.get(stat_var, last_year)),
+                )
+                + 1,
+            )
         ],
     )
 
@@ -294,7 +310,8 @@ def retrieved(
     reads them (`data_mcp.frame_materialisation.observed_shape`), and
     `dimensions` are what apis reports. `role_keys` overrides the
     reported keys. `frame_read=False` leaves both out, as `get_data` does
-    when it could not read the frame.
+    when it could not read the frame. `statistics` replaces the per-series
+    statistics, one per provider and recipient by default.
     """
 
     async def _retrieved(
@@ -306,6 +323,7 @@ def retrieved(
         role_keys: Sequence[str] | None = None,
         dimensions: list[dict[str, Any]] | None = None,
         frame_read: bool = True,
+        statistics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if providers is None:
             providers = [entity for entity in source.entities if entity.role == "origin"]
@@ -328,7 +346,7 @@ def retrieved(
             ),
             writer="tests",
         )
-        statistics = [
+        statistics = statistics or [
             {
                 "stat_var": f"dcid:{_pinned(source)}",
                 "entities": [
@@ -396,15 +414,22 @@ def _scripted_result(*role_keys: str, stat_var_count: int = 1) -> dict[str, Any]
 
 @pytest.fixture
 def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) -> PlanFactory:
-    """Return a factory compiling and approving a plan over CRS family sources."""
+    """Return a factory compiling and approving a plan over CRS family sources.
+
+    With `anchors_read`, the newest years `executor.run.read_anchors` read over
+    the compiled workflow, the plan and translation are restated from them as
+    translation restates them (`translator.tool.restated_to_the_data`) and
+    compiled again before approval.
+    """
 
     def _plan(
         requirements: Sequence[EvidenceRequirement],
         operations: Sequence[Operation],
         *,
-        terminal: str,
+        terminal: str | Sequence[str],
         discovered: dict[str, SelectedSource] | None = None,
         decisions: Sequence[Decision] = (),
+        anchors_read: Sequence[AnchorRead] = (),
     ) -> Plan:
         draft = Plan(
             question="How much bilateral ODA do Germany and France give Kenya?",
@@ -417,14 +442,27 @@ def plan_for(decision: Callable[..., Decision], real_schemas: list[ToolSchema]) 
             ],
             status=PlanStatus.DRAFT,
         )
-        translation = Translation(operations=list(operations), terminal=[terminal])
-        compiled = compile_plan(
-            plan=draft,
-            translation=translation,
-            schemas={schema.name: schema for schema in real_schemas},
-            discovered=discovered or {"oda": _source()},
-        )
-        assert compiled.workflow is not None, compiled.issues
+        terminals = [terminal] if isinstance(terminal, str) else list(terminal)
+        translation = Translation(operations=list(operations), terminal=terminals)
+
+        def compiled_from(plan: Plan, translation: Translation) -> CompileResult:
+            result = compile_plan(
+                plan=plan,
+                translation=translation,
+                schemas={schema.name: schema for schema in real_schemas},
+                discovered=discovered or {"oda": _source()},
+            )
+            assert result.workflow is not None, result.issues
+            return result
+
+        compiled = compiled_from(draft, translation)
+        if anchors_read:
+            assert compiled.workflow is not None
+            restated = restated_to_the_data(draft, translation, compiled.workflow, anchors_read)
+            assert not isinstance(restated, CompileResult), restated.issues
+            draft, translation = restated
+            compiled = compiled_from(draft, translation)
+        assert compiled.workflow is not None
         return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
             at=datetime.now(UTC)
         )
@@ -541,7 +579,12 @@ def _since_2005_plan(plan_for: PlanFactory, source: SelectedSource) -> Plan:
     )
 
 
-def _aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+def _aggregate_plan(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    *,
+    requirement: DatasetRequirement | None = None,
+) -> Plan:
     del decision
     totals = AggregateRequirement(
         id="totals",
@@ -551,7 +594,7 @@ def _aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) ->
         group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
     )
     return plan_for(
-        [_requirement(), totals],
+        [requirement or _requirement(), totals],
         [
             _RETRIEVE,
             AggregateOperation(
@@ -604,11 +647,11 @@ def _growth_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Pl
     )
 
 
-def _rolling_growth_plan(plan_for: PlanFactory) -> Plan:
-    """Growth over the last five years, planned against 2023."""
+def _rolling_growth_plan(plan_for: PlanFactory, *, newest: int = 2023) -> Plan:
+    """Growth over the last five years, planned against `newest`."""
     window: dict[str, Any] = {
-        "window_start": 2018,
-        "window_end": 2023,
+        "window_start": newest - 5,
+        "window_end": newest,
         "rolling": RollingWindow(
             window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
         ),
@@ -1196,11 +1239,11 @@ async def test_a_growth_keys_each_series_by_the_frames_role_columns(
 async def test_a_rolling_growth_is_resolved_and_run_over_the_frames_own_columns(
     plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
 ) -> None:
-    # Planned against 2023, over a frame whose newest year is 2022. The plan's
+    # Planned against 2021, over a frame whose newest year is 2022. The plan's
     # population names `origin` and `destination`; the frame's columns are the
     # declared properties, and analysis-mcp checks each rolling call's
     # population against the one the newest period was resolved over.
-    plan = _rolling_growth_plan(plan_for)
+    plan = _rolling_growth_plan(plan_for, newest=2021)
     assert plan.workflow is not None
     assert plan.workflow.steps[-1].args["rolling"]["population"] == [
         {
@@ -1239,6 +1282,23 @@ async def test_a_rolling_growth_is_resolved_and_run_over_the_frames_own_columns(
         "rolling": {**sent["rolling"], "population": population},
         "anchor_key": anchor.anchor_key,
     }
+
+
+async def test_a_newest_year_before_the_plans_stops_the_run_before_the_growth(
+    plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> None:
+    # Planned against 2023; analysis-mcp resolves 2022 over a frame ending there.
+    surface = surface_for(
+        get_data=[ok(await retrieved(_source(), frame=_family_frame(last_year=2022)))]
+    )
+
+    outcome = await _run(_rolling_growth_plan(plan_for), surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN
+    assert outcome.step_id == "growth_op"
+    assert [name for name, _ in surface.calls] == ["get_data", "resolve_anchor"]
+    assert [anchor.period for anchor in outcome.anchors] == ["2022"]
 
 
 async def test_a_rolling_population_the_frame_cannot_spell_refuses_before_it_is_resolved(
@@ -1461,10 +1521,13 @@ async def test_a_join_keys_both_frames_by_their_shared_role_columns(
 
     assert isinstance(outcome, Accepted), outcome
     assert outcome.steps[-1].stat_var_count == 2
-    assert _analysis_call(surface, "join") == {"join_keys": [PROVIDER, RECIPIENT]}
+    assert _analysis_call(surface, "join") == {
+        "join_keys": [PROVIDER, RECIPIENT],
+        "right_keys": {PROVIDER: PROVIDER, RECIPIENT: RECIPIENT},
+    }
 
 
-async def test_a_join_key_the_two_frames_spell_differently_refuses_before_the_call(
+async def test_a_join_key_the_two_frames_spell_differently_is_sent_in_each_frames_spelling(
     plan_for: PlanFactory, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
 ) -> None:
     plan = _join_plan(plan_for)
@@ -1480,11 +1543,301 @@ async def test_a_join_key_the_two_frames_spell_differently_refuses_before_the_ca
 
     outcome = await _run(plan, surface)
 
-    assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.COLUMN_UNBOUND
-    assert outcome.step_id == "joined_op"
-    assert "origin" in outcome.detail
-    assert [name for name, _ in surface.calls] == ["get_data", "get_data"]
+    assert isinstance(outcome, Accepted), outcome
+    assert _analysis_call(surface, "join") == {
+        "join_keys": [PROVIDER, RECIPIENT],
+        "right_keys": {PROVIDER: "provider", RECIPIENT: RECIPIENT},
+    }
+
+
+@pytest.mark.parametrize("health_side", ["right", "left"])
+async def test_a_join_that_matched_a_donor_in_no_year_says_which_sides_data_it_lacked(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    health_side: str,
+) -> None:
+    # Health ODA comes from Germany alone, so France's ODA to Kenya matches in
+    # no year and its rows are left out, on whichever side ODA is joined.
+    health = _requirement(id="oda_health", donors=("Germany",)).model_copy(
+        update={"measure": "health ODA"}
+    )
+    sides = ("oda", "oda_health") if health_side == "right" else ("oda_health", "oda")
+    operations = ("crs", "crs_health") if health_side == "right" else ("crs_health", "crs")
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id=sides[0], right_id=sides[1]
+    )
+    health_source = _source(spec_id=SPEC_CRS_HEALTH, entities=(GERMANY, KENYA))
+    plan = plan_for(
+        [_requirement(), health, joined],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left=operations[0], right=operations[1]
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"oda": _source(), "oda_health": health_source},
+    )
+    results = {
+        SPEC_CRS: await retrieved(_source()),
+        SPEC_CRS_HEALTH: await retrieved(
+            health_source, frame=_family_frame(stat_vars=("OdaHealth",), providers=(GERMANY,))
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    join = outcome.steps[-1]
+    assert (join.dropped_key_count, join.right_dropped_key_count) == (
+        (1, 0) if health_side == "right" else (0, 1)
+    )
+    # The two sides join on donor and on recipient, so a key is one pair.
+    assert answer_notes(None, outcome, plan=plan) == [
+        "1 donor and recipient pair had no health ODA figure for the same year as its "
+        "bilateral ODA and was left out."
+    ]
+
+
+_WHO_KENYA = ResolvedEntity(role="observationAbout", ref="country/KEN", label="Kenya")
+_WHO_UGANDA = ResolvedEntity(role="observationAbout", ref="country/UGA", label="Uganda")
+
+
+async def test_a_place_series_joins_the_aid_its_place_receives_by_value(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # A place series on `observationAbout` beside the aid Kenya receives,
+    # summed over its donors on `financingRecipient`, matched by value: Kenya
+    # matches Kenya each year, so no key is dropped.
+    place = _WHO_KENYA
+    spending = DatasetRequirement(
+        id="spending",
+        decision_ids=["measure"],
+        measure="domestic health spending",
+        entities=[Entity(name=place.label)],
+        period=Period(start=2000, end=2023),
+    )
+    oda = _requirement(donors=())
+    total = AggregateRequirement(
+        id="oda_total",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="oda_total"
+    )
+    spending_source = _source(spec_id=SPEC_CRS_HEALTH, entities=(place,)).model_copy(
+        update={"identity": _pinning("HealthSpending", SPEC_CRS_HEALTH)}
+    )
+    plan = plan_for(
+        [spending, oda, total, joined],
+        [
+            RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
+            _RETRIEVE,
+            AggregateOperation(
+                id="oda_total_op",
+                requirement_id="oda_total",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+            ),
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left="who", right="oda_total_op"
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"spending": spending_source, "oda": _source(entities=(KENYA,))},
+    )
+    place_frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:HealthSpending",
+                "observationAbout": place.ref,
+                "time_period": str(year),
+                "value": 10.0 + year,
+                "unit": "usd",
+            }
+            for year in range(2000, 2024)
+        ],
+    )
+    results = {
+        SPEC_CRS_HEALTH: await retrieved(
+            spending_source,
+            frame=place_frame,
+            dimensions=[{"label": "observationAbout", "count": 1}, DIMENSIONS[-1]],
+            statistics=[
+                {
+                    "stat_var": "dcid:HealthSpending",
+                    "entities": [{"role": "observationAbout", "ref": place.ref}],
+                    "facet": {"unit": "usd"},
+                    "observations": 24,
+                    "first": {"value": 2010.0, "period": "2000"},
+                    "latest": {"value": 2033.0, "period": "2023"},
+                    "minimum": {"value": 2010.0, "period": "2000"},
+                    "maximum": {"value": 2033.0, "period": "2023"},
+                }
+            ],
+        ),
+        SPEC_CRS: await retrieved(
+            _source(entities=(KENYA,)), providers=(GERMANY, FRANCE), frame=_family_frame(kinds=True)
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert _analysis_call(surface, "join") == {
+        "join_keys": ["observationAbout"],
+        "right_keys": {"observationAbout": RECIPIENT},
+    }
+    records = outcome.steps if isinstance(outcome, Accepted) else outcome.completed
+    (join,) = [record for record in records if record.step_id == "joined_op"]
+    dropped = [line for line in join.digest.splitlines() if "unmatched_key" in line]
+    assert isinstance(outcome, Accepted), outcome
+    held, _trace = await frame_store.get(outcome.results["joined_op"])
+    assert held.num_rows == 48
+    assert dropped == []
+
+
+@pytest.mark.parametrize(
+    ("kenya_spending_from", "aid_recipients", "kenya_aid_to", "notes"),
+    [
+        # Health spending for Kenya and Uganda beside the aid Kenya alone
+        # receives: Uganda matches in no year.
+        pytest.param(
+            2000,
+            (KENYA,),
+            2023,
+            [
+                "1 country had no bilateral ODA figure for the same year as its domestic "
+                "health spending and was left out."
+            ],
+            id="one-sided",
+        ),
+        # Kenya's aid ends in 2009 and its spending starts in 2010, so Kenya
+        # is on both sides in years that never overlap. Uganda matches.
+        pytest.param(
+            2010,
+            (KENYA, UGANDA),
+            2009,
+            [
+                "1 country had no bilateral ODA figure for the same year as its domestic "
+                "health spending and was left out.",
+                "1 country had no domestic health spending figure for the same year as its "
+                "bilateral ODA and was left out.",
+            ],
+            id="disjoint-years",
+        ),
+    ],
+)
+async def test_a_place_series_joined_to_aid_names_the_place_the_aid_missed_as_a_country(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    kenya_spending_from: int,
+    aid_recipients: tuple[ResolvedEntity, ...],
+    kenya_aid_to: int,
+    notes: list[str],
+) -> None:
+    # The one key pair is the place.
+    places = (_WHO_KENYA, _WHO_UGANDA)
+    spending = DatasetRequirement(
+        id="spending",
+        decision_ids=["measure"],
+        measure="domestic health spending",
+        entities=[Entity(name=place.label) for place in places],
+        period=Period(start=2000, end=2023),
+    )
+    oda = _requirement(donors=(), recipients=[entity.label for entity in aid_recipients])
+    total = AggregateRequirement(
+        id="oda_total",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending", right_id="oda_total"
+    )
+    spending_source = _source(spec_id=SPEC_CRS_HEALTH, entities=places).model_copy(
+        update={"identity": _pinning("HealthSpending", SPEC_CRS_HEALTH)}
+    )
+    plan = plan_for(
+        [spending, oda, total, joined],
+        [
+            RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
+            _RETRIEVE,
+            AggregateOperation(
+                id="oda_total_op",
+                requirement_id="oda_total",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+            ),
+            JoinOperation(
+                id="joined_op", requirement_id="joined", left="who", right="oda_total_op"
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"spending": spending_source, "oda": _source(entities=aid_recipients)},
+    )
+    place_frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:HealthSpending",
+                "observationAbout": place.ref,
+                "time_period": str(year),
+                "value": 10.0 + year,
+                "unit": "usd",
+            }
+            for place in places
+            for year in range(kenya_spending_from if place is _WHO_KENYA else 2000, 2024)
+        ],
+    )
+    results = {
+        SPEC_CRS_HEALTH: await retrieved(
+            spending_source,
+            frame=place_frame,
+            dimensions=[{"label": "observationAbout", "count": len(places)}, DIMENSIONS[-1]],
+            statistics=[
+                {
+                    "stat_var": "dcid:HealthSpending",
+                    "entities": [{"role": "observationAbout", "ref": place.ref}],
+                    "facet": {"unit": "usd"},
+                    "observations": 24,
+                    "first": {"value": 2010.0, "period": "2000"},
+                    "latest": {"value": 2033.0, "period": "2023"},
+                    "minimum": {"value": 2010.0, "period": "2000"},
+                    "maximum": {"value": 2033.0, "period": "2023"},
+                }
+                for place in places
+            ],
+        ),
+        SPEC_CRS: await retrieved(
+            _source(entities=aid_recipients),
+            providers=(GERMANY, FRANCE),
+            recipients=aid_recipients,
+            frame=_family_frame(
+                kinds=True, recipients=aid_recipients, last_years={KENYA: kenya_aid_to}
+            ),
+        ),
+    }
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    assert answer_notes(None, outcome, plan=plan) == notes
 
 
 async def test_a_role_the_frame_has_no_column_for_refuses_before_the_call(
@@ -1861,3 +2214,753 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     assert set(total.table.column("value").to_pylist()) == {38.0}
     ((_, aggregated),) = [call for call in surface.calls if call[0] == "aggregate"]
     assert aggregated["frame_ref"]["content_version"] == _WITHOUT_TOTALS_CONTENT_VERSION
+
+
+# --- A keyed pairing under a rolling period: the matched keys' newest year ----
+
+_MATCHED_DONORS = (
+    GERMANY,
+    FRANCE,
+    UNITED_STATES,
+    ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom"),
+)
+_MATCHED_WINDOW = Period(start=2000, end=2024)
+
+
+def _matched_source(spec_id: str) -> SelectedSource:
+    return _source(spec_id=spec_id, entities=(*_MATCHED_DONORS, KENYA)).model_copy(
+        update={"coverage_window": _MATCHED_WINDOW}
+    )
+
+
+def _matched_requirement(id: str) -> DatasetRequirement:
+    return DatasetRequirement(
+        id=id,
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[
+            *(Entity(name=donor.label, role="donor") for donor in _MATCHED_DONORS),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=_MATCHED_WINDOW,
+        period_end_open=True,
+    )
+
+
+_MATCHED_GROWTH: dict[str, Any] = {
+    "change": GrowthChange.ABSOLUTE,
+    "window_start": 2019,
+    "window_end": 2024,
+    "rolling": RollingWindow(
+        window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+    ),
+}
+
+
+async def _restated_from_the_data(
+    planned: Callable[..., Plan],
+    *,
+    results: dict[str, dict[str, Any]],
+    surface_for: Callable[..., FrameSurface],
+) -> tuple[AnchorRead, FrameSurface, Plan]:
+    """The one group's newest year as translation reads it over the workflow
+    `planned()` compiles (`read_anchors`), the surface it read on, and the plan
+    `planned` compiles restated from it."""
+    plan = planned()
+    assert plan.workflow is not None
+    reading = surface_for(get_data=_get_data_answers(plan, results))
+    read = await read_anchors(
+        plan.workflow,
+        revision=plan_revision(plan),
+        requirements=[r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)],
+        surface=reading,
+    )
+    assert isinstance(read, tuple), read
+    (group,) = read
+    return group, reading, planned(anchors_read=read)
+
+
+def _rolling_share_plan(plan_for: PlanFactory, **restated: Any) -> Plan:
+    """Growth over the last five years of each donor's health share of its ODA,
+    planned against 2024."""
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="oda_health"),
+        denominator=RequirementSide(input_id="oda"),
+        axis="donor",
+        denominator_scope=DenominatorScope.PER_AXIS,
+    )
+    return plan_for(
+        [
+            _matched_requirement("oda"),
+            _matched_requirement("oda_health"),
+            share,
+            GrowthRequirement(
+                id="growth", decision_ids=["measure"], input_id="share", **_MATCHED_GROWTH
+            ),
+        ],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input="crs_health"),
+                denominator=Side(input="crs"),
+                axis="donor",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+            GrowthOperation(
+                id="growth_op", requirement_id="growth", input="share_op", **_MATCHED_GROWTH
+            ),
+        ],
+        terminal="growth_op",
+        discovered={
+            "oda": _matched_source(SPEC_CRS),
+            "oda_health": _matched_source(SPEC_CRS_HEALTH),
+        },
+        **restated,
+    )
+
+
+async def test_a_rolling_share_of_disjoint_halves_answers_from_the_year_its_keys_share(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # Half the donors report 2024 on each side, and they are different halves,
+    # so no donor's share holds 2024. Counted over the donors both sides hold,
+    # the newest year is 2023, so translation restates the plan's 2019 to 2024
+    # as 2018 to 2023 and the run of it answers. Counted per side, as at
+    # cd1f7289, it was 2024, and the run stopped at the growth with
+    # `growth_gap_year`, since no share has a row in 2024.
+    first, second = _MATCHED_DONORS[:2], _MATCHED_DONORS[2:]
+    results = {
+        SPEC_CRS: await retrieved(
+            _matched_source(SPEC_CRS),
+            frame=_family_frame(
+                providers=_MATCHED_DONORS,
+                last_years={**dict.fromkeys(first, 2023), **dict.fromkeys(second, 2024)},
+                kinds=True,
+            ),
+            providers=_MATCHED_DONORS,
+        ),
+        SPEC_CRS_HEALTH: await retrieved(
+            _matched_source(SPEC_CRS_HEALTH),
+            frame=_family_frame(
+                stat_vars=("OdaHealth",),
+                providers=_MATCHED_DONORS,
+                last_years={**dict.fromkeys(first, 2024), **dict.fromkeys(second, 2023)},
+                kinds=True,
+            ),
+            providers=_MATCHED_DONORS,
+        ),
+    }
+    read, reading, plan = await _restated_from_the_data(
+        lambda **restated: _rolling_share_plan(plan_for, **restated),
+        results=results,
+        surface_for=surface_for,
+    )
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(read.result, AnchorResult)
+    assert (read.planned, read.result.period) == ("2024", "2023")
+    # Translation's read and the run each name the group's retrievals.
+    assert read.result.roots == outcome.anchors[0].roots == ("crs", "crs_health")
+    bindings = {PROVIDER: sorted(donor.ref for donor in _MATCHED_DONORS), RECIPIENT: [KENYA.ref]}
+    assert _analysis_call(reading, "resolve_anchor")["populations"] == [
+        {
+            "pair": [
+                [{"spec_id": SPEC_CRS_HEALTH, "bindings": bindings}],
+                [{"spec_id": SPEC_CRS, "bindings": bindings}],
+            ],
+            "keys": {PROVIDER: PROVIDER},
+        }
+    ]
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2023"]
+    sent = _analysis_call(surface, "growth")
+    assert (sent["window_start"], sent["window_end"]) == ("2018", "2023")
+    held, _trace = await frame_store.get(outcome.results["growth_op"])
+    assert held.num_rows == len(_MATCHED_DONORS)
+
+
+_RELATIVE_GROWTH = {**_MATCHED_GROWTH, "change": GrowthChange.RELATIVE}
+_MATCHED_PLACES = (
+    KENYA,
+    UGANDA,
+    ResolvedEntity(role="destination", ref="country/TZA", label="Tanzania"),
+    ResolvedEntity(role="destination", ref="country/RWA", label="Rwanda"),
+)
+
+
+async def test_a_rolling_join_through_right_keys_answers_from_the_year_its_places_share(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    frame_store: InMemoryMaterialisationStore,
+) -> None:
+    # The growth of a place series on `observationAbout` joined to the growth of
+    # the aid each place receives, summed over donors on `financingRecipient`.
+    # Half the places report 2024 on each side, and they are different halves.
+    # Counted over the places both sides hold, the newest year is 2023, so
+    # translation restates 2019 to 2024 as 2018 to 2023 and the run answers.
+    # Counted per side, as at cd1f7289, it was 2024, and the join matched no
+    # place (`empty_answer`).
+    first, second = _MATCHED_PLACES[:2], _MATCHED_PLACES[2:]
+    spending = DatasetRequirement(
+        id="spending",
+        decision_ids=["measure"],
+        measure="domestic health spending",
+        entities=[Entity(name=place.label) for place in _MATCHED_PLACES],
+        period=_MATCHED_WINDOW,
+        period_end_open=True,
+    )
+    oda = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[Entity(name=place.label, role="recipient") for place in _MATCHED_PLACES],
+        period=_MATCHED_WINDOW,
+        period_end_open=True,
+    )
+    total = AggregateRequirement(
+        id="oda_total",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+    )
+    spending_growth = GrowthRequirement(
+        id="spending_growth", decision_ids=["measure"], input_id="spending", **_RELATIVE_GROWTH
+    )
+    oda_growth = GrowthRequirement(
+        id="oda_growth", decision_ids=["measure"], input_id="oda_total", **_RELATIVE_GROWTH
+    )
+    joined = JoinRequirement(
+        id="joined", decision_ids=["measure"], left_id="spending_growth", right_id="oda_growth"
+    )
+    places = tuple(
+        ResolvedEntity(role="observationAbout", ref=place.ref, label=place.label)
+        for place in _MATCHED_PLACES
+    )
+    spending_source = _source(spec_id=SPEC_CRS_HEALTH, entities=places).model_copy(
+        update={
+            "identity": _pinning("HealthSpending", SPEC_CRS_HEALTH),
+            "coverage_window": _MATCHED_WINDOW,
+        }
+    )
+    oda_source = _source(entities=_MATCHED_PLACES).model_copy(
+        update={"coverage_window": _MATCHED_WINDOW}
+    )
+    planned = partial(
+        plan_for,
+        [spending, oda, total, spending_growth, oda_growth, joined],
+        [
+            RetrieveOperation(id="who", requirement_id="spending", spec_id=SPEC_CRS_HEALTH),
+            _RETRIEVE,
+            AggregateOperation(
+                id="oda_total_op",
+                requirement_id="oda_total",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY, GroupBy.PERIOD),
+            ),
+            GrowthOperation(
+                id="spending_growth_op",
+                requirement_id="spending_growth",
+                input="who",
+                **_RELATIVE_GROWTH,
+            ),
+            GrowthOperation(
+                id="oda_growth_op",
+                requirement_id="oda_growth",
+                input="oda_total_op",
+                **_RELATIVE_GROWTH,
+            ),
+            JoinOperation(
+                id="joined_op",
+                requirement_id="joined",
+                left="spending_growth_op",
+                right="oda_growth_op",
+            ),
+        ],
+        terminal="joined_op",
+        discovered={"spending": spending_source, "oda": oda_source},
+    )
+    last = {**dict.fromkeys(first, 2024), **dict.fromkeys(second, 2023)}
+    place_frame = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:HealthSpending",
+                "observationAbout": place.ref,
+                "time_period": str(year),
+                "value": 10.0 + year,
+                "unit": "usd",
+            }
+            for place in _MATCHED_PLACES
+            for year in range(2000, last[place] + 1)
+        ],
+    )
+    results = {
+        SPEC_CRS_HEALTH: await retrieved(
+            spending_source,
+            frame=place_frame,
+            dimensions=[{"label": "observationAbout", "count": 4}, DIMENSIONS[-1]],
+            statistics=[
+                {
+                    "stat_var": "dcid:HealthSpending",
+                    "entities": [{"role": "observationAbout", "ref": place.ref}],
+                    "facet": {"unit": "usd"},
+                    "observations": 24,
+                    "first": {"value": 2010.0, "period": "2000"},
+                    "latest": {"value": 2033.0, "period": "2023"},
+                    "minimum": {"value": 2010.0, "period": "2000"},
+                    "maximum": {"value": 2033.0, "period": "2023"},
+                }
+                for place in _MATCHED_PLACES
+            ],
+        ),
+        SPEC_CRS: await retrieved(
+            oda_source,
+            providers=(GERMANY, FRANCE),
+            recipients=_MATCHED_PLACES,
+            frame=_family_frame(
+                recipients=_MATCHED_PLACES,
+                last_years={**dict.fromkeys(first, 2023), **dict.fromkeys(second, 2024)},
+                kinds=True,
+            ),
+        ),
+    }
+    read, reading, plan = await _restated_from_the_data(
+        planned, results=results, surface_for=surface_for
+    )
+    surface = surface_for(get_data=_get_data_answers(plan, results))
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(read.result, AnchorResult)
+    assert (read.planned, read.result.period) == ("2024", "2023")
+    refs = sorted(place.ref for place in _MATCHED_PLACES)
+    assert _analysis_call(reading, "resolve_anchor")["populations"] == [
+        {
+            "pair": [
+                [{"spec_id": SPEC_CRS_HEALTH, "bindings": {"observationAbout": refs}}],
+                [{"spec_id": SPEC_CRS, "bindings": {RECIPIENT: refs}}],
+            ],
+            "keys": {"observationAbout": RECIPIENT},
+        }
+    ]
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2023"]
+    windows = [
+        (sent["window_start"], sent["window_end"])
+        for name, sent in surface.calls
+        if name == "growth"
+    ]
+    assert windows == [("2018", "2023")] * 2
+    held, _trace = await frame_store.get(outcome.results["joined_op"])
+    # Each place's growth on each side, every place matched.
+    assert held.num_rows == 2 * len(_MATCHED_PLACES)
+
+
+# --- A donor whose series stopped: left out, and the answer names it ---------
+#
+# Germany's series stops before the requirement's period, so the retrieval
+# holds France's alone.
+
+_LEFT_OUT = "Germany has no data from 2000 to 2023 and was left out."
+
+
+def _entity_filter_plan(*names: str) -> Callable[..., Plan]:
+    """A plan keeping the rows of `names` from both donors' ODA to Kenya."""
+
+    def _plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+        del decision
+        kept = FilterRequirement(
+            id="kept",
+            decision_ids=["measure"],
+            input_id="oda",
+            predicates=(EntityIn(names=names),),
+        )
+        return plan_for(
+            [_requirement(), kept],
+            [
+                _RETRIEVE,
+                FilterOperation(
+                    id="kept_op",
+                    requirement_id="kept",
+                    input="crs",
+                    predicates=(EntityIn(names=names),),
+                ),
+            ],
+            terminal="kept_op",
+        )
+
+    return _plan
+
+
+def _provider_aggregate_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """`_aggregate_plan` naming Germany a donor and France a provider: one side of the flow."""
+    named = DatasetRequirement(
+        id="oda",
+        decision_ids=["measure"],
+        measure="bilateral ODA",
+        entities=[
+            Entity(name="Germany", role="donor"),
+            Entity(name="France", role="provider"),
+            Entity(name="Kenya", role="recipient"),
+        ],
+        period=Period(start=2000, end=2023),
+    )
+    return _aggregate_plan(plan_for, decision, requirement=named)
+
+
+def _germany_share_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """Germany's share of both donors' total."""
+    del decision
+    pooled = AggregateRequirement(
+        id="pooled",
+        decision_ids=["measure"],
+        input_id="oda",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id="oda", entity="Germany"),
+        denominator=RequirementSide(input_id="pooled"),
+    )
+    return plan_for(
+        [_requirement(), pooled, share],
+        [
+            _RETRIEVE,
+            AggregateOperation(
+                id="pooled_op",
+                requirement_id="pooled",
+                input="crs",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input="crs", entity="Germany"),
+                denominator=Side(input="pooled_op"),
+            ),
+        ],
+        terminal="share_op",
+    )
+
+
+def _germany_sum_plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+    """Germany's bilateral ODA plus its imputed ODA, each source naming both donors."""
+    del decision
+    total = SumOfRequirement(
+        id="total",
+        decision_ids=["measure"],
+        left=RequirementSide(input_id="oda", entity="Germany"),
+        right=RequirementSide(input_id="oda_health", entity="Germany"),
+    )
+    return plan_for(
+        [_requirement(), _requirement(id="oda_health"), total],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            SumOfOperation(
+                id="total_op",
+                requirement_id="total",
+                left=Side(input="crs", entity="Germany"),
+                right=Side(input="crs_health", entity="Germany"),
+            ),
+        ],
+        terminal="total_op",
+        discovered={"oda": _source(), "oda_health": _imputed_source()},
+    )
+
+
+def _imputed_source() -> SelectedSource:
+    """A second source of both donors' ODA to Kenya: imputed multilateral ODA."""
+    return _source(spec_id=SPEC_CRS_HEALTH).model_copy(
+        update={
+            "identity": _pinning("OdaImputed", SPEC_CRS_HEALTH),
+            "shape_member_digest": member_digest(["OdaImputed"]),
+        }
+    )
+
+
+def _shared_germany_plan(*, bilateral_numerator: bool) -> Callable[..., Plan]:
+    """Each donor's bilateral ODA as a share of its health ODA, or the other
+    way round, then Germany's share kept.
+
+    The share rests on both retrievals and keeps the donors both sides
+    hold, so Germany, which the bilateral retrieval left out, is in it on
+    neither reading.
+    """
+    numerator, denominator = ("oda", "oda_health") if bilateral_numerator else ("oda_health", "oda")
+    steps = {"oda": "crs", "oda_health": "crs_health"}
+
+    def _plan(plan_for: PlanFactory, decision: Callable[..., Decision]) -> Plan:
+        del decision
+        return _share_then_germany(plan_for, numerator, denominator, steps)
+
+    return _plan
+
+
+def _share_then_germany(
+    plan_for: PlanFactory, numerator: str, denominator: str, steps: Mapping[str, str]
+) -> Plan:
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=RequirementSide(input_id=numerator),
+        denominator=RequirementSide(input_id=denominator),
+        axis="donor",
+        denominator_scope=DenominatorScope.PER_AXIS,
+    )
+    germany = FilterRequirement(
+        id="germany",
+        decision_ids=["measure"],
+        input_id="share",
+        predicates=(EntityIn(names=("Germany",)),),
+    )
+    return plan_for(
+        [_requirement(), _requirement(id="oda_health"), share, germany],
+        [
+            _RETRIEVE,
+            _RETRIEVE_HEALTH,
+            ShareOfOperation(
+                id="share_op",
+                requirement_id="share",
+                numerator=Side(input=steps[numerator]),
+                denominator=Side(input=steps[denominator]),
+                axis="donor",
+                denominator_scope=DenominatorScope.PER_AXIS,
+            ),
+            FilterOperation(
+                id="germany_op",
+                requirement_id="germany",
+                input="share_op",
+                predicates=(EntityIn(names=("Germany",)),),
+            ),
+        ],
+        terminal="germany_op",
+        discovered={"oda": _source(), "oda_health": _source(spec_id=SPEC_CRS_HEALTH)},
+    )
+
+
+async def _stopped_bilateral(
+    plan: Plan, retrieved: Retrieved, surface_for: Callable[..., FrameSurface]
+) -> FrameSurface:
+    """A surface whose bilateral retrieval holds France alone and any other
+    retrieval both donors, each frame carrying its parties' kinds, which a
+    share across donors pools by."""
+    results = {}
+    for spec_id, source in _sources_of(plan).items():
+        providers = (FRANCE,) if spec_id == SPEC_CRS else (GERMANY, FRANCE)
+        results[spec_id] = await retrieved(
+            source,
+            frame=_family_frame(stat_vars=(_pinned(source),), providers=providers, kinds=True),
+            providers=providers,
+        )
+    return surface_for(get_data=_get_data_answers(plan, results))
+
+
+def _left_out(outcome: Accepted) -> list[tuple[JsonValue, str]]:
+    return [
+        (gap.required, gap.severity.value)
+        for record in outcome.evidence
+        for gap in record.gaps
+        if gap.code.value == "entity_missing"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("plan_of", "rows"),
+    [
+        pytest.param(_aggregate_plan, 24, id="aggregate"),
+        pytest.param(_provider_aggregate_plan, 24, id="donor-and-provider"),
+        pytest.param(_rank_plan, 1, id="rank"),
+        pytest.param(_growth_plan, 1, id="growth"),
+        pytest.param(_entity_filter_plan("Germany", "France"), 24, id="filter"),
+    ],
+)
+async def test_a_donor_with_no_series_in_the_period_is_left_out_and_named(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    plan_of: Callable[..., Plan],
+    rows: int | None,
+) -> None:
+    plan = plan_of(plan_for, decision)
+    surface = await _stopped_bilateral(plan, retrieved, surface_for)
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    if rows is not None:
+        assert outcome.steps[-1].row_count == rows
+    assert _left_out(outcome) == [("Germany", "warning")]
+    assert answer_notes(surface, outcome, plan=plan) == [_LEFT_OUT]
+
+
+@pytest.mark.parametrize(
+    ("plan_of", "step_id"),
+    [
+        pytest.param(_compare_plan, "compared_op", id="compare"),
+        pytest.param(_germany_share_plan, "share_op", id="share"),
+        pytest.param(_entity_filter_plan("Germany"), "kept_op", id="filter"),
+        pytest.param(_germany_sum_plan, "total_op", id="sum"),
+        pytest.param(
+            _shared_germany_plan(bilateral_numerator=True), "germany_op", id="share-then-filter"
+        ),
+        pytest.param(
+            _shared_germany_plan(bilateral_numerator=False),
+            "germany_op",
+            id="share-over-it-then-filter",
+        ),
+    ],
+)
+async def test_a_step_reading_the_left_out_donor_alone_is_refused_before_any_verb_runs(
+    plan_for: PlanFactory,
+    decision: Callable[..., Decision],
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    plan_of: Callable[..., Plan],
+    step_id: str,
+) -> None:
+    plan = plan_of(plan_for, decision)
+    surface = await _stopped_bilateral(plan, retrieved, surface_for)
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+    assert (outcome.step_id, outcome.requirement_id) == (step_id, "oda")
+    assert [
+        (issue.code.value, issue.required, issue.severity.value) for issue in outcome.issues
+    ] == [("entity_missing", "Germany", "error")]
+    assert plan.workflow is not None
+    assert [name for name, _ in surface.calls] == ["get_data"] * len(
+        plan.workflow.evidence_bindings
+    )
+
+
+TANZANIA = ResolvedEntity(role="destination", ref="country/TZA", label="Tanzania")
+# Germany's ODA to each recipient ends in its own year.
+_LATEST_ODA = {KENYA: 2021, UGANDA: 2024, TANZANIA: 2022}
+
+
+@pytest.mark.parametrize("with_kenya", [True, False], ids=["beside-kenya", "alone"])
+async def test_an_answer_states_the_short_series_of_its_own_newest_year(
+    plan_for: PlanFactory,
+    retrieved: Retrieved,
+    surface_for: Callable[..., FrameSurface],
+    with_kenya: bool,
+) -> None:
+    # One retrieval of Germany's ODA to Kenya, Uganda and Tanzania, open to
+    # the newest year, under the latest year for Uganda and Tanzania and,
+    # beside it, the latest year for Kenya. Kenya's newest year is 2021, and
+    # Uganda and Tanzania's 2024, which Tanzania's series falls short of.
+    # Each answer states the series of its own newest year: the Kenya branch
+    # neither ends Uganda and Tanzania's window at 2021 nor puts Kenya's
+    # series in it.
+    recipients = tuple(_LATEST_ODA)
+    source = _source(entities=(GERMANY, *recipients)).model_copy(
+        update={"coverage_window": Period(start=2000, end=2024)}
+    )
+    oda = _requirement(donors=("Germany",), recipients=[r.label for r in recipients]).model_copy(
+        update={"period": Period(start=2000, end=2024), "period_end_open": True}
+    )
+    branches = [("kenya", ("Kenya",)), ("others", ("Uganda", "Tanzania"))][not with_kenya :]
+    latest = {
+        id: (
+            EntityIn(names=names, role="recipient"),
+            PeriodThreshold(op="eq", year=2024, rolling=RelativePeriod(offset=0)),
+        )
+        for id, names in branches
+    }
+
+    def planned(**restated: Any) -> Plan:
+        return plan_for(
+            [
+                oda,
+                *(
+                    FilterRequirement(
+                        id=id, decision_ids=["measure"], input_id="oda", predicates=predicates
+                    )
+                    for id, predicates in latest.items()
+                ),
+            ],
+            [
+                _RETRIEVE,
+                *(
+                    FilterOperation(
+                        id=f"{id}_op", requirement_id=id, input="crs", predicates=predicates
+                    )
+                    for id, predicates in latest.items()
+                ),
+            ],
+            terminal=[f"{id}_op" for id in latest],
+            discovered={"oda": source},
+            **restated,
+        )
+
+    results = {
+        SPEC_CRS: await retrieved(
+            source,
+            frame=_family_frame(
+                providers=(GERMANY,), recipients=recipients, last_years=_LATEST_ODA
+            ),
+            providers=(GERMANY,),
+            recipients=recipients,
+            statistics=[
+                {
+                    "stat_var": "dcid:Oda",
+                    "entities": [
+                        {"role": PROVIDER, "ref": GERMANY.ref},
+                        {"role": RECIPIENT, "ref": recipient.ref},
+                    ],
+                    "facet": {"unit": "usd"},
+                    "observations": end - 2000 + 1,
+                    "first": {"value": 100.0, "period": "2000"},
+                    "latest": {"value": 123.0, "period": str(end)},
+                    "minimum": {"value": 100.0, "period": "2000"},
+                    "maximum": {"value": 123.0, "period": str(end)},
+                }
+                for recipient, end in _LATEST_ODA.items()
+            ],
+            dimensions=[
+                {"label": PROVIDER, "count": 1, "axis": "origin"},
+                {"label": RECIPIENT, "count": len(recipients), "axis": "destination"},
+                {"label": "years", "count": 25},
+            ],
+        )
+    }
+    draft = planned()
+    assert draft.workflow is not None
+    read = await read_anchors(
+        draft.workflow,
+        revision=plan_revision(draft),
+        requirements=[oda],
+        surface=surface_for(get_data=_get_data_answers(draft, results)),
+    )
+    assert isinstance(read, tuple), read
+    plan = planned(anchors_read=read)
+
+    outcome = await _run(plan, surface_for(get_data=_get_data_answers(plan, results)))
+
+    assert isinstance(outcome, Accepted), outcome
+    assert [anchor.period for anchor in outcome.anchors] == ["2021", "2024"][not with_kenya :]
+    assert answer_notes(None, outcome, plan=plan, terminals=["others_op"]) == [
+        "Germany and Tanzania's series ends in 2022."
+    ]
+    if with_kenya:
+        assert answer_notes(None, outcome, plan=plan, terminals=["kenya_op"]) == []

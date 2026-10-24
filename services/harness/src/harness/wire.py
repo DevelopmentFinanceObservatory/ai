@@ -1165,7 +1165,9 @@ class ActivityStep(_WireModel):
     one `harness.sentences` has for the failure's code. The refusal's own
     text is written for the agent and stays in the trace. The run continues
     where the graph allows (delta 4); a stream-fatal problem is an `error`
-    frame instead, whose `detail` is such a sentence too."""
+    frame instead, whose `detail` is such a sentence too. When a later try
+    of the same step succeeds in the turn, a `complete` frame on the failed
+    step's `step_id` settles it."""
 
     event: Literal["activity.step"]
     seq: int = Field(ge=0)

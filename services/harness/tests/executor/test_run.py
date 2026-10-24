@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,6 +33,8 @@ from compiler.surface import (
 from data_mcp import stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.deadline import CallDeadline
+from data_mcp.errors import UpstreamError
+from data_mcp.graph_wire import NotHeldEntry, OrganisationNode
 from data_mcp.manifest import strip_manifest
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA
 from data_mcp.settings import Settings as DataMcpSettings
@@ -40,11 +42,20 @@ from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import BACKOFF_SECONDS, MAX_RETRY_AFTER_SECONDS, retry_delay
 from executor.completion import FramePublished, ResultPublisher
 from executor.ledger import Attempt, InMemoryRunLedger, RunChange, RunRecord
-from executor.outcomes import Accepted, MethodChoiceNeeded, RediscoveryNeeded, RefusalKind, Refused
+from executor.outcomes import (
+    Accepted,
+    MethodChoiceNeeded,
+    RediscoveryNeeded,
+    RefusalKind,
+    Refused,
+    StopCause,
+    stop_cause,
+)
 from executor.run import (
     EVIDENCE_ALLOWANCE_S,
     MAX_ATTEMPTS_PER_STEP,
     RunAbandonedError,
+    _series_labels,
     current_step_deadline,
     default_fetch_series_stats,
     execute_approved_plan,
@@ -62,6 +73,7 @@ from planner.plan import (
     Coverage,
     DatasetRequirement,
     Decision,
+    Entity,
     Plan,
     PlanStatus,
     plan_revision,
@@ -648,7 +660,7 @@ async def test_a_statistics_fetch_that_never_answers_stops_at_its_step_budget(
     assert outcome.completed == ()
 
 
-async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_transport_failed(
+async def test_a_slow_statistics_fetch_stops_the_step_as_transient_before_its_budget_runs_out(
     approved_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
@@ -658,10 +670,9 @@ async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_tr
     """`default_fetch_series_stats` gives `fetch_series_statistics_table` a deadline built off
     what is left of the step budget, capped at `EVIDENCE_ALLOWANCE_S`; a fetch that outlives
     it raises `TimeoutError` the way the real one does once its own internal
-    `asyncio.timeout` expires, and `default_fetch_series_stats` catches that like any other
-    fetch failure. Before F3 this degraded path did not exist: the fetch ran with no
-    deadline of its own, so only the step's outer budget could ever cut it off, stopping the
-    whole step `transport_failed` instead of the requirement alone.
+    `asyncio.timeout` expires. That is a failed transport, which a later try can get past,
+    so the step stops `transport_failed` with the fetch's own detail rather than as a
+    requirement the data does not meet.
 
     `_EVIDENCE_DEADLINE_MARGIN_S` is shrunk to fit `short_budget`'s millisecond scale --
     production's 1s margin would swallow the whole 50ms evidence allowance and refuse before
@@ -687,9 +698,11 @@ async def test_a_slow_statistics_fetch_degrades_to_statistics_unavailable_not_tr
     )
 
     assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+    assert outcome.refusal is RefusalKind.TRANSPORT_FAILED
+    assert stop_cause(outcome) is StopCause.TRANSIENT
     assert outcome.step_id == "debt"
-    assert "statistics_unavailable" in [issue.code.value for issue in outcome.issues]
+    assert "statistics artifact" in outcome.detail
+    assert outcome.issues == ()
 
 
 async def test_a_refresh_then_retry_refusal_sends_the_requirement_back_to_discovery(
@@ -1058,6 +1071,48 @@ async def test_a_result_without_the_frame_it_was_compiled_to_yield_stops_the_run
     assert outcome.step_id == "totals"
 
 
+@pytest.mark.parametrize(
+    ("on_missing", "accepted"),
+    [pytest.param("report_gaps", True, id="left-out"), pytest.param("fail", False, id="fails")],
+)
+async def test_a_retrieval_missing_one_of_two_named_entities_leaves_it_out_and_records_it(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    wide_source: Callable[..., SelectedSource],
+    on_missing: str,
+    accepted: bool,
+) -> None:
+    # Kenya's series stopped before the period: the retrieval holds Ghana's alone.
+    ghana_only = manifest()
+    ghana_only["statistics"][0]["entities"] = [{"role": "recipient", "ref": "country/GHA"}]
+    surface = _surface(real_schemas, ghana_only)
+    plan = approved_plan(
+        requirement=requirement(
+            entities=[Entity(name="Kenya", role="debtor"), Entity(name="Ghana", role="debtor")],
+            coverage=Coverage(on_missing=on_missing),
+        ),
+        source=wide_source(),
+    )
+
+    outcome = await _run(plan, surface=surface, sleep=_Sleeps())
+
+    if accepted:
+        assert isinstance(outcome, Accepted), outcome
+        (record,) = outcome.evidence
+        findings = record.gaps
+    else:
+        assert isinstance(outcome, Refused), outcome
+        assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
+        findings = outcome.issues
+    assert [
+        (issue.required, issue.severity.value)
+        for issue in findings
+        if issue.code.value == "entity_missing"
+    ] == [("Kenya", "warning" if accepted else "error")]
+
+
 async def test_a_retrieval_missing_a_required_entity_is_not_evidence(
     approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
@@ -1156,6 +1211,91 @@ async def test_missing_years_are_recorded_or_refused_as_the_requirement_says(
     assert "coverage_gaps" in [gap.code.value for gap in lenient.evidence[0].gaps]
     assert isinstance(refused, Refused)
     assert refused.refusal is RefusalKind.REQUIREMENT_UNMET
+
+
+@pytest.mark.parametrize(
+    ("seam", "labels"),
+    [
+        pytest.param("graph", ["Kenya", "Germany", None], id="named-by-the-graph"),
+        # A lookup that fails or hangs leaves the donors unlabelled, and the
+        # step goes on, whatever seam was injected.
+        pytest.param("graph-fails", ["Kenya", None, None], id="graph-lookup-fails"),
+        pytest.param("raises", ["Kenya", None, None], id="injected-seam-raises"),
+        pytest.param("hangs", ["Kenya", None, None], id="injected-seam-hangs"),
+    ],
+)
+async def test_a_short_series_entity_the_source_labels_none_for_is_named_by_the_graph(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: RequirementFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    labels: list[str | None],
+) -> None:
+    """Kenya's series from two donors miss years. The approved source labels
+    Kenya, so the run asks for the donors' names alone, and keeps the name
+    the graph gives one and none for the one it does not hold."""
+    sparse = manifest()
+    (row,) = sparse["statistics"]
+    row["observations"] = 7
+    # The same list the statistics fetch reads, replaced in place.
+    sparse["statistics"][:] = [
+        {**row, "entities": [*row["entities"], {"role": "donor", "ref": donor}]}
+        for donor in ("donor/DEU", "donor/XYZ")
+    ]
+    sparse["series_count"] = 2
+    asked: list[list[str]] = []
+
+    async def describe(dcids: list[str]) -> dict[str, Any]:
+        asked.append(list(dcids))
+        if seam == "graph-fails":
+            raise UpstreamError(status=503, code="upstream_unavailable")
+        return {
+            "donor/DEU": OrganisationNode.model_construct(ref="donor/DEU", label="Germany"),
+            "donor/XYZ": NotHeldEntry(ref="donor/XYZ", status="not_held"),
+        }
+
+    async def injected(refs: Sequence[str]) -> Mapping[str, str]:
+        asked.append(list(refs))
+        if seam == "raises":
+            raise RuntimeError("a seam's own defect")
+        await asyncio.Event().wait()
+        return {}
+
+    monkeypatch.setattr("executor.run.describe_nodes", describe)
+    monkeypatch.setattr("executor.run.LABEL_ALLOWANCE_S", 0.05)
+    plan = approved_plan(requirement=requirement(coverage=Coverage(on_missing="report_gaps")))
+    chosen = {} if seam.startswith("graph") else {"label_refs": injected}
+
+    outcome = await asyncio.wait_for(
+        _run(plan, surface=_surface(real_schemas, sparse), sleep=_Sleeps(), **chosen), timeout=5
+    )
+
+    assert isinstance(outcome, Accepted), outcome
+    assert asked == [["donor/DEU", "donor/XYZ"]]
+    gaps = [gap for gap in outcome.evidence[0].gaps if gap.code.value == "coverage_gaps"]
+    assert [[entity.label for entity in gap.entities] for gap in gaps] == [
+        labels[:2],
+        [labels[0], labels[2]],
+    ]
+
+
+async def test_a_name_lookup_needs_more_step_budget_left_than_its_margin() -> None:
+    called: list[Sequence[str]] = []
+
+    async def names(refs: Sequence[str]) -> Mapping[str, str]:
+        called.append(refs)
+        return {"donor/DEU": "Germany"}
+
+    token = current_step_deadline.set(CallDeadline.after(0.5))
+    try:
+        labels = await _series_labels(names, ["donor/DEU"])
+    finally:
+        current_step_deadline.reset(token)
+
+    assert labels == {}
+    assert called == []
 
 
 async def test_a_retrieval_returning_no_rows_is_not_evidence(
@@ -1774,16 +1914,40 @@ async def test_a_manifest_with_statistics_but_no_series_count_is_accepted(
     assert evidence.stat_vars == ("DebtServicePaid",)
 
 
-async def test_a_manifest_with_neither_series_count_nor_statistics_still_fails_closed(
-    approved_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+@pytest.mark.parametrize(
+    ("series_count", "kind", "cause", "issue_codes"),
+    [
+        (
+            None,
+            RefusalKind.REQUIREMENT_UNMET,
+            StopCause.DATA,
+            ["statistics_unavailable", "unit_unverified"],
+        ),
+        (1, RefusalKind.STEP_RESULT_UNUSABLE, StopCause.HARNESS, []),
+    ],
+    ids=["old-record", "series-named-without-artifact"],
+)
+async def test_a_manifest_without_a_statistics_artifact_fails_closed(
+    approved_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    series_count: int | None,
+    kind: RefusalKind,
+    cause: StopCause,
+    issue_codes: list[str],
 ) -> None:
-    surface = _surface(real_schemas, manifest(series_count=None, artifacts=[]))
+    """A record minted before statistics existed has none to check; a manifest that names
+    its series but carries no artifact for them breaks the wire contract, which is no fact
+    of the data."""
+    surface = _surface(real_schemas, manifest(series_count=series_count, artifacts=[]))
 
     outcome = await _run(approved_plan(), surface=surface, sleep=_Sleeps())
 
     assert isinstance(outcome, Refused), outcome
-    assert outcome.refusal is RefusalKind.REQUIREMENT_UNMET
-    assert "statistics_unavailable" in [issue.code.value for issue in outcome.issues]
+    assert (outcome.refusal, stop_cause(outcome)) == (kind, cause)
+    assert [issue.code.value for issue in outcome.issues if issue.severity.value == "error"] == (
+        issue_codes
+    )
 
 
 async def test_default_fetch_series_stats_bounds_the_deadline_by_the_smaller_of_the_two(

@@ -2027,8 +2027,8 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     """`execute` hands `plan_done` the sentences `_stat_var_totals` writes,
     and `plan_done` gives each to the agent under `totals`."""
     sentence = (
-        'By default, the figures for "OECD Creditor Reporting System (CRS)" sum the '
-        "family's 74 indicators."
+        'By default, the figures for "OECD Creditor Reporting System (CRS)" are the '
+        "sum of 74 indicators."
     )
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
     plan = _seam_plan(schemas=real_schemas)
@@ -2838,6 +2838,8 @@ def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retriev
     refusal = _planner_refusal(stop, plan=plan)
 
     (gap,) = [issue for issue in refusal["issues"] if issue["code"] == "window_short"]
+    # A finding naming no series reads as it did before findings could name one.
+    assert set(gap) == {"code", "severity", "requirement_id", "detail", "found", "required"}
     assert gap["requirement_id"] == "debt"
     assert gap["detail"] == (
         "the source covers 2000-2023, the requirement asks for 2015-2024, "
