@@ -59,6 +59,9 @@ FRAME_PARAMETER = "frame_ref"
 # the member of it listing the populations the newest period is taken over.
 ROLLING_PARAMETER = "rolling"
 _POPULATION = "population"
+# The member of a pairing population holding the populations of its two sides
+# (`common.rolling`).
+_PAIR = "pair"
 # The members of one population that are keyed by column name.
 _POPULATION_COLUMN_MEMBERS = ("bindings", "levels")
 
@@ -288,9 +291,10 @@ def bound_populations(
 
     An entry names columns of the retrievals of its own dataset, so it is read
     against those frames, whichever frame the step carrying it is bound to.
-    The result is in the canonical spelling and order
-    (`common.rolling.canonical_populations`), which depend on the column
-    names.
+    A pairing's sides are bound the same way, and each of its keys against
+    the frames that key is read from (`_key_frames`). The result is in the
+    canonical spelling and order (`common.rolling.canonical_populations`),
+    which depend on the column names.
 
     Args:
         populations: The compiled `rolling.population` of a step.
@@ -302,36 +306,98 @@ def bound_populations(
     Raises:
         UnboundColumnError: If an entry names a dataset no retrieval fetched,
             a role a retrieved frame carries no column for, a role two
-            retrievals of one dataset spell differently, or two roles one
-            frame column carries.
+            retrievals of one dataset spell differently, two roles one
+            frame column carries, or a key the frames it is read from spell
+            differently.
     """
-    bound: list[dict[str, Any]] = []
-    for population in populations:
-        assert isinstance(population, dict)
-        spec_id = population["spec_id"]
-        sides = roots.get(spec_id) if isinstance(spec_id, str) else None
-        if not sides:
-            raise UnboundColumnError(
-                f"a population names {spec_id!r}, which none of the retrievals read fetched"
-            )
-        entry: dict[str, Any] = dict(population)
-        for member in _POPULATION_COLUMN_MEMBERS:
-            by_column = population.get(member)
-            if not isinstance(by_column, dict):
-                continue
-            respelled = {_spelling(name, sides=sides): kept for name, kept in by_column.items()}
-            if len(respelled) < len(by_column):
-                raise UnboundColumnError(
-                    f"the population of {spec_id} names {sorted(by_column)!r} in its {member}, "
-                    f"which its frame carries as {sorted(respelled)!r}; one column cannot "
-                    "stand for two roles"
+    return list(
+        canonical_populations(_bound(population, roots=roots) for population in populations)
+    )
+
+
+def _bound(
+    population: JsonValue, *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> dict[str, Any]:
+    """One entry of `bound_populations`."""
+    assert isinstance(population, dict)
+    if _PAIR in population:
+        left, right = population[_PAIR]
+        assert isinstance(left, list) and isinstance(right, list)
+        keys = population["keys"]
+        assert isinstance(keys, dict)
+        return {
+            _PAIR: [
+                [_bound(side, roots=roots) for side in left],
+                [_bound(side, roots=roots) for side in right],
+            ],
+            "keys": {
+                _spelling(name, sides=_key_frames(name, left, roots=roots)): _spelling(
+                    str(paired), sides=_key_frames(str(paired), right, roots=roots)
                 )
-            entry[member] = respelled
-        strict_levels = population.get("strict_levels")
-        if isinstance(strict_levels, list):
-            entry["strict_levels"] = [_spelling(name, sides=sides) for name in strict_levels]
-        bound.append(entry)
-    return list(canonical_populations(bound))
+                for name, paired in keys.items()
+            },
+        }
+    entry: dict[str, Any] = dict(population)
+    sides = _frames_of(population, roots=roots)
+    spec_id = population["spec_id"]
+    for member in _POPULATION_COLUMN_MEMBERS:
+        by_column = population.get(member)
+        if not isinstance(by_column, dict):
+            continue
+        respelled = {_spelling(name, sides=sides): kept for name, kept in by_column.items()}
+        if len(respelled) < len(by_column):
+            raise UnboundColumnError(
+                f"the population of {spec_id} names {sorted(by_column)!r} in its {member}, "
+                f"which its frame carries as {sorted(respelled)!r}; one column cannot "
+                "stand for two roles"
+            )
+        entry[member] = respelled
+    strict_levels = population.get("strict_levels")
+    if isinstance(strict_levels, list):
+        entry["strict_levels"] = [_spelling(name, sides=sides) for name in strict_levels]
+    return entry
+
+
+def _frames_of(
+    population: Mapping[str, JsonValue], *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> Sequence[FrameColumns | None]:
+    """The retrieved frames of the dataset a flat `population` names."""
+    spec_id = population["spec_id"]
+    sides = roots.get(spec_id) if isinstance(spec_id, str) else None
+    if not sides:
+        raise UnboundColumnError(
+            f"a population names {spec_id!r}, which none of the retrievals read fetched"
+        )
+    return sides
+
+
+def _key_frames(
+    name: str, side: Sequence[JsonValue], *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> list[FrameColumns | None]:
+    """The retrieved frames a pairing's key `name` is read from on one `side`,
+    as `analysis_mcp.rolling_tool` reads it: the frames of each flat population
+    on the side, and on a pairing nested there, the frames of its left side,
+    and of its right side too unless `name` is one of its keys, which its
+    right side holds under the column the nested pairing maps it to. Of a
+    nested pairing's frames, those that carry `name` are read, or all of them
+    when none does, so the spelling of a role only one inner side has is that
+    side's."""
+    frames: list[FrameColumns | None] = []
+    for population in side:
+        assert isinstance(population, dict)
+        if _PAIR not in population:
+            frames.extend(_frames_of(population, roots=roots))
+            continue
+        left, right = population[_PAIR]
+        assert isinstance(left, list) and isinstance(right, list)
+        keys = population["keys"]
+        assert isinstance(keys, dict)
+        inner = _key_frames(name, left, roots=roots)
+        if name not in keys:
+            inner += _key_frames(name, right, roots=roots)
+        carrying = [frame for frame in inner if frame is None or frame.columns.get(name)]
+        frames.extend(carrying or inner)
+    return frames
 
 
 def bound_role_keys(

@@ -32,7 +32,13 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
 )
-from executor.run import MAX_ATTEMPTS_PER_STEP, _first_year_kept, _waves, execute_approved_plan
+from executor.run import (
+    _NAMED_YEARS_REMEDY,
+    MAX_ATTEMPTS_PER_STEP,
+    _first_year_kept,
+    _waves,
+    execute_approved_plan,
+)
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -561,22 +567,39 @@ async def test_a_rolling_plan_refuses_a_capability_table_that_pins_no_resolve_an
 
 
 @pytest.mark.parametrize(
-    "served",
+    ("served", "named_years"),
     [
-        ToolRefusal.rolling_anchor_unresolved(
-            detail="no_qualifying_period", reason="no period is held by half of every population"
+        (
+            ToolRefusal.rolling_anchor_unresolved(
+                detail="no_qualifying_period",
+                reason="no period is held by half of every population",
+            ),
+            True,
         ),
-        ToolRefusal.rolling_grain_unsupported(
-            reason="a root frame holds periods that are no calendar year", periods=["2023-01"]
+        (
+            ToolRefusal.rolling_grain_unsupported(
+                reason="a root frame holds periods that are no calendar year", periods=["2023-01"]
+            ),
+            True,
+        ),
+        # Named years cannot help two sides that name no entity in common.
+        (
+            ToolRefusal.rolling_anchor_unresolved(
+                detail="pairing_shares_no_key",
+                reason="the two sides of the pairing share no key",
+                context={"keys": {"reporter": "reporter"}},
+            ),
+            False,
         ),
     ],
-    ids=["no_qualifying_period", "grain"],
+    ids=["no_qualifying_period", "grain", "pairing_shares_no_key"],
 )
 async def test_a_newest_period_the_data_cannot_give_stops_the_run_with_words_for_the_user(
     rolling_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
     served: ToolRefusal,
+    named_years: bool,
 ) -> None:
     plan = rolling_plan()
     surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_served(served)])
@@ -594,6 +617,7 @@ async def test_a_newest_period_the_data_cannot_give_stops_the_run_with_words_for
     assert outcome.payload.message != served.message
     assert "resolve_anchor" not in outcome.payload.message
     assert outcome.payload.fix["remedy"] not in outcome.payload.message
+    assert (outcome.payload.fix["remedy"] == _NAMED_YEARS_REMEDY) is named_years
     assert outcome.payload.fix.items() >= served.fix.items()
     assert [record.step_id for record in outcome.completed] == ["debt"]
     assert not _calls(surface, "growth") and not _calls(surface, "filter")

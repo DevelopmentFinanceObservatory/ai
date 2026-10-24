@@ -8,13 +8,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
+from analysis_mcp import rolling_tool
 from analysis_mcp.aggregate_tool import aggregate
 from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.fixtures import seed_fixture_store
 from analysis_mcp.growth_tool import growth
 from analysis_mcp.join_tool import join
 from analysis_mcp.rank_tool import rank
-from analysis_mcp.rolling_tool import resolve_anchor
+from analysis_mcp.rolling_tool import MAX_DISTINCT_POPULATIONS, resolve_anchor
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -947,9 +948,11 @@ def _planned_since(root: int) -> dict[str, Any]:
     }
 
 
-def _planned_join(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+def _planned_join(left: dict[str, Any], right: dict[str, Any], **keys: Any) -> dict[str, Any]:
+    """A join of `left` and `right` before any frame exists, `keys` its
+    `join_keys` and `right_keys` when stated."""
     return {
-        "op_spec": {"verb": "join", "parameters": {"right_frame_ref": {}}},
+        "op_spec": {"verb": "join", "parameters": {"right_frame_ref": {}, **keys}},
         "inputs": {"frame_ref": left, "right_frame_ref": right},
     }
 
@@ -1012,16 +1015,22 @@ async def test_a_dataset_joined_beside_a_rolling_step_does_not_move_its_period(s
 
 async def test_rolling_steps_one_step_joins_stand_on_one_period_over_both_datasets(store) -> None:
     aid, gni = await _roots(store, aid=2023, gni=2021)
-    planned = _planned_join(_planned_since(0), _planned_since(1))
+    planned = _planned_join(_planned_since(0), _planned_since(1), join_keys=["reporter"])
     columns = [list(_frame({}).columns)] * 2
     populations = anchor_populations(planned, _mints([aid, gni]), root_columns=columns)
-    assert [population["spec_id"] for population in populations] == [_AID, _GNI]
+    assert populations == [
+        {
+            "pair": [[{"spec_id": _AID, "bindings": {}}], [{"spec_id": _GNI, "bindings": {}}]],
+            "keys": {"reporter": "reporter"},
+        }
+    ]
 
     anchor = (await resolve_anchor(populations=populations, roots=[aid, gni])).structured_content
     joined = _pair(
         await join(
             frame_ref=await _since(aid, populations=populations, anchor=anchor),
             right_frame_ref=await _since(gni, populations=populations, anchor=anchor),
+            join_keys=("reporter",),
         )
     )
     recipe = await build_recipe(FrameRef(**joined), store=store)
@@ -1045,6 +1054,7 @@ async def test_a_frame_whose_populations_reach_past_its_tree_gives_its_recipe_to
         await join(
             frame_ref=await _since(aid, populations=group, anchor=anchor),
             right_frame_ref=await _since(gni, populations=group, anchor=anchor),
+            join_keys=("reporter",),
         )
     )
 
@@ -1057,4 +1067,226 @@ async def test_a_frame_whose_populations_reach_past_its_tree_gives_its_recipe_to
     assert recipe["anchor"] is None
     columns = [list(_frame({}).columns)] * len(recipe["roots"])
     own = anchor_populations(recipe["tree"], recipe["roots"], root_columns=columns)
-    assert own == [{"spec_id": _AID, "bindings": {}}, {"spec_id": _GNI, "bindings": {}}]
+    assert own == [
+        {
+            "pair": [[{"spec_id": _AID, "bindings": {}}], [{"spec_id": _GNI, "bindings": {}}]],
+            "keys": {"reporter": "reporter"},
+        }
+    ]
+
+
+# Pairings: a keyed verb's two sides counted over the keys they share ------------
+
+_WHO = "spec_" + "d" * 32
+
+
+def _keyed(last_by_key: Mapping[str, int], *, column: str = "reporter") -> Frame:
+    """Each key's one series under `column`, holding 2018 to its last year."""
+    return Frame.build(
+        role_keys=[column],
+        rows=[
+            {
+                "stat_var": "dcid:Count",
+                column: key,
+                "time_period": str(year),
+                "value": 1.0,
+                "unit": "dcid:USD",
+            }
+            for key, last in last_by_key.items()
+            for year in range(2018, last + 1)
+        ],
+    )
+
+
+async def _keyed_roots(
+    store: InMemoryMaterialisationStore, **frames: tuple[str, Frame]
+) -> list[dict[str, str]]:
+    return [await _register(store, _ref("1", spec_id), frame) for spec_id, frame in frames.values()]
+
+
+def _pairing(left: list[Any], right: list[Any], **keys: str) -> dict[str, Any]:
+    return {"pair": [left, right], "keys": keys}
+
+
+async def _period(populations: list[dict[str, Any]], roots: list[dict[str, str]]) -> str:
+    result = await resolve_anchor(populations=populations, roots=roots)
+    assert result.is_error is False, result.content
+    return result.structured_content["period"]
+
+
+# Half of each side holds 2024, and the halves are different donors.
+_AID_HALF = {"dcid:AUS": 2024, "dcid:BEL": 2024, "dcid:CAN": 2023, "dcid:DEU": 2023}
+_GNI_HALF = {"dcid:AUS": 2023, "dcid:BEL": 2023, "dcid:CAN": 2024, "dcid:DEU": 2024}
+
+
+async def test_a_keyed_pairing_takes_the_newest_year_its_matched_keys_hold(store) -> None:
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)), gni=(_GNI, _keyed(_GNI_HALF)))
+    flat = [{"spec_id": _AID}, {"spec_id": _GNI}]
+    paired = [_pairing([{"spec_id": _AID}], [{"spec_id": _GNI}], reporter="reporter")]
+
+    # Counted flat, each side alone holds 2024 for half its series, but no
+    # donor holds 2024 on both sides.
+    assert await _period(flat, roots) == "2024"
+    assert await _period(paired, roots) == "2023"
+
+
+async def test_a_pairing_no_verb_keys_is_counted_flat_as_before(store) -> None:
+    # compare(aid, gni) pairs no keys, so its sides are counted as two
+    # populations, the anchor dev reads over the same frames.
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)), gni=(_GNI, _keyed(_GNI_HALF)))
+    rolled = {
+        "op_spec": {"verb": "growth", "parameters": {"rolling": {}}},
+        "inputs": {
+            "frame_ref": {
+                "op_spec": {"verb": "compare", "parameters": {"right_frame_ref": {}}},
+                "inputs": {"frame_ref": {"root": 0}, "right_frame_ref": {"root": 1}},
+            }
+        },
+    }
+    columns = [list(_keyed({}).columns)] * 2
+    populations = anchor_populations(rolled, _mints(roots), root_columns=columns)
+
+    assert populations == canonical_populations([{"spec_id": _AID}, {"spec_id": _GNI}])
+    assert await _period(populations, roots) == "2024"
+
+
+async def test_a_pairing_on_one_side_of_another_is_counted_by_the_outer_keys(store) -> None:
+    # join(quotient_of(aid, gni) by reporter, debt) on reporter. The inner
+    # pairing holds 2024 for CAN and DEU alone, and debt for AUS and BEL alone.
+    roots = await _keyed_roots(
+        store,
+        aid=(_AID, _keyed(_GNI_HALF)),
+        gni=(_GNI, _keyed(dict.fromkeys(_DONORS, 2024))),
+        debt=(_DEBT, _keyed(_AID_HALF)),
+    )
+    inner = _pairing([{"spec_id": _AID}], [{"spec_id": _GNI}], reporter="reporter")
+    nested = [_pairing([inner], [{"spec_id": _DEBT}], reporter="reporter")]
+    flat = [{"spec_id": _AID}, {"spec_id": _GNI}, {"spec_id": _DEBT}]
+
+    assert await _period(flat, roots) == "2024"
+    assert await _period([inner], roots[:2]) == "2024"
+    assert await _period(nested, roots) == "2023"
+
+
+async def test_an_outer_key_one_inner_side_lacks_is_read_on_the_side_that_holds_it(
+    store,
+) -> None:
+    # join(join(aid by reporter and recipient, gni by reporter) on reporter,
+    # who) on recipient through right_keys. gni carries no recipient, so the
+    # outer key is read on aid alone. Of the inner pairs only BEL to KEN holds
+    # 2024 (aid stops at 2023 for UGA, gni at 2023 for AUS), and WHO holds 2024
+    # for UGA alone, so no recipient holds 2024 on both outer sides.
+    rows = [
+        {
+            "stat_var": "dcid:Count",
+            "reporter": reporter,
+            "recipient": recipient,
+            "time_period": str(year),
+            "value": 1.0,
+            "unit": "dcid:USD",
+        }
+        for reporter in ("dcid:AUS", "dcid:BEL")
+        for recipient in ("dcid:KEN", "dcid:UGA")
+        for year in range(2018, 2024 if recipient == "dcid:UGA" else 2025)
+    ]
+    roots = await _keyed_roots(
+        store,
+        aid=(_AID, Frame.build(role_keys=["reporter", "recipient"], rows=rows)),
+        gni=(_GNI, _keyed({"dcid:AUS": 2023, "dcid:BEL": 2024})),
+        who=(
+            _WHO,
+            _keyed({"dcid:KEN": 2023, "dcid:UGA": 2024}, column="observationAbout"),
+        ),
+    )
+    inner = _pairing([{"spec_id": _AID}], [{"spec_id": _GNI}], reporter="reporter")
+    nested = [_pairing([inner], [{"spec_id": _WHO}], recipient="observationAbout")]
+    flat = [{"spec_id": _AID}, {"spec_id": _GNI}, {"spec_id": _WHO}]
+
+    assert await _period(flat, roots) == "2024"
+    result = await resolve_anchor(populations=nested, roots=roots)
+    assert result.is_error is False, result.content
+    assert result.structured_content["period"] == "2023"
+    assert result.structured_content["left_out"] == []
+
+
+async def test_a_join_pairs_through_right_keys_and_leaves_out_the_keys_that_lack_the_period(
+    store,
+) -> None:
+    # WHO names the donor under observationAbout. AUS stops at 2022 on the aid
+    # side, and FRA is on the WHO side alone, so it pairs with nothing.
+    aid = _keyed({"dcid:AUS": 2022, "dcid:BEL": 2024, "dcid:CAN": 2023, "dcid:DEU": 2023})
+    who = _keyed(
+        {"dcid:AUS": 2024, "dcid:BEL": 2023, "dcid:CAN": 2024, "dcid:DEU": 2024, "dcid:FRA": 2018},
+        column="observationAbout",
+    )
+    roots = await _keyed_roots(store, aid=(_AID, aid), who=(_WHO, who))
+    paired = [_pairing([{"spec_id": _AID}], [{"spec_id": _WHO}], reporter="observationAbout")]
+
+    result = await resolve_anchor(populations=paired, roots=roots)
+
+    assert result.is_error is False, result.content
+    assert result.structured_content["period"] == "2023"
+    assert result.structured_content["left_out"] == [
+        {"root": 0, "coordinates": {"reporter": "dcid:AUS"}}
+    ]
+    misnamed = [_pairing([{"spec_id": _AID}], [{"spec_id": _WHO}], reporter="destination")]
+    assert _refused(await resolve_anchor(populations=misnamed, roots=roots)) == (
+        "rolling_anchor_unresolved",
+        "pairing_key_column_unknown",
+    )
+    # Narrowed to AUS on one side and BEL on the other, the sides name no donor
+    # in common, in any year.
+    apart = [
+        _pairing(
+            [{"spec_id": _AID, "bindings": {"reporter": ["dcid:AUS"]}}],
+            [{"spec_id": _WHO, "bindings": {"observationAbout": ["dcid:BEL"]}}],
+            reporter="observationAbout",
+        )
+    ]
+    refused = await resolve_anchor(populations=apart, roots=roots)
+    assert _refused(refused) == ("rolling_anchor_unresolved", "pairing_shares_no_key")
+    assert refused.structured_content["fix"]["keys"] == {"reporter": "observationAbout"}
+
+
+def _counting_groupings(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """How many tables `resolve_anchor` groups into series, from now on."""
+    grouped = [0]
+    series = rolling_tool._series
+
+    def _counted(table: Any) -> Any:
+        grouped[0] += 1
+        return series(table)
+
+    monkeypatch.setattr(rolling_tool, "_series", _counted)
+    return grouped
+
+
+async def test_a_population_repeated_across_branches_is_grouped_once(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # share_of(s, filter(s)) by reporter four times over, from
+    # s = share_of(aid, gni): 32 root leaves over two frames.
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)), gni=(_GNI, _keyed(_GNI_HALF)))
+    nested = _pairing([{"spec_id": _AID}], [{"spec_id": _GNI}], reporter="reporter")
+    for _ in range(4):
+        nested = _pairing([nested], [nested], reporter="reporter")
+    grouped = _counting_groupings(monkeypatch)
+
+    assert await _period([nested], roots) == "2023"
+    assert grouped == [2]
+
+
+async def test_populations_past_the_distinct_ceiling_refuse_before_any_frame_is_read(
+    store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = await _keyed_roots(store, aid=(_AID, _keyed(_AID_HALF)))
+    populations = [
+        {"spec_id": _AID, "bindings": {"reporter": [f"dcid:D{index}"]}}
+        for index in range(MAX_DISTINCT_POPULATIONS + 1)
+    ]
+    grouped = _counting_groupings(monkeypatch)
+
+    refused = await resolve_anchor(populations=populations, roots=roots)
+
+    assert _refused(refused) == ("rolling_anchor_unresolved", "populations_too_many")
+    assert grouped == [0]

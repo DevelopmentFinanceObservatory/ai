@@ -89,7 +89,7 @@ from common.materialisation import (
     MintRecordUnrecoverableError,
     StoredFrameTrace,
 )
-from common.rolling import anchor_key, rolling_roots
+from common.rolling import anchor_key, flat_populations, rolling_roots
 
 __all__ = [
     "RECIPE_SCHEMA_VERSION",
@@ -382,7 +382,8 @@ async def recipe_anchor(
     (rule,) = rules
 
     reached = [node["frame"] for node in rolling_roots(tree)]
-    if {population["spec_id"] for population in populations[0]} - {
+    # The datasets the populations name, those on each side of a pairing included.
+    if {population["spec_id"] for population in flat_populations(populations[0])} - {
         frame["spec_id"] for frame in reached
     }:
         raise RecipeAnchorError(ref, reason=_OUTSIDE_REACH)
