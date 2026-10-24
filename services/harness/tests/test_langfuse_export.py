@@ -10,8 +10,9 @@ job makes.
 
 from __future__ import annotations
 
+import email.utils
 import json
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,13 @@ from harness import langfuse_export
 from harness.langfuse_export import (
     ACCESS_DAYS,
     BACKFILL_FLOOR,
+    ERROR_BODY_CHARS,
+    MAX_RETRY_AFTER_S,
+    METRICS_ATTEMPTS,
+    RATE_LIMIT_BACKOFF_S,
     REQUEST_INTERVAL_S,
     SCHEMA,
+    DayOutcome,
     EmptyWindowError,
     IncompleteDaysError,
     LangfuseError,
@@ -32,6 +38,7 @@ from harness.langfuse_export import (
     export_days,
     retained_from,
     run_export,
+    window_start,
 )
 
 RECORDING = json.loads(
@@ -39,6 +46,8 @@ RECORDING = json.loads(
 )
 RECORDED_DAY = date(2026, 10, 20)
 TABLE_ID = "proj.langfuse_export.observations"
+# The wall clock every reader sees, which dates a `Retry-After` HTTP date.
+WALL = datetime(2026, 10, 22, 12, 0, tzinfo=UTC)
 
 
 class FakeClock:
@@ -48,6 +57,9 @@ class FakeClock:
 
     def clock(self) -> float:
         return self.now
+
+    def wall_clock(self) -> datetime:
+        return WALL
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
@@ -85,6 +97,7 @@ def reader_for(transport: httpx2.MockTransport, clock: FakeClock | None = None) 
         environment="dfo-prod-ai",
         sleep=clock.sleep,
         clock=clock.clock,
+        wall_clock=clock.wall_clock,
     )
 
 
@@ -108,7 +121,6 @@ class FakeBigQuery:
         self.created: list[bigquery.Table] = []
         self.queries: list[str] = []
         self.loads: list[tuple[str, list[dict[str, Any]], bigquery.LoadJobConfig]] = []
-        self.deleted: list[str] = []
 
     def create_table(self, table: bigquery.Table, *, exists_ok: bool) -> None:
         assert exists_ok
@@ -128,10 +140,6 @@ class FakeBigQuery:
     ) -> FakeJob:
         self.loads.append((destination, rows, job_config))
         return FakeJob()
-
-    def delete_table(self, table: str, *, not_found_ok: bool) -> None:
-        assert not_found_ok
-        self.deleted.append(table)
 
 
 def test_recorded_pages_map_to_rows_without_free_text():
@@ -215,13 +223,6 @@ def test_cached_input_tokens_come_from_usage_details(usage, cached):
     assert row["cached_input_tokens"] == cached
 
 
-def test_cached_input_tokens_follow_input_tokens():
-    names = [field.name for field in SCHEMA]
-
-    assert names[names.index("input_tokens") + 1] == "cached_input_tokens"
-    assert next(f for f in SCHEMA if f.name == "cached_input_tokens").field_type == "INT64"
-
-
 def test_mapping_drops_status_message_and_user_id():
     observation = {
         **RECORDING["pages"][0]["answer"]["data"][0],
@@ -247,7 +248,9 @@ def test_mapping_drops_status_message_and_user_id():
     ],
 )
 def test_export_days_replace_from_latest_minus_one(latest, today, first, last):
-    days = export_days(latest_loaded=latest, today=today, langfuse={}, held={})
+    days = export_days(
+        first=window_start(latest_loaded=latest, since=None), today=today, langfuse={}, held={}
+    )
 
     assert days[0] == first
     assert days[-1] == last
@@ -273,11 +276,11 @@ def test_export_days_replace_from_latest_minus_one(latest, today, first, last):
 def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added):
     today = date(2026, 11, 20)
     assert retained_from(today) == date(2026, 10, 22)
-    latest = date(2026, 11, 18)
+    first = date(2026, 11, 17)
 
-    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held)
+    days = export_days(first=first, today=today, langfuse=langfuse, held=held)
 
-    assert days == [*added, *export_days(latest_loaded=latest, today=today, langfuse={}, held={})]
+    assert days == [*added, *export_days(first=first, today=today, langfuse={}, held={})]
 
 
 @pytest.mark.parametrize(
@@ -286,46 +289,57 @@ def test_export_days_add_retained_days_whose_counts_differ(langfuse, held, added
         (date(2026, 10, 5), date(2026, 10, 5)),
         # A day inside the usual window adds nothing.
         (date(2026, 11, 19), date(2026, 11, 17)),
+        # Nothing before the floor was ever exported.
+        (date(2026, 9, 1), BACKFILL_FLOOR),
     ],
 )
 def test_from_widens_the_window_to_its_day(since, first):
     today = date(2026, 11, 20)
 
     days = export_days(
-        latest_loaded=date(2026, 11, 18), today=today, langfuse={}, held={}, since=since
+        first=window_start(latest_loaded=date(2026, 11, 18), since=since),
+        today=today,
+        langfuse={},
+        held={},
     )
 
     assert days == [first + timedelta(days=offset) for offset in range((today - first).days + 1)]
 
 
-def test_from_reads_old_days_and_keeps_a_partition_that_reads_short(capsys):
-    """`--from` re-reads days before the usual window, and a day that reads fewer rows
-    than its partition holds keeps the partition."""
-    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS)
-    bq = FakeBigQuery(latest=today - timedelta(days=1), held={RECORDED_DAY: 5})
+def test_a_window_reaching_before_the_access_window_requests_no_day_before_it():
+    """`--from` back to the floor asks Langfuse for no day it hides: those days keep their
+    partitions and get one outcome apiece, and the days from the first whole one on are
+    read, an empty one keeping its partition."""
+    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS - 1)
+    assert retained_from(today) == RECORDED_DAY
+    bq = FakeBigQuery(latest=today - timedelta(days=1), held={RECORDED_DAY - timedelta(days=1): 5})
     requests: list[httpx2.Request] = []
 
-    loaded = run_export(
-        reader=reader_for(recorded_langfuse(requests, {})),
+    outcomes = run_export(
+        reader=reader_for(recorded_langfuse(requests)),
         bq=bq,
         table_id=TABLE_ID,
         today=today,
         since=BACKFILL_FLOOR,
     )
 
-    assert loaded == []
-    assert bq.loads == []
-    days_read = {
-        r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params
+    days_read = sorted(
+        {r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params}
+    )
+    assert days_read == [
+        (RECORDED_DAY + timedelta(days=offset)).isoformat() for offset in range(ACCESS_DAYS)
+    ]
+    assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
+    hidden = [
+        BACKFILL_FLOOR + timedelta(days=n) for n in range((RECORDED_DAY - BACKFILL_FLOOR).days)
+    ]
+    assert outcomes == {
+        **dict.fromkeys(hidden, DayOutcome.OUTSIDE_WINDOW),
+        RECORDED_DAY: DayOutcome.REPLACED,
+        **dict.fromkeys(
+            (RECORDED_DAY + timedelta(days=n) for n in range(1, ACCESS_DAYS)), DayOutcome.KEPT
+        ),
     }
-    assert len(days_read) == (today - BACKFILL_FLOOR).days + 1
-    recorded_line = next(
-        line for line in capsys.readouterr().out.splitlines() if line.startswith("2026-10-20")
-    )
-    assert recorded_line == (
-        "2026-10-20: partition kept; read 4 rows, the partition holds 5, "
-        "older than Langfuse's access window"
-    )
 
 
 @pytest.mark.parametrize(
@@ -349,10 +363,14 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     bq = FakeBigQuery(latest=date(2026, 10, 21))
     reader = reader_for(recorded_langfuse([]))
 
-    loaded = run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=date(2026, 10, 22))
+    outcomes = run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=date(2026, 10, 22))
 
     # The table holds 10-21, so the run reaches back to 10-20 and on to today.
-    assert loaded == [(date(2026, 10, 20), 4)]
+    assert outcomes == {
+        date(2026, 10, 20): DayOutcome.REPLACED,
+        date(2026, 10, 21): DayOutcome.KEPT,
+        date(2026, 10, 22): DayOutcome.KEPT,
+    }
     assert logged_days(capsys.readouterr().out) == ["2026-10-20", "2026-10-21", "2026-10-22"]
     [table] = bq.created
     assert [field.name for field in table.schema] == [field.name for field in SCHEMA]
@@ -371,25 +389,9 @@ def test_run_replaces_each_day_partition_and_keeps_empty_days(capsys):
     assert config.write_disposition == bigquery.WriteDisposition.WRITE_TRUNCATE
     assert config.source_format == bigquery.SourceFormat.NEWLINE_DELIMITED_JSON
     assert config.time_partitioning.field == "start_time"
-    # 10-21 and 10-22 read empty, so their partitions are left as they are.
-    assert bq.deleted == []
-
-
-def test_a_load_adds_cached_input_tokens_to_an_older_table():
-    """A table made before `cached_input_tokens` gains the column through the load of
-    one partition, which leaves the other partitions as they are."""
-    bq = FakeBigQuery(latest=date(2026, 10, 21))
-
-    run_export(
-        reader=reader_for(recorded_langfuse([])), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 21)
-    )
-
-    [(destination, rows, config)] = bq.loads
-    assert destination == f"{TABLE_ID}$20261020"
-    assert config.write_disposition == bigquery.WriteDisposition.WRITE_TRUNCATE
+    # A table made before a column of `SCHEMA` gains it through the load.
     assert config.schema_update_options == [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
-    assert "cached_input_tokens" in [field.name for field in config.schema]
-    assert all("cached_input_tokens" in row for row in rows)
+    assert [field.name for field in config.schema] == [field.name for field in SCHEMA]
 
 
 def test_an_empty_window_fails_and_touches_no_partition():
@@ -403,21 +405,20 @@ def test_an_empty_window_fails_and_touches_no_partition():
         run_export(reader=reader_for(empty), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 23))
 
     assert bq.loads == []
-    assert bq.deleted == []
 
 
 @pytest.mark.parametrize("held", [4, 3])
 def test_a_read_holding_the_partition_replaces_it(capsys, held):
     bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: held})
 
-    loaded = run_export(
+    outcomes = run_export(
         reader=reader_for(recorded_langfuse([])),
         bq=bq,
         table_id=TABLE_ID,
         today=date(2026, 10, 21),
     )
 
-    assert loaded == [(RECORDED_DAY, 4)]
+    assert outcomes[RECORDED_DAY] is DayOutcome.REPLACED
     assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
     assert capsys.readouterr().out.splitlines()[0].startswith("2026-10-20: replaced")
 
@@ -427,6 +428,8 @@ def test_a_read_holding_the_partition_replaces_it(capsys, held):
     [
         # Fewer rows than the partition holds: the partition is kept.
         ({RECORDED_DAY: 5}, {RECORDED_DAY: 4}, False),
+        # A day the metrics answer leaves out does not lower the partition's floor.
+        ({RECORDED_DAY: 5}, {}, False),
         # Fewer rows than Langfuse counts: the read still grows the partition.
         ({RECORDED_DAY: 3}, {RECORDED_DAY: 6}, True),
     ],
@@ -442,10 +445,7 @@ def test_a_retained_day_read_short_fails_after_the_other_days(capsys, held, coun
             today=date(2026, 10, 22),
         )
 
-    message = str(failure.value)
-    assert "2026-10-20 read 4 rows" in message
-    assert f"Langfuse counts {counts[RECORDED_DAY]}" in message
-    assert f"the partition holds {held[RECORDED_DAY]}" in message
+    assert failure.value.days == [RECORDED_DAY]
     assert [destination for destination, _, _ in bq.loads] == (
         [f"{TABLE_ID}$20261020"] if replaced else []
     )
@@ -458,14 +458,14 @@ def test_a_day_missing_from_bigquery_is_loaded():
     bq = FakeBigQuery(latest=date(2026, 10, 25))
     requests: list[httpx2.Request] = []
 
-    loaded = run_export(
+    outcomes = run_export(
         reader=reader_for(recorded_langfuse(requests)),
         bq=bq,
         table_id=TABLE_ID,
         today=date(2026, 10, 26),
     )
 
-    assert loaded == [(RECORDED_DAY, 4)]
+    assert outcomes[RECORDED_DAY] is DayOutcome.REPLACED
     days_read = sorted(
         {r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params}
     )
@@ -478,23 +478,18 @@ def test_a_day_missing_from_bigquery_is_loaded():
     assert query["filters"][0]["value"] == ["dfo-prod-ai"]
 
 
-@pytest.mark.parametrize(("age", "fails"), [(ACCESS_DAYS - 1, True), (ACCESS_DAYS, False)])
-def test_a_short_day_fails_inside_the_access_window_and_is_kept_past_it(capsys, age, fails):
-    """Hobby's access window hides older observations, so a day past it reads partial."""
-    today = RECORDED_DAY + timedelta(days=age)
+def test_a_short_day_inside_the_access_window_fails_and_keeps_its_partition(capsys):
+    """Hobby's access window hides older observations, so only a day inside it reads whole."""
+    today = RECORDED_DAY + timedelta(days=ACCESS_DAYS - 1)
     bq = FakeBigQuery(latest=date(2026, 10, 21), held={RECORDED_DAY: 5})
-    reader = reader_for(recorded_langfuse([], {}))
+    reader = reader_for(recorded_langfuse([], {RECORDED_DAY: 5}))
 
-    if fails:
-        with pytest.raises(IncompleteDaysError, match="2026-10-20 read 4 rows"):
-            run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today)
-    else:
-        assert run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today) == []
+    with pytest.raises(IncompleteDaysError) as failure:
+        run_export(reader=reader, bq=bq, table_id=TABLE_ID, today=today)
 
+    assert failure.value.days == [RECORDED_DAY]
     assert bq.loads == []
-    first_line = capsys.readouterr().out.splitlines()[0]
-    assert first_line.startswith("2026-10-20: partition kept")
-    assert ("access window" in first_line) is not fails
+    assert capsys.readouterr().out.startswith("2026-10-20: partition kept")
 
 
 def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
@@ -519,15 +514,251 @@ def test_a_failure_partway_through_a_day_leaves_its_partition(capsys):
         )
 
     assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
-    assert bq.deleted == []
     assert logged_days(capsys.readouterr().out) == ["2026-10-20", "2026-10-21"]
+
+
+def overlapping_pages() -> httpx2.MockTransport:
+    """The recording, with the first page's first observation repeated on the second."""
+    recorded = recorded_langfuse([])
+    repeated = RECORDING["pages"][0]["answer"]["data"][0]
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        response = recorded.handle_request(request)
+        if "cursor" not in request.url.params:
+            return response
+        page = response.json()
+        return httpx2.Response(200, json={**page, "data": [repeated, *page["data"]]})
+
+    return httpx2.MockTransport(handle)
+
+
+def test_an_observation_two_pages_hold_loads_once():
+    """Pages that overlap repeat an observation, which would otherwise load one row more
+    than Langfuse counts, a row the never-shrink rule then keeps."""
+    bq = FakeBigQuery(latest=date(2026, 10, 21))
+
+    run_export(
+        reader=reader_for(overlapping_pages()), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 21)
+    )
+
+    [(_, rows, _)] = bq.loads
+    assert sorted(row["id"] for row in rows) == sorted(
+        observation["id"] for page in RECORDING["pages"] for observation in page["answer"]["data"]
+    )
+
+
+@pytest.mark.parametrize("finished_first", [False, True])
+def test_the_newest_copy_of_an_observation_loads(finished_first):
+    """Page 1 holds an observation still in progress and page 2 its finished copy, or the
+    reverse; the copy with an end time loads either way."""
+    recorded = recorded_langfuse([])
+    finished = RECORDING["pages"][0]["answer"]["data"][0]
+    in_progress = {**finished, "endTime": None}
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        response = recorded.handle_request(request)
+        page = response.json()
+        if request.url.path == "/api/public/v2/metrics" or not page["data"]:
+            return response
+        if "cursor" in request.url.params:
+            page["data"] = [in_progress if finished_first else finished, *page["data"]]
+        else:
+            page["data"] = [finished if finished_first else in_progress, *page["data"][1:]]
+        return httpx2.Response(200, json=page)
+
+    bq = FakeBigQuery(latest=date(2026, 10, 21))
+
+    run_export(
+        reader=reader_for(httpx2.MockTransport(handle)),
+        bq=bq,
+        table_id=TABLE_ID,
+        today=date(2026, 10, 21),
+    )
+
+    [(_, rows, _)] = bq.loads
+    [row] = [row for row in rows if row["id"] == finished["id"]]
+    assert row["end_time"] == finished["endTime"]
+
+
+def test_check_day_counts_an_observation_two_pages_hold_once():
+    pages = overlapping_pages()
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/public/v2/metrics":
+            query = json.loads(request.url.params["query"])
+            if query["metrics"] == [{"measure": "usageByType", "aggregation": "sum"}]:
+                usage = [{"usageType": "input_cached_tokens", "sum_usageByType": 10319}]
+                return httpx2.Response(200, json={"data": usage})
+            totals = {"count_count": 4, "sum_totalCost": 0.006941175}
+            return httpx2.Response(200, json={"data": [totals]})
+        return pages.handle_request(request)
+
+    matched, _ = check_day(reader=reader_for(httpx2.MockTransport(handle)), day=RECORDED_DAY)
+
+    assert matched
+
+
+def counts_answering(
+    metrics: httpx2.Response, requests: list[httpx2.Request]
+) -> httpx2.MockTransport:
+    """The recording, with every metrics query answered by `metrics`."""
+    recorded = recorded_langfuse([])
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == "/api/public/v2/metrics":
+            return metrics
+        return recorded.handle_request(request)
+
+    return httpx2.MockTransport(handle)
+
+
+@pytest.mark.parametrize(
+    ("held", "replaced", "error"),
+    [
+        ({}, True, LangfuseError),
+        # A retained day that reads below its partition is reported with the failure.
+        ({RECORDED_DAY: 5}, False, IncompleteDaysError),
+    ],
+)
+def test_a_failed_count_query_still_loads_the_window_and_fails(held, replaced, error):
+    """The window needs no count, so it loads under the never-shrink rule. A day only the
+    count comparison would add is not read, and the run still fails."""
+    requests: list[httpx2.Request] = []
+    bq = FakeBigQuery(latest=date(2026, 10, 21), held={**held, date(2026, 10, 15): 3})
+
+    with pytest.raises(RuntimeError) as failure:
+        run_export(
+            reader=reader_for(counts_answering(httpx2.Response(503), requests)),
+            bq=bq,
+            table_id=TABLE_ID,
+            today=date(2026, 10, 22),
+        )
+
+    assert type(failure.value) is error
+    if error is IncompleteDaysError:
+        assert failure.value.days == [RECORDED_DAY]
+        counts_failure = failure.value.__cause__
+    else:
+        counts_failure = failure.value
+    assert isinstance(counts_failure, LangfuseError)
+    assert counts_failure.status == 503
+    # Metrics queries draw from a daily bucket, so a failing one is tried only twice.
+    assert len([r for r in requests if r.url.path == "/api/public/v2/metrics"]) == (
+        METRICS_ATTEMPTS
+    )
+    assert [destination for destination, _, _ in bq.loads] == (
+        [f"{TABLE_ID}$20261020"] if replaced else []
+    )
+    days_read = sorted(
+        {r.url.params["fromStartTime"][:10] for r in requests if "fromStartTime" in r.url.params}
+    )
+    assert days_read == ["2026-10-20", "2026-10-21", "2026-10-22"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx2.Response(200, text="<html>bad gateway</html>"),
+        httpx2.Response(200, json={"rows": []}),
+        httpx2.Response(200, json=[]),
+        httpx2.Response(200, json={"data": [{"count_count": 4}]}),
+        httpx2.Response(200, json={"data": [{"time_dimension": "2026-10-20"}]}),
+        httpx2.Response(200, json={"data": [{"time_dimension": "yesterday", "count_count": 4}]}),
+        httpx2.Response(200, json={"data": [{"time_dimension": "2026-10-20", "count_count": "x"}]}),
+    ],
+)
+def test_an_unreadable_count_answer_fails_like_a_failed_query(answer):
+    bq = FakeBigQuery(latest=date(2026, 10, 21))
+
+    with pytest.raises(LangfuseError) as failure:
+        run_export(
+            reader=reader_for(counts_answering(answer, [])),
+            bq=bq,
+            table_id=TABLE_ID,
+            today=date(2026, 10, 22),
+        )
+
+    assert failure.value.status == 200
+    body = failure.value.body
+    assert body is not None
+    assert body == answer.text or json.loads(body) == answer.json()
+    assert [destination for destination, _, _ in bq.loads] == [f"{TABLE_ID}$20261020"]
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda reader: reader.day_totals(RECORDED_DAY),
+        lambda reader: reader.day_cached_input_tokens(RECORDED_DAY),
+    ],
+    ids=["totals", "cached_input_tokens"],
+)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx2.Response(200, text="<html>bad gateway</html>"),
+        httpx2.Response(200, json={"rows": []}),
+        httpx2.Response(200, json={"data": [{"unexpected": 1}]}),
+        httpx2.Response(200, json={"data": [{"unexpected": "y" * ERROR_BODY_CHARS * 2}]}),
+    ],
+)
+def test_an_unreadable_metrics_answer_raises_langfuse_error_with_its_body(read, answer):
+    reader = reader_for(httpx2.MockTransport(lambda request: answer))
+
+    with pytest.raises(LangfuseError) as failure:
+        read(reader)
+
+    assert failure.value.status == 200
+    assert failure.value.body is not None
+    assert 0 < len(failure.value.body) <= ERROR_BODY_CHARS
+
+
+def test_a_4xx_other_than_429_fails_at_once():
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(403, text="forbidden")
+
+    clock = FakeClock()
+    reader = reader_for(httpx2.MockTransport(handle), clock)
+
+    with pytest.raises(LangfuseError) as failure:
+        reader.observations(RECORDED_DAY)
+
+    assert failure.value.status == 403
+    assert len(requests) == 1
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("counts_status", [503, 200])
+def test_an_empty_window_names_the_environment_whatever_the_count_query_did(counts_status):
+    """A wrong environment reads empty, and the count query failing must not hide that."""
+    empty = httpx2.MockTransport(
+        lambda request: httpx2.Response(
+            counts_status if request.url.path == "/api/public/v2/metrics" else 200,
+            json={"data": [], "meta": {}},
+        )
+    )
+    bq = FakeBigQuery(latest=date(2026, 10, 21))
+
+    with pytest.raises(EmptyWindowError, match="LANGFUSE_EXPORT_ENVIRONMENT") as failure:
+        run_export(reader=reader_for(empty), bq=bq, table_id=TABLE_ID, today=date(2026, 10, 22))
+
+    assert bq.loads == []
+    if counts_status == 503:
+        assert isinstance(failure.value.__cause__, LangfuseError)
+        assert failure.value.__cause__.status == 503
+    else:
+        assert failure.value.__cause__ is None
 
 
 def test_empty_table_backfills_from_the_floor():
     bq = FakeBigQuery(latest=None)
     requests: list[httpx2.Request] = []
 
-    loaded = run_export(
+    outcomes = run_export(
         reader=reader_for(recorded_langfuse(requests)),
         bq=bq,
         table_id=TABLE_ID,
@@ -543,7 +774,7 @@ def test_empty_table_backfills_from_the_floor():
     )
     assert days_read[0] == BACKFILL_FLOOR.isoformat()
     assert len(days_read) == 16
-    assert loaded == [(RECORDED_DAY, 4)]
+    assert outcomes[RECORDED_DAY] is DayOutcome.REPLACED
 
 
 def test_pages_are_paced_and_429_waits_for_retry_after():
@@ -563,6 +794,97 @@ def test_pages_are_paced_and_429_waits_for_retry_after():
     # 429 waits its Retry-After, which already covers the pacing interval. The 503
     # backs off two seconds, after which the retry needs no further pacing wait.
     assert clock.sleeps == [7.0, REQUEST_INTERVAL_S, langfuse_export.BACKOFF_S]
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "wait"),
+    [
+        ("inf", RATE_LIMIT_BACKOFF_S),
+        ("-5", RATE_LIMIT_BACKOFF_S),
+        (None, RATE_LIMIT_BACKOFF_S),
+        # An HTTP date in the past asks for no wait.
+        ("Wed, 21 Oct 2015 07:28:00 GMT", 0.0),
+    ],
+)
+def test_a_429_without_a_usable_retry_after_backs_off(retry_after, wait):
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    answers = [httpx2.Response(429, headers=headers), httpx2.Response(200, json={"data": []})]
+    clock = FakeClock()
+    reader = reader_for(httpx2.MockTransport(lambda request: answers.pop(0)), clock)
+
+    list(reader.observations(RECORDED_DAY))
+
+    assert clock.sleeps[0] == wait
+
+
+def test_a_429_backoff_counts_consecutive_429s():
+    """A 429 after a 5xx is the first 429 in a row, however many attempts came before."""
+    answers = [
+        httpx2.Response(503),
+        httpx2.Response(429),
+        httpx2.Response(200, json={"data": []}),
+    ]
+    clock = FakeClock()
+    reader = reader_for(httpx2.MockTransport(lambda request: answers.pop(0)), clock)
+
+    list(reader.observations(RECORDED_DAY))
+
+    assert clock.sleeps == [langfuse_export.BACKOFF_S, RATE_LIMIT_BACKOFF_S]
+
+
+def test_a_429_waits_for_an_http_date():
+    at = email.utils.format_datetime(WALL + timedelta(seconds=31), usegmt=True)
+    answers = [
+        httpx2.Response(429, headers={"retry-after": at}),
+        httpx2.Response(200, json={"data": []}),
+    ]
+    clock = FakeClock()
+    reader = reader_for(httpx2.MockTransport(lambda request: answers.pop(0)), clock)
+
+    list(reader.observations(RECORDED_DAY))
+
+    assert clock.sleeps[0] == 31.0
+
+
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        str(int(MAX_RETRY_AFTER_S) + 1),
+        email.utils.format_datetime(WALL + timedelta(hours=2), usegmt=True),
+    ],
+)
+def test_a_429_asking_to_wait_past_the_cap_fails_at_once(retry_after):
+    """An exhausted daily Metrics bucket names a wait of hours."""
+    requests: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(429, headers={"retry-after": retry_after})
+
+    clock = FakeClock()
+    reader = reader_for(httpx2.MockTransport(handle), clock)
+
+    with pytest.raises(LangfuseError) as failure:
+        list(reader.observations(RECORDED_DAY))
+
+    assert failure.value.status == 429
+    assert len(requests) == 1
+    assert clock.sleeps == []
+
+
+def test_persistent_429s_back_off_and_raise_with_the_body():
+    body = "rate limit exceeded; " * 50
+    clock = FakeClock()
+    reader = reader_for(
+        httpx2.MockTransport(lambda request: httpx2.Response(429, text=body)), clock
+    )
+
+    with pytest.raises(LangfuseError) as failure:
+        list(reader.observations(RECORDED_DAY))
+
+    assert clock.sleeps == [15.0, 30.0, 60.0, 60.0]
+    assert failure.value.status == 429
+    assert failure.value.body == body[:ERROR_BODY_CHARS]
 
 
 def test_persistent_server_errors_raise():
@@ -605,6 +927,28 @@ def test_check_day_compares_rows_with_metrics(totals, cached, matched):
 
     assert ok is matched
     assert "rows 4 cost 0.006941175 cached input tokens 10319" in line
+
+
+def test_check_day_names_the_usage_measure_langfuse_refuses():
+    observations = recorded_langfuse([])
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/public/v2/metrics":
+            query = json.loads(request.url.params["query"])
+            if query["metrics"] == [{"measure": "usageByType", "aggregation": "sum"}]:
+                return httpx2.Response(400, json={"message": "Invalid query"})
+            return httpx2.Response(200, json={"data": [{"count_count": 4, "sum_totalCost": 0}]})
+        return observations.handle_request(request)
+
+    with pytest.raises(LangfuseError) as failure:
+        check_day(reader=reader_for(httpx2.MockTransport(handle)), day=RECORDED_DAY)
+
+    # The refusal is wrapped in the error naming the measure.
+    assert failure.value.status == 400
+    assert failure.value.body is not None
+    assert json.loads(failure.value.body) == {"message": "Invalid query"}
+    assert isinstance(failure.value.__cause__, LangfuseError)
+    assert failure.value.__cause__.status == 400
 
 
 def test_load_refuses_without_bigquery_settings(monkeypatch, tmp_path):

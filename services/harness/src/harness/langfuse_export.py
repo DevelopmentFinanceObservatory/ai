@@ -8,29 +8,44 @@ day is replaced. The days are the latest loaded day minus one through today, plu
 every day Langfuse still shows whole (`retained_from` on) whose observation count,
 from one `GET /api/public/v2/metrics` query grouped by day, differs from its
 partition's row count. An empty table is backfilled from `BACKFILL_FLOOR`, the
-first day the prod project holds data. `--from DAY` adds every day from DAY
-through today to the window, under the same rules, to re-read history after a
-column is added: run it once with `--from 2026-10-05` after `cached_input_tokens`
-ships, before 2026-11-04, when Langfuse's access window starts to hide 2026-10-05.
-A run that fails part-way leaves every day it reached replaced whole and every
-other day as it was. For the scheduled window, the next run's count comparison
-picks up the gap. A `--from` run that stops part-way is repaired by running it
-again, which is safe because every replace is whole-day and never shrinks.
-
-A replace never shrinks a partition: a day that reads fewer rows than its
-partition holds, none included, keeps the partition and prints both counts.
+first day the prod project holds data. `--from DAY` adds every day from DAY (or
+`BACKFILL_FLOOR`, when DAY is earlier) through today to the window, under the
+same rules, so a column added to `SCHEMA` reaches the days Langfuse still shows.
 Hobby's data access window hides observations older than `ACCESS_DAYS` from the
-API, so a day before `retained_from` reads partial or empty; such a day is kept
-and logged.
-A day from `retained_from` on that reads fewer rows than its partition holds or
-than Langfuse counts is a fault. The run processes the other days and then
-raises `IncompleteDaysError` naming every such day with its counts, and the day
-stays in later runs until the counts match. When every day of the run reads no
-rows, the run raises `EmptyWindowError` naming the days and
-`LANGFUSE_EXPORT_ENVIRONMENT`, since a wrong environment or keys for another
-project read as empty and prod has had turns every day since `BACKFILL_FLOOR`.
-Each day prints a line as it is replaced or kept, and a failure prints the day it
-stopped on before the error.
+API, so no window starts before `retained_from`: a day before it is logged once
+as outside the access window, its partition is kept, and the API is not asked
+for it. A run that fails part-way leaves every day it reached replaced whole and
+every other day as it was. For the scheduled window, the next run's count
+comparison picks up the gap. A `--from` run that stops part-way is repaired by
+running it again, since the scheduled runs skip days whose counts already match.
+
+`LangfuseReader.observations` returns each observation id once, so an observation
+two pages both hold loads once and `--check-day` counts it once. Of two copies of
+one id it keeps the one with an `endTime` over one without, and otherwise the
+copy seen last, since an observation Langfuse was still updating when an early
+page was cut has no `endTime` yet. A replace never shrinks a partition: a day that
+reads fewer rows than its partition holds, none included, keeps the partition and
+prints both counts. A request error ends the run as `LangfuseError`, and
+`run_export` returns each day's `DayOutcome`.
+A day that reads fewer rows than its partition holds or than Langfuse counts is a
+fault. The run processes the other days and then raises `IncompleteDaysError`
+naming every such day with its counts, and the day stays in later runs until the
+counts match. A partition holding rows Langfuse no
+longer counts, such as an observation deleted in Langfuse, fails every run until
+that day's rows are deleted from the table, after which the next run reloads the
+day. When every day of the run reads no rows, the run raises `EmptyWindowError`
+naming the days and `LANGFUSE_EXPORT_ENVIRONMENT`, since a wrong environment or
+keys for another project read as empty and prod has had turns every day since
+`BACKFILL_FLOOR`. Each day prints a line as it is replaced or kept, and a failure
+prints the day it stopped on before the error.
+
+When the day-count query fails, the run still reads the window from the latest
+loaded day minus one (or `--from`, or `retained_from` when later) through today,
+which needs no count, under the never-shrink rule. It then raises
+`EmptyWindowError` chained from the query's `LangfuseError` when every day read no
+rows, so a wrong environment is always named, and otherwise the query's
+`LangfuseError`, or an `IncompleteDaysError` chained from it and naming it when a
+day read fewer rows than its partition holds.
 
 The rows carry ids, names, the model, times, tokens and cost. `input_tokens` is
 Langfuse's `inputUsage`, which includes the cached input tokens, and
@@ -40,10 +55,18 @@ observation has no such key. Requests omit the
 Langfuse, and `observation_row` copies named fields only, which keeps
 `statusMessage` (it can echo user input) and `userId` out of BigQuery.
 
-Langfuse Cloud counts every page against the organisation's General API bucket
-(30 requests a minute on Hobby), so pages go out at most one per
-`REQUEST_INTERVAL_S`. A 429 waits for its `Retry-After`. A 5xx or a transport
-error is retried with backoff.
+Langfuse Cloud counts every observations page against the organisation's General
+API bucket (30 requests a minute on Hobby), so requests go out at most one per
+`REQUEST_INTERVAL_S`. Metrics queries draw from the separate Metrics API bucket
+(100 requests a day on Hobby) and make at most `METRICS_ATTEMPTS` attempts. An
+hourly run makes one query, spending one request and at most two, so 24 runs
+spend 24 to 48 a day, and each `--check-day` makes two queries, spending two to
+four. A 429 waits when its `Retry-After`, in seconds or as an HTTP date, is at most
+`MAX_RETRY_AFTER_S`, and backs off with a doubling wait from `RATE_LIMIT_BACKOFF_S`
+capped at `MAX_RETRY_AFTER_S` when the header is missing or unusable. It ends the
+run with `LangfuseError` when it asks for longer, as an exhausted daily Metrics
+bucket does, or when the attempts run out. Any other 4xx ends the run at once. A
+5xx or a transport error is retried with backoff.
 
 `--check-day DAY` reads one day and compares the row count, summed cost and summed
 cached input tokens the mapping produces with `GET /api/public/v2/metrics` for the
@@ -61,12 +84,15 @@ whole run read no rows, and 2 when a setting is missing.
 from __future__ import annotations
 
 import argparse
+import email.utils
 import json
 import math
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 import httpx2
@@ -89,6 +115,18 @@ PAGE_LIMIT = 1000
 REQUEST_INTERVAL_S = 2.0
 ATTEMPTS = 5
 BACKOFF_S = 2.0
+# A metrics query's attempts. The Metrics bucket allows 100 requests a day, so a
+# persistent metrics failure spends at most 48 of them across 24 hourly runs.
+METRICS_ATTEMPTS = 2
+# A 429 without a usable `Retry-After` waits this long, doubling with each
+# consecutive 429.
+RATE_LIMIT_BACKOFF_S = 15.0
+# The longest a 429 waits. The General API bucket refills within a minute, and a
+# longer `Retry-After`, such as the hours an exhausted daily Metrics bucket names,
+# fails the request at once.
+MAX_RETRY_AFTER_S = 60.0
+# How much of a refusal's body a `LangfuseError` message carries.
+ERROR_BODY_CHARS = 500
 
 SCHEMA = [
     bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
@@ -138,7 +176,22 @@ class ExportSettings(BaseSettings):
 
 
 class LangfuseError(RuntimeError):
-    """Langfuse kept failing a request after every retry, or refused it."""
+    """Langfuse kept failing a request after every retry, refused it, or answered
+    what the job cannot read. `status` is the last answer's HTTP status, None after
+    a transport error, and `body` its first `ERROR_BODY_CHARS` characters."""
+
+    def __init__(self, message: str, *, status: int | None = None, body: str | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
+
+
+class DayOutcome(StrEnum):
+    """What a run did with one day's partition."""
+
+    REPLACED = "replaced"
+    KEPT = "partition kept"
+    OUTSIDE_WINDOW = "outside the access window"
 
 
 class EmptyWindowError(RuntimeError):
@@ -147,9 +200,28 @@ class EmptyWindowError(RuntimeError):
 
 class IncompleteDaysError(RuntimeError):
     """A day Langfuse still shows whole read fewer rows than its partition or
-    Langfuse's own count. A partition holding rows Langfuse no longer counts, such
-    as an observation deleted in Langfuse, fails every run until that day's rows
-    are deleted from the table, after which the next run reloads the day."""
+    Langfuse's own count; `days` lists them. A partition holding rows Langfuse no
+    longer counts, such as an observation deleted in Langfuse, fails every run until
+    that day's rows are deleted from the table, after which the next run reloads the
+    day."""
+
+    def __init__(self, message: str, *, days: list[date]) -> None:
+        super().__init__(message)
+        self.days = days
+
+
+@contextmanager
+def _readable(shown: object) -> Iterator[None]:
+    """Turns a KeyError, TypeError or ValueError from reading a metrics answer into a
+    `LangfuseError` carrying the first `ERROR_BODY_CHARS` characters of `shown`."""
+    try:
+        yield
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LangfuseError(
+            f"the metrics query answered rows it cannot read: {exc!r}",
+            status=200,
+            body=json.dumps(shown)[:ERROR_BODY_CHARS],
+        ) from exc
 
 
 def _text(value: object) -> str | None:
@@ -192,35 +264,69 @@ def retained_from(today: date) -> date:
     return max(today - timedelta(days=ACCESS_DAYS - 1), BACKFILL_FLOOR)
 
 
-def _catch_up_from(latest_loaded: date | None) -> date:
-    if latest_loaded is None:
-        return BACKFILL_FLOOR
-    return max(latest_loaded - timedelta(days=1), BACKFILL_FLOOR)
+def window_start(*, latest_loaded: date | None, since: date | None) -> date:
+    """The first day of the run's window, which is read whatever the counts say: the
+    latest loaded day minus one (`BACKFILL_FLOOR` when nothing is loaded), or `since`
+    when earlier, and never before `BACKFILL_FLOOR`. The count comparison sees only
+    observations added or removed, and Langfuse updates an existing observation in
+    place as later events for it arrive (its end time, usage and cost), so the day
+    before the latest loaded day is re-read for the updates a count misses."""
+    first = BACKFILL_FLOOR if latest_loaded is None else latest_loaded - timedelta(days=1)
+    if since is not None:
+        first = min(first, since)
+    return max(first, BACKFILL_FLOOR)
 
 
 def export_days(
     *,
-    latest_loaded: date | None,
+    first: date,
     today: date,
-    langfuse: Mapping[date, int],
+    langfuse: Mapping[date, int] | None,
     held: Mapping[date, int],
-    since: date | None = None,
 ) -> list[date]:
-    """The days a run replaces: the latest loaded day minus one (or `BACKFILL_FLOOR`
-    when nothing is loaded) through today, or `since` through today when `since` is
-    earlier, and every day from `retained_from` on whose Langfuse count differs from
-    its partition's row count."""
-    first = _catch_up_from(latest_loaded)
-    if since is not None:
-        first = min(first, since)
+    """The days a run replaces: `first` (the run's `window_start`) through today, and
+    every day from `retained_from` on whose Langfuse count differs from its
+    partition's row count. `langfuse` is None when the counts could not be read,
+    which leaves the window."""
     days = {first + timedelta(days=offset) for offset in range((today - first).days + 1)}
-    retained = retained_from(today)
-    days.update(
-        day
-        for day in langfuse.keys() | held.keys()
-        if retained <= day <= today and langfuse.get(day, 0) != held.get(day, 0)
-    )
+    if langfuse is not None:
+        retained = retained_from(today)
+        days.update(
+            day
+            for day in langfuse.keys() | held.keys()
+            if retained <= day <= today and langfuse.get(day, 0) != held.get(day, 0)
+        )
     return sorted(days)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _rate_limit_wait(retry_after: str | None, consecutive: int, now: datetime) -> float:
+    """How long the `consecutive`th 429 in a row asks to wait: its `Retry-After`, in
+    seconds or as an HTTP date measured from `now`, or a wait doubling from
+    `RATE_LIMIT_BACKOFF_S`, at most `MAX_RETRY_AFTER_S`, when the header is missing or
+    unusable."""
+    seconds = _retry_after_seconds(retry_after, now)
+    if seconds is None:
+        return min(RATE_LIMIT_BACKOFF_S * 2 ** (consecutive - 1), MAX_RETRY_AFTER_S)
+    return seconds
+
+
+def _retry_after_seconds(value: str | None, now: datetime) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            at = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        # A date already past asks for no wait beyond the pacing interval.
+        return max((at.replace(tzinfo=at.tzinfo or UTC) - now).total_seconds(), 0.0)
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _day_bounds(day: date) -> tuple[str, str]:
@@ -242,15 +348,20 @@ class LangfuseReader:
         environment: str,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._client = client
         self._environment = environment
         self._sleep = sleep
         self._clock = clock
+        self._wall_clock = wall_clock
         self._last_request: float | None = None
 
-    def _get(self, path: str, params: Mapping[str, str | int]) -> dict[str, Any]:
-        for attempt in range(1, ATTEMPTS + 1):
+    def _get(
+        self, path: str, params: Mapping[str, str | int], *, attempts: int = ATTEMPTS
+    ) -> dict[str, Any]:
+        rate_limited = 0
+        for attempt in range(1, attempts + 1):
             if self._last_request is not None:
                 wait = self._last_request + REQUEST_INTERVAL_S - self._clock()
                 if wait > 0:
@@ -259,24 +370,45 @@ class LangfuseReader:
             try:
                 response = self._client.get(path, params=params)
             except httpx2.TransportError as exc:
-                if attempt == ATTEMPTS:
+                rate_limited = 0
+                if attempt == attempts:
                     raise LangfuseError(f"GET {path} failed: {exc!r}") from exc
                 self._sleep(BACKOFF_S * 2 ** (attempt - 1))
                 continue
-            if response.status_code == 429 and attempt < ATTEMPTS:
-                self._sleep(float(response.headers.get("retry-after", BACKOFF_S)))
-                continue
-            if response.status_code >= 500 and attempt < ATTEMPTS:
+            rate_limited = rate_limited + 1 if response.status_code == 429 else 0
+            if response.status_code == 429 and attempt < attempts:
+                wait = _rate_limit_wait(
+                    response.headers.get("retry-after"), rate_limited, self._wall_clock()
+                )
+                if wait <= MAX_RETRY_AFTER_S:
+                    self._sleep(wait)
+                    continue
+            if response.status_code >= 500 and attempt < attempts:
                 self._sleep(BACKOFF_S * 2 ** (attempt - 1))
                 continue
             if response.status_code != 200:
-                raise LangfuseError(f"GET {path} answered {response.status_code}")
-            return response.json()
+                body = response.text[:ERROR_BODY_CHARS]
+                raise LangfuseError(
+                    f"GET {path} answered {response.status_code}: {body}",
+                    status=response.status_code,
+                    body=body,
+                )
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise LangfuseError(
+                    f"GET {path} answered 200 with a body that is not JSON: {exc!r}",
+                    status=200,
+                    body=response.text[:ERROR_BODY_CHARS],
+                ) from exc
         raise AssertionError("unreachable: the last attempt returns or raises")
 
-    def observations(self, day: date) -> Iterator[dict[str, Any]]:
-        """Every observation of the environment whose start time falls on `day` (UTC)."""
+    def observations(self, day: date) -> list[dict[str, Any]]:
+        """Every observation of the environment whose start time falls on `day` (UTC),
+        each id once. Of two copies of an id, which overlapping pages can hold, the one
+        with an `endTime` wins over one without, and otherwise the later-seen copy."""
         start, end = _day_bounds(day)
+        found: dict[str, dict[str, Any]] = {}
         params: dict[str, str | int] = {
             "fields": FIELD_GROUPS,
             "environment": self._environment,
@@ -286,10 +418,13 @@ class LangfuseReader:
         }
         while True:
             page = self._get("/api/public/v2/observations", params)
-            yield from page["data"]
+            for observation in page["data"]:
+                kept = found.get(observation["id"])
+                if kept is None or observation.get("endTime") or not kept.get("endTime"):
+                    found[observation["id"]] = observation
             cursor = (page.get("meta") or {}).get("cursor")
             if not cursor or not page["data"]:
-                return
+                return list(found.values())
             params["cursor"] = cursor
 
     def _metrics(
@@ -302,8 +437,10 @@ class LangfuseReader:
         by_day: bool,
     ) -> list[dict[str, Any]]:
         """The metrics rows for the environment's observations from `first` through
-        `last` (UTC), one row a day when `by_day` and one row otherwise, for each
-        value of `dimensions`."""
+        `last` (UTC), one row a day when `by_day` and one row otherwise, for each value
+        of `dimensions`, in at most `METRICS_ATTEMPTS` attempts. Raises `LangfuseError`
+        carrying the answer's first `ERROR_BODY_CHARS` characters when it holds no
+        `data`."""
         query: dict[str, Any] = {
             "view": "observations",
             "metrics": metrics,
@@ -321,35 +458,55 @@ class LangfuseReader:
         }
         if by_day:
             query["timeDimension"] = {"granularity": "day"}
-        return self._get("/api/public/v2/metrics", {"query": json.dumps(query)})["data"]
+        answer = self._get(
+            "/api/public/v2/metrics", {"query": json.dumps(query)}, attempts=METRICS_ATTEMPTS
+        )
+        with _readable(answer):
+            return answer["data"]
 
     def day_counts(self, *, first: date, last: date) -> dict[date, int]:
         """The observation count Langfuse's metrics report for each day from `first`
         through `last` that holds observations. The metrics bucket a day by UTC
-        start time, the bounds `observations` reads."""
+        start time, the bounds `observations` reads. Raises `LangfuseError` when the
+        query fails or answers rows without a readable day and count."""
         rows = self._metrics(
             first=first,
             last=last,
             metrics=[{"measure": "count", "aggregation": "count"}],
             by_day=True,
         )
-        return {date.fromisoformat(row["time_dimension"]): int(row["count_count"]) for row in rows}
+        with _readable({"data": rows}):
+            return {
+                date.fromisoformat(row["time_dimension"]): int(row["count_count"]) for row in rows
+            }
 
     def day_cached_input_tokens(self, day: date) -> int:
         """The summed `input_cached_tokens` usage Langfuse's metrics report for `day`.
-        The `usageByType` measure sums each usage key, grouped by `usageType`."""
-        rows = self._metrics(
-            first=day,
-            last=day,
-            metrics=[{"measure": "usageByType", "aggregation": "sum"}],
-            dimensions=[{"field": "usageType"}],
-            by_day=False,
-        )
-        return sum(
-            int(row["sum_usageByType"] or 0)
-            for row in rows
-            if row["usageType"] == "input_cached_tokens"
-        )
+        The `usageByType` measure sums each usage key, grouped by `usageType`. Raises
+        `LangfuseError` naming the measure when Langfuse refuses it with a 400."""
+        try:
+            rows = self._metrics(
+                first=day,
+                last=day,
+                metrics=[{"measure": "usageByType", "aggregation": "sum"}],
+                dimensions=[{"field": "usageType"}],
+                by_day=False,
+            )
+        except LangfuseError as exc:
+            if exc.status != 400:
+                raise
+            raise LangfuseError(
+                "the metrics API does not accept the `usageByType` measure grouped by "
+                f"`usageType`, which sums cached input tokens: {exc}",
+                status=exc.status,
+                body=exc.body,
+            ) from exc
+        with _readable({"data": rows}):
+            return sum(
+                int(row["sum_usageByType"] or 0)
+                for row in rows
+                if row["usageType"] == "input_cached_tokens"
+            )
 
     def day_totals(self, day: date) -> tuple[int, float]:
         """The observation count and summed total cost Langfuse's metrics report for `day`."""
@@ -362,9 +519,10 @@ class LangfuseReader:
             ],
             by_day=False,
         )
-        if not rows:
-            return 0, 0.0
-        return int(rows[0]["count_count"]), float(rows[0]["sum_totalCost"] or 0.0)
+        with _readable({"data": rows}):
+            if not rows:
+                return 0, 0.0
+            return int(rows[0]["count_count"]), float(rows[0]["sum_totalCost"] or 0.0)
 
 
 def _table_id(settings: ExportSettings) -> str:
@@ -407,27 +565,48 @@ def run_export(
     table_id: str,
     today: date,
     since: date | None = None,
-) -> list[tuple[date, int]]:
+) -> dict[date, DayOutcome]:
     """Create the table if absent and replace every day `export_days` names, with
     `since` widening the window, whose read holds rows and at least as many as its
-    partition. Returns each replaced day
-    with its row count. Raises `EmptyWindowError` when every day reads no rows, and
-    otherwise `IncompleteDaysError` when a day from `retained_from` on read fewer
-    rows than its partition or Langfuse's count."""
+    partition. No day before `retained_from` is requested: those days keep their
+    partitions. Returns each day's `DayOutcome`. Raises a read's `LangfuseError` at
+    once, then `EmptyWindowError` when every day reads no rows, chained from the
+    day-count query's `LangfuseError` when that failed, then that `LangfuseError` or
+    an `IncompleteDaysError` chained from it when a day read fewer rows than its
+    partition holds, and then `IncompleteDaysError` when a day read fewer rows than
+    its partition or Langfuse's count."""
     table = bigquery.Table(table_id, schema=SCHEMA)
     table.time_partitioning = PARTITIONING
     bq.create_table(table, exists_ok=True)
     latest = latest_loaded_day(bq, table_id)
     retained = retained_from(today)
-    langfuse = reader.day_counts(first=retained, last=today)
-    held = partition_row_counts(
-        bq, table_id, min(_catch_up_from(latest), retained, since or retained)
-    )
-    days = export_days(latest_loaded=latest, today=today, langfuse=langfuse, held=held, since=since)
-    loaded = []
+    wanted = window_start(latest_loaded=latest, since=since)
+    first = max(wanted, retained)
+    outcomes: dict[date, DayOutcome] = {}
+    if wanted < retained:
+        outcomes = dict.fromkeys(
+            (wanted + timedelta(days=offset) for offset in range((retained - wanted).days)),
+            DayOutcome.OUTSIDE_WINDOW,
+        )
+        print(
+            f"{wanted} through {retained - timedelta(days=1)}: {DayOutcome.OUTSIDE_WINDOW}; "
+            f"partitions kept, not requested, since {retained} is the first day inside it",
+            flush=True,
+        )
+    counts_error = None
+    langfuse: dict[date, int] | None
+    try:
+        langfuse = reader.day_counts(first=retained, last=today)
+    except LangfuseError as exc:
+        print(f"day counts: failed, so only {first} through {today} is read; {exc}", flush=True)
+        counts_error = exc
+        langfuse = None
+    held = partition_row_counts(bq, table_id, retained)
+    days = export_days(first=first, today=today, langfuse=langfuse, held=held)
     short = []
     read_any = False
     for day in days:
+        count = None if langfuse is None else langfuse.get(day, 0)
         try:
             rows = [observation_row(observation) for observation in reader.observations(day)]
             replaced = bool(rows) and len(rows) >= held.get(day, 0)
@@ -437,32 +616,35 @@ def run_export(
             print(f"{day}: failed; this day and later days were not replaced", flush=True)
             raise
         read_any = read_any or bool(rows)
-        if day >= retained:
+        counts = f"read {len(rows)} rows, the partition holds {held.get(day, 0)}"
+        if count is not None:
             counts = (
-                f"read {len(rows)} rows, Langfuse counts {langfuse.get(day, 0)}, "
+                f"read {len(rows)} rows, Langfuse counts {count}, "
                 f"the partition holds {held.get(day, 0)}"
             )
-            if len(rows) < max(held.get(day, 0), langfuse.get(day, 0)):
-                short.append(f"{day} {counts}")
-        else:
-            counts = (
-                f"read {len(rows)} rows, the partition holds {held.get(day, 0)}, "
-                "older than Langfuse's access window"
-            )
-        if replaced:
-            print(f"{day}: replaced; {counts}", flush=True)
-            loaded.append((day, len(rows)))
-        else:
-            print(f"{day}: partition kept; {counts}", flush=True)
+        if len(rows) < max(held.get(day, 0), count or 0):
+            short.append((day, counts))
+        outcomes[day] = DayOutcome.REPLACED if replaced else DayOutcome.KEPT
+        print(f"{day}: {outcomes[day]}; {counts}", flush=True)
     if not read_any:
         raise EmptyWindowError(
             f"Langfuse returned no rows for any day from {days[0]} to {days[-1]}; check "
             "LANGFUSE_EXPORT_ENVIRONMENT and that the Langfuse keys belong to the project "
             "holding it"
-        )
+        ) from counts_error
+    incomplete = "days read short of their counts: " + ", ".join(
+        f"{day} {counts}" for day, counts in short
+    )
+    if counts_error is not None:
+        if not short:
+            raise counts_error
+        raise IncompleteDaysError(
+            f"{incomplete}; the day-count query failed: {counts_error}",
+            days=[day for day, _ in short],
+        ) from counts_error
     if short:
-        raise IncompleteDaysError(f"days read short of their counts: {', '.join(short)}")
-    return loaded
+        raise IncompleteDaysError(incomplete, days=[day for day, _ in short])
+    return outcomes
 
 
 def check_day(*, reader: LangfuseReader, day: date) -> tuple[bool, str]:
