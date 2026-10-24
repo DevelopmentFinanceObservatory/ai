@@ -54,6 +54,7 @@ from data_mcp.manifest import (
     party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
+from data_mcp.tool_errors import ENTITY_DCID_MARKER
 from data_mcp.version_description import VersionDescription
 
 # How the digest's frame reference line and operation poll note begin. Both
@@ -122,9 +123,6 @@ _MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
 # Its message carries the count of StatVars summed, so it renders outside
 # `_MANIFEST_WARNING_CAP`.
 _STAT_VARS_SUMMED = "stat_vars_summed"
-
-# The prefix apis writes a warning's refs with; a ref with no label is named without it.
-_DCID_PREFIX = "dcid:"
 
 # The coverage dimension apis counts after every declared role column.
 _YEARS_DIMENSION = "years"
@@ -918,7 +916,7 @@ def _counted_field_sentence(field: _CountedField, labels: Mapping[str, str]) -> 
     many of its count it names none of."""
     names = []
     for ref, years in field.named:
-        name = labels.get(ref) or ref.removeprefix(_DCID_PREFIX)
+        name = labels.get(ref) or ref.removeprefix(ENTITY_DCID_MARKER)
         names.append(f"{name} ({', '.join(years)})" if years else name)
     text = ", ".join(names)
     if (unnamed := field.count - len(field.named)) > 0:

@@ -5581,20 +5581,33 @@ def _with_messages(*messages: str) -> list[dict[str, Any]]:
 
 
 def _ref_warnings_handler(
-    spec_id: str, nodes: Callable[[httpx2.Request], httpx2.Response], node_requests: list[list[str]]
+    spec_id: str,
+    nodes: Handler,
+    node_requests: list[list[str]],
+    *,
+    on_mint: Callable[[], None] = lambda: None,
 ) -> Handler:
+    """Answer the mint with `_REF_WARNINGS`, calling `on_mint` first, and the node batch
+    route with `nodes`, recording each request's dcids in `node_requests`."""
     payload = _manifest_response(spec_id=spec_id)
     payload["warnings"] = _REF_WARNINGS
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/datasets":
+            on_mint()
             return httpx2.Response(200, json=payload)
         if request.url.path == _NODES_PATH:
             node_requests.append(json.loads(request.content)["dcids"])
-            return nodes(request)
+            response = nodes(request)
+            return response if isinstance(response, httpx2.Response) else await response
         raise AssertionError(f"unexpected call to {request.url.path}")
 
     return handler
+
+
+async def _never_answers(_request: httpx2.Request) -> httpx2.Response:
+    await asyncio.Event().wait()
+    raise AssertionError("the wait above never ends")
 
 
 def _labelled_nodes(request: httpx2.Request) -> httpx2.Response:
@@ -5636,26 +5649,41 @@ async def test_every_warnings_refs_are_labelled_by_one_node_lookup() -> None:
 
 
 @pytest.mark.parametrize(
-    "nodes",
+    ("nodes", "seconds_left"),
     [
-        lambda _request: httpx2.Response(
-            500, content=_problem_body(code="internal", retryable=False)
+        (
+            lambda _request: httpx2.Response(
+                500, content=_problem_body(code="internal", retryable=False)
+            ),
+            None,
         ),
-        lambda _request: httpx2.Response(200, json={"nodes": "not a list"}),
+        (lambda _request: httpx2.Response(200, json={"nodes": "not a list"}), None),
+        # The mint answers with 3.05s of the call deadline left, so the label read, which
+        # must leave 3s unspent, gets 0.05s: its request is sent and cut unanswered.
+        (_never_answers, get_data_tool._STATISTICS_RESERVE_S + 0.05),
     ],
-    ids=["refused", "unparsable"],
+    ids=["refused", "unparsable", "past_its_reserve"],
 )
 async def test_a_failed_label_lookup_names_the_warnings_refs_bare(
-    nodes: Callable[[httpx2.Request], httpx2.Response],
+    monkeypatch: pytest.MonkeyPatch, nodes: Handler, seconds_left: float | None
 ) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(get_data_tool, "_deadline_clock", clock)
     stored = _stored_definition()
     node_requests: list[list[str]] = []
 
-    result = await _call_get_data(
-        _ref_warnings_handler(stored.spec_id, nodes, node_requests),
-        _StubStore(stored),
-        {"spec_id": stored.spec_id},
-    )
+    def on_mint() -> None:
+        if seconds_left is not None:
+            clock.now = Settings().get_data_deadline_s - seconds_left
+
+    # Without the read's own bound, the unanswered route would hold the call open; this
+    # guard turns that into a failure instead of a hang.
+    async with asyncio.timeout(5.0):
+        result = await _call_get_data(
+            _ref_warnings_handler(stored.spec_id, nodes, node_requests, on_mint=on_mint),
+            _StubStore(stored),
+            {"spec_id": stored.spec_id},
+        )
 
     assert result.is_error is False
     assert len(node_requests) == 1
