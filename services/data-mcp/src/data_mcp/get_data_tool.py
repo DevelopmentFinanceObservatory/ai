@@ -37,6 +37,7 @@ from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from data_mcp import node_lookup
 from data_mcp.client import UpstreamClient
 from data_mcp.client_holder import get_client
 from data_mcp.deadline import (
@@ -65,11 +66,14 @@ from data_mcp.frame_materialisation import (
 from data_mcp.get_data_digest import (
     BreakdownLevel,
     OperationPollNote,
+    labelled_warnings,
     render_dcids,
     render_get_data_digest,
     statistics_needs_fetch,
     summed_family,
+    warning_refs,
 )
+from data_mcp.graph_wire import NotHeldEntry
 from data_mcp.manifest import (
     ArtifactEntry,
     DefinitionModel,
@@ -182,7 +186,8 @@ _DEFINITION_STORE_SERVICE_NAME = "the definition store"
 # The current `CallBudget` shares out one call's deadline (`data_mcp.deadline`). Inside
 # its post-mint reserve, the statistics fetch runs only with `_STATISTICS_FLOOR_S` left
 # and must finish with `_STATISTICS_RESERVE_S` still unspent, for the digest. The
-# description read runs beside it and ends with the same reserve unspent.
+# description read and the warnings' label read run beside it and end with the same
+# reserve unspent.
 _STATISTICS_FLOOR_S = 8.0
 _STATISTICS_RESERVE_S = 3.0
 
@@ -821,6 +826,39 @@ async def _fetch_statistics_for_digest(
     return series_stats, False
 
 
+async def _fetch_warning_labels(manifest: Manifest, *, deadline: CallDeadline) -> dict[str, str]:
+    """ref -> name for the refs `manifest`'s warnings name (`warning_refs`), read in one
+    `node_lookup.describe_nodes` call, for `labelled_warnings`.
+
+    The read must end with `_STATISTICS_RESERVE_S` of `deadline` still left. A failed or
+    late read is logged and labels nothing, and a ref the graph does not hold or names
+    nothing gets no label, so the digest names those refs bare.
+    """
+    refs = warning_refs(manifest.warnings)
+    if not refs:
+        return {}
+    dcids = {ref: ref.removeprefix(ENTITY_DCID_MARKER) for ref in refs}
+    try:
+        async with asyncio.timeout(deadline.reserving(_STATISTICS_RESERVE_S).remaining()):
+            outcomes = await node_lookup.describe_nodes(list(dcids.values()))
+    except (UpstreamError, ValueError, TimeoutError) as exc:
+        # `ValueError` covers a body off the wire models (`pydantic.ValidationError`)
+        # and one answering other dcids than were asked.
+        logger.warning(
+            "get_data: could not label the warning refs of %s/%s: %s",
+            manifest.definition.spec_id,
+            manifest.content_version,
+            exc,
+        )
+        return {}
+    labels: dict[str, str] = {}
+    for ref, dcid in dcids.items():
+        node = outcomes.get(dcid)
+        if node is not None and not isinstance(node, NotHeldEntry) and node.label:
+            labels[ref] = node.label
+    return labels
+
+
 def _mint_json_or_refusal(response: httpx2.Response) -> dict[str, Any] | ToolResult:
     """The mint response's parsed JSON body, or the refusal for one that does not parse."""
     try:
@@ -1018,13 +1056,14 @@ async def _finish_mint_response(
     # apis' pair, not `frame_ref`, keys the description: a frame minted with
     # `options.columns` or `options.groupby` is held under a pair of its own that apis
     # never stored.
-    (series_stats, statistics_fetch_failed), description = await asyncio.gather(
+    (series_stats, statistics_fetch_failed), description, warning_labels = await asyncio.gather(
         _fetch_statistics_for_digest(manifest, deadline=deadline),
         fetch_version_description(
             spec_id=manifest.definition.spec_id,
             content_version=manifest.content_version,
             deadline=deadline.reserving(_STATISTICS_RESERVE_S),
         ),
+        _fetch_warning_labels(manifest, deadline=deadline),
     )
     summed = summed_family(
         manifest,
@@ -1033,6 +1072,10 @@ async def _finish_mint_response(
         description=description,
     )
 
+    # The digest and the returned manifest carry the same labelled warning messages.
+    manifest = manifest.model_copy(
+        update={"warnings": labelled_warnings(manifest.warnings, warning_labels)}
+    )
     try:
         content = render_get_data_digest(
             manifest=manifest,

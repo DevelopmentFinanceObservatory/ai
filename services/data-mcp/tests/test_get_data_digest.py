@@ -8,7 +8,12 @@ import pytest
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from data_mcp.frame_materialisation import DegradedReason, MaterialisationOutcome
-from data_mcp.get_data_digest import BreakdownLevel, SummedFamily, render_get_data_digest
+from data_mcp.get_data_digest import (
+    BreakdownLevel,
+    SummedFamily,
+    labelled_warnings,
+    render_get_data_digest,
+)
 from data_mcp.manifest import Manifest, SeriesStatisticsModel, strip_manifest
 
 
@@ -80,6 +85,7 @@ def _digest(
     statistics_fetch_failed: bool = False,
     series_count: int | None = None,
     trace: dict[str, Any] | None = None,
+    warning_labels: dict[str, str] | None = None,
     **overrides: Any,
 ) -> str:
     """Render a digest for a manifest payload built from `overrides`.
@@ -91,7 +97,7 @@ def _digest(
     never resolved to any series); a list sets `series_count` to its length
     and, unless `statistics_fetch_failed`, feeds the parsed rows straight
     through as `series_stats`. `series_count` overrides that length, and
-    `trace` the manifest's empty trace.
+    `trace` the manifest's empty trace, and `warning_labels` labels the warnings' refs (`labelled_warnings`).
     """
     payload = _manifest_payload(**overrides)
     payload["series_count"] = (
@@ -104,6 +110,10 @@ def _digest(
     if trace is not None:
         payload["trace"] = trace
     manifest = strip_manifest(payload)
+    if warning_labels is not None:
+        manifest = manifest.model_copy(
+            update={"warnings": labelled_warnings(manifest.warnings, warning_labels)}
+        )
     series_stats = (
         None
         if statistics is None
@@ -991,6 +1001,99 @@ def test_the_shared_budget_splits_across_both_groups_when_neither_fills_it() -> 
     remainder_at = digest.rindex("1 more warning(s) not shown.")
 
     assert coverage_at < coverage_warning_at < frame_at < other_warning_at < remainder_at
+
+
+# Refs a warning names in its counted fields
+
+_LABELS = {"dcid:country/KEN": "Kenya", "dcid:country/UGA": "Uganda"}
+
+
+@pytest.mark.parametrize(
+    ("code", "fields", "sentence"),
+    [
+        (
+            "coverage_below_scope",
+            {
+                "member_count": 14,
+                "off_cadence_members": {
+                    "count": 2,
+                    "refs": ["dcid:country/KEN", "dcid:country/UGA"],
+                },
+            },
+            "Series at another frequency: Kenya, Uganda.",
+        ),
+        (
+            "coverage_below_scope",
+            {"out_of_window_members": {"count": 1, "refs": ["dcid:country/KEN"]}},
+            "Series with no observation in the requested years: Kenya.",
+        ),
+        (
+            "coverage_below_scope",
+            {"unserved_entities": {"count": 1, "refs": ["dcid:country/UGA"]}},
+            "Entities with no observation: Uganda.",
+        ),
+        (
+            "currency_unmapped_omitted",
+            {"omitted_entities": {"count": 2, "refs": ["dcid:country/KEN", "dcid:country/UGA"]}},
+            "Entities left out: Kenya, Uganda.",
+        ),
+        (
+            "deflator_missing_omitted",
+            {
+                "omitted_entity_years": {
+                    "count": 2,
+                    "entities": [
+                        {"ref": "dcid:country/KEN", "years": ["1990-2001", "2004"]},
+                        {"ref": "dcid:country/UGA", "years": ["2010"]},
+                    ],
+                }
+            },
+            "Entities left out: Kenya (1990-2001, 2004), Uganda (2010).",
+        ),
+    ],
+)
+def test_a_warnings_counted_field_names_its_refs_by_label_after_the_message(
+    code: str, fields: dict[str, Any], sentence: str
+) -> None:
+    warning = {"code": code, "severity": "warn", "message": "It left out 2 entities.", **fields}
+
+    digest = _digest(warnings=[warning], warning_labels=_LABELS)
+
+    assert f"Warning [{code}] (warn): It left out 2 entities. {sentence}" in digest
+
+
+def test_a_ref_with_no_label_is_named_by_its_bare_dcid() -> None:
+    warning = {
+        "code": "coverage_below_scope",
+        "severity": "warn",
+        "message": "No observations were served for 2 requested entities.",
+        "unserved_entities": {"count": 2, "refs": ["dcid:country/KEN", "dcid:country/TCD"]},
+    }
+
+    digest = _digest(warnings=[warning], warning_labels={"dcid:country/KEN": "Kenya"})
+
+    assert "Entities with no observation: Kenya, country/TCD." in digest
+
+
+def test_a_count_past_the_named_refs_is_stated_as_more() -> None:
+    warning = {
+        "code": "coverage_below_scope",
+        "severity": "warn",
+        "message": "7 of 14 series report at a different frequency.",
+        "off_cadence_members": {"count": 7, "refs": ["dcid:country/KEN", "dcid:country/UGA"]},
+    }
+
+    digest = _digest(warnings=[warning], warning_labels=_LABELS)
+
+    assert "Series at another frequency: Kenya, Uganda, and 5 more." in digest
+
+
+def test_a_warning_with_no_counted_field_renders_its_message_alone() -> None:
+    warning = {"code": "facet_fallback", "severity": "info", "message": "Fell back."}
+
+    digest = _digest(warnings=[warning], warning_labels=_LABELS)
+
+    assert "Warning [facet_fallback] (info): Fell back.\n" in f"{digest}\n"
 
 
 # Summed StatVar family
