@@ -322,15 +322,12 @@ def test_the_figure_fields_name_what_a_card_returns_for_them():
     assert listed in _word_runs(properties["state_period"]["description"], 1)
 
 
-def test_a_chart_title_carries_its_period_unless_the_period_moves():
+def test_a_chart_title_names_its_subject_and_leaves_the_period_to_the_tool():
     properties = Chart.model_json_schema()["properties"]
     title = properties["title"]["description"]
 
-    assert "the period it shows" in title
-    assert "a stat card's title carries the period" in title
-    assert "rolling: true" in title
-    assert "latest_periods" in title
-    assert "its title leaves out the years it shows" in title
+    assert "with no period or year" in title
+    assert "make_charts adds the period the card shows" in title
     assert "counted back from the latest data" in properties["latest_periods"]["description"]
 
 
@@ -1992,7 +1989,7 @@ class RowFrames(HeldFrames):
         ]
 
 
-_CUT_TITLE = re.compile(r"^Aid to Kenya \((\d+) largest of (\d+) in (\d{4})\)$")
+_CUT_TITLE = re.compile(r"^Aid to Kenya(, [^(]+)? \((\d+) largest of (\d+) in (\d{4})\)$")
 
 
 @pytest.mark.parametrize(
@@ -2018,7 +2015,9 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     executor, result = await _draw_wide(monkeypatch, RowFrames(values), view=view, type=type_)
 
     (intent,) = _intents(executor)
-    drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    covered, drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    # A cut line chart or table draws every year its frame covers, and says so.
+    assert covered == (None if type_ == "bar_chart" else ", 1900 to 2024")
     members = intent["select"]["financingProvider"]
     assert (period, int(holding)) == ("2024", 20)
     assert len(members) == int(drawn) == kept
@@ -2165,6 +2164,135 @@ async def test_make_charts_pins_a_cut_bar_chart_to_the_period_it_ranked_at(
     assert intent["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
 
 
+# `TEN_PROVIDERS` described as the frame apis serves them, over the years they hold.
+TEN_VIEW: dict[str, Any] = {**WIDE_VIEW, "coverage": ["2023", "2025"]}
+
+
+def _ten_select(provider: str | list[str]) -> str:
+    return json.dumps({"financingRecipient": "country/KEN", "financingProvider": provider})
+
+
+@pytest.mark.parametrize(
+    ("chart", "view", "title", "window"),
+    [
+        ({"type": "table"}, TEN_VIEW, "Aid to Kenya, 2023 to 2025", None),
+        # C and D share 2024 at the latest, so their bars are drawn there.
+        (
+            {"type": "bar_chart", "select_json": _ten_select(["C", "D"])},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            {"start": "2024", "end": "2024"},
+        ),
+        # A select listing no dimension draws one series, a bar for each period.
+        (
+            {"type": "bar_chart", "select_json": _ten_select("D")},
+            TEN_VIEW,
+            "Aid to Kenya, 2023 to 2025",
+            None,
+        ),
+        # C's latest value is of 2024, though the frame covers 2025.
+        (
+            {"type": "stat_card", "select_json": _ten_select("C")},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            None,
+        ),
+        (
+            {"type": "table", "latest_periods": 3},
+            TEN_VIEW,
+            "Aid to Kenya, last 3 years",
+            {"start": {"anchor": "latest", "offset": -2}, "end": {"anchor": "latest", "offset": 0}},
+        ),
+        # A rolling frame's years move on, so its card names none.
+        ({"type": "table"}, {**TEN_VIEW, "rolling": True}, "Aid to Kenya", None),
+    ],
+    ids=["range", "bar", "period_bars", "stat", "latest_periods", "rolling"],
+)
+async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
+    monkeypatch: pytest.MonkeyPatch,
+    chart: dict[str, Any],
+    view: dict[str, Any],
+    title: str,
+    window: dict[str, Any] | None,
+) -> None:
+    """The model names the subject and the tool writes the period once: a
+    table's or a period bar chart's first and last years, the year a bar
+    chart of listed providers is drawn and pinned at, the year of a stat
+    card's value, and periods counted back."""
+    executor, result = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=view, **chart
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == (title, window)
+    assert result["charts"][0]["title"] == title
+
+
+async def test_a_card_whose_frame_is_unread_names_no_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat card's period is its value's, read from the frame's rows, so a
+    frame the store does not hold gives none, and no period is guessed."""
+    executor, _ = await _draw_wide(
+        monkeypatch,
+        HeldFrames(held=False),
+        providers=10,
+        view=TEN_VIEW,
+        type="stat_card",
+        select_json=_ten_select("C"),
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == ("Aid to Kenya", None)
+
+
+@pytest.mark.parametrize(
+    ("title", "named"),
+    [
+        ("Aid to Kenya (2025)", "2025"),
+        ("Aid to Kenya in 2024", "2024"),
+        ("Aid to Kenya, 2023 to 2025", "2023"),
+    ],
+)
+async def test_make_charts_refuses_a_title_naming_a_year_of_its_frame(
+    monkeypatch: pytest.MonkeyPatch, title: str, named: str
+) -> None:
+    """Under a cap of two, the two largest of ten are ranked at 2023, the year
+    half of them hold. A title naming any year of the frame, 2025 the latest
+    included, is refused before a write, so no card states two periods; the
+    subject alone is drawn with the cut's period once."""
+    for module in (orchestrator_tools, chart_binding):
+        monkeypatch.setattr(module, "MAX_SERIES_PER_COMPONENT", 2)
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = BarPlatform(TEN_PROVIDERS)
+    executor.view = copy.deepcopy(TEN_VIEW)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    refused = await tools["make_charts"]([_wide_chart(type="bar_chart", title=title)], ctx)
+    drawn = await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    (entry,) = refused["charts"]
+    assert _stated(entry) == ("title_names_period", "correct_and_retry")
+    assert entry["fix"] == {"period": named}
+    (intent,) = _intents(executor)
+    assert (
+        intent["title"] == drawn["charts"][0]["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
+    )
+
+
+async def test_make_charts_draws_a_title_naming_a_year_outside_its_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A year the frame does not cover is no period of the card."""
+    executor, _ = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=TEN_VIEW, title="Agenda 2030"
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == "Agenda 2030, 2023 to 2025"
+
+
 async def test_a_cut_bar_chart_draws_every_bar_at_the_period_in_its_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2298,7 +2426,7 @@ async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
         assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(29, 5, -1)]
     else:
         assert (intent["title"], intent["select"]) == (
-            "Aid to Kenya",
+            "Aid to Kenya, 2020 to 2024",
             {"financingRecipient": "country/KEN"},
         )
     assert intent.get("window") == window
@@ -2365,7 +2493,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     (intent,) = _intents(executor)
     assert intent["frame_ref"] == WIDE_REF
     assert intent["select"][role] == [f"donor/{number:02d}" for number in range(24, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (24 largest of 25 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (24 largest of 25 in 2024)"
     assert "another level: 5." in result["charts"][0]["note"]
     assert _kind_reads(executor) == (0 if carried else 1)
 
@@ -2412,7 +2540,7 @@ async def test_make_charts_asks_a_frame_with_no_fetch_for_its_kinds_by_its_spec(
         assert "error" in result["charts"][0]
     else:
         assert calls == [asked]
-        assert result["charts"][0]["title"] == "t (24 largest of 30 in 2024)"
+        assert result["charts"][0]["title"] == "t, 2023 to 2024 (24 largest of 30 in 2024)"
 
 
 async def test_make_charts_cut_title_carries_one_suffix(
@@ -2420,7 +2548,7 @@ async def test_make_charts_cut_title_carries_one_suffix(
 ) -> None:
     """A chart titled with the title of a card already cut, as the model copies
     it from the first card's result, ends in one suffix."""
-    cut = "Aid to Kenya (24 largest of 30 in 2024)"
+    cut = "Aid to Kenya, 2023 to 2024 (24 largest of 30 in 2024)"
 
     executor, _ = await _draw_wide(monkeypatch, HeldFrames(), type="table", title=cut)
 
@@ -2729,7 +2857,7 @@ async def test_make_charts_counts_only_the_members_the_chart_lists(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (8 largest of 9 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (8 largest of 9 in 2024)"
 
 
 async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
@@ -2796,7 +2924,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in (4, 3, 2, 1, 0)]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 
@@ -2848,7 +2976,7 @@ async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
 
     (intent,) = _intents(executor)
     assert len(intent["select"]["financingProvider"]) == 20
-    assert intent["title"] == "Aid to Kenya (20 largest of 30 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 1925 to 2024 (20 largest of 30 in 2024)"
 
 
 @pytest.mark.parametrize(
@@ -2899,7 +3027,7 @@ async def test_make_charts_orders_a_member_with_no_value_at_the_period_last(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == ["donor/b", "donor/a", "donor/c"]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 

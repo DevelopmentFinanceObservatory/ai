@@ -125,6 +125,7 @@ __all__ = [
     "card_selection",
     "frame_periods",
     "holds_relative_period",
+    "named_year",
     "resolved_basis",
     "title_refusal",
     "written_title_refusal",
@@ -243,16 +244,21 @@ def title_refusal(title: object, periods: Iterable[object]) -> dict[str, Any] | 
     such year. A year outside `periods` may be named: "Agenda 2030", or the
     fixed first year of a window whose end moves.
     """
+    year = named_year(title, periods)
+    if year is None:
+        return None
+    refusal = harness_refusal(
+        code=HarnessCode.TITLE_QUOTES_ROLLING_PERIOD, message=_TITLE_MESSAGE.format(period=year)
+    )
+    return {**refusal, "fix": {"period": year}}
+
+
+def named_year(title: object, periods: Iterable[object]) -> str | None:
+    """The first year of `periods`, in order, whose digits stand in `title`
+    with no digit on either side, or None when it names none of them."""
     text = str(title or "")
     years = sorted({year for period in periods for year in _YEAR.findall(str(period))})
-    for year in years:
-        if re.search(rf"(?<!\d){year}(?!\d)", text):
-            refusal = harness_refusal(
-                code=HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
-                message=_TITLE_MESSAGE.format(period=year),
-            )
-            return {**refusal, "fix": {"period": year}}
-    return None
+    return next((year for year in years if re.search(rf"(?<!\d){year}(?!\d)", text)), None)
 
 
 def written_title_refusal(

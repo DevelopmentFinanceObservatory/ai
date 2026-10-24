@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from types import FunctionType
-from typing import Any, Literal, Protocol, get_type_hints
+from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
 from analysis_mcp.frame_ref_resolution import read_derived_marker
@@ -73,6 +73,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
 from mcp import MCPError
@@ -111,6 +112,7 @@ from harness.chart_binding import (
     covers_every_row,
     empty_select_refusal,
     every_series_selects,
+    latest_shared_period,
     over_cap_dimension,
     select_binding_ok,
     top_members,
@@ -149,6 +151,7 @@ from harness.reply_figures import (
     unplaced_names,
     with_coordinates,
 )
+from harness.rolling_cards import named_year
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -230,12 +233,9 @@ class Chart(BaseModel):
     )
     title: str = Field(
         description=(
-            "what the chart shows and the period it shows; a stat card's title carries "
-            "the period of the value on the card. The exception is a chart whose period "
-            "moves with the data, which is one on a frame whose view says rolling: true "
-            "and one given latest_periods: its title leaves out the years it shows "
-            "('over the last five years', never '2019-2024'), and a title naming one of "
-            "them is refused"
+            "what the chart shows, with no period or year: 'Aid to Kenya by donor'. "
+            "make_charts adds the period the card shows, and refuses a title naming a "
+            "year the frame covers"
         )
     )
     latest_periods: int | None = Field(
@@ -607,17 +607,129 @@ class _Narrowed:
     cut: TopMembers | None
 
 
-# The suffix a cut card's title ends with, as `_cut_title` writes it.
-_CUT_SUFFIX = re.compile(r" \(\d+ largest of \d+ in [^()]+\)$")
+# The suffix a cut card's title ends with, as `_card_title` writes it, the
+# periods a cut line chart or table draws included.
+_CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
 
 
-def _cut_title(title: str, cut: TopMembers) -> str:
-    """The title of a card cut to its largest members, ending in what it leaves
-    out. A title the model copied from a card already cut loses that suffix
-    first, so the new suffix is the only one."""
-    base = _CUT_SUFFIX.sub("", title)
-    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
-    return f"{base[: 117 - len(suffix)]} ({suffix})"
+def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
+    """A card's title: the model's `subject`, then the period the card shows,
+    then on a card cut to its largest members what the cut leaves out and the
+    period it ranked at. The subject is shortened so the title fits 120
+    characters."""
+    suffix = f", {period}" if period is not None else ""
+    if cut is not None:
+        suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
+    return f"{subject[: 120 - len(suffix)]}{suffix}"
+
+
+def _covered_years(view: Mapping[str, Any]) -> list[str]:
+    """Every year from the first to the last the frame's coverage names, a
+    span's included; none for a view that states no coverage."""
+    coverage = view.get("coverage") or []
+    years = [int(year) for label in coverage for year in re.findall(r"\d{4}", str(label))]
+    return [str(year) for year in range(min(years), max(years) + 1)] if years else []
+
+
+def _title_refusal(subject: str, view: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The `title_names_period` refusal of a model's title naming a year the
+    frame covers, `None` for any other title. `make_charts` writes the card's
+    period, so a title naming one would state it twice or contradict it."""
+    year = named_year(subject, _covered_years(view))
+    if year is None:
+        return None
+    return harness_refusal(
+        code=HarnessCode.TITLE_NAMES_PERIOD,
+        message=(
+            f"The title names {year}. Write what the chart shows with no period or year: "
+            "make_charts adds the period the card shows."
+        ),
+        fix={"period": year},
+    )
+
+
+def _period_text(label: str) -> str:
+    """A period label as a title states it, a span `2020/2024` as `2020 to 2024`."""
+    return " to ".join(label.split("/"))
+
+
+def _latest_text(periods: int, view: Mapping[str, Any]) -> str:
+    """The period of a card counting `periods` back from the latest data, in
+    the frame's grain (`TimeGrain`): `latest year`, `last 5 years`."""
+    grain = view.get("period_grain")
+    grain = grain if grain in get_args(TimeGrain) else "period"
+    return f"latest {grain}" if periods == 1 else f"last {periods} {grain}s"
+
+
+def _covered_range(view: Mapping[str, Any]) -> tuple[str, bool] | None:
+    """The periods a frame's coverage names, as a title states them, and
+    whether they are several: its one period, or its first and last. None for
+    a rolling frame, whose years were worked out from the latest data and move
+    on (`harness.rolling_cards`), and for a view that states no coverage."""
+    coverage = [str(label) for label in view.get("coverage") or []]
+    if view.get("rolling") or len(coverage) != 2:
+        return None
+    first, last = coverage
+    if first == last or "/" in first:
+        return _period_text(first), False
+    return f"{first} to {last}", True
+
+
+async def _card_period(
+    chart: Chart,
+    *,
+    frame: Mapping[str, Any],
+    select: dict[str, Any],
+    cut: TopMembers | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The period a card's title states, None when nothing can or a cut bar
+    chart's suffix states it, and the window its intent names, None for none.
+
+    A card counting `latest_periods` back states them as relative periods. A
+    card drawing every period its frame covers states them
+    (`_covered_range`): a line chart, a table, and a bar chart whose select
+    lists no dimension, which apis draws as one bar a period. A bar chart
+    whose select lists one is drawn at one period, the latest every selected
+    series holds inside its window, and a stat card states the period of its
+    value; on a frame of several periods both are read from the frame's rows
+    (`latest_shared_period`) and the bar chart is pinned there, since without
+    a window it moves when the frame gains a newer period. A cut bar chart is
+    pinned at the cut's period, which its suffix states (`_card_title`), and
+    a cut line chart or table states its frame's periods beside it."""
+    view = frame["view"]
+    if chart.latest_periods is not None:
+        return _latest_text(chart.latest_periods, view), _latest_window(chart.latest_periods)
+    at_one = chart.type == "stat_card" or (
+        chart.type == "bar_chart" and any(isinstance(value, list) for value in select.values())
+    )
+    if cut is not None and at_one:
+        return None, {"start": cut.period, "end": cut.period}
+    covered = _covered_range(view)
+    if covered is None:
+        return None, None
+    text, several = covered
+    if cut is not None:
+        # The suffix states a frame of one period, the period the cut ranked at.
+        return text if several else None, None
+    if not (at_one and several):
+        return text, None
+    at = await _frame_work(frame_store_ref(frame), functools.partial(_drawn_period, select=select))
+    pinned = at is not None and chart.type == "bar_chart"
+    return at, {"start": at, "end": at} if pinned else None
+
+
+def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | None:
+    """`latest_shared_period` over a stored frame, read without its enrichment
+    columns, which describe a member and split no series."""
+    rows = [
+        {
+            name: cell
+            for name, cell in row.items()
+            if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
+        }
+        for row in _rows_of(data)
+    ]
+    return latest_shared_period(rows=rows, select=select)
 
 
 def _card_identity(intent: Mapping[str, Any]) -> str:
@@ -1845,6 +1957,12 @@ def build_orchestrator_tools(
                         )
                     )
                     continue
+                # A title the model copied from a card already cut loses that
+                # suffix, so the card's own suffix is the only one.
+                subject = _CUT_SUFFIX.sub("", chart.title)
+                if (refusal := _title_refusal(subject, frame["view"])) is not None:
+                    drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
+                    continue
                 try:
                     select = json.loads(chart.select_json)
                 except json.JSONDecodeError:
@@ -1901,22 +2019,16 @@ def build_orchestrator_tools(
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                title = chart.title if cut is None else _cut_title(chart.title, cut)
+                period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
+                title = _card_title(subject, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
                     "select": select,
-                    "title": title[:120],
+                    "title": title,
                 }
-                if chart.latest_periods is not None:
-                    intent["window"] = _latest_window(chart.latest_periods)
-                elif cut is not None and chart.type == "bar_chart":
-                    # The card's title and members are of the cut's period, so
-                    # its bars stay at it. apis draws a bar chart at the
-                    # latest period every selected series holds inside its
-                    # window, which without one moves when the frame gains a
-                    # newer period.
-                    intent["window"] = {"start": cut.period, "end": cut.period}
+                if window is not None:
+                    intent["window"] = window
                 identity = _card_identity(intent)
                 held = drawn_cards.get(identity) or canvas.get(identity)
                 stored = None if held is None else await _stored_card(held["component_id"])
