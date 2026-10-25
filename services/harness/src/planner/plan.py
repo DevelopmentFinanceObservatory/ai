@@ -1990,7 +1990,11 @@ def check_wholes_span_their_totals(
                 ]
                 if not held or not all(_among_members(one, part) for one in held):
                     continue
-                members = {found or entity.name for entity, found in held}
+                # A pool's members are every ref its entities resolve to, a
+                # group counting each of its members, and the names that resolve none.
+                members = {ref for _, found in held for ref in found} | {
+                    entity.name for entity, found in held if not found
+                }
                 if len(members) > 1 and _pools_across(requirement, word):
                     continue
                 raise WholeIsItsMemberError(
