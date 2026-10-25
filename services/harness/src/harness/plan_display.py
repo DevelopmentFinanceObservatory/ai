@@ -272,23 +272,22 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
 def _listed_slots(plan: Plan) -> dict[str, str]:
     """Each slot of `plan`'s decisions mapped to the slot of the listed decision stating it.
 
-    Search pins whose decisions state the same description, the same
-    options in any order and the same chosen label, such as a share's
-    numerator and denominator sources both counted as gross disbursements,
-    map to one of them: the first one the user settled, else the first. The
-    order differs when the two searches elected different measures, since
-    `_measure_decision` lists the elected one first; the listed decision
-    keeps its own order. A search pin whose choice names a spec_id has no
-    entry. Every other decision maps to its own slot.
+    Search pins whose decisions state the same description and the same
+    chosen label, such as a share's numerator and denominator sources both
+    counted as gross disbursements, map to one of them: the first one the
+    user settled, else the first. Their options are left out of the
+    comparison, since the card and the plan record show no options, and two
+    sources offering different other counts make the same choice. A search
+    pin whose choice names a spec_id has no entry. Every other decision maps
+    to its own slot.
     """
     listed: dict[str, str] = {}
-    same_choice: dict[tuple[str, frozenset[str], str], list[Decision]] = {}
+    same_choice: dict[tuple[str, str], list[Decision]] = {}
     for decision in plan.decisions:
         if not is_search_pin(decision):
             listed[decision.slot] = decision.slot
         elif not _SPEC_ID.search(decision.chosen):
-            key = (decision.description, frozenset(decision.options), decision.chosen)
-            same_choice.setdefault(key, []).append(decision)
+            same_choice.setdefault((decision.description, decision.chosen), []).append(decision)
     for pins in same_choice.values():
         kept = next((pin for pin in pins if pin.resolved_by is ResolvedBy.USER), pins[0])
         listed.update(dict.fromkeys((pin.slot for pin in pins), kept.slot))

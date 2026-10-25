@@ -327,16 +327,24 @@ _GROSS = ("gross disbursements", "net disbursements")
         (_GROSS, "gross disbursements", "bilateral"),
         (("net disbursements", "gross disbursements"), "gross disbursements", "bilateral"),
         (_GROSS, "net disbursements", "both"),
-        (("gross disbursements", "commitments"), "gross disbursements", "both"),
+        (("gross disbursements", "commitments"), "gross disbursements", "bilateral"),
+        (("commitments", "gross disbursements"), "commitments", "both"),
     ],
-    ids=["same choice", "same choice, net elected", "different chosen", "different options"],
+    ids=[
+        "same choice",
+        "same choice, net elected",
+        "different chosen",
+        "different options",
+        "different chosen and options",
+    ],
 )
 def test_search_pins_making_one_choice_list_one_decision(
     imputed_options: tuple[str, ...], imputed_chosen: str, listed: str
 ) -> None:
     """A numerator and a denominator pin counted the same way list one decision,
-    the one the user settled, and each requirement cites it. Pins whose
-    choices differ list one decision each."""
+    the one the user settled, and each requirement cites it, whatever other
+    counts each source offers. Pins whose choices differ list one decision
+    each."""
     joined = _plan("france_guatemala_join")
     bilateral, imputed = search_pin_slot(_BILATERAL_SPEC), search_pin_slot(_IMPUTED_SPEC)
     pins = {
