@@ -4463,6 +4463,57 @@ def test_a_re_pin_to_a_source_found_in_place_of_a_stale_pin_needs_no_decision(
     assert amended.requirement(dataset.id) == re_pinned
 
 
+@pytest.mark.parametrize(
+    ("events", "resolved_by"),
+    [([], ResolvedBy.PLANNER_DEFAULT), (_measure_ask_events(_GROSS), ResolvedBy.USER)],
+    ids=["planner-re-pins", "user-picks"],
+)
+def test_a_re_pin_to_a_source_a_referral_offered_states_how_the_flow_is_counted(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    events: list[Any],
+    resolved_by: ResolvedBy,
+) -> None:
+    """A source a referral offered in place of a stale pin is one no search
+    the planner was shown settled, and its block elects a measure among
+    several, so a re-pin of it gets the measure decision all the same."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show(ctx, SPEC)
+    dataset, derived = requirements
+    _propose(tools, ctx, decision(), [dataset.model_copy(update={"source_spec_id": SPEC}), derived])
+    first = load_plan(ctx.state)
+    assert first is not None
+    save_referral(
+        ctx.state,
+        Referral(
+            kind=ReferralKind.PINNED_SOURCE_NOT_FOUND,
+            reason="r",
+            requirement_id=dataset.id,
+            candidates=(
+                source_from_spec_block(_FRANCE_KENYA),
+                SelectedSource(spec_id=POPULATION_SPEC, sentence="found instead", has_data=True),
+            ),
+        ),
+    )
+    ctx.session.events.extend(events)
+
+    result = tools["propose_plan"].func(
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        amends_version=first.version,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    amended = load_plan(ctx.state)
+    assert amended is not None
+    (measure,) = [d for d in amended.decisions if d.fixes and d.fixes.source_spec_id == _GROSS]
+    assert measure.options == ("gross disbursements", "net disbursements")
+    assert (measure.chosen, measure.resolved_by) == ("gross disbursements", resolved_by)
+    assert measure.slot in amended.requirement(dataset.id).decision_ids
+    assert measure in shown_decisions(amended)
+
+
 # --- a pin whose identity a search recorded, over the requirement's period ----------
 
 # Two definitions of Guatemala's GDP, as data-mcp stored them. The first is a
