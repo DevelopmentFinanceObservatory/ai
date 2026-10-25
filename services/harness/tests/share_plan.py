@@ -5,7 +5,8 @@ year: `us` reads the United States' ODA to Kenya and `all_oda` every
 donor's, which `all_by_year` totals by year; `share` divides the first by
 that total, and any steps `then` names read the share. The source
 `all_oda` reads is one binding the total for official donors (DAC)
-(`DAC_DONORS`) or one leaving every donor open (`ALL_DONORS`).
+(`DAC_DONORS`), one leaving every donor open (`ALL_DONORS`), or one of
+named donors only (`NAMED_DONORS`).
 
 `us_share_per_recipient` is the United States' share of ODA to each
 recipient, keyed by recipient, over sources leaving the recipients open:
@@ -60,6 +61,7 @@ SPEC_ALL = "spec_" + "d" * 32
 
 _KENYA = ResolvedEntity(role="destination", ref="country/KEN", label="Kenya")
 _USA = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+_GBR = ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom")
 _PERIOD = Period(start=2015, end=2024)
 
 # The DAC2a source of the United States' ODA to Kenya.
@@ -87,6 +89,9 @@ ALL_DONORS: dict[str, Any] = {
     "open_entity_axes": (OpenEntityAxis(column="origin", member_count=140),),
 }
 
+# The DAC2a source of ODA to Kenya from the United Kingdom and the United States.
+NAMED_DONORS: dict[str, Any] = {"entities": (_KENYA, _GBR, _USA)}
+
 # A step reading the share: its requirement and its operation, each reading `share`.
 type Then = tuple[EvidenceRequirement, Operation]
 
@@ -98,16 +103,19 @@ def us_share_of_kenya_oda(
     numerator: Mapping[str, Any],
     donor: str = "United States",
     whole_across: tuple[str, ...] = ("donor",),
+    whole_donors: Sequence[str] = (),
     every_donor: bool = False,
+    from_whole: bool = False,
     narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
 ) -> Plan:
     """The first plan of the module docstring, `all_oda` read from a source
-    stating `whole`'s fields over the donors `whole_across` covers and
-    narrowed by `narrowing` before its total, and `us` from one stating
-    `numerator`'s for the donor named `donor`. With `every_donor`, `us` reads
-    every donor's ODA and totals it by year, as a share of one sector's ODA
-    does."""
+    stating `whole`'s fields for the donors named `whole_donors` and over
+    those `whole_across` covers, and narrowed by `narrowing` before its
+    total, and `us` from one stating `numerator`'s for the donor named
+    `donor`. With `every_donor`, `us` reads every donor's ODA and totals it
+    by year, as a share of one sector's ODA does. With `from_whole`, the
+    share's numerator is `donor` narrowed out of `all_oda`."""
     kenya = Entity(name="Kenya", role="recipient")
     donors = [kenya] if every_donor else [Entity(name=donor, role="donor"), kenya]
     return _compiled(
@@ -125,13 +133,14 @@ def us_share_of_kenya_oda(
             id="all_oda",
             decision_ids=["measure"],
             measure="ODA gross disbursements",
-            entities=[kenya],
+            entities=[*(Entity(name=name, role="donor") for name in whole_donors), kenya],
             across=whole_across,
             period=_PERIOD,
         ),
         group_by=(GroupBy.PERIOD,),
         sources={"us": numerator, "all_oda": whole},
         numerator_by_year=every_donor,
+        numerator_entity=donor if from_whole else None,
         narrowing=narrowing,
         then=then,
     )
@@ -207,13 +216,15 @@ def _compiled(
     axis: str | None = None,
     scope: DenominatorScope | None = None,
     numerator_by_year: bool = False,
+    numerator_entity: str | None = None,
     narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
 ) -> Plan:
     """`numerator`'s share of `whole`, narrowed by each of `narrowing` in turn
     and totalled by `group_by` (`all_by_year`), or of `whole` itself when
     `group_by` is None. The numerator is totalled by year first
-    (`us_by_year`) when `numerator_by_year`. The share is keyed by `axis` and
+    (`us_by_year`) when `numerator_by_year`, or with `numerator_entity` is
+    that entity narrowed out of `whole`. The share is keyed by `axis` and
     divided by `scope` when given, then read by each of `then`, and the plan
     compiled with each dataset read from a source stating `sources`' fields."""
     steps: list[Then] = [*narrowing]
@@ -225,6 +236,8 @@ def _compiled(
     if numerator_by_year:
         steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,)))
         share_of = "us_by_year"
+    if numerator_entity is not None:
+        share_of = whole.id
     decisions = [decision()]
     if scope is not None:
         decisions.append(decision(slot="scope", fixes=DecisionFixes(denominator_scope=scope)))
@@ -242,7 +255,7 @@ def _compiled(
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure", *(["scope"] if scope is not None else [])],
-                numerator=RequirementSide(input_id=share_of),
+                numerator=RequirementSide(input_id=share_of, entity=numerator_entity),
                 denominator=RequirementSide(input_id=divisor),
                 axis=axis,
                 denominator_scope=scope,
@@ -257,7 +270,7 @@ def _compiled(
         ShareOfOperation(
             id="share",
             requirement_id="share",
-            numerator=Side(input=share_of),
+            numerator=Side(input=share_of, entity=numerator_entity),
             denominator=Side(input=divisor),
             axis=axis,
             denominator_scope=scope,

@@ -42,7 +42,7 @@ import re
 import typing
 from collections.abc import Collection, Mapping, Sequence
 
-from compiler.evidence import open_axes_for
+from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, role_party, singular
@@ -464,15 +464,24 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
     `per_axis` divides each member by its own total, so that column is no
     part of the whole; `pooled` divides by the total across the column's
     members, which is part of it whatever the numerator holds there.
+
+    Off the axis, a column of named entities (`_Population.named`) is part
+    of the whole only where the numerator is known to hold other entities
+    there: the United States' share of the United Kingdom's and the United
+    States' ODA divides "from United Kingdom and United States". The
+    numerator holds them by its own sources, or, narrowed to one entity of
+    the denominator's frame, holds that entity on its column and the
+    frame's entities on every other (`_narrowed_entity`). A numerator
+    narrowed by a step (`_reads_whole`) shows nothing to differ.
     """
-    denominator = _populations(plan.requirement(requirement.denominator.input_id), plan)
+    denominator_input = plan.requirement(requirement.denominator.input_id)
+    denominator = _populations(denominator_input, plan)
     if denominator is None:
         return None
-    numerator = (
-        None
-        if requirement.pools_its_own_axis or requirement.numerator.entity is not None
-        else _populations(plan.requirement(requirement.numerator.input_id), plan)
-    ) or {}
+    if requirement.pools_its_own_axis or requirement.numerator.entity is not None:
+        numerator = _narrowed_entity(requirement, denominator_input, plan)
+    else:
+        numerator = _populations(plan.requirement(requirement.numerator.input_id), plan) or {}
     axis = None if requirement.axis is None else role_party(requirement.axis)
     clauses: list[str] = []
     for column, population in denominator.items():
@@ -480,9 +489,33 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
         if on_axis and requirement.denominator_scope is DenominatorScope.PER_AXIS:
             continue
         held = numerator.get(column)
-        if on_axis or held is None or not held.same(population):
+        if population.named and not on_axis:
+            shown = held is not None and not held.same(population)
+        else:
+            shown = on_axis or held is None or not held.same(population)
+        if shown:
             clauses.append(f"{_preposition(column)} {population.phrase}")
     return " and ".join(clauses) or None
+
+
+def _narrowed_entity(
+    requirement: ShareOfRequirement, denominator: EvidenceRequirement, plan: Plan
+) -> dict[str, _Population]:
+    """The one entity `requirement`'s numerator narrows the denominator's
+    frame to (`RequirementSide.entity`), as a population on its role column,
+    found among the entities the denominator's sources resolve
+    (`resolve_name`); empty for a numerator taking a whole frame, and for an
+    entity no source resolves."""
+    if requirement.numerator.entity is None:
+        return {}
+    entity = Entity(name=requirement.numerator.entity)
+    for dataset in datasets_of(denominator, plan):
+        source = _selected_source(dataset.id, plan)
+        resolved = None if source is None else resolve_name(entity, source)
+        if resolved is not None:
+            identity = ("named", frozenset({resolved.ref}))
+            return {resolved.role: _Population(entity.name, identity, named=True)}
+    return {}
 
 
 def _column_party(column: str) -> str:
@@ -503,13 +536,15 @@ class _Population(typing.NamedTuple):
     """A population a source holds on one role column: its words, and what identifies it.
 
     `identity` is the named set's graph ref (its published total's, or its
-    label for a set the graph holds no node for), or an open axis's column
-    and the source's count of its members; `None` for an axis the source
-    did not count, which nothing shows equal to another.
+    label for a set the graph holds no node for), an open axis's column
+    and the source's count of its members, or the refs of the named
+    entities a column holds (`named`); `None` for an axis the source did
+    not count, which nothing shows equal to another.
     """
 
     phrase: str
-    identity: tuple[str, str | int] | None
+    identity: tuple[str, str | int | frozenset[str]] | None
+    named: bool = False
 
     def same(self, other: _Population) -> bool:
         """Whether `other` is known to be this population."""
@@ -523,8 +558,9 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
     A named set a source binds (`SelectedSource.groups`) is named by its
     label, and an axis a source leaves open for an `across` word reads as
     `entities_phrase` writes it, uncounted: the whole sits in a card title that
-    names a period, which an all-years count would read as. A
-    column holding only named entities holds no population and has no entry.
+    names a period, which an all-years count would read as. A column holding
+    only entities the requirement names holds them by the refs its source
+    resolves them to (`_named_entities`), `named`.
     """
     datasets = _reads_whole(requirement, plan)
     if datasets is None:
@@ -537,16 +573,41 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
         for group in source.groups:
             identity = group.ref or group.total or group.label
             populations.setdefault(group.role, _Population(group.label, ("group", identity)))
-        if not dataset.across:
-            continue
-        axes = open_axes_for(dataset.across, source.open_entity_axes)
-        if isinstance(axes, str):
-            continue
-        for word, axis in zip(dataset.across, axes, strict=True):
-            phrase = entities_phrase((), across=(word,))
-            identity = None if axis.member_count is None else (axis.column, axis.member_count)
-            populations.setdefault(axis.column, _Population(phrase, identity))
+        axes = open_axes_for(dataset.across, source.open_entity_axes) if dataset.across else ()
+        if not isinstance(axes, str):
+            for word, axis in zip(dataset.across, axes, strict=True):
+                phrase = entities_phrase((), across=(word,))
+                identity = None if axis.member_count is None else (axis.column, axis.member_count)
+                populations.setdefault(axis.column, _Population(phrase, identity))
+        for column, population in _named_entities(dataset, source).items():
+            populations.setdefault(column, population)
     return populations
+
+
+def _named_entities(dataset: DatasetRequirement, source: SelectedSource) -> dict[str, _Population]:
+    """The entities `dataset` names on each role column, by the refs `source`
+    resolves them to (`resolve_name`), as `entities_phrase` names them.
+
+    A name a set of the source's answers (`resolve_group`) is the set's
+    population, which `_populations` reads from the set. Empty when one name
+    resolves to nothing, since the columns are then unknown.
+    """
+    named: dict[str, list[tuple[Entity, str]]] = {}
+    for entity in dataset.entities:
+        if resolve_group(entity, source) is not None:
+            continue
+        resolved = resolve_name(entity, source)
+        if resolved is None:
+            return {}
+        named.setdefault(resolved.role, []).append((entity, resolved.ref))
+    return {
+        column: _Population(
+            entities_phrase([entity for entity, _ in entities]),
+            ("named", frozenset(ref for _, ref in entities)),
+            named=True,
+        )
+        for column, entities in named.items()
+    }
 
 
 def _reads_whole(

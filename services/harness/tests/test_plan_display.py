@@ -93,6 +93,7 @@ from planner.workflow import (
 from .share_plan import (
     ALL_DONORS,
     DAC_DONORS,
+    NAMED_DONORS,
     US_DONOR,
     us_share_of_kenya_oda,
     us_share_per_recipient,
@@ -2658,6 +2659,62 @@ def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
 
     assert share_wholes(plan) == wholes
     assert {row["id"]: row["sentence"] for row in requirement_rows(plan)}["share"] == sentence
+
+
+_UK_AND_US = ("United Kingdom", "United States")
+
+
+@pytest.mark.parametrize(
+    ("whole", "whole_donors", "options", "wholes"),
+    [
+        (NAMED_DONORS, _UK_AND_US, {}, {"share": "from United Kingdom and United States"}),
+        # The United States narrowed out of the same frame.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {"from_whole": True},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # The denominator names the numerator's donor, by its words or by another
+        # name the graph resolves to the same ref.
+        (US_DONOR, ("United States",), {}, {}),
+        ({**US_DONOR, "entity_refs": {"usa": "country/USA"}}, ("USA",), {}, {}),
+        # Donors giving at least $1bn of the two are not both of them.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {
+                "narrowing": [
+                    _narrowed(
+                        FilterRequirement(id="big", input_id="all_oda", predicates=_AT_LEAST_1BN)
+                    )
+                ]
+            },
+            {},
+        ),
+    ],
+    ids=["named_donors", "narrowed_out_of_the_frame", "same_donor", "same_ref", "value_filter"],
+)
+def test_a_share_of_named_donors_names_them_where_the_numerator_holds_others(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    whole_donors: tuple[str, ...],
+    options: dict[str, Any],
+    wholes: dict[str, str],
+) -> None:
+    """The United States' share of the United Kingdom's and the United
+    States' ODA to Kenya divides by the two donors; Kenya, which both sides
+    name, is no part of the whole."""
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole=whole,
+        numerator=US_DONOR,
+        whole_across=(),
+        whole_donors=whole_donors,
+        **options,
+    )
+
+    assert share_wholes(plan) == wholes
 
 
 @pytest.mark.parametrize(
