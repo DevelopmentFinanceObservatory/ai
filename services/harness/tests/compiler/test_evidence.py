@@ -818,6 +818,24 @@ def test_a_stated_source_matches_a_provenance_label_split_at_an_acronym_boundary
     assert errors(issues) == []
 
 
+@pytest.mark.parametrize(
+    ("stated", "label"),
+    [("OECD DAC2a", "OECD DAC2A"), ("Covid19 Deaths", "Covid19Deaths")],
+    ids=["table-letter-in-either-case", "digit-before-a-word"],
+)
+def test_a_stated_source_matches_a_provenance_label_with_a_digit_before_a_capital(
+    requirement: RequirementFactory, source: SourceFactory, stated: str, label: str
+) -> None:
+    # Search labels the DAC2a provenance "OECD DAC2A", and a requirement copies
+    # the search sentence's "OECD DAC2a".
+    issues = check_evidence(
+        requirement(source=stated),
+        evidence_from_source(source(provenance_ref=None, provenance_label=label)),
+    )
+
+    assert errors(issues) == []
+
+
 def test_a_stated_source_matches_a_provenance_label_across_accented_and_plain_spellings(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:

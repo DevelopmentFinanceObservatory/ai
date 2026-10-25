@@ -1642,7 +1642,7 @@ def _prices_words(unit: Unit) -> str:
 
 
 _WORD_CHAR = re.compile(r"[^\W_]", re.UNICODE)
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z0-9])(?=[A-Z][a-z])")
 
 # Unicode general categories for a combining mark: nonspacing (Mn), spacing
 # combining (Mc), and enclosing (Me). Python's `re` has no `\p{M}` class, so
@@ -1738,8 +1738,11 @@ def _tokens(text: str) -> tuple[str, ...]:
     "WorldDevelopmentIndicators" as `("world", "development",
     "indicators")`, the same tokens spaces would have given, without
     collapsing the name to one blob a short, unrelated word could contain a
-    substring of. Matching is Unicode-aware in both directions: Latin accents
-    are folded before splitting, so "Český" and "Cesky" tokenize the same,
+    substring of. A digit and the capital after it split only where the
+    capital starts a word ("Covid19Deaths"), so "DAC2A" and "DAC2a", one
+    table's name in two cases, are the one token `dac2a`. Matching is
+    Unicode-aware in both directions: Latin accents are folded before
+    splitting, so "Český" and "Cesky" tokenize the same,
     while a mark on a non-Latin base is left alone (recomposed with it into
     one code point by NFC where composition allows, kept as base-plus-mark by
     `_words` where it does not), so "が" and "か", or "क़" and "क", keep

@@ -74,6 +74,7 @@ from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    load_log,
     resolve_definition,
     resolved_spec,
 )
@@ -90,7 +91,6 @@ from planner.plan import (
     Decline,
     EvidenceRequirement,
     FullHistory,
-    PinSource,
     Plan,
     PlanStatus,
     SessionState,
@@ -1214,9 +1214,18 @@ def _first_year_wanted(result: Mapping[str, object]) -> str | None:
 FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
 
 
-def _first_year_identity(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | None:
-    """The identity a first-year read of `pin` reads; `None` when none is on record."""
-    recorded = identity_on_record(pin, shown=shown, end_open=True)
+def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | None:
+    """The identity a first-year read of `pin` reads; `None` when none is on record.
+
+    It is on record as `submission.service.admit` finds it, the discovery
+    log's definitions included, so a pin `propose_plan` admits is read.
+    """
+    recorded = identity_on_record(
+        pin,
+        shown=pin_sources(state),
+        end_open=True,
+        definition_lookup=load_log(state).recorded_definition,
+    )
     return recorded.identity if recorded is not None else None
 
 
@@ -1454,7 +1463,7 @@ def build_planner_tools(
             pin = _first_year_wanted(result)
             if pin is None or pin in full_histories(state):
                 return result
-            identity = _first_year_identity(pin, pin_sources(state))
+            identity = _first_year_identity(pin, state)
             if identity is None:
                 return result
             try:

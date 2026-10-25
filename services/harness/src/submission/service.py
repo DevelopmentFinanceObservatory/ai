@@ -405,7 +405,7 @@ def admit(
         previous, evidence_requirements, removed_evidence_requirements
     )
     read = full_histories(view.state)
-    definition_lookup = load_log(view.state).recorded_alternative
+    definition_lookup = load_log(view.state).recorded_definition
     settled = [
         *settled,
         *_user_settled_rewrites(
@@ -2579,7 +2579,10 @@ def identity_on_record(
     """The definition on record for `pin`; `None` when none is.
 
     The definition is the one a search in the conversation recorded
-    (`planner.plan.recorded_identity`). For a requirement stating
+    (`planner.plan.recorded_identity`), else the one `definition_lookup`
+    answers: `admit` passes the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
+    a candidate the translator offered. For a requirement stating
     `period_end_open` it is otherwise the one the block the planner was
     shown carries (`planner.plan.shown_identity`): the translator can find
     a closed requirement's pin by searching its stated years, and no search
@@ -2642,7 +2645,10 @@ def _window_pins(
     `scope.window` would mint), and so is the decision that fixes the pin.
 
     The identity on record is the one a search in the conversation recorded
-    (`planner.plan.recorded_identity`). One of a `latest` window is copied
+    (`planner.plan.recorded_identity`), else the one `definition_lookup`
+    answers, the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`) under
+    `admit`. One of a `latest` window is copied
     like any other: the copy replaces the window whole, as `get_data`'s
     scope surgery does, and the translator confirms the copy through Search
     before it is retrieved.

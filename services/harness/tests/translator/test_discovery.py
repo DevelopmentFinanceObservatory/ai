@@ -786,6 +786,7 @@ def _matching_window() -> dict[str, Any]:
     return {"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}}
 
 
+@pytest.mark.parametrize("stated_source", [None, "OECD DAC2a"], ids=["no_source", "its_source"])
 @pytest.mark.parametrize("earlier_turn", [False, True], ids=["this_turn", "an_earlier_turn"])
 async def test_a_pin_of_a_shown_dataset_builds_the_source_with_no_search(
     surface: McpSurface,
@@ -796,20 +797,31 @@ async def test_a_pin_of_a_shown_dataset_builds_the_source_with_no_search(
     derived_requirement: DerivedRequirementFactory,
     context_holding: ContextHolding,
     earlier_turn: bool,
+    stated_source: str | None,
 ) -> None:
     # The pin names a dataset the planner was shown (`PIN_SOURCES_STATE_KEY`)
     # with no blocking warning, and the block's own window agrees with the
     # requirement's period: the source comes straight from that block, with
     # no `search` call at all. An earlier turn's dataset is shown with no
-    # block, and the pin reads the one that turn stored.
-    pinned = requirement(source_spec_id=SPEC_KENYA)
+    # block, and the pin reads the one that turn stored. A stated source the
+    # block's provenance names is confirmed by it, as "OECD DAC2a" is by
+    # Search's label "OECD DAC2A" for a search that named no source.
+    pinned = requirement(source_spec_id=SPEC_KENYA, source=stated_source)
     context = context_holding(
         draft(
             decisions=[pinning_decision(SPEC_KENYA)],
             evidence_requirements=[pinned, derived_requirement()],
         )
     )
-    block = _spec(SPEC_KENYA, "debt service paid by Kenya", coverage=_matching_window())
+    block = _spec(
+        SPEC_KENYA,
+        "debt service paid by Kenya",
+        coverage=_matching_window(),
+        facets={
+            "unit": {"basis": "declared_default", "ref": "usd", "label": "US dollars"},
+            "provenance": {"ref": "provenance/OECDDAC2A", "label": "OECD DAC2A"},
+        },
+    )
     if earlier_turn:
         sources = pin_sources(context.state)
         sources[SPEC_KENYA] = PinSource(settled=True, earlier_turn=True)
