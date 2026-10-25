@@ -1831,12 +1831,9 @@ def test_an_open_axis_rank_states_how_many_donors_the_source_holds(
 
     # The retrieval's label names the source's measure and its 55 donors, not
     # the planner's "education aid for every donor".
-    assert (
-        labels[0]
-        == "Fetch gross disbursements (education) for Kenya and the 55 donors the source holds in any year"
-    )
+    assert labels[0] == "Fetch gross disbursements (education) for Kenya and all 55 donors"
     assert sentences["ranked"] == (
-        "Ranks by the total of education aid: ranks the 55 donors the source holds in any year; "
+        "Ranks by the total of education aid: ranks all 55 donors the source holds; "
         "the window is collapsed into one ranking."
     )
 
@@ -1864,7 +1861,7 @@ def test_an_open_axis_rank_states_a_count_in_the_thousands_with_a_separator(
 
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
-    assert "ranks the 1,234 donors the source holds in any year" in sentences["ranked"]
+    assert "ranks all 1,234 donors the source holds" in sentences["ranked"]
 
 
 def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
@@ -1892,11 +1889,8 @@ def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
     # A source stating no measure label leaves the label the requirement's measure.
-    assert labels[0] == (
-        "Fetch education aid for the 140 recipients the source holds in any year "
-        "and the 55 donors the source holds in any year"
-    )
-    assert "ranks the 55 donors the source holds in any year" in sentences["ranked"]
+    assert labels[0] == "Fetch education aid for all 140 recipients and all 55 donors"
+    assert "ranks all 55 donors the source holds" in sentences["ranked"]
 
 
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(
@@ -2050,7 +2044,30 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over whichever of its 1,554 indicators hold data by default",
+            "summed over its 1,554 indicators by default",
+        ),
+        # The US health share of Kenya in 2022: the family serves 288, and the
+        # answer sums the 13 that hold data.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over its 13 indicators",
+        ),
+        # With the donors left open, Search's count also covers group totals,
+        # which the retrieval leaves out.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "open_entity_axes": (_DONORS,),
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over whichever of its 288 indicators hold data",
         ),
         (
             {
@@ -2098,6 +2115,8 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
     ],
     ids=[
         "summed-by-the-rule",
+        "confirmed-within-a-served-family",
+        "confirmed-over-an-open-donor-axis",
         "summed-by-the-plan",
         "separate-by-the-plan",
         "one-confirmed-summed",
@@ -2416,10 +2435,7 @@ def test_a_share_names_the_population_its_denominator_holds_and_its_numerator_do
 
 @pytest.mark.parametrize(
     ("whole", "parties"),
-    [
-        (DAC_DONORS, "Kenya and official donors (DAC)"),
-        (ALL_DONORS, "Kenya and the 140 donors the source holds in any year"),
-    ],
+    [(DAC_DONORS, "Kenya and official donors (DAC)"), (ALL_DONORS, "Kenya and all 140 donors")],
     ids=["dac_donors", "all_donors"],
 )
 def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(

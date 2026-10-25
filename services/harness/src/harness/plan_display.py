@@ -838,8 +838,8 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     a flow where the source binds a named set (`SelectedSource.groups`)
     reads as the set's label, since a source bound to the total for official
     donors (DAC) holds those donors and not every donor, and any other with
-    how many members the source holds on its axis in any year
-    (`_population_count`), as `entities_phrase` writes it, a place word with the `level` a filter
+    how many members the source holds on its axis (`_population_count`), as
+    `entities_phrase` writes it, a place word with the `level` a filter
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
@@ -858,9 +858,7 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
         for word in across
         if (count := _population_count(requirement, word, plan)) is not None
     }
-    return entities_phrase(
-        entities, across=across, level=level, member_counts=counts, counted_in_any_year=True
-    )
+    return entities_phrase(entities, across=across, level=level, member_counts=counts)
 
 
 def _label_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
@@ -1074,13 +1072,19 @@ def _reading_clause(source: SelectedSource) -> str | None:
     """How the retrieval reads `source`'s family of StatVars, or `None` for a source binding one.
 
     The user reads a StatVar as an indicator, the noun the card attribution
-    counts them by. Counts the family as the source does (`stat_var_count`).
-    A family counted at fewer than two members, or at a floor
-    (`stat_var_count_is_floor`), is named without a count: its retrieval
-    holds every member with data, which can be more or fewer than the
-    members `search` confirmed. Says when the reading is the compiler's
-    default (`ReadingSetBy.RULE`), so the user knows the plan can be amended
-    to read it the other way.
+    counts them by. For a source binding every entity, the count is the one
+    the answer shows: the members `search` confirmed to hold data at those
+    entities in the plan's years (`stat_var_member_count`), the series the
+    retrieval holds, as "summed over its 13 indicators". On a source leaving
+    an entity axis open (`open_entity_axes`) `search` confirms members at
+    probe places on a place axis, and over group totals as well as parties
+    on a role axis, so the retrieval can hold other members than it counts.
+    Such a source, and one whose confirmed count `search` states as a floor
+    or not at all, is counted by the family `served_count` counts, whatever
+    its years, as "summed over whichever of its 288 indicators hold data". A family counted at fewer than two members, or
+    only at a floor (`stat_var_count_is_floor`), is named without a count. Says when the
+    reading is the compiler's default (`ReadingSetBy.RULE`), so the user
+    knows the plan can be amended to read it the other way.
 
     A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
@@ -1093,14 +1097,25 @@ def _reading_clause(source: SelectedSource) -> str | None:
     if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
     summed = source.stat_var_reading is StatVarReading.SUM
-    if count < 2 or stat_var_count_is_floor(source):
-        clause = "summed over its indicators" if summed else "kept as separate indicators"
-    else:
+    retrieved = (
+        source.stat_var_member_count
+        if source.stat_var_member_count_exact is not False and not source.open_entity_axes
+        else None
+    )
+    if retrieved is not None and retrieved > 1:
+        clause = (
+            f"summed over its {retrieved:,} indicators"
+            if summed
+            else f"kept as {retrieved:,} separate indicators"
+        )
+    elif retrieved is None and count > 1 and not stat_var_count_is_floor(source):
         clause = (
             f"summed over whichever of its {count:,} indicators hold data"
             if summed
             else f"kept separate over whichever of its {count:,} indicators hold data"
         )
+    else:
+        clause = "summed over its indicators" if summed else "kept as separate indicators"
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 
 

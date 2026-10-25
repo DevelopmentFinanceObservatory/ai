@@ -283,12 +283,12 @@ conversation needs no repeating.
 When you give a figure a tool states, round it to three significant figures,
 keeping counts exact and a small nonzero value from rounding to zero. Give
 it with a scale word (billion, million, per cent). Do not give it as frame
-counts, ids, codes or step names. A count names what it counts: entities
-with data in the period (a ranking's ranked entities, the series a fetch
-retrieved), every entity the source holds in any year (a plan record's "the N
-donors the source holds in any year"), or the indicators a measure's family
-holds, of which only those with data are summed ("summed over whichever of its
-N indicators hold data"). Do not give one as another.
+counts, ids, codes or step names. A count names what it counts: entities or
+series with data in the period (a ranking's ranked entities, the series a fetch
+retrieved, a plan record's "all N donors" or "summed over its N indicators"),
+or every indicator a measure's family holds in any year, of which only those
+with data are summed (a plan record's "summed over whichever of its N
+indicators hold data"). Do not give one as another.
 
 Say plainly what of the user's question could not be answered: an ask
 declined, not computed in part, or left without data, a part refused or not

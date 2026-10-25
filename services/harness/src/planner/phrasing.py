@@ -88,17 +88,15 @@ def entities_phrase(
     across: Sequence[str] = (),
     level: PlaceType | None = None,
     member_counts: Mapping[str, int] | None = None,
-    counted_in_any_year: bool = False,
 ) -> str:
     """Join entity names in the order given, deduplicated, then "every {word}" for each `across` word.
 
     The parts read "a", "a and b" or "a, b and c", and an `across` word reads
     in the singular, so "donors" gives "every donor". `member_counts` maps an
     `across` word to how many members the selected source holds on the axis
-    it covers, and a word with a count reads "all 50 recipients", or "the 50
-    recipients the source holds in any year" when `counted_in_any_year` holds,
-    for a count that spans every year while the retrieval pins one. A count
-    below two is left unstated, so a word with one member reads "every donor". A word
+    it covers in the plan's years, and a word with a count reads "all 50
+    recipients". A count below two is left unstated, so a word with one
+    member reads "every donor". A word
     naming the place party reads `EVERY_PLACE`, since such a retrieval holds
     every level of place and its count spans them all, or "every {level}"
     when a filter downstream of it keeps `level` (`kept_level`): "every
@@ -117,12 +115,7 @@ def entities_phrase(
         if across_party(word) == "place":
             parts.append(EVERY_PLACE if level is None else f"every {level_noun(level)}")
         elif count is not None and count > 1:
-            members = f"{count:,} {pluralize(singular(word))}"
-            parts.append(
-                f"the {members} the source holds in any year"
-                if counted_in_any_year
-                else f"all {members}"
-            )
+            parts.append(f"all {count:,} {pluralize(singular(word))}")
         else:
             parts.append(f"every {singular(word)}")
     if len(parts) == 1:
@@ -226,15 +219,14 @@ def among_phrase(
     of a requirement's `across` words; no entity on it is named, so there is
     no focus.
     `member_count` is how many members the selected source holds on that
-    axis in any year, stated when known: "ranks the 55 donors the source holds
-    in any year". A count below two is left unstated, as one member is no
+    axis in the plan's years, stated when known: "ranks all 55 donors the
+    source holds". A count below two is left unstated, as one member is no
     population to count.
     """
     if among is RankAmong.NAMED:
         return "ranks exactly the entities named"
     if across is not None and member_count is not None and member_count > 1:
-        members = f"{member_count:,} {pluralize(singular(across))}"
-        return f"ranks the {members} the source holds in any year"
+        return f"ranks all {member_count:,} {pluralize(singular(across))} the source holds"
     if across is not None:
         return f"ranks every {singular(across)} the source holds"
     return "ranks every entity the source holds, with the named entities as the focus"

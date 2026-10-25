@@ -691,8 +691,11 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
     for a worldwide total), and each `role_axis_facts` entry counts the members of
     a flow side the part left open. A count either field cannot state, such
     as a `members` that is not a list, is `None`, never 0. When both state
-    one column, the scope's count wins, since it lists the members it
-    counts. A column a `resolved.entities` entry binds is not open. Never
+    one column, the fact's count wins on a flow side (`FLOW_ROLE_COLUMNS`),
+    since `search` counts its parties there and leaves out the group totals
+    the scope lists, which a flow retrieval does not return; on the place
+    axis the scope's count wins, since it lists the members it counts. A
+    column a `resolved.entities` entry binds is not open. Never
     raises: `harness.tool_contracts` reads the search envelope with it
     too, where a malformed field must not fail the digest.
     """
@@ -702,7 +705,9 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
         if (role := _text(fact.get("role"))) is not None:
             counts[role] = _count(fact.get("member_count"))
     scope = _mapping(resolved.get("scope"))
-    if (axis := _text(scope.get("axis"))) is not None:
+    if (axis := _text(scope.get("axis"))) is not None and (
+        axis not in FLOW_ROLE_COLUMNS or counts.get(axis) is None
+    ):
         members = scope.get("members")
         counts[axis] = len(members) if isinstance(members, list) else None
     return tuple(
