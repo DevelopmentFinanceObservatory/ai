@@ -1745,7 +1745,7 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`_check_wholes_span_their_totals`). `planner.agent.propose_plan`
+    too (`check_wholes_span_their_totals`). `planner.agent.propose_plan`
     answers it with a typed problem naming the ways out.
     """
 
@@ -1910,7 +1910,16 @@ def _side_dataset(
     return item if isinstance(item, DatasetRequirement) else None
 
 
-def _check_wholes_span_their_totals(plan: Plan) -> None:
+def no_refs(_dataset: DatasetRequirement | None, _entity: Entity) -> frozenset[str]:
+    """No graph ref, so the entity is compared by its name (`check_wholes_span_their_totals`)."""
+    return frozenset()
+
+
+def check_wholes_span_their_totals(
+    plan: Plan,
+    *,
+    refs: Callable[[DatasetRequirement | None, Entity], frozenset[str]] = no_refs,
+) -> None:
     """Reject a share or quotient whose denominator, on a party its ask totals across, names the numerator's members alone.
 
     An ask's `over` (`AskBreakdown.over`) is a party its answer totals
@@ -1937,8 +1946,16 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
     `share_of` operation runs over (`harness.orchestrator_tools._breakdowns_missing`).
     An ask listing a party in `by` is answered by an output keeping it
     (`_check_asks_keep_their_parties`), which an unkeyed share does not.
-    Names are compared as the plan writes them, so an alias, or a group on
-    one side beside its members on the other, is not seen. The requirements
+
+    Each entity is compared by the graph refs `refs` resolves it to, given
+    the dataset requirement its side reads, `None` through any other kind,
+    and by its name where either entity of a pair resolves none
+    (`_among_members`). `Plan` validation resolves none (`no_refs`), so it
+    compares names as the plan writes them, and an alias, or a group on one
+    side beside its members on the other, is not seen there.
+    `submission.service.admit` checks again with the refs each side's pinned
+    source resolves its names to, so "United States" and "United States of
+    America" compare equal when both resolve to one ref. The requirements
     are those the model wrote (`authored`), so a refusal names its ids.
 
     Raises:
@@ -1963,13 +1980,19 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                 continue
             numerator = side_entities(by_id, requirement.numerator)
             denominator = side_entities(by_id, requirement.denominator)
+            numerator_dataset = _side_dataset(by_id, requirement.numerator.input_id)
+            dataset = _side_dataset(by_id, requirement.denominator.input_id)
             for word in words:
-                held = _names_on_side(denominator, word)
-                if not held or not held <= _names_on_side(numerator, word):
+                held = [(entity, refs(dataset, entity)) for entity in _on_side(denominator, word)]
+                part = [
+                    (entity, refs(numerator_dataset, entity))
+                    for entity in _on_side(numerator, word)
+                ]
+                if not held or not all(_among_members(one, part) for one in held):
                     continue
-                if len(held) > 1 and _pools_across(requirement, word):
+                members = {found or entity.name for entity, found in held}
+                if len(members) > 1 and _pools_across(requirement, word):
                     continue
-                dataset = _side_dataset(by_id, requirement.denominator.input_id)
                 raise WholeIsItsMemberError(
                     requirement_id=requirement.id,
                     ask=answer.ask,
@@ -1978,7 +2001,7 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                     denominator_id=requirement.denominator.input_id
                     if dataset is None
                     else dataset.id,
-                    named=held,
+                    named={entity.name for entity, _ in held},
                 )
 
 
@@ -1992,13 +2015,27 @@ def _pools_across(requirement: ShareOfRequirement | QuotientRequirement, word: s
     )
 
 
-def _names_on_side(entities: Iterable[Entity], word: str) -> set[str]:
-    """The names of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
-    return {
-        entity.name
-        for entity in entities
-        if entity.role is not None and same_party(entity.role, word)
-    }
+def _among_members(
+    resolved: tuple[Entity, frozenset[str]], part: Sequence[tuple[Entity, frozenset[str]]]
+) -> bool:
+    """Whether an entity of a whole, with the refs it resolves to, is among the members `part` names.
+
+    By ref, when every ref it resolves to is one `part`'s entities resolve
+    to, so a group the part names stands for each of its members; by name,
+    against an entity of `part` with the same name where either of the two
+    resolves no ref.
+    """
+    entity, found = resolved
+    if found and found <= {ref for _, theirs in part for ref in theirs}:
+        return True
+    return any(one.name == entity.name for one, theirs in part if not (found and theirs))
+
+
+def _on_side(entities: Iterable[Entity], word: str) -> tuple[Entity, ...]:
+    """The entities of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
+    return tuple(
+        entity for entity in entities if entity.role is not None and same_party(entity.role, word)
+    )
 
 
 def _check_asks_across_years(asks: Sequence[str], numbers: Sequence[int]) -> None:
@@ -3843,7 +3880,7 @@ class Plan(StrictModel):
         party its ask breaks down by unless that part is declined
         (`_check_asks_keep_their_parties`), and a share or quotient answering
         an ask that totals across a party divides by a whole spanning more
-        than the numerator's own members of it (`_check_wholes_span_their_totals`).
+        than the numerator's own members of it (`check_wholes_span_their_totals`).
 
         The requirements are judged as they run: split so each dataset read
         from its first year serves only its rolling-start readers
@@ -3898,7 +3935,7 @@ class Plan(StrictModel):
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
         _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
         _check_asks_keep_their_parties(self)
-        _check_wholes_span_their_totals(self)
+        check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self

@@ -207,8 +207,12 @@ naming the United States and Kenya does, and the plan is refused with the way
 out as `whole_is_its_member`: keep that party open in the denominator's
 `across`, name the group the user named as the whole, or, when translation
 finds no source holding every member, decline the ask with the code its answer
-names (`planner.plan._check_wholes_span_their_totals`). Names are compared as
-the plan writes them, and an ask with no `over` is not checked. The
+names (`planner.plan.check_wholes_span_their_totals`). `Plan` validation
+compares names as the plan writes them. Admission checks again by graph ref,
+each side's names resolved against the source its dataset requirement pins
+(`submission.service._entity_refs`), so "United States" over a whole naming
+"United States of America" is refused when both resolve to one ref; two
+names are compared as written where either resolves no ref. An ask with no `over` is not checked. The
 orchestrator's `plan` call is refused until an ask names in `over` the side a
 search's `share_of` operation runs over, or in `by` when the search also held
 that side open (`harness.orchestrator_tools._breakdowns_missing`).
