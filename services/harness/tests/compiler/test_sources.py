@@ -22,7 +22,7 @@ from compiler.sources import (
     wire_groups,
 )
 from planner.records import Period
-from planner.workflow import OpenEntityAxis
+from planner.workflow import BoundEntity, OpenEntityAxis
 
 SPEC_KENYA = "spec_" + "a" * 32
 SPEC_OTHER = "spec_" + "b" * 32
@@ -79,38 +79,92 @@ def _envelope(status: str, **payload: Any) -> dict[str, Any]:
     return {"schema_version": 1, "status": status, "parts": [_part(status, **payload)]}
 
 
+def _rows(*rows: dict[str, Any]) -> dict[str, Any]:
+    """The restatement entity rows of a part."""
+    return {"entities": list(rows)}
+
+
+_CONGO_PART = {
+    "restatement": _rows(
+        {"text": "Congo", "dcid": "country/COD", "role_text": "from"},
+        {"text": "Congo", "dcid": "country/COG", "role_text": "to"},
+    ),
+    "entity_refs": [
+        {"text": "Congo", "refs": ["country/COD"]},
+        {"text": "Congo", "refs": ["country/COG"]},
+    ],
+}
+
+
 @pytest.mark.parametrize(
     ("part", "expected"),
     [
         (
             {
+                "restatement": _rows(
+                    {"text": "G7", "role_text": "from"}, {"text": "Africa", "role_text": "to"}
+                ),
                 "entity_refs": [
                     {"text": "G7", "refs": ["GroupOfSeven"]},
                     {"text": "Africa", "refs": ["DACAfrica"]},
-                ]
+                ],
             },
-            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+            [
+                BoundEntity(identity="G7", text="G7", role="from", refs=("GroupOfSeven",)),
+                BoundEntity(identity="Africa", text="Africa", role="to", refs=("DACAfrica",)),
+            ],
         ),
-        # A text Search bound nothing for names nothing by ref.
-        ({"entity_refs": [{"text": "Atlantis", "refs": []}]}, {}),
-        # A Search that predates `entity_refs` states none, whatever it restates.
-        ({"restatement": {"entities": [{"text": "G7", "role_text": "from"}]}}, {}),
-        # A text stated twice binds every ref either row states.
+        # A row Search bound nothing for names nothing by ref.
         (
             {
-                "entity_refs": [
-                    {"text": "Kenya", "refs": ["country/KEN"]},
-                    {"text": "kenya", "refs": ["KEN2"]},
-                ]
+                "restatement": _rows({"text": "Atlantis"}),
+                "entity_refs": [{"text": "Atlantis", "refs": []}],
             },
-            {"kenya": ("country/KEN", "KEN2")},
+            [],
+        ),
+        # A Search that predates `entity_refs` states none, whatever it restates.
+        ({"restatement": _rows({"text": "G7", "role_text": "from"})}, []),
+        # Nor does one stating an entry per text rather than per row.
+        (
+            {
+                "restatement": _rows({"text": "Congo"}, {"text": "Congo"}),
+                "entity_refs": [{"text": "Congo", "refs": ["country/COD", "country/COG"]}],
+            },
+            [],
+        ),
+        # Two rows written alike stay two entities, each keyed by what it pins or names.
+        (
+            _CONGO_PART,
+            [
+                BoundEntity(
+                    identity="country/COD", text="Congo", role="from", refs=("country/COD",)
+                ),
+                BoundEntity(identity="country/COG", text="Congo", role="to", refs=("country/COG",)),
+            ],
+        ),
+        (
+            {
+                "restatement": _rows(
+                    {"text": "Congo", "name": "Republic of the Congo"},
+                    {"text": "Congo"},
+                ),
+                "entity_refs": [
+                    {"text": "Congo", "refs": ["country/COG"]},
+                    {"text": "Congo", "refs": ["country/COD"]},
+                ],
+            },
+            [
+                BoundEntity(identity="Republic of the Congo", text="Congo", refs=("country/COG",)),
+                BoundEntity(identity="Congo", text="Congo", refs=("country/COD",)),
+            ],
         ),
     ],
+    ids=["texts", "unbound", "no-entity-refs", "per-text", "pinned-alike", "named-alike"],
 )
-def test_each_entity_text_maps_to_the_refs_it_bound(
-    part: dict[str, Any], expected: dict[str, tuple[str, ...]]
+def test_each_entity_row_keeps_the_refs_it_bound(
+    part: dict[str, Any], expected: list[BoundEntity]
 ) -> None:
-    assert bound_refs(part) == expected
+    assert list(bound_refs(part)) == expected
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
@@ -762,6 +816,20 @@ def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:
     source = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
 
     assert wire_groups(source.groups) == {"origin": {"label": "all donors"}}
+
+
+def test_a_block_carries_its_parts_bound_rows_back_into_the_source() -> None:
+    rows = bound_refs(_CONGO_PART)
+    block = {**_spec(), "_bound_refs": [row.model_dump(mode="json") for row in rows]}
+
+    assert source_from_spec_block(block).bound_refs == rows
+
+
+def test_a_block_holding_bound_refs_by_text_is_not_usable() -> None:
+    block = {**_spec(), "_bound_refs": {"congo": ["country/COD", "country/COG"]}}
+
+    with pytest.raises(ValueError, match="not usable as a source"):
+        source_from_spec_block(block)
 
 
 def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:

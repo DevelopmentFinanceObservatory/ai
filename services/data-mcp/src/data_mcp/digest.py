@@ -322,6 +322,7 @@ def _render_no_data_part(part: Mapping[str, Any]) -> str:
     sections = [header]
     if message := no_data.get("message"):
         sections.append(message)
+    sections.extend(_ambiguous_entity_lines(no_data, part.get("sentence_plan") or []))
     sections.extend(_ambiguous_source_lines(no_data.get("ambiguous_sources") or []))
     checked = _checked_count(no_data)
     if checked:
@@ -360,6 +361,67 @@ def _unapplied_phrase_header(unbound_qualifiers: Sequence[Mapping[str, Any]]) ->
     )
 
 
+def _ambiguous_entity_lines(
+    no_data: Mapping[str, Any], sentence_plan: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """One line per `ambiguous_entities` group, naming each candidate's dcid, then how to settle it.
+
+    Groups are numbered by their index, since two groups can share a wording
+    ("aid from Congo to Congo" asks "Congo" for each end). A group's role is
+    the `role_text` of the row its options pin to a candidate, else the role
+    of the sentence slot sharing its `entity_choice`. An option settles the
+    group its `entity_choice` names or, without one, every group its
+    mentions name. Candidates are capped at `_CANDIDATE_CAP`, with a trailing
+    count of the rest.
+    """
+    groups = no_data.get("ambiguous_entities") or []
+    if not groups:
+        return []
+    options = no_data.get("options") or []
+    lines = []
+    for index, group in enumerate(groups):
+        text = group.get("text")
+        candidates = group.get("candidates") or []
+        settling = [
+            option
+            for option in options
+            if option.get("entity_choice") == index
+            or (option.get("entity_choice") is None and text in (option.get("mentions") or []))
+        ]
+        role = _ambiguous_entity_role(
+            settling, refs={candidate.get("ref") for candidate in candidates}
+        ) or next(
+            (
+                token.get("role")
+                for token in sentence_plan
+                if token.get("entity_choice") == index and token.get("role")
+            ),
+            None,
+        )
+        shown = [_candidate_piece(candidate) for candidate in candidates[:_CANDIDATE_CAP]]
+        remaining = len(candidates) - len(shown)
+        tail = f", and {remaining} more" if remaining > 0 else ""
+        named = f'Entity {index + 1}, "{text}"' + (f" ({role})" if role else "")
+        lines.append(f"{named}, could mean: {'; '.join(shown)}{tail}.")
+    lines.append(
+        "Ask the user which one each entity means, then resend its row with the chosen "
+        "candidate's dcid as `dcid`, keeping its `text` and `role`."
+    )
+    return lines
+
+
+def _ambiguous_entity_role(options: Sequence[Mapping[str, Any]], *, refs: set[Any]) -> str | None:
+    """The one `role_text` on the rows `options` pin to a dcid in `refs`, or None when they state none or several."""
+    roles = {
+        entity.get("role_text")
+        for option in options
+        for data_part in (option.get("data_query") or {}).get("parts") or []
+        for entity in data_part.get("entities") or []
+        if entity.get("dcid") in refs and entity.get("role_text")
+    }
+    return roles.pop() if len(roles) == 1 else None
+
+
 def _ambiguous_source_lines(groups: Sequence[Mapping[str, Any]]) -> list[str]:
     """One line per ambiguous source wording, naming each source it could mean.
 
@@ -370,14 +432,14 @@ def _ambiguous_source_lines(groups: Sequence[Mapping[str, Any]]) -> list[str]:
     lines = []
     for group in groups:
         candidates = group.get("candidates") or []
-        shown = [_source_candidate(candidate) for candidate in candidates[:_CANDIDATE_CAP]]
+        shown = [_candidate_piece(candidate) for candidate in candidates[:_CANDIDATE_CAP]]
         remaining = len(candidates) - len(shown)
         tail = f", and {remaining} more" if remaining > 0 else ""
         lines.append(f'"{group.get("text")}" could mean: {"; ".join(shown)}{tail}.')
     return lines
 
 
-def _source_candidate(candidate: Mapping[str, Any]) -> str:
+def _candidate_piece(candidate: Mapping[str, Any]) -> str:
     return f"{candidate.get('label')} ({candidate.get('ref')}, {candidate.get('kind')})"
 
 

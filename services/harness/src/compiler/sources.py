@@ -33,6 +33,7 @@ from planner.records import (
     StrictModel,
 )
 from planner.workflow import (
+    BoundEntity,
     ElectedMeasure,
     MeasureAlternative,
     OpenAxis,
@@ -143,25 +144,40 @@ def source_constraint_matches(
     )
 
 
-def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
-    """The refs Search bound for each entity text of `part`, by the text case-folded.
+def bound_refs(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """The refs Search bound for each entity row of `part`, one `BoundEntity` per row, in row order.
 
-    Search states, beside the part's `restatement`, one `entity_refs` row
-    per entity text it restates: the text and the refs it finally bound.
-    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
-    bound to nothing, being ambiguous, not held or not found, states no
-    refs and is left out, and so is every text of a part without
-    `entity_refs`, from a Search that predates the field. Such a name is
-    matched by label or through the graph's resolve door. A text stated
-    twice binds every ref either row states.
+    Search states one `entity_refs` entry per `restatement.entities` row,
+    at the row's position: the row's text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. Each
+    entry is kept with its row's identity (`dcid`, else `name`, else
+    `text`) and `role_text`, so two rows written "Congo" pinned to
+    `country/COD` and to `country/COG` stay two entities. A row bound to
+    nothing, being ambiguous, not held or not found, states no refs and is
+    left out, and so is every row of a part whose `entity_refs` does not
+    hold one entry per row, as a Search that predates the field or states
+    one entry per text answers. Such a name is matched by label or through
+    the graph's resolve door.
     """
-    refs: dict[str, tuple[str, ...]] = {}
-    for row in _sequence(part.get("entity_refs")):
-        text, bound = _text(row.get("text")), _strings(row.get("refs"))
-        if text is not None and bound:
-            key = text.casefold()
-            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
-    return refs
+    rows = _sequence(_mapping(part.get("restatement")).get("entities"))
+    entries = _sequence(part.get("entity_refs"))
+    if len(entries) != len(rows):
+        return ()
+    bound: list[BoundEntity] = []
+    for row, entry in zip(rows, entries, strict=True):
+        text, refs = _text(row.get("text")), _strings(entry.get("refs"))
+        if text is None or not refs:
+            continue
+        identity = _text(row.get("dcid")) or _text(row.get("name")) or text
+        bound.append(
+            BoundEntity(
+                identity=identity,
+                text=text,
+                role=_text(row.get("role_text")),
+                refs=tuple(dict.fromkeys(refs)),
+            )
+        )
+    return tuple(bound)
 
 
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
@@ -243,10 +259,14 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     `None`.
     `coverage.window` is a series window only when `coverage.kind` is
     `exact`; a `breadth` or `bare` coverage carries none.
+    The block's `_bound_refs`, the rows of the part that carried it
+    (`bound_refs`, written by `harness.tool_contracts.resolver_digest`),
+    are the source's `bound_refs`; a block without them binds none.
 
     Raises:
-        ValueError: If the block lacks a usable `spec_id`, or an entity it
-            resolves lacks its role, value or label.
+        ValueError: If the block lacks a usable `spec_id`, an entity it
+            resolves lacks its role, value or label, or its `_bound_refs`
+            are not a list of `BoundEntity` rows.
     """
     resolved = _mapping(block.get("resolved"))
     coverage = _mapping(resolved.get("coverage"))
@@ -271,11 +291,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
-            bound_refs={
-                text: tuple(refs)
-                for text, raw in _mapping(block.get("_bound_refs")).items()
-                if (refs := _strings(raw))
-            },
+            bound_refs=_BOUND_ENTITIES.validate_python(block.get("_bound_refs", ())),
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -1032,6 +1048,7 @@ def _strings(value: object) -> list[str]:
 
 
 _PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
+_BOUND_ENTITIES: TypeAdapter[tuple[BoundEntity, ...]] = TypeAdapter(tuple[BoundEntity, ...])
 
 
 def _party_classes(value: object) -> tuple[PartyClass, ...]:

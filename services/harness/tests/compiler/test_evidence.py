@@ -22,10 +22,11 @@ from compiler.evidence import (
     open_axes_for,
     opens_place_axis,
     resolve_entity,
+    resolve_name,
     unlabelled_series_refs,
     with_series_labels,
 )
-from compiler.sources import member_digest, source_from_spec_block, stat_var_reading
+from compiler.sources import bound_refs, member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
 from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
@@ -3258,6 +3259,108 @@ def test_a_retrieval_meets_a_member_by_the_ref_its_name_resolved_to_at_approval(
     assert [
         issue.required for issue in errors(issues) if issue.code is EvidenceIssueCode.ENTITY_MISSING
     ] == missing
+
+
+# "Aid from Congo to Congo": Search restates two rows written "Congo", each
+# pinned or named apart, and binds each its own country. The data labels the
+# Republic of the Congo "Congo".
+_COD = ResolvedEntity(role="origin", ref="country/COD", label="Congo, Dem. Rep.")
+_COG = ResolvedEntity(role="destination", ref="country/COG", label="Congo")
+
+
+def _congo_source(
+    source: SourceFactory, rows: list[dict[str, str]], entities: tuple[ResolvedEntity, ...]
+) -> SelectedSource:
+    part = {
+        "restatement": {"entities": rows},
+        "entity_refs": [{"text": "Congo", "refs": [entity.ref]} for entity in entities],
+    }
+    return source(entities=entities, bound_refs=bound_refs(part), identity=None)
+
+
+_PINNED_FROM_AND_TO = [
+    {"text": "Congo", "dcid": "country/COD", "role_text": "from"},
+    {"text": "Congo", "dcid": "country/COG", "role_text": "to"},
+]
+_PINNED_BOTH_FROM = [
+    {"text": "Congo", "dcid": "country/COD", "role_text": "from"},
+    {"text": "Congo", "dcid": "country/COG", "role_text": "from"},
+]
+_NAMED_BOTH_FROM = [
+    {"text": "Congo", "name": "Democratic Republic of the Congo", "role_text": "from"},
+    {"text": "Congo", "name": "Republic of the Congo", "role_text": "from"},
+]
+
+
+@pytest.mark.parametrize(
+    ("rows", "entities", "asked"),
+    [
+        (
+            _PINNED_FROM_AND_TO,
+            (_COD, _COG),
+            [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")],
+        ),
+        (
+            _PINNED_BOTH_FROM,
+            (_COD, _COG.model_copy(update={"role": "origin"})),
+            [Entity(name="country/COD", role="donor"), Entity(name="country/COG", role="donor")],
+        ),
+        (
+            _NAMED_BOTH_FROM,
+            (_COD, _COG.model_copy(update={"role": "origin"})),
+            [
+                Entity(name="Democratic Republic of the Congo", role="donor"),
+                Entity(name="Republic of the Congo", role="donor"),
+            ],
+        ),
+        # The unnamed row's identity is its text, which a recipient "Congo"
+        # equals too, but only the named row is bound on the recipient side.
+        (
+            [
+                {"text": "Congo", "role_text": "from"},
+                {"text": "Congo", "name": "Republic of the Congo", "role_text": "to"},
+            ],
+            (_COD, _COG),
+            [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")],
+        ),
+    ],
+    ids=["pinned-other-columns", "pinned-one-column", "named-one-column", "named-beside-unnamed"],
+)
+def test_two_entities_written_alike_each_resolve_to_their_own_row(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    rows: list[dict[str, str]],
+    entities: tuple[ResolvedEntity, ...],
+    asked: list[Entity],
+) -> None:
+    found = _congo_source(source, rows, entities)
+
+    resolved = [resolve_name(entity, found) for entity in asked]
+    issues = check_evidence(requirement(entities=asked), evidence_from_source(found))
+
+    assert resolved == list(entities)
+    assert _entity_codes(issues) == []
+
+
+@pytest.mark.parametrize(
+    ("refs", "missing"),
+    [(("country/COD", "country/COG"), 0), (("country/COD",), 1)],
+    ids=["holds-both", "holds-the-donor"],
+)
+def test_a_retrieval_meets_each_entity_written_alike_by_its_own_rows_ref(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    refs: tuple[str, ...],
+    missing: int,
+) -> None:
+    # Holding the donor's Congo alone leaves out the recipient's, and only it.
+    approved = _congo_source(source, _PINNED_FROM_AND_TO, (_COD, _COG))
+    asked = [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")]
+
+    issues = check_evidence(requirement(entities=asked), _g7_retrieval(*refs), approved=approved)
+
+    codes = [issue.code for issue in errors(issues)]
+    assert codes.count(EvidenceIssueCode.ENTITY_MISSING) == missing
 
 
 @pytest.mark.parametrize("exclude", [False, True])
