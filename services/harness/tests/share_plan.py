@@ -41,7 +41,7 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
 )
-from planner.records import DenominatorScope, GroupBy, Reduction
+from planner.records import DenominatorScope, GroupBy, RankAmong, Reduction
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -98,12 +98,18 @@ def us_share_of_kenya_oda(
     numerator: Mapping[str, Any],
     donor: str = "United States",
     whole_across: tuple[str, ...] = ("donor",),
+    every_donor: bool = False,
+    narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
 ) -> Plan:
     """The first plan of the module docstring, `all_oda` read from a source
-    stating `whole`'s fields over the donors `whole_across` covers, and `us`
-    from one stating `numerator`'s for the donor named `donor`."""
+    stating `whole`'s fields over the donors `whole_across` covers and
+    narrowed by `narrowing` before its total, and `us` from one stating
+    `numerator`'s for the donor named `donor`. With `every_donor`, `us` reads
+    every donor's ODA and totals it by year, as a share of one sector's ODA
+    does."""
     kenya = Entity(name="Kenya", role="recipient")
+    donors = [kenya] if every_donor else [Entity(name=donor, role="donor"), kenya]
     return _compiled(
         decision,
         question="What share of ODA to Kenya came from the United States each year since 2015?",
@@ -111,7 +117,8 @@ def us_share_of_kenya_oda(
             id="us",
             decision_ids=["measure"],
             measure="ODA gross disbursements",
-            entities=[Entity(name=donor, role="donor"), kenya],
+            entities=donors,
+            across=("donor",) if every_donor else (),
             period=_PERIOD,
         ),
         whole=DatasetRequirement(
@@ -124,6 +131,8 @@ def us_share_of_kenya_oda(
         ),
         group_by=(GroupBy.PERIOD,),
         sources={"us": numerator, "all_oda": whole},
+        numerator_by_year=every_donor,
+        narrowing=narrowing,
         then=then,
     )
 
@@ -134,10 +143,11 @@ def us_share_per_recipient(
     scope: DenominatorScope,
     numerator_recipients: int,
     whole_recipients: int,
+    then: Sequence[Then] = (),
 ) -> Plan:
     """The second plan of the module docstring, dividing per recipient by
     `scope`, its numerator source holding `numerator_recipients` recipients
-    and its denominator's `whole_recipients`."""
+    and its denominator's `whole_recipients`, then read by each of `then`."""
 
     pooled = scope is DenominatorScope.POOLED
 
@@ -182,6 +192,7 @@ def us_share_per_recipient(
         },
         axis="recipient",
         scope=scope,
+        then=then,
     )
 
 
@@ -195,48 +206,43 @@ def _compiled(
     sources: Mapping[str, Mapping[str, Any]],
     axis: str | None = None,
     scope: DenominatorScope | None = None,
+    numerator_by_year: bool = False,
+    narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
 ) -> Plan:
-    """`numerator`'s share of `whole` totalled by `group_by` (`all_by_year`),
-    or of `whole` itself when `group_by` is None, keyed by `axis` and divided
-    by `scope` when given, then each of `then`, compiled with each dataset
-    read from a source stating `sources`' fields."""
-    divisor = whole.id if group_by is None else "all_by_year"
-    totals: list[EvidenceRequirement] = []
-    total_operations: list[Operation] = []
+    """`numerator`'s share of `whole`, narrowed by each of `narrowing` in turn
+    and totalled by `group_by` (`all_by_year`), or of `whole` itself when
+    `group_by` is None. The numerator is totalled by year first
+    (`us_by_year`) when `numerator_by_year`. The share is keyed by `axis` and
+    divided by `scope` when given, then read by each of `then`, and the plan
+    compiled with each dataset read from a source stating `sources`' fields."""
+    steps: list[Then] = [*narrowing]
+    divisor = narrowing[-1][0].id if narrowing else whole.id
     if group_by is not None:
-        totals.append(
-            AggregateRequirement(
-                id="all_by_year",
-                decision_ids=["measure"],
-                input_id=whole.id,
-                reduction=Reduction.SUM,
-                group_by=group_by,
-            )
-        )
-        total_operations.append(
-            AggregateOperation(
-                id="all_by_year",
-                requirement_id="all_by_year",
-                input=whole.id,
-                reduction=Reduction.SUM,
-                group_by=group_by,
-            )
-        )
+        steps.append(_total("all_by_year", divisor, group_by))
+        divisor = "all_by_year"
+    share_of = numerator.id
+    if numerator_by_year:
+        steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,)))
+        share_of = "us_by_year"
     decisions = [decision()]
     if scope is not None:
         decisions.append(decision(slot="scope", fixes=DecisionFixes(denominator_scope=scope)))
+    if any("population" in requirement.decision_ids for requirement, _ in [*steps, *then]):
+        decisions.append(
+            decision(slot="population", fixes=DecisionFixes(among=RankAmong.POPULATION))
+        )
     draft = Plan(
         question=question,
         decisions=decisions,
         evidence_requirements=[
             numerator,
             whole,
-            *totals,
+            *(requirement for requirement, _ in steps),
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure", *(["scope"] if scope is not None else [])],
-                numerator=RequirementSide(input_id=numerator.id),
+                numerator=RequirementSide(input_id=share_of),
                 denominator=RequirementSide(input_id=divisor),
                 axis=axis,
                 denominator_scope=scope,
@@ -247,11 +253,11 @@ def _compiled(
     operations: list[Operation] = [
         RetrieveOperation(id=numerator.id, requirement_id=numerator.id, spec_id=SPEC_US),
         RetrieveOperation(id=whole.id, requirement_id=whole.id, spec_id=SPEC_ALL),
-        *total_operations,
+        *(operation for _, operation in steps),
         ShareOfOperation(
             id="share",
             requirement_id="share",
-            numerator=Side(input=numerator.id),
+            numerator=Side(input=share_of),
             denominator=Side(input=divisor),
             axis=axis,
             denominator_scope=scope,
@@ -279,6 +285,26 @@ def _compiled(
         terminal_steps=[terminal],
     )
     return draft.with_translation(translation=translation, workflow=workflow)
+
+
+def _total(step_id: str, input_id: str, group_by: tuple[GroupBy, ...]) -> Then:
+    """A total of `input_id` grouped by `group_by`, as a requirement and its operation."""
+    return (
+        AggregateRequirement(
+            id=step_id,
+            decision_ids=["measure"],
+            input_id=input_id,
+            reduction=Reduction.SUM,
+            group_by=group_by,
+        ),
+        AggregateOperation(
+            id=step_id,
+            requirement_id=step_id,
+            input=input_id,
+            reduction=Reduction.SUM,
+            group_by=group_by,
+        ),
+    )
 
 
 def _step(operation: Operation, specs: Mapping[str, str]) -> WorkflowStep:

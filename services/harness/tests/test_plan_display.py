@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from harness import plan_display
 from harness.plan_display import (
     _label,
     operation_rows,
@@ -35,6 +36,7 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
+from planner.phrasing import entities_phrase
 from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
@@ -2544,3 +2546,177 @@ def test_a_step_keeping_its_inputs_shares_keeps_their_whole(
     plan = us_share_of_kenya_oda(decision, whole=DAC_DONORS, numerator=US_DONOR, then=[then])
 
     assert share_wholes(plan) == wholes
+
+
+_AT_LEAST_1BN = (ValueThreshold(op="gte", value=1e9),)
+_POOLED_WHOLE = "from all 140 donors and to all 150 recipients"
+
+
+def _narrowed(requirement: FilterRequirement | RankRequirement) -> tuple[Any, Any]:
+    """`requirement` reading `all_oda`, beside the operation carrying it out."""
+    if isinstance(requirement, FilterRequirement):
+        operation: Operation = FilterOperation(
+            id=requirement.id,
+            requirement_id=requirement.id,
+            input="all_oda",
+            predicates=requirement.predicates,
+        )
+    else:
+        operation = RankOperation(
+            id=requirement.id,
+            requirement_id=requirement.id,
+            input="all_oda",
+            direction=requirement.direction,
+            among=requirement.among,
+            axis=requirement.axis,
+            reduction=requirement.reduction,
+            per_period=requirement.per_period,
+            limit=requirement.limit,
+        )
+    return requirement, operation
+
+
+_TOP_TEN = RankRequirement(
+    id="top",
+    input_id="all_oda",
+    direction=RankDirection.HIGHEST_FIRST,
+    among=RankAmong.POPULATION,
+    decision_ids=["population"],
+    axis="donor",
+    reduction=Reduction.SUM,
+    per_period=True,
+    limit=10,
+)
+# The share's sentence over a denominator narrowed by the step `label` names.
+_OVER_ROWS = (
+    "Share of ODA gross disbursements as one figure overall, divided by one total of ODA "
+    'gross disbursements over the rows "{label}" keeps.'
+)
+
+
+@pytest.mark.parametrize(
+    ("narrowing", "wholes", "sentence"),
+    [
+        # Donors giving at least $1bn are not every donor, and nothing typed names them.
+        (
+            FilterRequirement(id="big", input_id="all_oda", predicates=_AT_LEAST_1BN),
+            {},
+            _OVER_ROWS.format(label="Filter ODA gross disbursements"),
+        ),
+        (
+            _TOP_TEN,
+            {},
+            _OVER_ROWS.format(
+                label="Rank the top 10 donors by the total of ODA gross disbursements"
+            ),
+        ),
+        # Keeping some years keeps every donor.
+        (
+            FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
+            {"share": "from all 140 donors"},
+            "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
+            "disbursements (Kenya and all 140 donors).",
+        ),
+    ],
+    ids=["value_filter", "top_ten", "period_filter"],
+)
+def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
+    decision: DecisionFactory,
+    narrowing: FilterRequirement | RankRequirement,
+    wholes: dict[str, str],
+    sentence: str,
+) -> None:
+    """Neither the card nor the plan's sentence names every donor for a
+    total over the donors a filter or a limited rank keeps; the sentence
+    names that step, whose own line states what it keeps."""
+    plan = us_share_of_kenya_oda(
+        decision, whole=ALL_DONORS, numerator=US_DONOR, narrowing=[_narrowed(narrowing)]
+    )
+
+    assert share_wholes(plan) == wholes
+    assert {row["id"]: row["sentence"] for row in requirement_rows(plan)}["share"] == sentence
+
+
+@pytest.mark.parametrize(
+    ("limit", "wholes"),
+    [
+        # Ranked each year with no limit, the values are each recipient's place.
+        (None, {"share": _POOLED_WHOLE}),
+        (5, {"share": _POOLED_WHOLE, "ranked": _POOLED_WHOLE}),
+    ],
+    ids=["positions", "top_five"],
+)
+def test_a_rank_writing_positions_carries_no_share_whole(
+    decision: DecisionFactory, limit: int | None, wholes: dict[str, str]
+) -> None:
+    rank = RankRequirement(
+        id="ranked",
+        input_id="share",
+        direction=RankDirection.HIGHEST_FIRST,
+        among=RankAmong.POPULATION,
+        decision_ids=["population"],
+        axis="recipient",
+        per_period=True,
+        limit=limit,
+    )
+    operation = RankOperation(
+        id="ranked",
+        requirement_id="ranked",
+        input="share",
+        direction=rank.direction,
+        among=rank.among,
+        axis="recipient",
+        per_period=True,
+        limit=limit,
+    )
+    plan = us_share_per_recipient(
+        decision,
+        scope=DenominatorScope.POOLED,
+        numerator_recipients=150,
+        whole_recipients=150,
+        then=[(rank, operation)],
+    )
+
+    assert share_wholes(plan) == wholes
+
+
+def _every_donor(count: int) -> dict[str, Any]:
+    """A source of ODA to Kenya leaving its donors open, holding `count` of them."""
+    return {
+        "entities": ALL_DONORS["entities"],
+        "open_entity_axes": (OpenEntityAxis(column="origin", member_count=count),),
+    }
+
+
+@pytest.mark.parametrize("counted", [True, False], ids=["counted_words", "uncounted_words"])
+@pytest.mark.parametrize(
+    ("numerator", "whole", "whole_words"),
+    [
+        (_every_donor(140), _every_donor(140), None),
+        (_every_donor(120), _every_donor(140), ("from all 140 donors", "from every donor")),
+    ],
+    ids=["same_donors", "fewer_donors"],
+)
+def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_words(
+    decision: DecisionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    numerator: dict[str, Any],
+    whole: dict[str, Any],
+    whole_words: tuple[str, str] | None,
+    counted: bool,
+) -> None:
+    """120 donors are not the 140 the denominator holds, even in words
+    that state no count, as `uncounted_words` writes them."""
+    if not counted:
+        monkeypatch.setattr(
+            plan_display,
+            "entities_phrase",
+            lambda entities, *, across, member_counts=None, level=None: entities_phrase(
+                entities, across=across, level=level
+            ),
+        )
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, every_donor=True)
+
+    wholes = share_wholes(plan)
+
+    assert wholes == ({} if whole_words is None else {"share": whole_words[not counted]})
