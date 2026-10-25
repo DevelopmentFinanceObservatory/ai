@@ -1831,9 +1831,12 @@ def test_an_open_axis_rank_states_how_many_donors_the_source_holds(
 
     # The retrieval's label names the source's measure and its 55 donors, not
     # the planner's "education aid for every donor".
-    assert labels[0] == "Fetch gross disbursements (education) for Kenya and all 55 donors"
+    assert (
+        labels[0]
+        == "Fetch gross disbursements (education) for Kenya and the 55 donors the source holds in any year"
+    )
     assert sentences["ranked"] == (
-        "Ranks by the total of education aid: ranks all 55 donors the source holds; "
+        "Ranks by the total of education aid: ranks the 55 donors the source holds in any year; "
         "the window is collapsed into one ranking."
     )
 
@@ -1861,7 +1864,7 @@ def test_an_open_axis_rank_states_a_count_in_the_thousands_with_a_separator(
 
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
-    assert "ranks all 1,234 donors the source holds" in sentences["ranked"]
+    assert "ranks the 1,234 donors the source holds in any year" in sentences["ranked"]
 
 
 def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
@@ -1889,8 +1892,11 @@ def test_a_rank_over_one_of_two_open_parties_states_that_partys_count(
     sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
 
     # A source stating no measure label leaves the label the requirement's measure.
-    assert labels[0] == "Fetch education aid for all 140 recipients and all 55 donors"
-    assert "ranks all 55 donors the source holds" in sentences["ranked"]
+    assert labels[0] == (
+        "Fetch education aid for the 140 recipients the source holds in any year "
+        "and the 55 donors the source holds in any year"
+    )
+    assert "ranks the 55 donors the source holds in any year" in sentences["ranked"]
 
 
 def test_a_rank_whose_source_does_not_answer_its_party_states_no_count(
@@ -2044,7 +2050,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its 1,554 indicators by default",
+            "summed over whichever of its 1,554 indicators hold data by default",
         ),
         (
             {
@@ -2052,7 +2058,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 indicators",
+            "summed over whichever of its 3 indicators hold data",
         ),
         (
             {
@@ -2060,7 +2066,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate indicators",
+            "kept separate over whichever of its 2 indicators hold data",
         ),
         (
             {
@@ -2385,9 +2391,9 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
     ("numerator", "whole", "wholes"),
     [
         (US_DONOR, DAC_DONORS, {"share": "from official donors (DAC)"}),
-        (US_DONOR, ALL_DONORS, {"share": "from all 140 donors"}),
+        (US_DONOR, ALL_DONORS, {"share": "from every donor"}),
         # Official donors' share of every provider's ODA divides by every provider.
-        (DAC_DONORS, ALL_DONORS, {"share": "from all 140 donors"}),
+        (DAC_DONORS, ALL_DONORS, {"share": "from every donor"}),
         # A share of official donors' ODA divides by the same donors, which it names.
         (DAC_DONORS, DAC_DONORS, {}),
     ],
@@ -2410,7 +2416,10 @@ def test_a_share_names_the_population_its_denominator_holds_and_its_numerator_do
 
 @pytest.mark.parametrize(
     ("whole", "parties"),
-    [(DAC_DONORS, "Kenya and official donors (DAC)"), (ALL_DONORS, "Kenya and all 140 donors")],
+    [
+        (DAC_DONORS, "Kenya and official donors (DAC)"),
+        (ALL_DONORS, "Kenya and the 140 donors the source holds in any year"),
+    ],
     ids=["dac_donors", "all_donors"],
 )
 def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(
@@ -2457,7 +2466,7 @@ def test_a_bound_set_stands_only_for_an_across_word_on_its_side(
         # Each recipient divides by its own total, so the recipients are no part of the whole.
         (DenominatorScope.PER_AXIS, 120, "from official donors (DAC)"),
         # Every recipient divides by one total across them, though the numerator holds as many.
-        (DenominatorScope.POOLED, 150, "from all 140 donors and to all 150 recipients"),
+        (DenominatorScope.POOLED, 150, "from every donor and to every recipient"),
     ],
     ids=["per_axis", "pooled"],
 )

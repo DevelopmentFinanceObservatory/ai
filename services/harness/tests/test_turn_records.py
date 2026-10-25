@@ -82,7 +82,7 @@ sources:
 - spec_fd8b7635d17fe5f552ae2f31b6c78b89 OECD Creditor Reporting System (CRS) for official development assistance; data 2020-2023 (exact) within the years asked; family of 489 StatVars; from translator
 outputs: top_donors
 steps:
-- guatemala_oda: Fetch official development assistance for Guatemala and all 67 donors (spec_fd8b7635d17fe5f552ae2f31b6c78b89, sum)
+- guatemala_oda: Fetch official development assistance for Guatemala and the 67 donors the source holds in any year (spec_fd8b7635d17fe5f552ae2f31b6c78b89, sum)
 - top_donors: Rank the top 10 donors by the total of official development assistance [failed]"""
 
 _JOIN = """\

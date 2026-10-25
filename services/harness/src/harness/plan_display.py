@@ -453,7 +453,7 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
 
     The whole is the population the denominator's selected sources hold on
     each role column (`_populations`): "from official donors (DAC)" for a
-    source binding that group's total, "from all 140 donors" for one leaving
+    source binding that group's total, "from every donor" for one leaving
     the donors open. A denominator narrowed to fewer members than its
     sources hold has no whole. A column where the numerator holds the same
     population (`_Population.same`) is left out, since a share of health ODA
@@ -522,7 +522,8 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
 
     A named set a source binds (`SelectedSource.groups`) is named by its
     label, and an axis a source leaves open for an `across` word reads as
-    `entities_phrase` writes it, with the source's count of its members. A
+    `entities_phrase` writes it, uncounted: the whole sits in a card title that
+    names a period, which an all-years count would read as. A
     column holding only named entities holds no population and has no entry.
     """
     datasets = _reads_whole(requirement, plan)
@@ -542,8 +543,7 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
         if isinstance(axes, str):
             continue
         for word, axis in zip(dataset.across, axes, strict=True):
-            counts = {} if axis.member_count is None else {word: axis.member_count}
-            phrase = entities_phrase((), across=(word,), member_counts=counts)
+            phrase = entities_phrase((), across=(word,))
             identity = None if axis.member_count is None else (axis.column, axis.member_count)
             populations.setdefault(axis.column, _Population(phrase, identity))
     return populations
@@ -838,8 +838,8 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     a flow where the source binds a named set (`SelectedSource.groups`)
     reads as the set's label, since a source bound to the total for official
     donors (DAC) holds those donors and not every donor, and any other with
-    how many members the source holds on its axis (`_population_count`), as
-    `entities_phrase` writes it, a place word with the `level` a filter
+    how many members the source holds on its axis in any year
+    (`_population_count`), as `entities_phrase` writes it, a place word with the `level` a filter
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
@@ -858,7 +858,9 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
         for word in across
         if (count := _population_count(requirement, word, plan)) is not None
     }
-    return entities_phrase(entities, across=across, level=level, member_counts=counts)
+    return entities_phrase(
+        entities, across=across, level=level, member_counts=counts, counted_in_any_year=True
+    )
 
 
 def _label_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
@@ -1095,9 +1097,9 @@ def _reading_clause(source: SelectedSource) -> str | None:
         clause = "summed over its indicators" if summed else "kept as separate indicators"
     else:
         clause = (
-            f"summed over its {count:,} indicators"
+            f"summed over whichever of its {count:,} indicators hold data"
             if summed
-            else f"kept as {count:,} separate indicators"
+            else f"kept separate over whichever of its {count:,} indicators hold data"
         )
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 

@@ -285,9 +285,10 @@ keeping counts exact and a small nonzero value from rounding to zero. Give
 it with a scale word (billion, million, per cent). Do not give it as frame
 counts, ids, codes or step names. A count names what it counts: entities
 with data in the period (a ranking's ranked entities, the series a fetch
-retrieved), every entity the source holds in any year (a plan record's "all
-N donors the source holds"), or the indicators a total sums ("summed over its N
-indicators"). Do not give one as another.
+retrieved), every entity the source holds in any year (a plan record's "the N
+donors the source holds in any year"), or the indicators a measure's family
+holds, of which only those with data are summed ("summed over whichever of its
+N indicators hold data"). Do not give one as another.
 
 Say plainly what of the user's question could not be answered: an ask
 declined, not computed in part, or left without data, a part refused or not

@@ -2023,7 +2023,7 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
 
 @pytest.mark.parametrize(
     ("whole", "named"),
-    [(DAC_DONORS, "from official donors (DAC)"), (ALL_DONORS, "from all 140 donors")],
+    [(DAC_DONORS, "from official donors (DAC)"), (ALL_DONORS, "from every donor")],
     ids=["dac_donors", "all_donors"],
 )
 async def test_a_share_frame_is_registered_with_the_whole_its_plan_divides_by(

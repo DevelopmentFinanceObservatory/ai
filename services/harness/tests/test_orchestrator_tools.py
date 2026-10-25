@@ -2299,14 +2299,14 @@ async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
         ),
         (
             "US share of aid to Kenya",
-            "from all 140 donors",
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
         ),
         # A title copied from a card of shares states the whole and the period once.
         (
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
-            "from all 140 donors",
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
         ),
     ],
     ids=["dac_donors", "all_donors", "copied"],

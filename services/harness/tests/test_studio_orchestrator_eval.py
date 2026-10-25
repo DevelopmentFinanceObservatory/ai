@@ -1766,8 +1766,8 @@ _BY_CREDITOR_SOURCE = (
     "External debt service of 134 debtors owed to 97 creditors for general government in 2031."
 )
 _RANKS_CREDITORS = (
-    "Ranks by the total of general government debt service by creditor: ranks all 97 "
-    "creditors the source holds; the window is collapsed into one ranking."
+    "Ranks by the total of general government debt service by creditor: ranks the 97 "
+    "creditors the source holds in any year; the window is collapsed into one ranking."
 )
 # An aggregate's sentence restates the planner's measure, which carries the user's words.
 _SUMS_CREDITORS_AWAY = (
