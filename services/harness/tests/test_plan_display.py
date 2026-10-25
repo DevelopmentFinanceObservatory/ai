@@ -12,7 +12,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from harness import plan_display
 from harness.plan_display import (
     _label,
     operation_rows,
@@ -36,7 +35,6 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
-from planner.phrasing import entities_phrase
 from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
@@ -2574,7 +2572,7 @@ def test_a_step_keeping_its_inputs_shares_keeps_their_whole(
 
 
 _AT_LEAST_1BN = (ValueThreshold(op="gte", value=1e9),)
-_POOLED_WHOLE = "from all 140 donors and to all 150 recipients"
+_POOLED_WHOLE = "from every donor and to every recipient"
 
 
 def _narrowed(requirement: FilterRequirement | RankRequirement) -> tuple[Any, Any]:
@@ -2638,7 +2636,7 @@ _OVER_ROWS = (
         # Keeping some years keeps every donor.
         (
             FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
-            {"share": "from all 140 donors"},
+            {"share": "from every donor"},
             "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
             "disbursements (Kenya and all 140 donors).",
         ),
@@ -2713,35 +2711,23 @@ def _every_donor(count: int) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("counted", [True, False], ids=["counted_words", "uncounted_words"])
 @pytest.mark.parametrize(
     ("numerator", "whole", "whole_words"),
     [
         (_every_donor(140), _every_donor(140), None),
-        (_every_donor(120), _every_donor(140), ("from all 140 donors", "from every donor")),
+        (_every_donor(120), _every_donor(140), "from every donor"),
     ],
     ids=["same_donors", "fewer_donors"],
 )
 def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_words(
     decision: DecisionFactory,
-    monkeypatch: pytest.MonkeyPatch,
     numerator: dict[str, Any],
     whole: dict[str, Any],
-    whole_words: tuple[str, str] | None,
-    counted: bool,
+    whole_words: str | None,
 ) -> None:
-    """120 donors are not the 140 the denominator holds, even in words
-    that state no count, as `uncounted_words` writes them."""
-    if not counted:
-        monkeypatch.setattr(
-            plan_display,
-            "entities_phrase",
-            lambda entities, *, across, member_counts=None, level=None: entities_phrase(
-                entities, across=across, level=level
-            ),
-        )
+    """120 donors are not the 140 the denominator holds, though both read "every donor"."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, every_donor=True)
 
     wholes = share_wholes(plan)
 
-    assert wholes == ({} if whole_words is None else {"share": whole_words[not counted]})
+    assert wholes == ({} if whole_words is None else {"share": whole_words})
