@@ -71,6 +71,7 @@ from planner.plan import (
     Plan,
     QuotientRequirement,
     RankRequirement,
+    ResolvedBy,
     ShareOfRequirement,
     SumOfRequirement,
     answering_results,
@@ -259,13 +260,38 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     search settled on (`planner.plan.is_search_pin`) when its choice names
     the source's spec_id, since the plan names that source in words where
     it lists its sources. One that chooses how the flow is counted, by the
-    measures' labels, is listed.
+    measures' labels, is listed; pins making the same choice share one
+    listed decision (`_listed_slots`).
     """
+    listed = _listed_slots(plan)
     return tuple(
-        decision
-        for decision in plan.decisions
-        if not (is_search_pin(decision) and _SPEC_ID.search(decision.chosen))
+        decision for decision in plan.decisions if listed.get(decision.slot) == decision.slot
     )
+
+
+def _listed_slots(plan: Plan) -> dict[str, str]:
+    """Each slot of `plan`'s decisions mapped to the slot of the listed decision stating it.
+
+    Search pins whose decisions state the same description and the same
+    chosen label, such as a share's numerator and denominator sources both
+    counted as gross disbursements, map to one of them: the first one the
+    user settled, else the first. Their options are left out of the
+    comparison, since the card and the plan record show no options, and two
+    sources offering different other counts make the same choice. A search
+    pin whose choice names a spec_id has no entry. Every other decision maps
+    to its own slot.
+    """
+    listed: dict[str, str] = {}
+    same_choice: dict[tuple[str, str], list[Decision]] = {}
+    for decision in plan.decisions:
+        if not is_search_pin(decision):
+            listed[decision.slot] = decision.slot
+        elif not _SPEC_ID.search(decision.chosen):
+            same_choice.setdefault((decision.description, decision.chosen), []).append(decision)
+    for pins in same_choice.values():
+        kept = next((pin for pin in pins if pin.resolved_by is ResolvedBy.USER), pins[0])
+        listed.update(dict.fromkeys((pin.slot for pin in pins), kept.slot))
+    return listed
 
 
 # A spec_id as `planner.records.SpecId` states it, anywhere in a text.
@@ -288,15 +314,18 @@ def with_source_names(text: str, plan: Plan) -> str:
 def requirement_rows(plan: Plan) -> list[dict[str, object]]:
     """One row per evidence requirement the plan states: id, kind, its decisions, and a sentence.
 
-    A requirement's decisions are those `shown_decisions` lists.
+    A requirement's decisions are those `shown_decisions` lists, each cited
+    slot replaced by the slot of the listed decision stating its choice.
     """
-    slots = {decision.slot for decision in shown_decisions(plan)}
+    listed = _listed_slots(plan)
     shown = shown_plan(plan)
     return [
         {
             "id": requirement.id,
             "kind": requirement.kind,
-            "decision_ids": [slot for slot in requirement.decision_ids if slot in slots],
+            "decision_ids": list(
+                dict.fromkeys(listed[slot] for slot in requirement.decision_ids if slot in listed)
+            ),
             "sentence": _sentence(requirement, shown),
         }
         for requirement in shown.evidence_requirements

@@ -47,6 +47,7 @@ from harness.chart_binding import (
     empty_select_refusal,
 )
 from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
+from harness.graph.plan_done import HandBack
 from harness.graph.state import (
     BUDGETS,
     ORCHESTRATOR_CALLS_KEY,
@@ -86,6 +87,7 @@ from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
+from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
@@ -322,15 +324,12 @@ def test_the_figure_fields_name_what_a_card_returns_for_them():
     assert listed in _word_runs(properties["state_period"]["description"], 1)
 
 
-def test_a_chart_title_carries_its_period_unless_the_period_moves():
+def test_a_chart_title_names_its_subject_and_leaves_the_period_to_the_tool():
     properties = Chart.model_json_schema()["properties"]
     title = properties["title"]["description"]
 
-    assert "the period it shows" in title
-    assert "a stat card's title carries the period" in title
-    assert "rolling: true" in title
-    assert "latest_periods" in title
-    assert "its title leaves out the years it shows" in title
+    assert "with no period or year" in title
+    assert "make_charts adds the period the card shows" in title
     assert "counted back from the latest data" in properties["latest_periods"]["description"]
 
 
@@ -1744,6 +1743,65 @@ async def test_make_charts_stops_after_its_cap_of_calls_that_drew_nothing():
     assert _writes(executor) == writes
 
 
+class ScopedFrameExecutor(FakeExecutor):
+    """Serves `scoped_ref` for a fetch with a scope, as a narrower retrieval
+    states its own frame."""
+
+    def __init__(self, scoped_ref: dict[str, Any]) -> None:
+        super().__init__()
+        self.scoped_ref = scoped_ref
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data" and "scope" in args:
+            self.calls.append((tool, args))
+            return {"outcome": "ok", "frame_refs": [self.scoped_ref], "summary": "8 observations"}
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+REF_NARROW = {"spec_id": SPEC_LIFE, "content_version": "cv_2"}
+
+
+async def _fetched(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A fetch with a different scope, whose `get_data` states `ref`."""
+    window = {"kind": "range", "start_year": 2015, "end_year": 2020}
+    await tools["fetch"](SPEC_LIFE, ctx, scope={"window": window})
+
+
+async def _handed_back(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A plan's hand-back of `ref`, listed as `plan_done` lists it."""
+    hand_back = HandBack(executor)
+    await hand_back.describe(ref, tool="aggregate", store_ref=None)
+    hand_back.listing(ctx.state, None)
+
+
+@pytest.mark.parametrize("arrive", [_fetched, _handed_back], ids=["fetch", "hand_back"])
+@pytest.mark.parametrize(
+    ("arriving", "draws"), [(REF_NARROW, True), (REF, False)], ids=["new_frame", "held_frame"]
+)
+async def test_make_charts_draws_a_frame_that_arrived_after_its_cap_of_calls_that_drew_nothing(
+    arrive, arriving, draws
+):
+    """A frame registered after the calls that drew nothing clears their
+    count; a registration of a frame already held leaves it spent."""
+    executor = ScopedFrameExecutor(scoped_ref=arriving)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    for _ in range(BUDGETS["make_charts_failed"]):
+        failed = await tools["make_charts"](_one_chart("f999999"), ctx)
+        assert "error" in failed["charts"][0]
+    spent = await tools["make_charts"](_one_chart(frame_id_for(REF)), ctx)
+    assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+
+    await arrive(tools, ctx, executor, arriving)
+    charted = await tools["make_charts"](_one_chart(frame_id_for(arriving)), ctx)
+
+    if draws:
+        assert "holds" in charted["charts"][0]
+    else:
+        assert _stated(charted) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+    assert _writes(executor) == int(draws)
+
+
 @pytest.mark.parametrize(
     ("fails_on", "results", "counted"),
     [(1, ["error"], "make_charts_failed"), (2, ["holds", "error"], "make_charts")],
@@ -1992,7 +2050,7 @@ class RowFrames(HeldFrames):
         ]
 
 
-_CUT_TITLE = re.compile(r"^Aid to Kenya \((\d+) largest of (\d+) in (\d{4})\)$")
+_CUT_TITLE = re.compile(r"^Aid to Kenya(, [^(]+)? \((\d+) largest of (\d+) in (\d{4})\)$")
 
 
 @pytest.mark.parametrize(
@@ -2018,7 +2076,9 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     executor, result = await _draw_wide(monkeypatch, RowFrames(values), view=view, type=type_)
 
     (intent,) = _intents(executor)
-    drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    covered, drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    # A cut line chart or table draws every year its frame covers, and says so.
+    assert covered == (None if type_ == "bar_chart" else ", 1900 to 2024")
     members = intent["select"]["financingProvider"]
     assert (period, int(holding)) == ("2024", 20)
     assert len(members) == int(drawn) == kept
@@ -2165,6 +2225,135 @@ async def test_make_charts_pins_a_cut_bar_chart_to_the_period_it_ranked_at(
     assert intent["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
 
 
+# `TEN_PROVIDERS` described as the frame apis serves them, over the years they hold.
+TEN_VIEW: dict[str, Any] = {**WIDE_VIEW, "coverage": ["2023", "2025"]}
+
+
+def _ten_select(provider: str | list[str]) -> str:
+    return json.dumps({"financingRecipient": "country/KEN", "financingProvider": provider})
+
+
+@pytest.mark.parametrize(
+    ("chart", "view", "title", "window"),
+    [
+        ({"type": "table"}, TEN_VIEW, "Aid to Kenya, 2023 to 2025", None),
+        # C and D share 2024 at the latest, so their bars are drawn there.
+        (
+            {"type": "bar_chart", "select_json": _ten_select(["C", "D"])},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            {"start": "2024", "end": "2024"},
+        ),
+        # A select listing no dimension draws one series, a bar for each period.
+        (
+            {"type": "bar_chart", "select_json": _ten_select("D")},
+            TEN_VIEW,
+            "Aid to Kenya, 2023 to 2025",
+            None,
+        ),
+        # C's latest value is of 2024, though the frame covers 2025.
+        (
+            {"type": "stat_card", "select_json": _ten_select("C")},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            None,
+        ),
+        (
+            {"type": "table", "latest_periods": 3},
+            TEN_VIEW,
+            "Aid to Kenya, last 3 years",
+            {"start": {"anchor": "latest", "offset": -2}, "end": {"anchor": "latest", "offset": 0}},
+        ),
+        # A rolling frame's years move on, so its card names none.
+        ({"type": "table"}, {**TEN_VIEW, "rolling": True}, "Aid to Kenya", None),
+    ],
+    ids=["range", "bar", "period_bars", "stat", "latest_periods", "rolling"],
+)
+async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
+    monkeypatch: pytest.MonkeyPatch,
+    chart: dict[str, Any],
+    view: dict[str, Any],
+    title: str,
+    window: dict[str, Any] | None,
+) -> None:
+    """The model names the subject and the tool writes the period once: a
+    table's or a period bar chart's first and last years, the year a bar
+    chart of listed providers is drawn and pinned at, the year of a stat
+    card's value, and periods counted back."""
+    executor, result = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=view, **chart
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == (title, window)
+    assert result["charts"][0]["title"] == title
+
+
+async def test_a_card_whose_frame_is_unread_names_no_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat card's period is its value's, read from the frame's rows, so a
+    frame the store does not hold gives none, and no period is guessed."""
+    executor, _ = await _draw_wide(
+        monkeypatch,
+        HeldFrames(held=False),
+        providers=10,
+        view=TEN_VIEW,
+        type="stat_card",
+        select_json=_ten_select("C"),
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == ("Aid to Kenya", None)
+
+
+@pytest.mark.parametrize(
+    ("title", "named"),
+    [
+        ("Aid to Kenya (2025)", "2025"),
+        ("Aid to Kenya in 2024", "2024"),
+        ("Aid to Kenya, 2023 to 2025", "2023"),
+    ],
+)
+async def test_make_charts_refuses_a_title_naming_a_year_of_its_frame(
+    monkeypatch: pytest.MonkeyPatch, title: str, named: str
+) -> None:
+    """Under a cap of two, the two largest of ten are ranked at 2023, the year
+    half of them hold. A title naming any year of the frame, 2025 the latest
+    included, is refused before a write, so no card states two periods; the
+    subject alone is drawn with the cut's period once."""
+    for module in (orchestrator_tools, chart_binding):
+        monkeypatch.setattr(module, "MAX_SERIES_PER_COMPONENT", 2)
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = BarPlatform(TEN_PROVIDERS)
+    executor.view = copy.deepcopy(TEN_VIEW)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    refused = await tools["make_charts"]([_wide_chart(type="bar_chart", title=title)], ctx)
+    drawn = await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    (entry,) = refused["charts"]
+    assert _stated(entry) == ("title_names_period", "correct_and_retry")
+    assert entry["fix"] == {"period": named}
+    (intent,) = _intents(executor)
+    assert (
+        intent["title"] == drawn["charts"][0]["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
+    )
+
+
+async def test_make_charts_draws_a_title_naming_a_year_outside_its_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A year the frame does not cover is no period of the card."""
+    executor, _ = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=TEN_VIEW, title="Agenda 2030"
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == "Agenda 2030, 2023 to 2025"
+
+
 async def test_a_cut_bar_chart_draws_every_bar_at_the_period_in_its_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2298,7 +2487,7 @@ async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
         assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(29, 5, -1)]
     else:
         assert (intent["title"], intent["select"]) == (
-            "Aid to Kenya",
+            "Aid to Kenya, 2020 to 2024",
             {"financingRecipient": "country/KEN"},
         )
     assert intent.get("window") == window
@@ -2365,7 +2554,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     (intent,) = _intents(executor)
     assert intent["frame_ref"] == WIDE_REF
     assert intent["select"][role] == [f"donor/{number:02d}" for number in range(24, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (24 largest of 25 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (24 largest of 25 in 2024)"
     assert "another level: 5." in result["charts"][0]["note"]
     assert _kind_reads(executor) == (0 if carried else 1)
 
@@ -2412,7 +2601,7 @@ async def test_make_charts_asks_a_frame_with_no_fetch_for_its_kinds_by_its_spec(
         assert "error" in result["charts"][0]
     else:
         assert calls == [asked]
-        assert result["charts"][0]["title"] == "t (24 largest of 30 in 2024)"
+        assert result["charts"][0]["title"] == "t, 2023 to 2024 (24 largest of 30 in 2024)"
 
 
 async def test_make_charts_cut_title_carries_one_suffix(
@@ -2420,7 +2609,7 @@ async def test_make_charts_cut_title_carries_one_suffix(
 ) -> None:
     """A chart titled with the title of a card already cut, as the model copies
     it from the first card's result, ends in one suffix."""
-    cut = "Aid to Kenya (24 largest of 30 in 2024)"
+    cut = "Aid to Kenya, 2023 to 2024 (24 largest of 30 in 2024)"
 
     executor, _ = await _draw_wide(monkeypatch, HeldFrames(), type="table", title=cut)
 
@@ -2729,7 +2918,7 @@ async def test_make_charts_counts_only_the_members_the_chart_lists(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (8 largest of 9 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (8 largest of 9 in 2024)"
 
 
 async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
@@ -2743,32 +2932,49 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 0
 
 
+@pytest.mark.parametrize("plan_unspent", [False, True], ids=["plan_spent", "plan_unspent"])
 @pytest.mark.parametrize(
-    ("moves", "chart"),
-    [({}, {}), ({"rolling": True}, {}), ({}, {"latest_periods": 5})],
-    ids=["fixed", "rolling", "latest_periods"],
+    ("moves", "chart", "draws"),
+    [
+        ({}, {}, None),
+        ({"rolling": True}, {}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"latest_periods": 5}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"type": "line_chart", "latest_periods": 5}, LINE_CHART_MAX_VALUES),
+    ],
+    ids=["fixed", "rolling", "latest_periods", "line_chart_latest_periods"],
 )
 async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
-    monkeypatch: pytest.MonkeyPatch, moves: dict[str, Any], chart: dict[str, Any]
+    moves: dict[str, Any],
+    chart: dict[str, Any],
+    draws: int | None,
+    plan_unspent: bool,
 ) -> None:
     """A table that binds neither the six recipients nor the thirty providers
     is not narrowed: the model reads both dimensions and their counts. It is
     told a chart of the thirty alone is cut to its largest, except where the
     chart's period moves with the data: no cut is made there, so it is told
-    to list fewer or to rank with a limit."""
+    to list at most as many members as the chart type draws or to rank with
+    a limit."""
     view = copy.deepcopy(WIDE_VIEW) | moves
     view["dimensions"][2]["total_count"] = 6
 
-    executor, result = await _draw_wide(
-        monkeypatch, HeldFrames(), view=view, select_json="{}", **chart
-    )
+    executor = WideFrameExecutor(view=view)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    if not plan_unspent:
+        planned = tools["plan"](
+            "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+        )
+        assert planned[HANDED_OFF] == "plan"
+    result = await tools["make_charts"]([_wide_chart(select_json="{}", **chart)], ctx)
 
     error = result["charts"][0]["error"]
     assert "financingRecipient (6 values)" in error
     assert "financingProvider (30 values)" in error
     moving = bool(moves or chart)
     assert ("draws its largest members" in error) is not moving
-    assert ("ranking with a limit" in error) is moving
+    assert ("ranking with a limit" in error) is (moving and plan_unspent)
+    assert (f"at most {draws} members" in error) is moving
     assert _stated(result["charts"][0]) == (
         HarnessCode.SERIES_LIMIT_EXCEEDED,
         "correct_and_retry",
@@ -2796,7 +3002,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in (4, 3, 2, 1, 0)]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 
@@ -2848,7 +3054,7 @@ async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
 
     (intent,) = _intents(executor)
     assert len(intent["select"]["financingProvider"]) == 20
-    assert intent["title"] == "Aid to Kenya (20 largest of 30 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 1925 to 2024 (20 largest of 30 in 2024)"
 
 
 @pytest.mark.parametrize(
@@ -2864,7 +3070,7 @@ def test_periods_covered_counts_every_period_of_the_window_never_too_few(
     coverage: list[str], periods: int
 ) -> None:
     """Days count up to 31 a month: January to March is 91 days, counted 93."""
-    assert orchestrator_tools._periods_covered({"coverage": coverage}) == periods
+    assert chart_binding.periods_covered({"coverage": coverage}) == periods
 
 
 async def test_make_charts_keeps_a_drawable_select_when_ordering_would_break_it(
@@ -2899,7 +3105,7 @@ async def test_make_charts_orders_a_member_with_no_value_at_the_period_last(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == ["donor/b", "donor/a", "donor/c"]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 
@@ -3110,16 +3316,37 @@ def _rank_positions() -> HeldFrames:
     return HeldFrames(trace=trace)
 
 
+class TwoUnitFrames(HeldFrames):
+    """The store, holding the frame with every other provider in euros."""
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [
+            {**row, "unit": "EUR"} if int(row[self.role][-2:]) % 2 else row
+            for row in super().rows()
+        ]
+
+
+_UNIT_VIEW = copy.deepcopy(WIDE_VIEW)
+_UNIT_VIEW["dimensions"].append({"name": "unit", "values": [], "plural": True, "total_count": 2})
+
+
 @pytest.mark.parametrize(
-    ("store", "chart", "view", "warned"),
+    ("store", "chart", "view", "warned", "named"),
     [
-        (UnreadableFrames(), {}, None, True),
-        (FailingStore(), {}, None, True),
-        (HeldFrames(held=False), {}, None, True),
-        (UncountedFrames(), {}, None, True),
-        (_rank_positions(), {}, None, False),
-        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False),
-        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False),
+        (UnreadableFrames(), {}, None, True, "could not be picked"),
+        (FailingStore(), {}, None, True, "could not be picked"),
+        (HeldFrames(held=False), {}, None, True, "could not be picked"),
+        (UncountedFrames(), {}, None, True, "could not be picked"),
+        (_rank_positions(), {}, None, False, "rank positions"),
+        (TwoUnitFrames(), {}, _UNIT_VIEW, False, "Bind unit to one value"),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, "plan a ranking"),
+        (
+            HeldFrames(),
+            {"type": "line_chart", "latest_periods": 2},
+            None,
+            False,
+            f"at most {LINE_CHART_MAX_VALUES} ",
+        ),
     ],
     ids=[
         "unreadable",
@@ -3127,6 +3354,7 @@ def _rank_positions() -> HeldFrames:
         "not_held",
         "no_row_count",
         "rank_positions",
+        "two_units",
         "rolling",
         "latest_periods",
     ],
@@ -3138,27 +3366,84 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     chart: dict[str, Any],
     view: Any,
     warned: bool,
+    named: str,
 ) -> None:
     """A frame the store cannot read, a plan's rank positions (where the
-    highest number is the worst), and a card whose period moves with the
-    data (a list picked today would not follow it) are never narrowed: the
-    refusal stands. A frame the store cannot read, does not hold or states no
-    row count for is logged as a warning."""
+    highest number is the worst), rows in two units, and a card whose period
+    moves with the data (a list picked today would not follow it) are never
+    narrowed: the refusal stands, says what to change with the count the
+    chart type draws, and names the dimension over the cap and its count in
+    `fix`. A frame the store cannot read, does not hold or states no row
+    count for is logged as a warning."""
     monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
 
     with caplog.at_level(logging.WARNING, logger=orchestrator_tools.__name__):
         executor, result = await _draw_wide(monkeypatch, store, view=view, **chart)
 
-    assert "error" in result["charts"][0]
+    (refused,) = result["charts"]
+    assert named in refused["error"]
     assert _writes(executor) == 0
     assert (orchestrator_tools.__name__ in {record.name for record in caplog.records}) is warned
-    # A chart whose period moves is told what draws in place of a cut.
-    moving = bool(view and view.get("rolling")) or "latest_periods" in chart
-    assert ("ranking with a limit" in result["charts"][0]["error"]) is moving
-    assert _stated(result["charts"][0]) == (
-        HarnessCode.SERIES_LIMIT_EXCEEDED,
-        "correct_and_retry" if moving else "do_not_retry",
+    assert _stated(refused) == (HarnessCode.SERIES_LIMIT_EXCEEDED, "correct_and_retry")
+    assert refused["fix"] == {"dimension": "financingProvider", "values": 30}
+
+
+@pytest.mark.parametrize(
+    ("unranked", "plans"),
+    [
+        (orchestrator_tools._Unranked("rank_positions"), False),
+        (orchestrator_tools._Unranked("coordinates_differ", coordinates=("unit",)), False),
+        (orchestrator_tools._Unranked("not_ranked"), True),
+        (orchestrator_tools._Unranked("period_moves"), True),
+    ],
+    ids=["rank_positions", "coordinates_differ", "not_ranked", "period_moves"],
+)
+def test_over_cap_remedy_differs_with_each_reason_the_largest_were_not_picked(
+    unranked: Any, plans: bool
+) -> None:
+    """A plan is offered only beside a list of values and only while the plan
+    call is unspent, and the remedy names the coordinate the rows differ on,
+    or the dimension to list and how many the chart draws."""
+    spent, unspent = (
+        orchestrator_tools._over_cap_remedy(
+            dimension="financingProvider",
+            unranked=unranked,
+            draws=8,
+            plan_unspent=plan_unspent,
+        )
+        for plan_unspent in (False, True)
     )
+
+    assert (spent != unspent) is plans
+    assert "plan" not in spent
+    if unranked.coordinates:
+        assert "Bind unit to one value" in spent
+    else:
+        assert "financingProvider" in spent
+        assert re.search(r"at most 8\b", spent)
+
+
+@pytest.mark.parametrize(
+    ("store", "view"),
+    [(UnreadableFrames(), WIDE_VIEW), (HeldFrames(), {**WIDE_VIEW, "rolling": True})],
+    ids=["unranked", "rolling"],
+)
+async def test_make_charts_offers_a_plan_for_an_unranked_select_only_while_one_is_unspent(
+    monkeypatch: pytest.MonkeyPatch, store: Any, view: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: store)
+    tools, ctx = _tools(executor=WideFrameExecutor(view=copy.deepcopy(view)))
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    unspent = await tools["make_charts"]([_wide_chart()], ctx)
+    planned = tools["plan"](
+        "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+    )
+    assert planned[HANDED_OFF] == "plan"
+    spent = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert "plan" in unspent["charts"][0]["error"]
+    assert "plan" not in spent["charts"][0]["error"]
 
 
 def _marker_of(trace: Any) -> Any:
@@ -3775,22 +4060,92 @@ async def test_plan_carries_the_asks_put_across_years_by_number():
     assert pending_action(ctx.state) == PendingPlan(
         brief="Total debt service between 2015 and 2022",
         asks=["Debt service by creditor", "The total between 2015 and 2022"],
-        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+        ask_breakdowns=[
+            AskBreakdown(ask=0, by=("creditor",)),
+            AskBreakdown(ask=1, over=("creditor",)),
+        ],
         asks_across_years=[1],
     )
 
 
-async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():
+@pytest.mark.parametrize(
+    "over",
+    [("creditor",), ("donor", "creditor")],
+    ids=["one-word", "two-words-for-one-side"],
+)
+async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across(
+    over: tuple[PartyRole, ...],
+):
     tools, ctx = await _searched(_BY_CREDITOR)
 
     recorded = tools["plan"](
-        "Total debt service", [{"text": "Total debt service", "over": ["creditor"]}], ctx
+        "Total debt service", [{"text": "Total debt service", "over": list(over)}], ctx
     )
 
     assert recorded[HANDED_OFF] == "plan"
     assert pending_action(ctx.state) == PendingPlan(
-        brief="Total debt service", asks=["Total debt service"]
+        brief="Total debt service",
+        asks=["Total debt service"],
+        ask_breakdowns=[AskBreakdown(ask=0, over=over)],
     )
+
+
+_US_SHARE_OF_KENYA = {
+    "variable": "ODA",
+    "entities": [{"text": "Kenya", "role": "to"}, {"text": "United States", "role": "from"}],
+    "operations": [
+        {"verb": "share_of", "phrase": "share from the United States", "over": "origin"}
+    ],
+}
+
+
+_EACH_DONORS_SHARE_OF_KENYA = {
+    **_US_SHARE_OF_KENYA,
+    "entities": [{"text": "Kenya", "role": "to"}],
+    "open_roles": ["donor"],
+}
+
+
+@pytest.mark.parametrize(
+    ("part", "ask", "taken"),
+    [
+        pytest.param(_US_SHARE_OF_KENYA, "US share of ODA to Kenya", False, id="no-party"),
+        pytest.param(
+            _US_SHARE_OF_KENYA,
+            {"text": "US share of ODA to Kenya", "by": ["donor"]},
+            False,
+            id="named-member-by",
+        ),
+        pytest.param(
+            _US_SHARE_OF_KENYA,
+            {"text": "US share of ODA to Kenya", "over": ["donor"]},
+            True,
+            id="named-member-over",
+        ),
+        pytest.param(
+            _EACH_DONORS_SHARE_OF_KENYA,
+            {"text": "each donor's share", "by": ["donor"]},
+            True,
+            id="held-open-by",
+        ),
+    ],
+)
+async def test_plan_holds_a_share_searchs_side_to_an_ask_totalling_across_it(
+    part: dict[str, Any], ask: str | dict[str, Any], taken: bool
+):
+    # The whole of a share over origin spans every donor, so the ask the
+    # share answers totals across them, which the plan then holds it to. A
+    # search holding donors open lists each, so `by` answers it too.
+    tools, ctx = await _searched(part)
+
+    recorded = tools["plan"]("brief", [ask], ctx)
+
+    if taken:
+        assert recorded[HANDED_OFF] == "plan"
+        return
+    assert recorded["invalid"] == [
+        {"loc": "asks", "type": "share_whole_unstated", "party": "donor/creditor/exporter"}
+    ]
 
 
 @pytest.mark.parametrize("by", ["creditor", "donor"], ids=["one-word", "two-words-for-one-side"])

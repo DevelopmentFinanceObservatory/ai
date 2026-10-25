@@ -67,7 +67,12 @@ members, is listed under `withheld` with the scope it drops, and never under
 is the case. A rank, a filter or any other reader that reads the side per
 member needs every member `across` asks for, so there the pin gives way and
 the source is offered: "top donors to Malawi" pinned to the total of official
-donors (DAC) is that case (`translator.discovery.DiscoveryLog.scope_kept`).
+donors (DAC) is that case. A total that a share or a quotient divides by,
+pinned to a source binding the side to the numerator's own members alone, would
+divide them by themselves, so there too the pin gives way: "the United States'
+share of ODA to Kenya" with its total pinned to the United States' figure is
+that case. A total pinned to a group, as G7 in "Germany's share of G7 ODA",
+keeps its scope (`translator.discovery.DiscoveryLog.scope_kept`).
 
 `save_referral`, `load_referral` and `clear_referral` keep the last referral in
 session state, under `REFERRAL_STATE_KEY`, so the planner can read why the

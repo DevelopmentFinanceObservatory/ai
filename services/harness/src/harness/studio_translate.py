@@ -958,6 +958,42 @@ def _asks_correction(answer: Mapping[str, Any]) -> bool:
     return _answer_refusal(answer).get("retry_mode") == RetryMode.CORRECT_AND_RETRY
 
 
+type _ChartKey = tuple[str, str]
+
+
+def _chart_key(chart: Mapping[Any, Any]) -> _ChartKey:
+    """What makes a chart asked of `make_charts` the same chart asked again:
+    its frame and its type. A corrected chart keeps both and changes its title
+    or select."""
+    return (str(chart.get("frame")), str(chart.get("type")))
+
+
+def _listed_charts(args: Mapping[str, Any]) -> frozenset[_ChartKey]:
+    """The `_chart_key` of each chart a `make_charts` call asked for."""
+    asked = args.get("charts")
+    charts = asked if isinstance(asked, list) else []
+    return frozenset(_chart_key(chart) for chart in charts if isinstance(chart, Mapping))
+
+
+def _charts_to_correct(args: Mapping[str, Any], answer: Mapping[str, Any]) -> frozenset[_ChartKey]:
+    """The `_chart_key` of each chart a failed `make_charts` call refused, when
+    every refusal asks the model to correct the chart and no chart was left
+    past the per-call limit; empty otherwise. `make_charts` answers one entry
+    a chart, in the order asked."""
+    asked, charts = args.get("charts"), answer.get("charts")
+    if not isinstance(asked, list) or not isinstance(charts, list) or answer.get("not_drawn"):
+        return frozenset()
+    refused: set[_ChartKey] = set()
+    for chart, entry in zip(asked, charts, strict=False):
+        if not isinstance(entry, Mapping) or "error" not in entry:
+            continue
+        asks = entry.get("retry_mode") == RetryMode.CORRECT_AND_RETRY
+        if not isinstance(chart, Mapping) or not asks:
+            return frozenset()
+        refused.add(_chart_key(chart))
+    return frozenset(refused)
+
+
 def _step_label(tool: str, plan_label: str | None = None) -> str:
     return plan_label or _TOOL_LABELS.get(tool, _UNNAMED_TOOL_LABEL)
 
@@ -1071,7 +1107,9 @@ class _Translator:
       moment the model makes it, completed when the tool returns. A
       hand-off to the planner and a skill read show only when they fail:
       the planner's own lines follow a hand-off, and a skill read is
-      background, not progress;
+      background, not progress. A refusal of one that asks the model to
+      correct the call is held until the segment ends, and shows then
+      only if no later call of the tool completed;
     - answer text, as `message.delta` chunks, the last model call's text
       being the turn's `message.complete`: text before a tool call is
       interim, and text after a hand-off to the user or the planner would
@@ -1121,6 +1159,15 @@ class _Translator:
         # with the number of calls made before it: a later call of the tool
         # that completes corrects them.
         self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # Failed `make_charts` steps whose refused charts each asked for a
+        # corrected chart, each with the number of calls made before it and
+        # the `_chart_key` of those charts: a later call that completes and
+        # asks for every one of them again corrects it.
+        self._unredrawn: list[tuple[int, frozenset[_ChartKey], _FailedStep]] = []
+        # Quiet calls refused as ones to correct, by tool, each with the
+        # number of calls made before it and its failure sentence: shown at
+        # the segment's end unless a later call of the tool completes.
+        self._held: dict[str, list[tuple[int, str]]] = {}
         # The number of agent tool calls made so far, and each open call's
         # place among them, by call id.
         self._calls = 0
@@ -1714,13 +1761,22 @@ class _Translator:
         return frame
 
     def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
-        """The steps awaiting correction under `tool` that a completed call,
-        the `order`th made, corrects: those refused before it was made. A
-        call made beside a refused one, in the same batch, corrects nothing."""
-        queued = self._uncorrected.pop(tool, [])
-        if kept := [entry for entry in queued if entry[0] >= order]:
-            self._uncorrected[tool] = kept
-        return [step for before, step in queued if before < order]
+        """The shown steps awaiting correction under `tool` that a completed
+        call, the `order`th made, corrects (`_take_corrected`), and the held
+        refusals it corrects dropped."""
+        _take_corrected(self._held, tool, order)
+        return _take_corrected(self._uncorrected, tool, order)
+
+    def _redrawn(self, args: Mapping[str, Any], order: int) -> list[_FailedStep]:
+        """The failed `make_charts` steps that a completed call of it, the
+        `order`th made with `args`, corrects: those refused before it was made
+        whose refused charts it asks for again, every one."""
+        listed = _listed_charts(args)
+        corrected = [
+            step for before, keys, step in self._unredrawn if before < order and keys <= listed
+        ]
+        self._unredrawn = [entry for entry in self._unredrawn if entry[2] not in corrected]
+        return corrected
 
     def _recover(
         self, *keys: tuple[str, str], corrected: Sequence[_FailedStep] = ()
@@ -1854,7 +1910,9 @@ class _Translator:
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
                 name, args = quiet
-                if failed:
+                if failed and _asks_correction(answer):
+                    self._held.setdefault(name, []).append((self._calls, _answer_failure(answer)))
+                elif failed:
                     frames.append(
                         self._failed_step(
                             _retry_key(name, args),
@@ -1865,7 +1923,6 @@ class _Translator:
                                 tool=name,
                                 detail=_answer_failure(answer),
                             ),
-                            correctable=_asks_correction(answer),
                         )
                     )
                 else:
@@ -1889,12 +1946,19 @@ class _Translator:
             )
             frame = self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
             key = _retry_key(response.name or "", args)
-            if status is StepStatus.FAILED:
+            charted = response.name == "make_charts"
+            to_correct = _charts_to_correct(args, answer) if charted else frozenset()
+            if status is StepStatus.FAILED and to_correct:
+                self._unredrawn.append((self._calls, to_correct, (step_id, label, response.name)))
+                frames.append(frame)
+            elif status is StepStatus.FAILED:
                 frames.append(self._failed_step(key, frame, correctable=_asks_correction(answer)))
             else:
                 frames.append(frame)
                 if status is StepStatus.COMPLETE:
                     corrected = self._corrected(response.name or "", order)
+                    if charted:
+                        corrected += self._redrawn(args, order)
                     frames.extend(self._recover(key, corrected=corrected))
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
@@ -2030,6 +2094,15 @@ class _Translator:
         `message.delta` so the deltas still add up to the `message.complete`
         text."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        # A held refusal no later call corrected is a failed step after all.
+        frames.extend(
+            self._step(
+                None, _tool_call_label(tool, {}), StepStatus.FAILED, tool=tool, detail=detail
+            )
+            for tool, held in self._held.items()
+            for _, detail in held
+        )
+        self._held.clear()
         if self.paused:
             return frames
         if self._final_text:
@@ -2080,6 +2153,17 @@ _PLAN_MADE = ("plan", "made")
 
 # A failed step a later try can recover: its wire step id, label and tool.
 type _FailedStep = tuple[str, str, str | None]
+
+
+def _take_corrected[T](queue: dict[str, list[tuple[int, T]]], tool: str, order: int) -> list[T]:
+    """The entries `queue` holds under `tool` that a completed call, the
+    `order`th made, corrects, taken out of it: those refused before it was
+    made. A call made beside a refused one, in the same batch, corrects
+    nothing."""
+    queued = queue.pop(tool, [])
+    if kept := [entry for entry in queued if entry[0] >= order]:
+        queue[tool] = kept
+    return [entry for before, entry in queued if before < order]
 
 
 def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:

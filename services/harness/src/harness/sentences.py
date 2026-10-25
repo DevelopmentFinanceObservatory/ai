@@ -590,6 +590,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "release_mismatch",
             HarnessCode.SELECT_INVALID,
             HarnessCode.CHART_NOT_DRAWN,
+            HarnessCode.TITLE_NAMES_PERIOD,
             HarnessCode.FIELD_CREATE_ONLY,
             HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
             HarnessCode.ROLLING_REPLAY_REFUSED,
@@ -611,7 +612,6 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "frame_integrity_failed",
             ExecutorCode.MALFORMED_REFUSAL,
             HarnessCode.UNKNOWN_TOOL,
-            HarnessCode.TOOL_ARGUMENTS_INVALID,
             HarnessCode.RUN_RECORD_UNREADABLE,
             HarnessCode.RESUME_FAILED,
             HarnessCode.FIGURES_UNREAD,
@@ -663,6 +663,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "step_refused",
             "unit_matches",
             HarnessCode.NO_SEARCH_PARTS,
+            HarnessCode.TOOL_ARGUMENTS_INVALID,
             HarnessCode.UNSPECIFIED,
             HarnessCode.CARD_NOT_FOUND,
             HarnessCode.RAISED,
@@ -737,6 +738,7 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
         "That part of a card is set when the card is made", "so ask for a new card instead"
     ),
     HarnessCode.SELECT_INVALID: _MODEL_MAY_CORRECT,
+    HarnessCode.TITLE_NAMES_PERIOD: _MODEL_MAY_CORRECT,
     HarnessCode.TITLE_QUOTES_ROLLING_PERIOD: FailureText(
         "The title names a period this card will move past as newer data arrives",
         "so ask for a title without it",
@@ -753,6 +755,11 @@ CODE_SENTENCES: Mapping[str, FailureText] = {
     HarnessCode.ROLLING_SELECT_NEEDS_NEW_FRAME: FailureText(
         "The series now chosen have another latest period than this card was made for",
         "so ask for a new card",
+    ),
+    # The model writes a tool call's arguments, and a later try may write
+    # them well.
+    HarnessCode.TOOL_ARGUMENTS_INVALID: FailureText(
+        "This step was written in a form the system could not run", "and asking again may work"
     ),
     HarnessCode.NO_SEARCH_PARTS: FailureText(
         "The question could not be turned into a search", "so try wording it another way"

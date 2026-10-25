@@ -105,6 +105,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    ShareOfRequirement,
     SumOfRequirement,
     Unit,
     UnsupportedOperation,
@@ -4463,6 +4464,57 @@ def test_a_re_pin_to_a_source_found_in_place_of_a_stale_pin_needs_no_decision(
     assert amended.requirement(dataset.id) == re_pinned
 
 
+@pytest.mark.parametrize(
+    ("events", "resolved_by"),
+    [([], ResolvedBy.PLANNER_DEFAULT), (_measure_ask_events(_GROSS), ResolvedBy.USER)],
+    ids=["planner-re-pins", "user-picks"],
+)
+def test_a_re_pin_to_a_source_a_referral_offered_states_how_the_flow_is_counted(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    events: list[Any],
+    resolved_by: ResolvedBy,
+) -> None:
+    """A source a referral offered in place of a stale pin is one no search
+    the planner was shown settled, and its block elects a measure among
+    several, so a re-pin of it gets the measure decision all the same."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show(ctx, SPEC)
+    dataset, derived = requirements
+    _propose(tools, ctx, decision(), [dataset.model_copy(update={"source_spec_id": SPEC}), derived])
+    first = load_plan(ctx.state)
+    assert first is not None
+    save_referral(
+        ctx.state,
+        Referral(
+            kind=ReferralKind.PINNED_SOURCE_NOT_FOUND,
+            reason="r",
+            requirement_id=dataset.id,
+            candidates=(
+                source_from_spec_block(_FRANCE_KENYA),
+                SelectedSource(spec_id=POPULATION_SPEC, sentence="found instead", has_data=True),
+            ),
+        ),
+    )
+    ctx.session.events.extend(events)
+
+    result = tools["propose_plan"].func(
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        amends_version=first.version,
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    amended = load_plan(ctx.state)
+    assert amended is not None
+    (measure,) = [d for d in amended.decisions if d.fixes and d.fixes.source_spec_id == _GROSS]
+    assert measure.options == ("gross disbursements", "net disbursements")
+    assert (measure.chosen, measure.resolved_by) == ("gross disbursements", resolved_by)
+    assert measure.slot in amended.requirement(dataset.id).decision_ids
+    assert measure in shown_decisions(amended)
+
+
 # --- a pin whose identity a search recorded, over the requirement's period ----------
 
 # Two definitions of Guatemala's GDP, as data-mcp stored them. The first is a
@@ -6764,6 +6816,75 @@ def _propose_for_creditors(
         declined=list(declined),
         tool_context=ctx,
     )
+
+
+def test_a_share_whose_whole_names_its_own_donor_is_refused_until_the_whole_spans_donors(
+    decision: DecisionFactory,
+) -> None:
+    # Run B: the United States' ODA to Kenya over a total naming the United
+    # States and Kenya alone divided the United States by itself, 99.7%.
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["The United States' share of ODA to Kenya, each year"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+    kenya = Entity(name="Kenya", role="recipient")
+    united_states = Entity(name="United States", role="donor")
+
+    def propose(whole: DatasetRequirement) -> dict[str, Any]:
+        period = Period(start=2015, end=2024)
+        return _tools_by_name()["propose_plan"].func(
+            question="What share of ODA to Kenya came from the United States each year?",
+            answer_mode=AnswerMode.COMPUTED,
+            decisions=drafts([decision()]),
+            evidence_requirements=[
+                DatasetRequirement(
+                    id="part",
+                    decision_ids=["measure"],
+                    measure="ODA gross disbursements",
+                    entities=(united_states, kenya),
+                    period=period,
+                ),
+                whole.model_copy(update={"period": period}),
+                AggregateRequirement(
+                    id="whole_by_year",
+                    decision_ids=["measure"],
+                    input_id="whole",
+                    reduction=Reduction.SUM,
+                    group_by=(GroupBy.PERIOD,),
+                ),
+                ShareOfRequirement(
+                    id="share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="part"),
+                    denominator=RequirementSide(input_id="whole_by_year"),
+                ),
+            ],
+            answered=[AskAnswer(ask=0, outputs=("share",))],
+            tool_context=ctx,
+        )
+
+    def whole(**fields: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id="whole",
+            decision_ids=["measure"],
+            measure="total ODA gross disbursements",
+            period=Period(start=2015, end=2024),
+            **fields,
+        )
+
+    refused = propose(whole(entities=(kenya, united_states)))
+    spanning = propose(whole(entities=(kenya,), across=("donor",)))
+
+    assert refused["code"] == ProblemCode.WHOLE_IS_ITS_MEMBER.value, refused
+    assert refused["detail"] == {
+        "requirement_id": "share",
+        "ask": 0,
+        "party": "donor",
+        "denominator_id": "whole",
+        "named": ["United States"],
+    }
+    assert spanning["outcome"] == Outcome.OK.value, spanning
 
 
 def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(

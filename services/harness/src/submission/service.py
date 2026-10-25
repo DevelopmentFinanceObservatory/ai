@@ -38,6 +38,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol
 
 from compiler.evidence import open_axes_for
@@ -90,6 +91,7 @@ from planner.plan import (
     SumOfRequirement,
     UnsupportedOperation,
     UnsupportedPlanError,
+    WholeIsItsMemberError,
     WindowedPin,
     amendment_entry,
     authored,
@@ -385,6 +387,7 @@ def admit(
     measures = measure_choices(
         pins,
         compiled=previous.workflow.sources if previous is not None and previous.workflow else (),
+        offered=chain.from_iterable(referral.offered().values()) if referral else (),
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
@@ -657,7 +660,8 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     (`UnsupportedPlanError`) is no malformed draft, so it answers `_unsupported`.
     An ask left unaccounted for (`AsksUnaccountedError`) answers
     `_asks_unaccounted`, and a party an answer drops (`AskRoleDroppedError`)
-    answers `_ask_role_dropped`. A rolling period a rule refused
+    answers `_ask_role_dropped`, and a share dividing a member by itself
+    (`WholeIsItsMemberError`) answers `_whole_is_its_member`. A rolling period a rule refused
     (`RollingPlanError`) answers `_rolling_refused`, which names the rule.
 
     `exc.errors()` carries a `loc` tuple and, for a `model_validator` failure,
@@ -701,6 +705,8 @@ def _rule_refused(raised: object, proposer: Proposer) -> dict[str, object] | Non
         return _asks_unaccounted(raised, proposer)
     if isinstance(raised, AskRoleDroppedError):
         return _ask_role_dropped(raised)
+    if isinstance(raised, WholeIsItsMemberError):
+        return _whole_is_its_member(raised)
     if isinstance(raised, RollingPlanError):
         return _rolling_refused(raised)
     return None
@@ -817,6 +823,34 @@ def _ask_role_dropped(exc: AskRoleDroppedError) -> dict[str, object]:
                 | ({"together": list(exc.together[number])} if number in exc.together else {})
                 for number, roles in exc.dropped.items()
             ]
+        },
+    )
+
+
+def _whole_is_its_member(exc: WholeIsItsMemberError) -> dict[str, object]:
+    """Return the `WHOLE_IS_ITS_MEMBER` problem for a share or quotient dividing a member by itself.
+
+    Keeping the party open always passes the rule, so the refusal never
+    leaves the planner without a plan it admits. A party no source holds
+    open is then translation's to report, and its answer earns the decline
+    of the ask when it names a code. `detail` names the step, the ask, the
+    party, the denominator's dataset requirement and the entities it names.
+    """
+    party = exc.party
+    return problem(
+        ProblemCode.WHOLE_IS_ITS_MEMBER,
+        f"{exc}. Keep {party} open in {exc.denominator_id!r}'s `across`, naming no {party} in "
+        "its `entities`, so its total spans every one; or name there the group the user "
+        f"named as the whole; or, when translation finds no source holding every {party}, "
+        f"decline ask {exc.ask} in `declined` with the code its answer names and the ask's "
+        "number as `ask_ref`.",
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "requirement_id": exc.requirement_id,
+            "ask": exc.ask,
+            "party": party,
+            "denominator_id": exc.denominator_id,
+            "named": list(exc.named),
         },
     )
 
@@ -2223,12 +2257,18 @@ class MeasureChoice:
 
 
 def measure_choices(
-    shown: Mapping[str, PinSource], *, compiled: Sequence[SelectedSource] = ()
+    shown: Mapping[str, PinSource],
+    *,
+    compiled: Sequence[SelectedSource] = (),
+    offered: Iterable[SelectedSource] = (),
 ) -> dict[str, MeasureChoice]:
     """The measure choice a pin of each spec_id states, for every measure a settled source shown offers.
 
-    Families from the prior compiled plan are retained on an amendment;
-    a shown source with the same id takes precedence.
+    Families from the prior compiled plan are retained on an amendment, and
+    a source a pending referral offers in place of a pin (`offered`,
+    `translator.referral.Referral.offered`) counts as settled: discovery
+    found it, so its `elected_measure` is search's own. Each overrides the
+    last, and a shown source with the same id takes precedence.
 
     A settled source whose block elects a measure (`SelectedSource.
     elected_measure`) and offers another way of counting it maps to the
@@ -2242,7 +2282,7 @@ def measure_choices(
     source left with one option offers no choice. Price alternatives (axis
     `unit`) count the flow the same way in other prices and offer no choice here.
     """
-    elections = {source.spec_id: source.elected_measure for source in compiled}
+    elections = {source.spec_id: source.elected_measure for source in (*compiled, *offered)}
     for spec_id, source in shown.items():
         block = source.spec_block(spec_id) if source.settled and not source.other_count_of else None
         if block is None:

@@ -28,8 +28,10 @@ reads its own block from Search's answer for that definition
 refused as `capability_unavailable` this turn is refused without a call. A
 `get_data` call that does not complete, through a transport failure or an MCP
 error, is a refusal the model may retry, as an unreachable skill read is.
-Each tool's calls per turn are capped (`harness.graph.state.BUDGETS`). The download surface
-fetches one dataset and never plans.
+Each tool's calls per turn are capped (`harness.graph.state.BUDGETS`), except
+`make_charts`' calls that draw nothing, which are capped per frame arrival: a
+fetch or plan hand-back that adds a frame clears their count. The download
+surface fetches one dataset and never plans.
 
 Every tool validates the model's arguments against its annotations before its
 body runs (`_validated_arguments`), so a malformed argument comes back to the
@@ -48,9 +50,8 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum, auto
 from types import FunctionType
-from typing import Any, Literal, Protocol, get_type_hints
+from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
 from analysis_mcp.frame_ref_resolution import read_derived_marker
@@ -73,6 +74,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
 from mcp import MCPError
@@ -106,11 +108,13 @@ from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     MAX_CHARTS_PER_CALL,
     MAX_SERIES_PER_COMPONENT,
-    MAX_TABLE_ROWS,
     TopMembers,
+    chart_draws,
     covers_every_row,
+    differing_coordinates,
     empty_select_refusal,
     every_series_selects,
+    latest_shared_period,
     over_cap_dimension,
     select_binding_ok,
     top_members,
@@ -149,6 +153,7 @@ from harness.reply_figures import (
     unplaced_names,
     with_coordinates,
 )
+from harness.rolling_cards import named_year
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -230,12 +235,9 @@ class Chart(BaseModel):
     )
     title: str = Field(
         description=(
-            "what the chart shows and the period it shows; a stat card's title carries "
-            "the period of the value on the card. The exception is a chart whose period "
-            "moves with the data, which is one on a frame whose view says rolling: true "
-            "and one given latest_periods: its title leaves out the years it shows "
-            "('over the last five years', never '2019-2024'), and a title naming one of "
-            "them is refused"
+            "what the chart shows, with no period or year: 'Aid to Kenya by donor'. "
+            "make_charts adds the period the card shows, and refuses a title naming a "
+            "year the frame covers"
         )
     )
     latest_periods: int | None = Field(
@@ -360,8 +362,8 @@ class AskedOutput(BaseModel):
 
         One ask is one output, whose flow has one party on each side, so
         "donor" beside "creditor" lists the parties of two flows, each an
-        ask of its own. `over` may hold both: it totals, and reaches no
-        plan.
+        ask of its own. `over` may hold both: it totals, and the plan
+        checks each word on its own (`planner.plan.AskBreakdown`).
         """
         if shared := words_for_one_party(self.by):
             raise ValueError(
@@ -398,24 +400,6 @@ class FetchScope(GetDataScope):
 
 
 _ANSWER_NOW = "Answer with what you have, and say plainly what you could not do."
-
-
-def _periods_covered(view: Mapping[str, Any]) -> int:
-    """The periods a table of a frame with `view` draws rows at: every period
-    from the first to the last the frame covers, gaps included, as apis
-    binds a table's window. A day counts as up to 31 a month, so the count
-    errs high, never low. A span frame (`2020/2024`) has one period."""
-    coverage = view.get("coverage") or []
-    if len(coverage) != 2 or "/" in coverage[0]:
-        return 1
-    first, last = ([int(part) for part in bound.split("-")] for bound in coverage)
-    years = last[0] - first[0]
-    if len(first) == len(last) == 1:
-        return years + 1
-    months = years * 12 + last[1] - first[1]
-    if len(first) == len(last) == 2:
-        return months + 1
-    return months * 31 + last[-1] - first[-1] + 1
 
 
 async def _frame_work[T](ref: Mapping[str, Any], work: Callable[[Any, Any], T]) -> T | None:
@@ -552,12 +536,24 @@ async def _member_cells(
     return cells
 
 
-class _Unranked(Enum):
-    """Why a frame's rows gave no ranking."""
+@dataclass(frozen=True)
+class _Unranked:
+    """Why a select's largest members were not picked: a cut of a typed role
+    whose rows carry no kind or type cell (`kinds_needed`), a plan's rank
+    positions for values (`rank_positions`), compared members with no anchor
+    period (`no_period`), a chart whose period moves with the data
+    (`period_moves`), matching rows that differ on the declared `coordinates`
+    (`coordinates_differ`), or anything else (`not_ranked`)."""
 
-    KINDS_NEEDED = auto()  # a cut of a typed role whose rows carry no kind or type cell
-    RANK_POSITIONS = auto()  # the values are a plan's rank positions
-    NO_PERIOD = auto()  # the compared members have no anchor period
+    reason: Literal[
+        "kinds_needed",
+        "rank_positions",
+        "no_period",
+        "period_moves",
+        "coordinates_differ",
+        "not_ranked",
+    ]
+    coordinates: tuple[str, ...] = ()
 
 
 def _ranked(
@@ -566,24 +562,26 @@ def _ranked(
     *,
     select: dict[str, Any],
     dimension: str,
+    view: dict[str, Any],
     limit: int | None,
     cut: bool,
     kinds: Mapping[str, str] | None,
-) -> TopMembers | _Unranked | None:
+) -> TopMembers | _Unranked:
     """`top_members` over a stored frame. A cut of a place or flow party
     dimension compares only the members one ranking does, by the kind or type
     cells the frame's own rows carry, or by `kinds` when they carry none.
     Rows are ranked without their enrichment columns (`common.place_type`),
-    which describe a member and split no series."""
+    which describe a member and split no series. Rows that give no ranking
+    and differ on a dimension `view` declares are `coordinates_differ`."""
     marker = read_derived_marker(trace)
     if marker is not None and marker.ordinal:
-        return _Unranked.RANK_POSITIONS
+        return _Unranked("rank_positions")
     rows = _rows_of(data)
     cells = None
     if cut and dimension in TYPED_ROLES:
         cells = _held_cells(dimension, rows) or kinds
         if cells is None:
-            return _Unranked.KINDS_NEEDED
+            return _Unranked("kinds_needed")
     rows = [
         {
             name: cell
@@ -593,9 +591,75 @@ def _ranked(
         for row in rows
     ]
     try:
-        return top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
+        top = top_members(rows=rows, select=select, dimension=dimension, limit=limit, cells=cells)
     except RollingError:
-        return _Unranked.NO_PERIOD
+        return _Unranked("no_period")
+    if top is not None:
+        return top
+    differing = differing_coordinates(rows=rows, select=select, dimension=dimension, view=view)
+    if differing:
+        return _Unranked("coordinates_differ", coordinates=tuple(differing))
+    return _Unranked("not_ranked")
+
+
+def _over_cap_remedy(*, dimension: str, unranked: _Unranked, draws: int, plan_unspent: bool) -> str:
+    """What to change in a select refused with the one `dimension` over the
+    series cap, given why its largest members were not picked: bind the
+    coordinates the rows differ on; or list at most `draws` of its values,
+    with a plan offered beside the list when `plan_unspent` and the frame's
+    values can be ranked."""
+    plan = f", or plan a ranking or a total across {dimension}" if plan_unspent else ""
+    if unranked.reason == "period_moves":
+        return (
+            "This chart's period moves with the latest data, so its largest members are not "
+            f"chosen for it. List at most {draws} {dimension} values in the select{plan}."
+        )
+    if unranked.reason == "coordinates_differ":
+        differing = " and ".join(unranked.coordinates)
+        each = " each" if len(unranked.coordinates) > 1 else ""
+        return (
+            f"Its rows differ on {differing}, so the largest cannot be compared. "
+            f"Bind {differing}{each} to one value."
+        )
+    if unranked.reason == "rank_positions":
+        return (
+            "This frame holds rank positions, which the chart draws as they are. "
+            f"List the {dimension} values to show, at most {draws}."
+        )
+    return (
+        "The largest could not be picked from this frame's rows. "
+        f"List the {dimension} values the question names, at most {draws}{plan}."
+    )
+
+
+def _unnarrowed_refusal(
+    issue: dict[str, Any],
+    *,
+    chart: Chart,
+    select: dict[str, Any],
+    view: dict[str, Any],
+    unranked: _Unranked,
+    plan_unspent: bool,
+) -> dict[str, Any]:
+    """The over-cap `issue` of a select `_top_select` left as written, with
+    what to change (`_over_cap_remedy`) when one dimension is over the cap:
+    `correct_and_retry`, with the dimension and its count in `fix`."""
+    over = over_cap_dimension(select=select, view=view)
+    if over is None:
+        return issue
+    dimension, count = over
+    remedy = _over_cap_remedy(
+        dimension=dimension,
+        unranked=unranked,
+        draws=chart_draws(type_=chart.type, view=view),
+        plan_unspent=plan_unspent,
+    )
+    return harness_refusal(
+        code=HarnessCode.SERIES_LIMIT_EXCEEDED,
+        message=f"{issue['message']}. {remedy}",
+        fix={"dimension": dimension, "values": count},
+        retry_mode=RetryMode.CORRECT_AND_RETRY,
+    )
 
 
 @dataclass(frozen=True)
@@ -607,17 +671,129 @@ class _Narrowed:
     cut: TopMembers | None
 
 
-# The suffix a cut card's title ends with, as `_cut_title` writes it.
-_CUT_SUFFIX = re.compile(r" \(\d+ largest of \d+ in [^()]+\)$")
+# The suffix a cut card's title ends with, as `_card_title` writes it, the
+# periods a cut line chart or table draws included.
+_CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
 
 
-def _cut_title(title: str, cut: TopMembers) -> str:
-    """The title of a card cut to its largest members, ending in what it leaves
-    out. A title the model copied from a card already cut loses that suffix
-    first, so the new suffix is the only one."""
-    base = _CUT_SUFFIX.sub("", title)
-    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
-    return f"{base[: 117 - len(suffix)]} ({suffix})"
+def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
+    """A card's title: the model's `subject`, then the period the card shows,
+    then on a card cut to its largest members what the cut leaves out and the
+    period it ranked at. The subject is shortened so the title fits 120
+    characters."""
+    suffix = f", {period}" if period is not None else ""
+    if cut is not None:
+        suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
+    return f"{subject[: 120 - len(suffix)]}{suffix}"
+
+
+def _covered_years(view: Mapping[str, Any]) -> list[str]:
+    """Every year from the first to the last the frame's coverage names, a
+    span's included; none for a view that states no coverage."""
+    coverage = view.get("coverage") or []
+    years = [int(year) for label in coverage for year in re.findall(r"\d{4}", str(label))]
+    return [str(year) for year in range(min(years), max(years) + 1)] if years else []
+
+
+def _title_refusal(subject: str, view: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The `title_names_period` refusal of a model's title naming a year the
+    frame covers, `None` for any other title. `make_charts` writes the card's
+    period, so a title naming one would state it twice or contradict it."""
+    year = named_year(subject, _covered_years(view))
+    if year is None:
+        return None
+    return harness_refusal(
+        code=HarnessCode.TITLE_NAMES_PERIOD,
+        message=(
+            f"The title names {year}. Write what the chart shows with no period or year: "
+            "make_charts adds the period the card shows."
+        ),
+        fix={"period": year},
+    )
+
+
+def _period_text(label: str) -> str:
+    """A period label as a title states it, a span `2020/2024` as `2020 to 2024`."""
+    return " to ".join(label.split("/"))
+
+
+def _latest_text(periods: int, view: Mapping[str, Any]) -> str:
+    """The period of a card counting `periods` back from the latest data, in
+    the frame's grain (`TimeGrain`): `latest year`, `last 5 years`."""
+    grain = view.get("period_grain")
+    grain = grain if grain in get_args(TimeGrain) else "period"
+    return f"latest {grain}" if periods == 1 else f"last {periods} {grain}s"
+
+
+def _covered_range(view: Mapping[str, Any]) -> tuple[str, bool] | None:
+    """The periods a frame's coverage names, as a title states them, and
+    whether they are several: its one period, or its first and last. None for
+    a rolling frame, whose years were worked out from the latest data and move
+    on (`harness.rolling_cards`), and for a view that states no coverage."""
+    coverage = [str(label) for label in view.get("coverage") or []]
+    if view.get("rolling") or len(coverage) != 2:
+        return None
+    first, last = coverage
+    if first == last or "/" in first:
+        return _period_text(first), False
+    return f"{first} to {last}", True
+
+
+async def _card_period(
+    chart: Chart,
+    *,
+    frame: Mapping[str, Any],
+    select: dict[str, Any],
+    cut: TopMembers | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The period a card's title states, None when nothing can or a cut bar
+    chart's suffix states it, and the window its intent names, None for none.
+
+    A card counting `latest_periods` back states them as relative periods. A
+    card drawing every period its frame covers states them
+    (`_covered_range`): a line chart, a table, and a bar chart whose select
+    lists no dimension, which apis draws as one bar a period. A bar chart
+    whose select lists one is drawn at one period, the latest every selected
+    series holds inside its window, and a stat card states the period of its
+    value; on a frame of several periods both are read from the frame's rows
+    (`latest_shared_period`) and the bar chart is pinned there, since without
+    a window it moves when the frame gains a newer period. A cut bar chart is
+    pinned at the cut's period, which its suffix states (`_card_title`), and
+    a cut line chart or table states its frame's periods beside it."""
+    view = frame["view"]
+    if chart.latest_periods is not None:
+        return _latest_text(chart.latest_periods, view), _latest_window(chart.latest_periods)
+    at_one = chart.type == "stat_card" or (
+        chart.type == "bar_chart" and any(isinstance(value, list) for value in select.values())
+    )
+    if cut is not None and at_one:
+        return None, {"start": cut.period, "end": cut.period}
+    covered = _covered_range(view)
+    if covered is None:
+        return None, None
+    text, several = covered
+    if cut is not None:
+        # The suffix states a frame of one period, the period the cut ranked at.
+        return text if several else None, None
+    if not (at_one and several):
+        return text, None
+    at = await _frame_work(frame_store_ref(frame), functools.partial(_drawn_period, select=select))
+    pinned = at is not None and chart.type == "bar_chart"
+    return at, {"start": at, "end": at} if pinned else None
+
+
+def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | None:
+    """`latest_shared_period` over a stored frame, read without its enrichment
+    columns, which describe a member and split no series."""
+    rows = [
+        {
+            name: cell
+            for name, cell in row.items()
+            if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
+        }
+        for row in _rows_of(data)
+    ]
+    return latest_shared_period(rows=rows, select=select)
 
 
 def _card_identity(intent: Mapping[str, Any]) -> str:
@@ -636,42 +812,46 @@ async def _top_select(
     executor: Executor,
     *,
     cut: bool,
-) -> _Narrowed | dict[str, Any] | None:
+) -> _Narrowed | dict[str, Any] | _Unranked:
     """`select` with its one multiplying dimension listing the frame's
     members by their value at one period (`top_members`), highest first.
 
     When `cut`, it lists only the members holding a value at that period, as
-    many as `chart.type` draws: `MAX_SERIES_PER_COMPONENT` bars or table
-    series, `LINE_CHART_MAX_VALUES` lines, and for a table no more than fit
-    `MAX_TABLE_ROWS`. A cut of a place or flow party dimension ranks only the
-    members one ranking compares (`_ranked`), by the frame's kind read
-    (`_member_cells`) when its rows carry no kind or type cell. Otherwise it
-    lists every member, those with no value at the period last. apis
+    many as `chart.type` draws (`chart_draws`). A cut of a place or flow
+    party dimension ranks only the members one ranking compares (`_ranked`),
+    by the frame's kind read (`_member_cells`) when its rows carry no kind or
+    type cell. Otherwise it lists every member, those with no value at the
+    period last. apis
     draws a table's and a line chart's series in the order the select lists
     them.
 
     Returns:
         The narrowed select; a harness refusal for a cut whose kind read
         failed (`member_kind_unread`) or whose members have no anchor period
-        (`no_shared_period`); None, leaving the select as written, when the
-        frame cannot be read, holds rank positions rather than values, its
-        rows cannot be ranked honestly, an analysis result's members state no
-        kind, or the card's period moves with the data, so a list picked today
-        would not follow it.
+        (`no_shared_period`); or an `_Unranked`, leaving the select as
+        written: `period_moves` when the card's period moves with the data,
+        so a list picked today would not follow it; `not_ranked` when no one
+        dimension multiplies or the frame cannot be read; otherwise why its
+        rows gave no ranking (`_ranked`).
     """
     frame = (state.get(ORCHESTRATOR_FRAMES_KEY) or {})[chart.frame]
-    dimension = over_cap_dimension(select=select, view=frame["view"])
-    if dimension is None or frame["view"].get("rolling") or chart.latest_periods is not None:
-        return None
-    limit = None
-    if cut:
-        limit = LINE_CHART_MAX_VALUES if chart.type == "line_chart" else MAX_SERIES_PER_COMPONENT
-        if chart.type == "table":
-            limit = max(1, min(limit, MAX_TABLE_ROWS // _periods_covered(frame["view"])))
-    rank = functools.partial(_ranked, select=select, dimension=dimension, limit=limit, cut=cut)
+    if frame["view"].get("rolling") or chart.latest_periods is not None:
+        return _Unranked("period_moves")
+    over = over_cap_dimension(select=select, view=frame["view"])
+    if over is None:
+        return _Unranked("not_ranked")
+    dimension = over[0]
+    rank = functools.partial(
+        _ranked,
+        select=select,
+        dimension=dimension,
+        view=frame["view"],
+        limit=chart_draws(type_=chart.type, view=frame["view"]) if cut else None,
+        cut=cut,
+    )
     top = await _frame_work(frame_store_ref(frame), functools.partial(rank, kinds=None))
     analysis = str(frame["ref"]["spec_id"]).startswith(OP_SPEC_HASH_PREFIX)
-    if top is _Unranked.KINDS_NEEDED and not analysis:
+    if top == _Unranked("kinds_needed") and not analysis:
         kinds = await _member_cells(state, chart.frame, executor)
         if kinds is None:
             return harness_refusal(
@@ -685,7 +865,7 @@ async def _top_select(
         top = await _frame_work(
             frame_store_ref(frame), functools.partial(rank, kinds=kinds.get(dimension, {}))
         )
-    if top is _Unranked.NO_PERIOD and cut:
+    if top == _Unranked("no_period") and cut:
         return harness_refusal(
             code=HarnessCode.NO_SHARED_PERIOD,
             message=(
@@ -695,7 +875,7 @@ async def _top_select(
             ),
         )
     if not isinstance(top, TopMembers) or not top.members:
-        return None
+        return top if isinstance(top, _Unranked) else _Unranked("not_ranked")
     members = top.members if cut else [*top.members, *top.unvalued]
     return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
 
@@ -832,8 +1012,8 @@ def _charts_spent(tool_context: ToolContext) -> dict[str, Any] | None:
     if failed >= budgets["make_charts_failed"]:
         return _failed(
             HarnessCode.TOOL_BUDGET_SPENT,
-            f"make_charts has drawn nothing in {failed} call(s) this turn, the limit for calls "
-            f"that draw nothing. {_ANSWER_NOW}",
+            f"make_charts has drawn nothing in {failed} call(s) since a frame last arrived, "
+            f"the limit for calls that draw nothing. {_ANSWER_NOW}",
         )
     return None
 
@@ -995,7 +1175,12 @@ def _breakdowns_missing(
 
     A party a settled reading asked to hold open (`SearchReading.open_roles`)
     is one the user asked to see one by one or to total across, so some ask
-    names it in `by` or in `over`. The turn's readings are of different
+    names it in `by` or in `over`. The side a reading's `share_of` runs over
+    (`SearchReading.share_over`) is one the share's whole totals across, so
+    some ask names it in `over`, which holds the plan's whole to every
+    member of it (`planner.plan.WholeIsItsMemberError`); a reading that also
+    held that side open, as each donor's share of every donor's total does,
+    is answered by `by` too. The turn's readings are of different
     sources, so a `PARTY_ROLES` word keeps its kind of flow: only that word
     names it, and a turn that held "donor" open for aid and "creditor" open
     for debt needs an ask naming each. A role column, held open by a word
@@ -1008,12 +1193,18 @@ def _breakdowns_missing(
     cannot call again without end.
     """
     named = [role for ask in asks for role in (*ask.by, *ask.over)]
+    totalled = [role for ask in asks for role in ask.over]
     held: dict[str, str] = {}
+    shared: dict[str, str] = {}
     for stored in tool_context.state.get(ORCHESTRATOR_SEARCHES_KEY) or []:
         reading = SearchReading.model_validate(stored)
         if reading.status in SETTLED_STATUSES and reading.spec_id:
+            text = reading.text or reading.spec_id
             for role in reading.open_roles:
-                held.setdefault(role, reading.text or reading.spec_id)
+                held.setdefault(role, text)
+            for column in reading.share_over:
+                if not party_among(column, reading.open_roles):
+                    shared.setdefault(column, text)
     problems = [
         (
             {"loc": "asks", "type": "breakdown_missing", "party": column_party_roles(role)},
@@ -1023,7 +1214,26 @@ def _breakdowns_missing(
         for role, text in held.items()
         if not (role in named if party_role(role) == role else party_among(role, named))
     ]
+    problems += [
+        (
+            {"loc": "asks", "type": "share_whole_unstated", "party": column_party_roles(column)},
+            f"asks: the whole of this turn's share for {text!r} spans every "
+            f"{column_party_roles(column)}, and no ask totals across it; {_share_repair(column)}",
+        )
+        for column, text in shared.items()
+        if not party_among(column, totalled)
+    ]
     return _invalid_arguments(tool_context, "plan", problems) if problems else None
+
+
+def _share_repair(column: str) -> str:
+    """What a `plan` call adds to its asks for a share whose whole spans the side `column` names."""
+    parties = ", ".join(f'"{party}"' for party in column_party_roles(column).split("/"))
+    return (
+        f"add the one of {parties} this flow has to the `over` of the ask the share answers, "
+        "since its whole totals across them; a share of named members lists them as "
+        "entities, not in `by`"
+    )
 
 
 def _held_party_repair(role: str) -> str:
@@ -1048,11 +1258,13 @@ def _held_party_repair(role: str) -> str:
 
 
 def _ask_breakdowns(asks: Sequence[AskedOutput]) -> list[AskBreakdown]:
-    """The parties each ask lists in `by`, by number, for the asks that list any."""
+    """The parties each ask lists in `by` and totals across in `over`, by number, for the asks that name any."""
     return [
-        AskBreakdown(ask=number, by=tuple(dict.fromkeys(ask.by)))
+        AskBreakdown(
+            ask=number, by=tuple(dict.fromkeys(ask.by)), over=tuple(dict.fromkeys(ask.over))
+        )
         for number, ask in enumerate(asks)
-        if ask.by
+        if ask.by or ask.over
     ]
 
 
@@ -1259,6 +1471,7 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             "departures": offered.departures,
             "asked_roles": offered.asked_roles,
             "open_roles": offered.open_roles,
+            "share_over": offered.share_over,
         }
         if sibling is not None:
             link = sibling[1]
@@ -1281,6 +1494,21 @@ def _open_roles(part: SearchPart) -> list[str]:
     "from" gives "origin".
     """
     return list(dict.fromkeys(role for word in part.open_roles or () if (role := open_party(word))))
+
+
+def _share_sides(part: SearchPart) -> list[str]:
+    """The role column of each side of the flow a `share_of` operation of `part` runs over.
+
+    A share over `origin` divides by a whole spanning every giving party:
+    "the United States' share of ODA to Kenya" is one.
+    """
+    return list(
+        dict.fromkeys(
+            operation.over
+            for operation in part.operations or ()
+            if operation.verb == "share_of" and operation.over in ("origin", "destination")
+        )
+    )
 
 
 def _offered_sibling(
@@ -1522,6 +1750,7 @@ def build_orchestrator_tools(
             digest,
             asked=[_asked_roles(part) for part in parts] if tied else [],
             held_open=[_open_roles(part) for part in parts] if tied else [],
+            share_sides=[_share_sides(part) for part in parts] if tied else [],
         )
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
@@ -1686,17 +1915,12 @@ def build_orchestrator_tools(
                 described.append((ref, view.get("view") or {}, store_ref))
             else:
                 unavailable.append((view.get("refusal") or {}).get("message") or "not described")
-        frames = dict(tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {})
         found = {
             "spec_id": spec_id,
             "summary": data.get("summary"),
             **_period_note_entry(data),
-            "frames": register_frames(frames, described),
+            "frames": register_frames(tool_context.state, described, fetch_args=args),
         }
-        # make_charts asks the same retrieval again for its members' kinds.
-        for entry in found["frames"]:
-            frames[entry["frame"]]["fetch_args"] = args
-        tool_context.state[ORCHESTRATOR_FRAMES_KEY] = frames
         if unavailable:
             found["frames_unavailable"] = unavailable
         else:
@@ -1845,6 +2069,12 @@ def build_orchestrator_tools(
                         )
                     )
                     continue
+                # A title the model copied from a card already cut loses that
+                # suffix, so the card's own suffix is the only one.
+                subject = _CUT_SUFFIX.sub("", chart.title)
+                if (refusal := _title_refusal(subject, frame["view"])) is not None:
+                    drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
+                    continue
                 try:
                     select = json.loads(chart.select_json)
                 except json.JSONDecodeError:
@@ -1856,11 +2086,13 @@ def build_orchestrator_tools(
                         )
                     )
                     continue
+                plan_unspent = _used(tool_context, "plan") < _budgets(tool_context)["plan"]
                 issue = select_binding_ok(
                     type_=chart.type,
                     select=select,
                     view=frame["view"],
                     latest_periods=chart.latest_periods is not None,
+                    plan_unspent=plan_unspent,
                 )
                 if select == {} and issue is None and frame["view"].get("dimensions"):
                     # The platform refuses an empty select, so one that names
@@ -1896,27 +2128,30 @@ def build_orchestrator_tools(
                         # Ordering alone never turns a drawable select into a refused one.
                         if over_cap or rewritten is None:
                             select, cut, issue = narrowed.select, narrowed.cut, rewritten
-                    elif narrowed is not None:
+                    elif not isinstance(narrowed, _Unranked):
                         issue = narrowed
+                    elif over_cap and issue is not None:
+                        issue = _unnarrowed_refusal(
+                            issue,
+                            chart=chart,
+                            select=select,
+                            view=frame["view"],
+                            unranked=narrowed,
+                            plan_unspent=plan_unspent,
+                        )
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                title = chart.title if cut is None else _cut_title(chart.title, cut)
+                period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
+                title = _card_title(subject, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
                     "select": select,
-                    "title": title[:120],
+                    "title": title,
                 }
-                if chart.latest_periods is not None:
-                    intent["window"] = _latest_window(chart.latest_periods)
-                elif cut is not None and chart.type == "bar_chart":
-                    # The card's title and members are of the cut's period, so
-                    # its bars stay at it. apis draws a bar chart at the
-                    # latest period every selected series holds inside its
-                    # window, which without one moves when the frame gains a
-                    # newer period.
-                    intent["window"] = {"start": cut.period, "end": cut.period}
+                if window is not None:
+                    intent["window"] = window
                 identity = _card_identity(intent)
                 held = drawn_cards.get(identity) or canvas.get(identity)
                 stored = None if held is None else await _stored_card(held["component_id"])

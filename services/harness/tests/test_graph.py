@@ -1053,11 +1053,10 @@ def test_over_cap_dimension_names_the_one_dimension_that_multiplies() -> None:
     view = _counted_view(stat_var=1, financingProvider=86, financingRecipient=1)
     wide = _counted_view(stat_var=5, financingProvider=86, financingRecipient=1)
 
-    assert over_cap_dimension(select={}, view=view) == "financingProvider"
-    assert (
-        over_cap_dimension(select={"financingProvider": ["a", "b"], "stat_var": "x"}, view=wide)
-        == "financingProvider"
-    )
+    assert over_cap_dimension(select={}, view=view) == ("financingProvider", 86)
+    assert over_cap_dimension(
+        select={"financingProvider": ["a", "b"], "stat_var": "x"}, view=wide
+    ) == ("financingProvider", 2)
     assert over_cap_dimension(select={}, view=wide) is None
 
 

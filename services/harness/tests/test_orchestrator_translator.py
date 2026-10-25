@@ -605,6 +605,45 @@ def _settled_failures(frames: list) -> list[ActivityStep]:
 
 
 _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
+# A hand-off whose ask lists donors one by one and totals across them, and
+# the orchestrator's refusal of it.
+_ASKED_TWICE = {"brief": "b", "asks": [{"by": ["donor"], "over": ["donor"], "across": "2022"}]}
+_ASK_SLIP = {
+    "error": "plan: asks.0: `by` lists donor and `over` totals across donor.",
+    "code": "tool_arguments_invalid",
+    "retry_mode": "correct_and_retry",
+}
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        lambda: [
+            _call("c1", "plan", _ASKED_TWICE),
+            _response("c1", "plan", _ASK_SLIP),
+            _call("c2", "plan", {"brief": "b", "asks": [{"by": ["donor"], "across": "2022"}]}),
+            _response("c2", "plan", _PLANNED),
+        ],
+        # A skill read under a wrong name.
+        lambda: [
+            _call("c1", "get_skill", {"name": "wrong"}),
+            _response("c1", "get_skill", {**_SLIP, "code": "skill_not_found"}),
+            _call("c2", "get_skill", {"name": "right"}),
+            _response("c2", "get_skill", {"skill": "text"}),
+        ],
+    ],
+    ids=["hand-off", "skill-read"],
+)
+def test_a_quiet_call_the_model_corrects_shows_no_failed_step(events):
+    """A hand-off or a skill read shows only when it fails, and a refusal
+    the model corrects is no failure: a line stating one, even settled later,
+    reads as a fault in the system."""
+    translator = _translator()
+
+    frames = [*_frames(translator, *events()), *translator.finish()]
+
+    steps = [frame for frame in frames if frame.event == "activity.step"]
+    assert [frame for frame in steps if frame.status is StepStatus.FAILED] == []
 
 
 @pytest.mark.parametrize(
@@ -624,13 +663,6 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
             _call("c2", "search", _SEARCH),
             _response("c2", "search", {"parts": []}),
         ],
-        # The same for a quiet call: a skill read under a wrong name.
-        lambda: [
-            _call("c1", "get_skill", {"name": "wrong"}),
-            _response("c1", "get_skill", {**_SLIP, "code": "skill_not_found"}),
-            _call("c2", "get_skill", {"name": "right"}),
-            _response("c2", "get_skill", {"skill": "text"}),
-        ],
         # f6a: a hand-off that hit a fault, then one the planner took.
         lambda: [
             _call("c1", "plan", {"brief": "b", "asks": ["a"]}),
@@ -649,7 +681,6 @@ _PLANNED = {"status": "Recorded.", HANDED_OFF: "plan"}
     ids=[
         "search-retried",
         "search-corrected",
-        "skill-read-corrected",
         "hand-off-retried",
         "replanned",
     ],
@@ -691,12 +722,20 @@ def test_a_failed_step_a_later_try_made_good_settles_as_complete(events):
         ],
         # A failure no later step tried again: the turn ends on it.
         lambda: [_call("c1", "search", _SEARCH), _response("c1", "search", _FAULT)],
+        # A hand-off refused as one to correct, which the model never
+        # corrected: held to the segment's end, it shows then.
+        lambda: [
+            _call("c1", "plan", _ASKED_TWICE),
+            _response("c1", "plan", _ASK_SLIP),
+            _event(types.Part(text="Here is what I found.")),
+        ],
     ],
     ids=[
         "other-search",
         "answered-without-a-plan",
         "no-plan-after-hand-off",
         "terminal",
+        "hand-off-never-corrected",
     ],
 )
 def test_a_failure_no_later_try_made_good_stays_failed(events):
@@ -712,6 +751,20 @@ _SLIPPED = {**_SEARCH, "open_roles": ["purpose"]}
 _FOUND = {"parts": []}
 _CHARTS = {"charts": [{"title": "Aid to Kenya"}]}
 _OTHER_CHARTS = {"charts": [{"title": "Aid to Kenya by donor"}]}
+_BAR = {"frame": "f1", "type": "bar_chart"}
+_NAMED_CHARTS = {"charts": [{**_BAR, "title": "Aid to Kenya in 2024"}]}
+_CORRECTED_CHARTS = {"charts": [{**_BAR, "title": "Aid to Kenya"}]}
+# `make_charts` refusing a chart whose title names a year of its frame.
+_TITLE_REFUSED = {
+    "charts": [
+        {
+            "title": "Aid to Kenya in 2024",
+            "error": "The title names 2024.",
+            "code": "title_names_period",
+            "retry_mode": "correct_and_retry",
+        }
+    ]
+}
 
 
 def _calls(*calls: tuple[str, str, dict[str, Any]]) -> Event:
@@ -827,6 +880,80 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
             ],
             [StepStatus.COMPLETE, StepStatus.FAILED],
         ),
+        # A chart refused for a title the model corrects, then the corrected call.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", _CORRECTED_CHARTS),
+                _response("c2", "make_charts", _CORRECTED_CHARTS),
+            ],
+            [StepStatus.COMPLETE],
+        ),
+        # The corrected chart drawn beside others corrects it too.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call(
+                    "c2",
+                    "make_charts",
+                    {"charts": [{"frame": "f2", "type": "table"}, *_CORRECTED_CHARTS["charts"]]},
+                ),
+                _response("c2", "make_charts", {"charts": [{"title": "t"}, {"title": "Aid"}]}),
+            ],
+            [StepStatus.COMPLETE],
+        ),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A chart of another frame or another type drawn later leaves the
+        # refused one undrawn.
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", {"charts": [{**_BAR, "type": "table"}]}),
+                _response("c2", "make_charts", _CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
+        (
+            lambda: [
+                _call("c1", "make_charts", _NAMED_CHARTS),
+                _response("c1", "make_charts", _TITLE_REFUSED),
+                _call("c2", "make_charts", {"charts": [{**_BAR, "frame": "f2"}]}),
+                _response("c2", "make_charts", _CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
+        # A chart the platform failed beside it is no slip to correct.
+        (
+            lambda: [
+                _call(
+                    "c1",
+                    "make_charts",
+                    {"charts": [*_NAMED_CHARTS["charts"], {"frame": "f2", "type": "table"}]},
+                ),
+                _response(
+                    "c1",
+                    "make_charts",
+                    {
+                        "charts": [
+                            *_TITLE_REFUSED["charts"],
+                            {"title": "Aid to Kenya by donor", **_FAULT},
+                        ]
+                    },
+                ),
+                _call("c2", "make_charts", _CORRECTED_CHARTS),
+                _response("c2", "make_charts", _CORRECTED_CHARTS),
+            ],
+            [StepStatus.FAILED],
+        ),
     ],
     ids=[
         "slip-slip-success",
@@ -837,6 +964,12 @@ def _responses(*responses: tuple[str, str, dict[str, Any]]) -> Event:
         "other-tool",
         "beside-the-slip",
         "keyless-failure-then-success",
+        "chart-refused-then-corrected",
+        "chart-corrected-beside-others",
+        "chart-refused-uncorrected",
+        "chart-refused-then-another-type",
+        "chart-refused-then-another-frame",
+        "chart-refused-beside-a-fault",
     ],
 )
 def test_a_later_call_of_its_tool_that_completes_settles_a_slip(events, settled):

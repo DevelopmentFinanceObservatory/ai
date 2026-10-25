@@ -35,7 +35,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from common.materialisation import FrameRef
 from common.period_note import period_note
@@ -54,6 +54,7 @@ from data_mcp.manifest import (
     party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
+from data_mcp.tool_errors import ENTITY_DCID_MARKER
 from data_mcp.version_description import VersionDescription
 
 # How the digest's frame reference line and operation poll note begin. Both
@@ -871,6 +872,78 @@ def _budget_warnings(
         len(other_warnings) - len(shown_other)
     )
     return shown_coverage, shown_other, remainder
+
+
+def warning_refs(warnings: Sequence[WarningModel]) -> list[str]:
+    """Every ref the counted fields of `warnings` name, once each, in the order
+    `labelled_warnings` names them."""
+    refs = (
+        ref for warning in warnings for field in _counted_fields(warning) for ref, _ in field.named
+    )
+    return list(dict.fromkeys(refs))
+
+
+class _CountedField(NamedTuple):
+    """One counted field of a warning: the noun its sentence opens with, how many things
+    it counts, and the `(ref, years)` of those it names, `years` empty for every field
+    but `omitted_entity_years`."""
+
+    noun: str
+    count: int
+    named: Sequence[tuple[str, Sequence[str]]]
+
+
+def _counted_fields(warning: WarningModel) -> list[_CountedField]:
+    """The counted fields `warning` carries, in the order they are rendered."""
+    fields = [
+        _CountedField(noun, counted.count, [(ref, ()) for ref in counted.refs])
+        for noun, counted in (
+            ("Series at another frequency", warning.off_cadence_members),
+            ("Series with no observation in the requested years", warning.out_of_window_members),
+            ("Entities with no observation", warning.unserved_entities),
+            ("Entities left out", warning.omitted_entities),
+        )
+        if counted is not None
+    ]
+    if (entity_years := warning.omitted_entity_years) is not None:
+        named = [(entity.ref, entity.years) for entity in entity_years.entities]
+        fields.append(_CountedField("Entities left out", entity_years.count, named))
+    return fields
+
+
+def _counted_field_sentence(field: _CountedField, labels: Mapping[str, str]) -> str:
+    """`field`'s noun and the names of the things it names, each with its years, then how
+    many of its count it names none of."""
+    names = []
+    for ref, years in field.named:
+        name = labels.get(ref) or ref.removeprefix(ENTITY_DCID_MARKER)
+        names.append(f"{name} ({', '.join(years)})" if years else name)
+    text = ", ".join(names)
+    if (unnamed := field.count - len(field.named)) > 0:
+        text = f"{text}, and {unnamed} more" if text else f"{unnamed} more"
+    return f"{field.noun}: {text}."
+
+
+def labelled_warnings(
+    warnings: Sequence[WarningModel], labels: Mapping[str, str]
+) -> list[WarningModel]:
+    """`warnings`, each message followed by a sentence for each counted field its warning
+    carries, naming the field's refs by `labels` and a ref outside them by its bare dcid.
+
+    apis' messages state counts only and leave the naming to the reader. `get_data`
+    labels the manifest once, and its digest and returned manifest both carry these
+    messages, so the harness's card copy reads the names the digest does. A warning with
+    no counted field keeps its message, and every warning keeps its fields.
+    """
+    return [
+        warning.model_copy(update={"message": _labelled_message(warning, labels)})
+        for warning in warnings
+    ]
+
+
+def _labelled_message(warning: WarningModel, labels: Mapping[str, str]) -> str:
+    sentences = (_counted_field_sentence(field, labels) for field in _counted_fields(warning))
+    return " ".join([warning.message, *sentences])
 
 
 def _warning_lines(warnings: Sequence[WarningModel]) -> list[str]:

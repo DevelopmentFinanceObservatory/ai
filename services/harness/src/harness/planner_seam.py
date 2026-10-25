@@ -1313,14 +1313,16 @@ def _asks_section(
 ) -> str:
     """The asks the answer is held to, numbered as `propose_plan` names them. Empty when none.
 
-    An ask in `breakdowns` names the parties it breaks down by, and the
-    section then states the rule `planner.plan.Plan` holds its answer to.
+    An ask in `breakdowns` names the parties it breaks down by (`by`), and
+    the section then states the rule `planner.plan.Plan` holds its answer
+    to. The parties an ask totals across (`over`) are not shown: the plan
+    holds a share's whole to them, and its refusal names the party.
     An ask in `across_years` is marked as one figure over its years taken
     together, and the section then says no other ask is.
     """
     if not asks:
         return ""
-    by = {breakdown.ask: breakdown.by for breakdown in breakdowns}
+    by = {breakdown.ask: breakdown.by for breakdown in breakdowns if breakdown.by}
     lines = "".join(
         f"{number}. {ask}"
         + (f" (by {', '.join(by[number])})" if number in by else "")

@@ -75,6 +75,7 @@ from planner.plan import (
     Unit,
     UnsupportedOperation,
     UnsupportedPlanError,
+    WholeIsItsMemberError,
     _build_shapes,
     authored_text,
     cut_user_text,
@@ -6636,8 +6637,330 @@ def test_a_breakdown_names_a_listed_ask_once(
 
 
 def test_a_breakdown_names_at_least_one_party() -> None:
-    with pytest.raises(ValidationError, match="at least 1 item"):
-        AskBreakdown(ask=0, by=())
+    with pytest.raises(ValidationError, match="names at least one party"):
+        AskBreakdown(ask=0, by=(), over=())
+
+
+_US = Entity(name="United States", role="donor")
+_UK = Entity(name="United Kingdom", role="donor")
+_KENYA_RECIPIENT = Entity(name="Kenya", role="recipient")
+
+
+def _whole_plan(
+    decision: DecisionFactory,
+    *,
+    numerator: tuple[Entity, ...],
+    denominator: tuple[Entity, ...],
+    across: tuple[str, ...] = (),
+    breakdown: AskBreakdown | None,
+    kind: type[ShareOfRequirement | QuotientRequirement] = ShareOfRequirement,
+) -> Plan:
+    """One ask answered by a share, or quotient, of `numerator` over a yearly total of `denominator`."""
+    period = Period(start=2015, end=2024)
+    return Plan(
+        question="What share of ODA to Kenya came from the United States each year since 2015?",
+        decisions=[decision()],
+        evidence_requirements=[
+            DatasetRequirement(
+                id="part",
+                decision_ids=["measure"],
+                measure="ODA gross disbursements",
+                entities=numerator,
+                period=period,
+            ),
+            DatasetRequirement(
+                id="whole",
+                decision_ids=["measure"],
+                measure="total ODA gross disbursements",
+                entities=denominator,
+                across=across,
+                period=period,
+            ),
+            AggregateRequirement(
+                id="whole_by_year",
+                decision_ids=["measure"],
+                input_id="whole",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            kind(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="whole_by_year"),
+            ),
+        ],
+        asks=["The United States' share of ODA to Kenya, each year since 2015"],
+        ask_breakdowns=() if breakdown is None else (breakdown,),
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+    )
+
+
+_OVER_DONOR = AskBreakdown(ask=0, over=("donor",))
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "across", "breakdown", "kind", "refused"),
+    [
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            _OVER_DONOR,
+            ShareOfRequirement,
+            True,
+            id="whole-names-the-member-alone",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            _OVER_DONOR,
+            QuotientRequirement,
+            True,
+            id="quotient-whole-names-the-member-alone",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT,),
+            ("donor",),
+            _OVER_DONOR,
+            ShareOfRequirement,
+            False,
+            id="whole-keeps-donor-open",
+        ),
+        pytest.param(
+            (Entity(name="Germany", role="donor"),),
+            (Entity(name="G7", role="donor"),),
+            (),
+            _OVER_DONOR,
+            ShareOfRequirement,
+            False,
+            id="whole-names-the-users-group",
+        ),
+        pytest.param(
+            (_US,),
+            (_US, _UK),
+            (),
+            _OVER_DONOR,
+            ShareOfRequirement,
+            False,
+            id="whole-names-another-member-too",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            None,
+            ShareOfRequirement,
+            False,
+            id="share-by-measure-totals-across-no-party",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            AskBreakdown(ask=0, over=("donor", "creditor")),
+            ShareOfRequirement,
+            True,
+            id="ask-over-two-words-for-one-side",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            AskBreakdown(ask=0, over=("recipient",)),
+            ShareOfRequirement,
+            True,
+            id="whole-names-the-recipient-alone",
+        ),
+    ],
+)
+def test_a_share_answering_an_ask_over_a_party_divides_by_a_whole_spanning_it(
+    decision: DecisionFactory,
+    numerator: tuple[Entity, ...],
+    denominator: tuple[Entity, ...],
+    across: tuple[str, ...],
+    breakdown: AskBreakdown | None,
+    kind: type[ShareOfRequirement | QuotientRequirement],
+    refused: bool,
+) -> None:
+    # Run B: the United States' ODA to Kenya over a total naming the United
+    # States and Kenya alone is the United States over itself, 99.7% in 2015.
+    def build() -> Plan:
+        return _whole_plan(
+            decision,
+            numerator=numerator,
+            denominator=denominator,
+            across=across,
+            breakdown=breakdown,
+            kind=kind,
+        )
+
+    if not refused:
+        assert build().requirement("share").kind == kind.model_fields["kind"].default
+        return
+    with pytest.raises(ValidationError) as raised:
+        build()
+    causes = [error.get("ctx", {}).get("error") for error in raised.value.errors()]
+    assert breakdown is not None
+    assert [
+        (cause.requirement_id, cause.ask, cause.party, cause.denominator_id)
+        for cause in causes
+        if isinstance(cause, WholeIsItsMemberError)
+    ] == [("share", 0, breakdown.over[0], "whole")]
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "across", "scope", "breakdown", "refused"),
+    [
+        pytest.param(
+            (_US, _UK, _KENYA_RECIPIENT),
+            (_US, _UK),
+            ("recipient",),
+            DenominatorScope.PER_AXIS,
+            AskBreakdown(ask=0, by=("donor",), over=("recipient",)),
+            False,
+            id="each-donors-share-of-its-own-total",
+        ),
+        pytest.param(
+            (_KENYA_RECIPIENT,),
+            (_KENYA_RECIPIENT,),
+            ("donor",),
+            DenominatorScope.POOLED,
+            AskBreakdown(ask=0, by=("donor",)),
+            False,
+            id="each-donors-share-of-the-donor-open-total",
+        ),
+        pytest.param(
+            (_US, _UK, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US, _UK),
+            (),
+            DenominatorScope.POOLED,
+            _OVER_DONOR,
+            False,
+            id="pooled-across-two-named-donors",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            DenominatorScope.POOLED,
+            _OVER_DONOR,
+            True,
+            id="pooled-across-one-named-donor",
+        ),
+        pytest.param(
+            (_US, _KENYA_RECIPIENT),
+            (_KENYA_RECIPIENT, _US),
+            (),
+            DenominatorScope.PER_AXIS,
+            _OVER_DONOR,
+            True,
+            id="per-donor-total-over-a-total-across-donors",
+        ),
+    ],
+)
+def test_a_share_keyed_by_donor_is_held_to_a_whole_spanning_the_donors_its_ask_totals_across(
+    decision: DecisionFactory,
+    numerator: tuple[Entity, ...],
+    denominator: tuple[Entity, ...],
+    across: tuple[str, ...],
+    scope: DenominatorScope,
+    breakdown: AskBreakdown,
+    refused: bool,
+) -> None:
+    # A pool of two named donors divides each by their combined total; a pool
+    # of one, or a donor over its own total, divides the donor by itself.
+    period = Period(start=2015, end=2024)
+    part_across = ("donor",) if len(numerator) == 1 else ()
+
+    def build() -> Plan:
+        return Plan(
+            question="Each donor's share of ODA to Kenya, each year since 2015",
+            decisions=[decision(fixes=DecisionFixes(denominator_scope=scope))],
+            evidence_requirements=[
+                DatasetRequirement(
+                    id="part",
+                    decision_ids=["measure"],
+                    measure="ODA",
+                    entities=numerator,
+                    across=part_across,
+                    period=period,
+                ),
+                DatasetRequirement(
+                    id="whole",
+                    decision_ids=["measure"],
+                    measure="total ODA",
+                    entities=denominator,
+                    across=across,
+                    period=period,
+                ),
+                AggregateRequirement(
+                    id="whole_by_year",
+                    decision_ids=["measure"],
+                    input_id="whole",
+                    reduction=Reduction.SUM,
+                    group_by=(GroupBy.ENTITY, GroupBy.PERIOD)
+                    if scope is DenominatorScope.PER_AXIS
+                    else (GroupBy.PERIOD,),
+                ),
+                ShareOfRequirement(
+                    id="share",
+                    decision_ids=["measure"],
+                    numerator=RequirementSide(input_id="part"),
+                    denominator=RequirementSide(input_id="whole_by_year"),
+                    axis="donor",
+                    denominator_scope=scope,
+                ),
+            ],
+            asks=["Each donor's share of ODA to Kenya, each year since 2015"],
+            ask_breakdowns=(breakdown,),
+            answered=[AskAnswer(ask=0, outputs=("share",))],
+        )
+
+    if not refused:
+        assert [role.role for role in frame_shapes(build())["share"].roles] == ["donor"]
+        return
+    with pytest.raises(ValidationError) as raised:
+        build()
+    causes = [error.get("ctx", {}).get("error") for error in raised.value.errors()]
+    assert [
+        (cause.requirement_id, cause.party, cause.named)
+        for cause in causes
+        if isinstance(cause, WholeIsItsMemberError)
+    ] == [("share", "donor", ("United States",))]
+
+
+def test_a_pooled_share_answering_an_ask_over_another_party_is_left_to_its_own_check(
+    decision: DecisionFactory, requirement: RequirementFactory
+) -> None:
+    # Each donor's share of all ODA to Uganda reads one side twice; the
+    # recipient it totals across is Uganda on both.
+    dataset = requirement(
+        id="oda_uganda",
+        measure="ODA",
+        entities=[_UGANDA_RECIPIENT],
+        across=("donor",),
+    )
+    side = RequirementSide(input_id=dataset.id)
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=["measure"],
+        numerator=side,
+        denominator=side,
+        axis="donor",
+        denominator_scope=DenominatorScope.POOLED,
+    )
+    plan = _plan(
+        decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED)),
+        evidence_requirements=[dataset, share],
+        asks=["Each donor's share of ODA to Uganda"],
+        ask_breakdowns=(AskBreakdown(ask=0, by=("donor",), over=("recipient",)),),
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+    )
+
+    assert [role.role for role in frame_shapes(plan)["share"].roles] == ["donor"]
 
 
 def test_an_amendment_under_the_same_asks_keeps_their_breakdowns(

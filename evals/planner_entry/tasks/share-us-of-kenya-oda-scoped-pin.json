@@ -1,0 +1,131 @@
+{
+  "id": "share-us-of-kenya-oda-scoped-pin",
+  "kind": "share_of",
+  "origin": "trace 8a46b33f850ec69d2d673b4cdfdebdfb",
+  "question": "What share of ODA to Kenya did the United States provide in 2022?",
+  "searches": [
+    {
+      "query": "What share of ODA to Kenya did the United States provide in 2022?",
+      "parts": [
+        {
+          "variable": "ODA",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            },
+            {
+              "text": "United States",
+              "role": "from"
+            }
+          ],
+          "operations": [
+            {
+              "verb": "share_of",
+              "over": "origin",
+              "phrase": "share of ODA to Kenya did the United States provide"
+            }
+          ],
+          "time": "2022"
+        }
+      ]
+    }
+  ],
+  "brief": "What share of gross ODA disbursements to Kenya did the United States provide in 2022? The user chose gross disbursements (spec_cab592cba40ca753825cc796a8b8a39b).",
+  "asks": [
+    {
+      "text": "The share of total gross ODA to Kenya provided by the United States in 2022",
+      "over": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "share_of"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate",
+    "share_of"
+  ],
+  "neighbour": {
+    "kind": "quotient_of",
+    "distinction": "share_of, not quotient_of: the United States' ODA is a part of all ODA to Kenya, both in one unit"
+  },
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "What share of gross ODA disbursements to Kenya did the United States provide in 2022? The user chose gross disbursements (spec_cab592cba40ca753825cc796a8b8a39b).",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "united_states",
+        "measure": "gross ODA disbursements from the United States",
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          },
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "source_spec_id": "spec_cab592cba40ca753825cc796a8b8a39b"
+      },
+      {
+        "kind": "dataset",
+        "id": "all_oda",
+        "measure": "gross ODA disbursements",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 2022,
+          "end": 2022
+        },
+        "across": [
+          "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "all_by_year",
+        "input_id": "all_oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      },
+      {
+        "kind": "share_of",
+        "id": "share",
+        "numerator": {
+          "input_id": "united_states"
+        },
+        "denominator": {
+          "input_id": "all_by_year"
+        }
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "share"
+        ]
+      }
+    ]
+  },
+  "alternative_payloads": []
+}

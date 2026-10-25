@@ -198,6 +198,21 @@ per-head figure or "divide one by the other". An `axis` or a
 `denominator_axis` names a role its side's entities state, or `'country'` for
 places that state none.
 
+An ask the orchestrator marks as totalled across a party (`AskBreakdown.over`)
+holds a `share_of` or `quotient_of` answering it to a whole spanning that
+party; a share keyed by the party and pooled across it needs a pool of two or
+more. A denominator naming, on that side, only entities its numerator names
+divides the member by itself, as the United States' ODA to Kenya over a total
+naming the United States and Kenya does, and the plan is refused with the way
+out as `whole_is_its_member`: keep that party open in the denominator's
+`across`, name the group the user named as the whole, or, when translation
+finds no source holding every member, decline the ask with the code its answer
+names (`planner.plan._check_wholes_span_their_totals`). Names are compared as
+the plan writes them, and an ask with no `over` is not checked. The
+orchestrator's `plan` call is refused until an ask names in `over` the side a
+search's `share_of` operation runs over, or in `by` when the search also held
+that side open (`harness.orchestrator_tools._breakdowns_missing`).
+
 A dataset requirement whose `across` states the place party, such as
 `'country'`, names no place. When its source
 leaves `observationAbout` open, the retrieval holds every place with data at
@@ -414,6 +429,8 @@ reading was the user's. A rank's `among='population'` and a `share_of`'s
 claim. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
+source a pending referral offers in place of a pin counts as settled, so a
+re-pin to it states its measure decision too. A
 decision the plan being amended records goes once a patch leaves no requirement
 citing it (`_uncited_carried_decisions`); one the patch itself states has to be
 cited. A patch moving a value a carried decision fixes drops a planner's

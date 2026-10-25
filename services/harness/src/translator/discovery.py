@@ -106,7 +106,12 @@ from weakref import WeakValueDictionary
 
 import rfc8785
 from common.hashed_fields import revision_content
-from compiler.evidence import named_members, open_axes_for, source_requirement_matches
+from compiler.evidence import (
+    named_members,
+    named_refs,
+    open_axes_for,
+    source_requirement_matches,
+)
 from compiler.shapes import BREAKDOWN_CODE_SYSTEMS
 from compiler.sources import (
     EXACT_COVERAGE,
@@ -131,14 +136,16 @@ from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.tools.function_tool import FunctionTool
 from google.adk.tools.tool_context import ToolContext
-from planner.parties import across_party, party_role
+from planner.parties import across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
     Entity,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     SessionState,
+    ShareOfRequirement,
     Unit,
     authored,
     dataset_of,
@@ -150,6 +157,7 @@ from planner.plan import (
     recorded_identity,
     retrieves_period,
     save_plan,
+    side_entities,
     split_of,
     windowed_pins,
     with_authored_requirements,
@@ -569,15 +577,27 @@ class DiscoveryLog(StrictModel):
         (`_sums_its_sides_away`), the pin's scope is the figure the plan asks
         for: a source that drops it (`translator.referral.dropped_scope`) is
         withheld, and the change that keeps that scope is stated when the
-        requirement can name it (`translator.referral.scope_repair`). Any
-        other reader, such as a rank or a filter, reads the side per member,
-        and naming the pin's scope would leave one member where the reader
-        needs every one `across` asks for. There the pin gives way and every
-        source is offered, the same sources a search with the pin dropped
-        finds. With no source set aside, every source is offered too.
+        requirement can name it (`translator.referral.scope_repair`). A group
+        the user named as a share's whole, as G7 in "Germany's share of G7
+        ODA", is that case.
+
+        The pin gives way, and every source is offered, the same sources a
+        search with the pin dropped finds, in two cases. A reader other than
+        such a sum, such as a rank or a filter, reads the side per member, and
+        naming the pin's scope would leave one member where the reader needs
+        every one `across` asks for. A sum that a share_of or quotient_of
+        divides by, where the pin binds that side to the numerator's own
+        members alone (`_divides_its_member_by_itself`), would divide the
+        member by itself: "the United States' share of ODA to Kenya" with its
+        total pinned to the United States' figure is that case. With no
+        source set aside, every source is offered too.
         """
         held = self.set_aside_pin(requirement_revision(requirement), requirement.id)
-        if held is None or not _sums_its_sides_away(plan, requirement.id):
+        if (
+            held is None
+            or not _sums_its_sides_away(plan, requirement.id)
+            or _divides_its_member_by_itself(plan, requirement, held)
+        ):
             return ScopeKept(offered=tuple(sources))
         offered: list[SelectedSource] = []
         withheld: list[WithheldSource] = []
@@ -2443,7 +2463,11 @@ async def name_pinned_groups(
     and every reader sums the side away, so either reading gives the
     group's figure. A side held to named
     members alone is left as it is: widening it changes the scope, which the
-    planner decides (`DiscoveryLog.scope_kept`).
+    planner decides (`DiscoveryLog.scope_kept`). So is the total a share or
+    quotient divides by when the group is the numerator's own
+    (`_divides_its_member_by_itself`): "G7's share of ODA to Kenya" named G7
+    on its total would divide G7 by itself, so the pin is set aside and the
+    total stays the whole.
 
     The requirements read are those the model wrote (`authored`), so a
     dataset read beside a copy of its whole history
@@ -2510,6 +2534,12 @@ async def name_pinned_groups(
     return tuple(named)
 
 
+def _origin_id(plan: Plan, requirement_id: str) -> str:
+    """The requirement `requirement_id` copies over its whole history (`Plan.rolling_copies`), else `requirement_id`."""
+    origin = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
+    return origin.get(requirement_id, requirement_id)
+
+
 def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
     """Whether every reader of `requirement_id` in `plan` sums its sides away (`_summed_by_every_reader`).
 
@@ -2517,8 +2547,56 @@ def _sums_its_sides_away(plan: Plan, requirement_id: str) -> bool:
     requirement's whole history (`Plan.rolling_copies`) is judged with the
     readers of the requirement it copies, as `name_pinned_groups` judges it.
     """
-    origin = {copy.copy_id: copy.origin_id for copy in plan.rolling_copies}
-    return _summed_by_every_reader(authored(plan), origin.get(requirement_id, requirement_id))
+    return _summed_by_every_reader(authored(plan), _origin_id(plan, requirement_id))
+
+
+def _divides_its_member_by_itself(
+    plan: Plan, requirement: DatasetRequirement, pinned: SelectedSource
+) -> bool:
+    """Whether `pinned`, `requirement`'s pinned source, binds an open side to the members a numerator dividing by `requirement` names, and to no others.
+
+    True when a share_of or quotient_of of `plan` reads `requirement` as its
+    denominator, directly or through aggregates (`_dividers`), and on a side
+    `requirement.across` opens every entity `pinned` binds is one its
+    numerator names (`planner.plan.side_entities`). Both are compared by graph ref:
+    the numerator's names are resolved against `pinned` by label, by the refs
+    Search bound for them or by the refs the graph resolved them to
+    (`compiler.evidence.named_refs`), and a group the numerator names stands
+    for every member `pinned` binds on its side. Keeping that scope on the
+    denominator, by withholding the sources that drop it
+    (`DiscoveryLog.scope_kept`) or by naming its group (`name_pinned_groups`),
+    would divide the numerator by itself. A pin binding that side to other
+    entities too, as a group whose members include the numerator's, keeps
+    a scope the user may have named as the whole, so it is not this case.
+    Judged on the plan as the model wrote it (`authored`), as
+    `_sums_its_sides_away` judges it.
+    """
+    written = authored(plan)
+    by_id = {item.id: item for item in written.evidence_requirements}
+    sides = {side for word in requirement.across if (side := flow_side(word)) is not None}
+    for divider in _dividers(written, _origin_id(plan, requirement.id)):
+        members = named_refs(side_entities(by_id, divider.numerator), pinned)
+        for side in sides:
+            bound = {entity.ref for entity in pinned.entities if flow_side(entity.role) == side}
+            if bound and bound <= members:
+                return True
+    return False
+
+
+def _dividers(
+    plan: Plan, requirement_id: str
+) -> tuple[ShareOfRequirement | QuotientRequirement, ...]:
+    """Each share_of or quotient_of of `plan` reading `requirement_id` as its denominator, directly or through aggregates."""
+    found: list[ShareOfRequirement | QuotientRequirement] = []
+    for reader in plan.evidence_requirements:
+        if requirement_id not in inputs_of(reader):
+            continue
+        if isinstance(reader, ShareOfRequirement | QuotientRequirement):
+            if reader.denominator.input_id == requirement_id:
+                found.append(reader)
+        elif isinstance(reader, AggregateRequirement):
+            found.extend(_dividers(plan, reader.id))
+    return tuple(found)
 
 
 def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:
@@ -2579,7 +2657,10 @@ async def _groups_named(
 
     One group per `across` word whose side the pin's source holds to one
     group (`translator.referral.closing_group`). `None` when a requirement
-    reading it keeps the sides apart (`_summed_by_every_reader`), or when
+    reading it keeps the sides apart (`_summed_by_every_reader`), when a
+    share or quotient divides by it and the pin's source binds the side to
+    the numerator's own members alone (`_divides_its_member_by_itself`), as
+    in "G7's share of ODA to Kenya" with the total pinned to G7, or when
     the pin's source cannot be read, leaves every side `across` asks for
     open, or holds none of them to one group.
     """
@@ -2592,7 +2673,9 @@ async def _groups_named(
     if read is None or isinstance(read, dict):
         return None
     source, honoured = read
-    if not _holds_closed(requirement, source):
+    if not _holds_closed(requirement, source) or _divides_its_member_by_itself(
+        plan, requirement, source
+    ):
         return None
     groups = tuple(
         NamedGroup(requirement.id, Entity(name=label, role=role), word)
