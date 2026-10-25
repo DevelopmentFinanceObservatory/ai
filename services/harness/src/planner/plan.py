@@ -65,6 +65,7 @@ from planner.parties import (
     across_party,
     party_among,
     role_party,
+    same_party,
     singular,
     words_for_one_party,
 )
@@ -1592,19 +1593,26 @@ class AskAnswer(StrictModel):
 
 
 class AskBreakdown(StrictModel):
-    """The parties one ask the brief lists breaks its answer down by.
+    """The parties one ask the brief lists breaks its answer down by, and those it totals across.
 
     `by` holds one word for each side of the flow: one ask is one output,
     whose flow has one giving and one receiving party, so two words for one
     side (`planner.parties.words_for_one_party`) are two outputs and are
-    rejected.
+    rejected. `over` may hold several words for one side, as a total of aid
+    and debt from every donor and creditor does: a total sums each away. At
+    least one of them names a party.
     """
 
     ask: int = Field(ge=0, lt=MAX_PLAN_ASKS, description="The ask's number in the brief.")
     by: tuple[PartyRole, ...] = Field(
-        min_length=1,
+        default=(),
         max_length=len(PARTY_ROLES),
         description="Each party the answer lists one by one, as `search` takes `open_roles`.",
+    )
+    over: Annotated[tuple[PartyRole, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        max_length=len(PARTY_ROLES),
+        description="Each party the answer totals across into one figure.",
     )
 
     @field_validator("by")
@@ -1617,6 +1625,12 @@ class AskBreakdown(StrictModel):
                 "party on each side"
             )
         return by
+
+    @model_validator(mode="after")
+    def _names_a_party(self) -> AskBreakdown:
+        if not self.by and not self.over:
+            raise ValueError("an ask breakdown names at least one party in `by` or `over`")
+        return self
 
 
 class PeriodLicence(StrictModel):
@@ -1722,6 +1736,40 @@ def _check_asks_accounted(
     ]
     if uncovered or repeated:
         raise AsksUnaccountedError(asks=asks, uncovered=uncovered, repeated=repeated)
+
+
+class WholeIsItsMemberError(ValueError):
+    """A share or quotient answering an ask that totals across a party divides by its own members of that party.
+
+    `requirement_id` is the share or quotient, `ask` the ask it answers,
+    `party` the party the ask totals across, `denominator_id` the dataset
+    requirement its denominator reads, and `named` the entities that
+    requirement names alone on that side, each of which the numerator names
+    too (`_check_wholes_span_their_totals`). `planner.agent.propose_plan`
+    answers it with a typed problem naming the ways out.
+    """
+
+    def __init__(
+        self,
+        *,
+        requirement_id: str,
+        ask: int,
+        ask_text: str,
+        party: str,
+        denominator_id: str,
+        named: Collection[str],
+    ) -> None:
+        self.requirement_id = requirement_id
+        self.ask = ask
+        self.party = party
+        self.denominator_id = denominator_id
+        self.named = tuple(sorted(named))
+        super().__init__(
+            f"{requirement_id!r} answers ask {ask} ({ask_text!r}), which totals across "
+            f"{party}, but its denominator ({denominator_id!r}) names {list(self.named)!r} "
+            f"alone as {party}, each of which its numerator names too, so it divides the "
+            "member by itself"
+        )
 
 
 class AskRoleDroppedError(ValueError):
@@ -1831,6 +1879,126 @@ def _check_asks_keep_their_parties(plan: Plan) -> None:
             if breakdown.ask in dropped and len(breakdown.by) > 1
         }
         raise AskRoleDroppedError(asks=asks, dropped=dropped, together=together)
+
+
+def side_entities(
+    requirements_by_id: Mapping[str, EvidenceRequirement], side: RequirementSide
+) -> tuple[Entity, ...]:
+    """The entities a calculation's `side` names, its requirements looked up in `requirements_by_id`.
+
+    A side names the entities of the dataset requirement it reads, directly
+    or through aggregates; narrowed to one `entity`, it names the entities
+    of that name alone, or that name with no role when it reads no dataset
+    requirement naming it. A side reading through any other kind names none.
+    """
+    dataset = _side_dataset(requirements_by_id, side.input_id)
+    entities = () if dataset is None else dataset.entities
+    if side.entity is None:
+        return entities
+    return tuple(entity for entity in entities if entity.name == side.entity) or (
+        Entity(name=side.entity),
+    )
+
+
+def _side_dataset(
+    requirements_by_id: Mapping[str, EvidenceRequirement], input_id: str
+) -> DatasetRequirement | None:
+    """The dataset requirement `input_id` reads, directly or through aggregates, or `None` through any other kind."""
+    item = requirements_by_id[input_id]
+    while isinstance(item, AggregateRequirement):
+        item = requirements_by_id[item.input_id]
+    return item if isinstance(item, DatasetRequirement) else None
+
+
+def _check_wholes_span_their_totals(plan: Plan) -> None:
+    """Reject a share or quotient whose denominator, on a party its ask totals across, names the numerator's members alone.
+
+    An ask's `over` (`AskBreakdown.over`) is a party its answer totals
+    across, as "the share of ODA to Kenya from the United States" totals
+    across donors, so a share_of or quotient_of computing that answer, as
+    an output of the ask or upstream of one, divides by a whole spanning
+    that party. When every entity its denominator names on that side is one
+    its numerator names, the whole holds the numerator's members alone and
+    the result divides the member by itself, whatever source each side
+    reads: the United States' ODA to Kenya over a total naming the United
+    States and Kenya. A denominator naming no entity on that side keeps it
+    open or reads a source's total, and one naming another entity there
+    too, as G7 beside Germany or the United Kingdom beside the United
+    States, holds a whole the user may have named; neither is refused. A
+    share keyed by that party and pooled across it divides each member by
+    the members' total, a whole spanning more than any one member once it
+    holds two, so only a pool of one is refused. A share pooling its own
+    axis from one side is checked by `_pools_one_member`.
+
+    The check is open where `over` is empty: an ask the orchestrator handed
+    with no party totalled across is not checked, which is right for a
+    share by measure, as health ODA within all ODA to one donor and
+    recipient. The orchestrator states `over` for the side a search's
+    `share_of` operation runs over (`harness.orchestrator_tools._breakdowns_missing`).
+    An ask listing a party in `by` is answered by an output keeping it
+    (`_check_asks_keep_their_parties`), which an unkeyed share does not.
+    Names are compared as the plan writes them, so an alias, or a group on
+    one side beside its members on the other, is not seen. The requirements
+    are those the model wrote (`authored`), so a refusal names its ids.
+
+    Raises:
+        WholeIsItsMemberError: For the first such share or quotient.
+    """
+    over = {breakdown.ask: breakdown.over for breakdown in plan.ask_breakdowns if breakdown.over}
+    if not over:
+        return
+    written = authored(plan).evidence_requirements
+    by_id = {requirement.id: requirement for requirement in written}
+    for answer in plan.answered:
+        words = over.get(answer.ask, ())
+        if not words:
+            continue
+        upstream = {key for output in answer.outputs for key in _upstream(output, by_id)}
+        for requirement in written:
+            if (
+                requirement.id not in upstream
+                or not isinstance(requirement, ShareOfRequirement | QuotientRequirement)
+                or (isinstance(requirement, ShareOfRequirement) and requirement.pools_its_own_axis)
+            ):
+                continue
+            numerator = side_entities(by_id, requirement.numerator)
+            denominator = side_entities(by_id, requirement.denominator)
+            for word in words:
+                held = _names_on_side(denominator, word)
+                if not held or not held <= _names_on_side(numerator, word):
+                    continue
+                if len(held) > 1 and _pools_across(requirement, word):
+                    continue
+                dataset = _side_dataset(by_id, requirement.denominator.input_id)
+                raise WholeIsItsMemberError(
+                    requirement_id=requirement.id,
+                    ask=answer.ask,
+                    ask_text=plan.asks[answer.ask],
+                    party=word,
+                    denominator_id=requirement.denominator.input_id
+                    if dataset is None
+                    else dataset.id,
+                    named=held,
+                )
+
+
+def _pools_across(requirement: ShareOfRequirement | QuotientRequirement, word: str) -> bool:
+    """Whether `requirement` is a share keyed by the party `word` names and pooled across it."""
+    return (
+        isinstance(requirement, ShareOfRequirement)
+        and requirement.denominator_scope is DenominatorScope.POOLED
+        and requirement.axis is not None
+        and same_party(requirement.axis, word)
+    )
+
+
+def _names_on_side(entities: Iterable[Entity], word: str) -> set[str]:
+    """The names of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
+    return {
+        entity.name
+        for entity in entities
+        if entity.role is not None and same_party(entity.role, word)
+    }
 
 
 def _check_asks_across_years(asks: Sequence[str], numbers: Sequence[int]) -> None:
@@ -3673,7 +3841,9 @@ class Plan(StrictModel):
         requirement the plan states, one another reads included
         (`_check_asks_accounted`), and an answer keeps in one output every
         party its ask breaks down by unless that part is declined
-        (`_check_asks_keep_their_parties`).
+        (`_check_asks_keep_their_parties`), and a share or quotient answering
+        an ask that totals across a party divides by a whole spanning more
+        than the numerator's own members of it (`_check_wholes_span_their_totals`).
 
         The requirements are judged as they run: split so each dataset read
         from its first year serves only its rolling-start readers
@@ -3728,6 +3898,7 @@ class Plan(StrictModel):
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
         _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
         _check_asks_keep_their_parties(self)
+        _check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self

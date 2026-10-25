@@ -626,7 +626,9 @@ class SearchReading(StrictModel):
     `open_roles` those of them it asked to hold open, every member listed,
     rather than name: each a `PARTY_ROLES` word, or the role column
     (`origin`, `destination`) for a word that names a side of the flow
-    alone (`planner.parties.open_party`). `refusal_code` is the reason code a `no_data`
+    alone (`planner.parties.open_party`). `share_over` is the role column
+    of each side a `share_of` operation of the part runs over, whose whole
+    spans every member of it. `refusal_code` is the reason code a `no_data`
     part gave. `unbound_qualifiers` and `flagged_match` explain a
     `qualifier_not_bound` refusal: its rejected phrase and the broader match
     search left unused. `fetch` is what a later `fetch` of `spec_id` returned.
@@ -664,6 +666,7 @@ class SearchReading(StrictModel):
     open_axes: tuple[OpenAxisReading, ...] = ()
     asked_roles: tuple[str, ...] = ()
     open_roles: tuple[str, ...] = Field(default=(), exclude_if=lambda roles: not roles)
+    share_over: tuple[str, ...] = Field(default=(), exclude_if=lambda sides: not sides)
     recent_years: tuple[YearCount, ...] = ()
     refusal_code: str | None = None
     # Search may refuse a same-variable match rather than silently widen the
@@ -766,6 +769,7 @@ class SearchReading(StrictModel):
             ),
             asked_roles=tuple(str(role) for role in part.get("asked_roles") or ()),
             open_roles=tuple(str(role) for role in part.get("open_roles") or ()),
+            share_over=tuple(str(side) for side in part.get("share_over") or ()),
             refusal_code=_str_or_none(part.get("reason")),
             unbound_qualifiers=tuple(
                 dict.fromkeys(

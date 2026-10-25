@@ -90,6 +90,7 @@ class ProblemCode(StrEnum):
     NOTHING_TO_PLAN = "nothing_to_plan"
     ASKS_UNACCOUNTED = "asks_unaccounted"
     ASK_ROLE_DROPPED = "ask_role_dropped"
+    WHOLE_IS_ITS_MEMBER = "whole_is_its_member"
     RESULT_SCOPE_UNSTATED = "result_scope_unstated"
     PERIOD_REDUCTION_UNSTATED = "period_reduction_unstated"
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
