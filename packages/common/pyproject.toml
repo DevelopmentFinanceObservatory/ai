@@ -25,7 +25,7 @@ dependencies = [
     # broken tracing in deployment rather than a failing test. 4.9 is the first
     # release with the `mask_otel_spans` client argument.
     "langfuse>=4.9,<5.0",
-    # `common.live_apis`'s client on dfo-apis, the same floor data-mcp uses.
+    # `common.live_apis`'s client on apis, the same floor data-mcp uses.
     "httpx2>=2.13.0",
     # Canonical JSON for `common.recipe` and `common.materialisation.mint_record`,
     # the same floor data-mcp and the harness use.

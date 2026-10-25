@@ -45,12 +45,13 @@ import functools
 import inspect
 import json
 import logging
+import re
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import FunctionType
-from typing import Any, Literal, Protocol, get_type_hints
+from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
 from analysis_mcp.frame_ref_resolution import read_derived_marker
@@ -59,8 +60,9 @@ from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
     TYPED_ROLES,
-    enrichment_columns,
     enrichment_role,
+    kind_column,
+    type_column,
 )
 from common.row_budget import row_budget
 from compiler.sources import (
@@ -72,6 +74,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
 from mcp import MCPError
@@ -111,6 +114,7 @@ from harness.chart_binding import (
     differing_coordinates,
     empty_select_refusal,
     every_series_selects,
+    latest_shared_period,
     over_cap_dimension,
     select_binding_ok,
     top_members,
@@ -131,7 +135,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
-    AskOption,
+    AskQuestion,
     DescribedFrame,
     PendingAsk,
     PendingPlan,
@@ -149,6 +153,7 @@ from harness.reply_figures import (
     unplaced_names,
     with_coordinates,
 )
+from harness.rolling_cards import named_year
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -158,7 +163,7 @@ from harness.tool_contracts import (
     harness_retry_mode,
     measure_choice,
 )
-from harness.turn_records import SETTLED_STATUSES, SearchReading
+from harness.turn_records import SETTLED_STATUSES, SearchReading, SiblingReading
 from harness.wire import RetryMode, usable_component
 
 logger = logging.getLogger(__name__)
@@ -170,6 +175,11 @@ _FETCHES_KEY = "orchestrator:fetches"
 # The ids of the series the canvas drew as a turn began, with the turn's
 # invocation id: {"invocation", "ids"}.
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
+# The cards `make_charts` drew this turn that are still on the canvas:
+# {"invocation", "drawn"}, `drawn` mapping `_card_identity` to the card's
+# {"component_id", "revision"}, the revision it was drawn as. `remove_cards`
+# drops the cards it takes off.
+_DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 # The key of the result of an `ask_user` or `plan` call that recorded its
 # action; the Studio stream holds back later text only after one of these.
 HANDED_OFF = "handed_off"
@@ -225,12 +235,9 @@ class Chart(BaseModel):
     )
     title: str = Field(
         description=(
-            "what the chart shows and the period it shows; a stat card's title carries "
-            "the period of the value on the card. The exception is a chart whose period "
-            "moves with the data, which is one on a frame whose view says rolling: true "
-            "and one given latest_periods: its title leaves out the years it shows "
-            "('over the last five years', never '2019-2024'), and a title naming one of "
-            "them is refused"
+            "what the chart shows, with no period or year: 'Aid to Kenya by donor'. "
+            "make_charts adds the period the card shows, and refuses a title naming a "
+            "year the frame covers"
         )
     )
     latest_periods: int | None = Field(
@@ -325,8 +332,21 @@ class AskedOutput(BaseModel):
     over: list[PartyRole] = Field(
         default=[],
         description=(
-            "each party the output totals across, every member summed into one figure: "
-            '["donor"] for "total aid from all donors"'
+            "each party the output totals across into one figure: "
+            '["donor"] for "total aid from all donors". Such a party stays out of open_roles, '
+            "and the search call names the population as an entity"
+        ),
+    )
+    across_years: bool = Field(
+        default=False,
+        description=(
+            "true when the user asked for this output as one figure, or one ranking, taken "
+            'across several years: a total, an average, a peak or a low over them ("the '
+            'total between 2015 and 2022", "in total, over all years", "the year aid '
+            'peaked"). It permits the plan to combine the years and requires nothing. Leave '
+            "it false for a figure for each year and for one year, and for a total or a "
+            "ranking when the user named no years: the years a source holds are not a span "
+            "the user asked for"
         ),
     )
 
@@ -442,12 +462,13 @@ def _covering_selects(
 
 
 def _held_cells(dimension: str, rows: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """Each `dimension` member's kind or type cell among `rows`; empty when
-    the rows carry neither of its enrichment columns."""
+    """Each `dimension` member's kind or type cell among `rows`, the kind where
+    both are held; empty when the rows carry neither column. A party's class
+    and whole cells take no part in a ranking."""
     return {
         str(row[dimension]): str(row[column])
         for row in rows
-        for column in enrichment_columns(dimension)
+        for column in (type_column(dimension), kind_column(dimension))
         if row.get(column) is not None and row.get(dimension) is not None
     }
 
@@ -650,6 +671,140 @@ class _Narrowed:
     cut: TopMembers | None
 
 
+# The suffix a cut card's title ends with, as `_card_title` writes it, the
+# periods a cut line chart or table draws included.
+_CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
+
+
+def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
+    """A card's title: the model's `subject`, then the period the card shows,
+    then on a card cut to its largest members what the cut leaves out and the
+    period it ranked at. The subject is shortened so the title fits 120
+    characters."""
+    suffix = f", {period}" if period is not None else ""
+    if cut is not None:
+        suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
+    return f"{subject[: 120 - len(suffix)]}{suffix}"
+
+
+def _covered_years(view: Mapping[str, Any]) -> list[str]:
+    """Every year from the first to the last the frame's coverage names, a
+    span's included; none for a view that states no coverage."""
+    coverage = view.get("coverage") or []
+    years = [int(year) for label in coverage for year in re.findall(r"\d{4}", str(label))]
+    return [str(year) for year in range(min(years), max(years) + 1)] if years else []
+
+
+def _title_refusal(subject: str, view: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The `title_names_period` refusal of a model's title naming a year the
+    frame covers, `None` for any other title. `make_charts` writes the card's
+    period, so a title naming one would state it twice or contradict it."""
+    year = named_year(subject, _covered_years(view))
+    if year is None:
+        return None
+    return harness_refusal(
+        code=HarnessCode.TITLE_NAMES_PERIOD,
+        message=(
+            f"The title names {year}. Write what the chart shows with no period or year: "
+            "make_charts adds the period the card shows."
+        ),
+        fix={"period": year},
+    )
+
+
+def _period_text(label: str) -> str:
+    """A period label as a title states it, a span `2020/2024` as `2020 to 2024`."""
+    return " to ".join(label.split("/"))
+
+
+def _latest_text(periods: int, view: Mapping[str, Any]) -> str:
+    """The period of a card counting `periods` back from the latest data, in
+    the frame's grain (`TimeGrain`): `latest year`, `last 5 years`."""
+    grain = view.get("period_grain")
+    grain = grain if grain in get_args(TimeGrain) else "period"
+    return f"latest {grain}" if periods == 1 else f"last {periods} {grain}s"
+
+
+def _covered_range(view: Mapping[str, Any]) -> tuple[str, bool] | None:
+    """The periods a frame's coverage names, as a title states them, and
+    whether they are several: its one period, or its first and last. None for
+    a rolling frame, whose years were worked out from the latest data and move
+    on (`harness.rolling_cards`), and for a view that states no coverage."""
+    coverage = [str(label) for label in view.get("coverage") or []]
+    if view.get("rolling") or len(coverage) != 2:
+        return None
+    first, last = coverage
+    if first == last or "/" in first:
+        return _period_text(first), False
+    return f"{first} to {last}", True
+
+
+async def _card_period(
+    chart: Chart,
+    *,
+    frame: Mapping[str, Any],
+    select: dict[str, Any],
+    cut: TopMembers | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The period a card's title states, None when nothing can or a cut bar
+    chart's suffix states it, and the window its intent names, None for none.
+
+    A card counting `latest_periods` back states them as relative periods. A
+    card drawing every period its frame covers states them
+    (`_covered_range`): a line chart, a table, and a bar chart whose select
+    lists no dimension, which apis draws as one bar a period. A bar chart
+    whose select lists one is drawn at one period, the latest every selected
+    series holds inside its window, and a stat card states the period of its
+    value; on a frame of several periods both are read from the frame's rows
+    (`latest_shared_period`) and the bar chart is pinned there, since without
+    a window it moves when the frame gains a newer period. A cut bar chart is
+    pinned at the cut's period, which its suffix states (`_card_title`), and
+    a cut line chart or table states its frame's periods beside it."""
+    view = frame["view"]
+    if chart.latest_periods is not None:
+        return _latest_text(chart.latest_periods, view), _latest_window(chart.latest_periods)
+    at_one = chart.type == "stat_card" or (
+        chart.type == "bar_chart" and any(isinstance(value, list) for value in select.values())
+    )
+    if cut is not None and at_one:
+        return None, {"start": cut.period, "end": cut.period}
+    covered = _covered_range(view)
+    if covered is None:
+        return None, None
+    text, several = covered
+    if cut is not None:
+        # The suffix states a frame of one period, the period the cut ranked at.
+        return text if several else None, None
+    if not (at_one and several):
+        return text, None
+    at = await _frame_work(frame_store_ref(frame), functools.partial(_drawn_period, select=select))
+    pinned = at is not None and chart.type == "bar_chart"
+    return at, {"start": at, "end": at} if pinned else None
+
+
+def _drawn_period(data: Any, _trace: Any, *, select: dict[str, Any]) -> str | None:
+    """`latest_shared_period` over a stored frame, read without its enrichment
+    columns, which describe a member and split no series."""
+    rows = [
+        {
+            name: cell
+            for name, cell in row.items()
+            if name in select or enrichment_role(name, roles=TYPED_ROLES) is None
+        }
+        for row in _rows_of(data)
+    ]
+    return latest_shared_period(rows=rows, select=select)
+
+
+def _card_identity(intent: Mapping[str, Any]) -> str:
+    """What a drawn card is: the intent the platform renders and checks it
+    from (kind, frame, select, window, title). The figures a chart asks to be
+    stated are no part of it, so asking a drawn card for other figures reads
+    them from it. The title stays in, so a title the platform would refuse is
+    checked afresh rather than answered from a card drawn under another."""
+    return json.dumps(intent, sort_keys=True)
+
+
 async def _top_select(
     chart: Chart,
     select: dict[str, Any],
@@ -665,8 +820,8 @@ async def _top_select(
     many as `chart.type` draws (`chart_draws`). A cut of a place or flow
     party dimension ranks only the members one ranking compares (`_ranked`),
     by the frame's kind read (`_member_cells`) when its rows carry no kind or
-    type cell. Otherwise it
-    lists every member, those with no value at the period last. dfo-apis
+    type cell. Otherwise it lists every member, those with no value at the
+    period last. apis
     draws a table's and a line chart's series in the order the select lists
     them.
 
@@ -730,8 +885,8 @@ def _cut_note(cut: TopMembers) -> str:
     kind and the members with no value at the cut's period counted apart."""
     return (
         f"This card draws the {len(cut.members)} largest of the {cut.holding} members with a "
-        f"value in {cut.period}, highest first. Left out as group totals or members of "
-        f"another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
+        f"value in {cut.period}, highest first. Left out as group totals, unallocated amounts "
+        f"or members of another level: {cut.other_kinds}. Left out with no value in {cut.period}: "
         f"{len(cut.unvalued)}. Say in the reply that it shows the largest of them in "
         f"{cut.period}."
     )
@@ -980,9 +1135,14 @@ def _validated_arguments(
 
 
 def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
-    """The refusal of a `plan` call whose `asks` break the planner's limits
-    (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None."""
+    """The refusal of a `plan` call whose `asks` list none or break the
+    planner's limits (`planner.plan.MAX_PLAN_ASKS`, `MAX_ASK_CHARS`), or None.
+
+    A plan held to no asks has no ask to license combining a step's years
+    (`planner.plan.Plan.period_licences`), so a brief lists at least one."""
     problems = []
+    if not asks:
+        problems.append("asks lists no outputs: list each output the user asked for")
     if len(asks) > MAX_PLAN_ASKS:
         problems.append(
             f"asks lists {len(asks)} outputs, more than {MAX_PLAN_ASKS}: merge outputs the "
@@ -1004,7 +1164,7 @@ def _asks_refusal(asks: Sequence[str]) -> dict[str, Any] | None:
     return {
         "refusal": f"plan recorded nothing: {'; '.join(problems)}.",
         "code": ToolErrorCode.REQUEST_INVALID.value,
-        "legal": {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]},
+        "legal": {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]},
     }
 
 
@@ -1076,25 +1236,49 @@ def _ask_breakdowns(asks: Sequence[AskedOutput]) -> list[AskBreakdown]:
     ]
 
 
+def _asks_across_years(asks: Sequence[AskedOutput]) -> list[int]:
+    """The numbers of the asks that set `across_years`."""
+    return [number for number, ask in enumerate(asks) if ask.across_years]
+
+
 def _named_spec_ids(tool_context: ToolContext) -> set[str]:
     """Every spec_id this turn's search results named: each part's own and each
-    candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count a part's
-    result offers (`measure_choice`)."""
+    candidate's (`ORCHESTRATOR_SPECS_KEY`), and each other count and other
+    prices a part's result offers (`measure_choice`)."""
     specs = tool_context.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     named = set(specs)
     for block in specs.values():
+        choice = measure_choice(block or {})
         named.update(
             alternative["spec_id"]
-            for alternative in measure_choice(block or {}).get("alternatives") or ()
+            for key in ("alternatives", "other_prices")
+            for alternative in choice.get(key) or ()
         )
     return named
 
 
-def _options_refusal(options: list[AskOption], named: set[str]) -> dict[str, Any] | None:
-    """The refusal of an `ask_user` call whose options carry a spec_id no search
-    result this turn named (`_named_spec_ids`), or one spec_id twice, or None."""
+# The questions one `ask_user` call may put to the user in one pause.
+MAX_ASK_QUESTIONS = 3
+
+
+def _questions_refusal(questions: list[AskQuestion], named: set[str]) -> dict[str, Any] | None:
+    """The refusal of an `ask_user` call that asks no question or more than
+    `MAX_ASK_QUESTIONS`, asks a question with no option, offers a spec_id no
+    search result this turn named (`_named_spec_ids`), or offers one spec_id
+    on two options of the call; None when it asks well."""
+    options = [option for question in questions for option in question.options]
     spec_ids = [option.spec_id for option in options if option.spec_id is not None]
-    problems = [
+    problems = []
+    if not 1 <= len(questions) <= MAX_ASK_QUESTIONS:
+        problems.append(
+            f"it asks {len(questions)} questions, and ask_user takes 1 to {MAX_ASK_QUESTIONS}"
+        )
+    problems += [
+        f"question {question.question!r} offers no option"
+        for question in questions
+        if not question.options
+    ]
+    problems += [
         f"option {option.label!r} carries {option.spec_id}, which no search result named this turn"
         for option in options
         if option.spec_id is not None and option.spec_id not in named
@@ -1201,7 +1385,7 @@ def _unresolved_refusal(
 
 def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     """`data`, a `get_data` outcome that served no observations, as the refusal `fetch`
-    gives for it, with dfo-apis' own `empty_result` warning when it sent one."""
+    gives for it, with apis' own `empty_result` warning when it sent one."""
     warning = next(
         (w for w in data.get("warnings") or [] if w.get("code") == HarnessCode.EMPTY_RESULT), {}
     )
@@ -1220,12 +1404,14 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     """Add a `fetch` result to every stored search reading of its spec_id.
 
     A spec_id that no reading holds as its own, but one offered as a
-    candidate or as another count (`SearchReading.alternatives`), first
-    gains a reading of its own, read from its block (`chosen_part`) with the
+    candidate, as another count (`SearchReading.alternatives`) or as the
+    same count in other prices (`SearchReading.other_prices`), first gains
+    a reading of its own, read from its block (`chosen_part`) with the
     offering reading's text, skills and departures and asked parties and
     its own warnings, else the offering reading's. A spec_id no reading
-    offers as a candidate is another count, and its reading names the
-    reading that offered it (`SearchReading.other_count_of`).
+    offers as a candidate is a sibling (`_offered_sibling`), and its reading
+    names the reading that offered it (`SearchReading.sibling_of`) and the
+    count it reads.
     """
     spec_id = result["spec_id"]
     state = tool_context.state
@@ -1237,10 +1423,8 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
     candidate_of = next(
         (r for r in searches if any(c.spec_id == spec_id for c in r.candidates)), None
     )
-    count_of = next(
-        (r for r in searches if any(a.spec_id == spec_id for a in r.alternatives)), None
-    )
-    offered = candidate_of or count_of
+    sibling = None if candidate_of else _offered_sibling(searches, spec_id)
+    offered = candidate_of or (sibling[0] if sibling else None)
     if block and offered is not None and all(r.spec_id != spec_id for r in searches):
         warnings = (state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {}).get(spec_id)
         if warnings is None:
@@ -1250,17 +1434,17 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             skills=offered.skills,
             observed_at=datetime.now(UTC),
         )
-        searches.append(
-            chosen.model_copy(
-                update={
-                    "separate": offered.separate,
-                    "departures": offered.departures,
-                    "asked_roles": offered.asked_roles,
-                    "open_roles": offered.open_roles,
-                    "other_count_of": None if candidate_of else offered.spec_id,
-                }
-            )
-        )
+        update: dict[str, Any] = {
+            "separate": offered.separate,
+            "departures": offered.departures,
+            "asked_roles": offered.asked_roles,
+            "open_roles": offered.open_roles,
+        }
+        if sibling is not None:
+            link = sibling[1]
+            counted_as = link.label if link.axis == "what" else offered.counted_as
+            update |= {"sibling_of": link, "counted_as": counted_as}
+        searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
         (reading.with_fetch(result) if reading.spec_id == spec_id else reading).model_dump(
             mode="json"
@@ -1277,6 +1461,22 @@ def _open_roles(part: SearchPart) -> list[str]:
     "from" gives "origin".
     """
     return list(dict.fromkeys(role for word in part.open_roles or () if (role := open_party(word))))
+
+
+def _offered_sibling(
+    searches: Sequence[SearchReading], spec_id: str
+) -> tuple[SearchReading, SiblingReading] | None:
+    """The first reading of `searches` offering `spec_id` as another count or
+    in other prices, with the link a reading of `spec_id` keeps to it; `None`
+    when none does."""
+    for reading in searches:
+        if reading.spec_id is None:
+            continue
+        for axis, offers in (("what", reading.alternatives), ("unit", reading.other_prices)):
+            label = next((offer.label for offer in offers if offer.spec_id == spec_id), None)
+            if label is not None:
+                return reading, SiblingReading(spec_id=reading.spec_id, axis=axis, label=label)
+    return None
 
 
 def _asked_roles(part: SearchPart) -> list[str]:
@@ -1335,6 +1535,7 @@ def build_orchestrator_tools(
     definition_surface: ToolSurface | None = None,
     recall_part: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     canvas_series: Callable[[], list[str]] | None = None,
+    canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
     remove_cards: Callable[..., Awaitable[tuple[list[str], list[str]]]] | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
@@ -1350,14 +1551,24 @@ def build_orchestrator_tools(
     `recall_part` is `harness.studio_state.make_recall_part`'s seam. Left
     unset, `recall` says there is nothing to recall from. `canvas_series` is
     `harness.studio_state.make_canvas_series`'s seam; left unset, no series
-    counts as on the canvas. `remove_cards` is
+    counts as on the canvas. `canvas_cards` is
+    `harness.studio_state.make_canvas_cards`' seam; left unset, only the
+    cards drawn this turn are known to be on the canvas. `remove_cards` is
     `harness.studio_state.make_remove_cards`'s seam; left unset, the tool
     says it is not available.
     """
     # One lock per invocation, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
-    # is admitted on exact counts. An entry lasts while a call holds its lock.
+    # is admitted on exact counts, and by remove_cards while it takes cards
+    # off and drops them from the turn's drawn cards. An entry lasts while a
+    # call holds its lock.
     chart_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+
+    def _canvas_lock(tool_context: ToolContext) -> asyncio.Lock:
+        lock = chart_locks.get(tool_context.invocation_id)
+        if lock is None:
+            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
+        return lock
 
     async def search(
         query: str,
@@ -1389,9 +1600,23 @@ def build_orchestrator_tools(
         `entities`, as spoken. Use `to` for a recipient and `from` for a
         donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
         creditor" or "which donors" question leaves that flow side open in
-        `open_roles`. A rank over `origin` or `destination` also opens that
-        side. Keep `open_roles` when the user explicitly asks to break down
-        that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
+        `open_roles`. A total across a side leaves it out of `open_roles` and
+        names the population the user asked for: "aid to Ethiopia from all
+        donors" names "all donors" as a `from` entity, which covers official
+        and private donors, and a donor side left unnamed on DAC2a covers
+        official donors only. For a named population, search binds the
+        source's published total. Where the source publishes none, search
+        departs `whole_total_unpublished` and returns the members, whose sum
+        is the total. Where the source holds no series of that total, such as
+        "official donors" on the CRS, search finds no data. A published total
+        stands in only where no operation runs over its side: any operation
+        over `origin` or `destination`, `aggregate` included, opens that side and keeps its members. Search
+        lists "official donors" member by member only where the dataset holds
+        no private donors, and otherwise refuses `entity_role_not_admitted`:
+        open the donor side and keep the parties whose
+        `financingProvider_party_kind` is `party` and
+        `financingProvider_party_class` is `official`. Keep `open_roles` when the
+        user explicitly asks to break down that side: "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
         "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
         ["creditor"], "operations": [{"verb": "rank",
         "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,
@@ -1436,9 +1661,10 @@ def build_orchestrator_tools(
         any, its `group_readings` when it reads a named group as the
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
-        with the others under `alternatives`, each with its spec_id and
-        label, and lists the `source_codes` of the indicators it found, each
-        with the publisher that issues it when search names one. And
+        with other counts under `alternatives` and the same count in other
+        prices under `other_prices`, each with its spec_id and label, and
+        lists the `source_codes` of the indicators it found, each with the
+        publisher that issues it when search names one. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
@@ -1684,12 +1910,13 @@ def build_orchestrator_tools(
         on_canvas: list[str],
         cut: TopMembers | None,
     ) -> dict[str, Any]:
-        """What a drawn card holds and the figures a reply may state of it
-        (`harness.reply_figures.card_result`), from the drawn payload of its
-        write reply. The rows of the frame the card draws (`_drawn_store_ref`)
-        are read only for a name in `chart.state_values_for` that matches no
-        series while some state no coordinates: the platform's summary lists
-        the coordinates of twelve."""
+        """What a drawn card holds and the figures `chart` asks a reply to
+        state of it (`harness.reply_figures.card_result`), from the drawn
+        payload of `component`, a write reply's component or `_stored_card`.
+        The rows of the frame the card draws (`_drawn_store_ref`) are read
+        only for a name in `chart.state_values_for` that matches no series
+        while some state no coordinates: the platform's summary lists the
+        coordinates of twelve."""
         payload = component.get("payload") or {}
         series = drawn_series(payload.get("component") or {}, component.get("fact_summary") or {})
         if unplaced_names(series, chart.state_values_for):
@@ -1707,13 +1934,79 @@ def build_orchestrator_tools(
             cut=cut,
         )
 
+    async def _stored_card(component_id: str) -> dict[str, Any] | None:
+        """The card `component_id` as the platform holds its head revision
+        (`describe_component`), shaped as a write reply's component: its
+        revision, resolved payload and fact summary. None when the read
+        fails or carries no resolved payload."""
+        try:
+            described = await executor(
+                tool="describe_component", args={"component_id": component_id}
+            )
+        except Exception:
+            logger.exception("make_charts: reading back card %r failed", component_id)
+            return None
+        payload = described.get("resolved_payload")
+        body = described.get("component_body")
+        if (
+            described.get("outcome") != "ok"
+            or not isinstance(payload, dict)
+            or not isinstance(payload.get("component"), dict)
+            or not isinstance(body, dict)
+        ):
+            return None
+        return {
+            "revision": body.get("revision"),
+            "payload": payload,
+            "fact_summary": body.get("fact_summary") or {},
+        }
+
+    async def _card_entry(
+        chart: Chart,
+        component: Mapping[str, Any],
+        *,
+        title: str,
+        frame: Mapping[str, Any],
+        on_canvas: list[str],
+        cut: TopMembers | None,
+    ) -> dict[str, Any]:
+        """What `make_charts` returns of a card on the canvas: its title,
+        `_card_result` and, on a cut card, what the cut leaves out."""
+        try:
+            held = await _card_result(chart, component, frame=frame, on_canvas=on_canvas, cut=cut)
+        except Exception:
+            # The card is on the canvas, so only what a reply may state of
+            # it is lost, and the charts after it are still drawn.
+            logger.exception("make_charts: reading the figures of %r failed", title)
+            held = _figures_unread()
+        entry = {"title": title, **held}
+        if cut is not None:
+            entry["note"] = _cut_note(cut)
+        return entry
+
     async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
         """Draw `charts`, up to `MAX_CHARTS_PER_CALL`, and count the call as one
-        that drew a chart or one that drew none."""
+        that drew or read a chart or one that did neither. A chart whose card
+        is on the canvas, drawn this turn or an earlier one, is not drawn
+        again: its figures are read from the card's head revision
+        (`_stored_card`), and a card that cannot be read is refused."""
         frames: dict[str, Any] = tool_context.state.get(ORCHESTRATOR_FRAMES_KEY) or {}
         on_canvas = _canvas_series(tool_context)
+        held_cards = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        drawn_cards: dict[str, dict[str, Any]] = (
+            dict(held_cards["drawn"])
+            if held_cards.get("invocation") == tool_context.invocation_id
+            else {}
+        )
+        canvas = {
+            _card_identity(card["intent"]): {
+                "component_id": card["component_id"],
+                "revision": card["revision"],
+            }
+            for card in (canvas_cards() if canvas_cards is not None else [])
+        }
         drawn: list[dict[str, Any]] = []
-        landed = False
+        landed = read = False
         try:
             for chart in charts[:MAX_CHARTS_PER_CALL]:
                 frame = frames.get(chart.frame)
@@ -1726,6 +2019,12 @@ def build_orchestrator_tools(
                             code=HarnessCode.FRAME_UNKNOWN,
                         )
                     )
+                    continue
+                # A title the model copied from a card already cut loses that
+                # suffix, so the card's own suffix is the only one.
+                subject = _CUT_SUFFIX.sub("", chart.title)
+                if (refusal := _title_refusal(subject, frame["view"])) is not None:
+                    drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
                     continue
                 try:
                     select = json.loads(chart.select_json)
@@ -1767,7 +2066,7 @@ def build_orchestrator_tools(
                         )
                 cut = None
                 over_cap = issue is not None and issue["code"] == HarnessCode.SERIES_LIMIT_EXCEEDED
-                # dfo-apis sorts a bar chart's bars itself, at the period it draws.
+                # apis sorts a bar chart's bars itself, at the period it draws.
                 ordered = chart.order_by_value and chart.type != "bar_chart"
                 if over_cap or (issue is None and ordered):
                     narrowed = await _top_select(
@@ -1794,26 +2093,53 @@ def build_orchestrator_tools(
                 if issue is not None:
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
-                title = chart.title
-                if cut is not None:
-                    # The card says what it leaves out in a suffix that ends the title.
-                    suffix = f"{len(cut.members)} largest of {cut.holding} in {cut.period}"
-                    title = f"{chart.title[: 117 - len(suffix)]} ({suffix})"
+                period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
+                title = _card_title(subject, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
                     "select": select,
-                    "title": title[:120],
+                    "title": title,
                 }
-                if chart.latest_periods is not None:
-                    intent["window"] = _latest_window(chart.latest_periods)
-                elif cut is not None and chart.type == "bar_chart":
-                    # The card's title and members are of the cut's period, so
-                    # its bars stay at it. dfo-apis draws a bar chart at the
-                    # latest period every selected series holds inside its
-                    # window, which without one moves when the frame gains a
-                    # newer period.
-                    intent["window"] = {"start": cut.period, "end": cut.period}
+                if window is not None:
+                    intent["window"] = window
+                identity = _card_identity(intent)
+                held = drawn_cards.get(identity) or canvas.get(identity)
+                stored = None if held is None else await _stored_card(held["component_id"])
+                if held is not None and stored is None:
+                    # The canvas holds this card, so another write would stack a copy.
+                    drawn.append(
+                        _not_drawn(
+                            chart,
+                            "This card is already on the canvas, and its figures could "
+                            "not be read back. No copy was drawn; state no value of it "
+                            "in the reply.",
+                            code=HarnessCode.FIGURES_UNREAD,
+                        )
+                    )
+                    continue
+                # A card revised since it was drawn no longer draws this intent.
+                if (
+                    held is not None
+                    and stored is not None
+                    and stored["revision"] == held["revision"]
+                ):
+                    read = True
+                    entry = await _card_entry(
+                        chart, stored, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                    )
+                    drawn.append(
+                        entry
+                        | {
+                            "already_on_canvas": (
+                                "This card is already on the canvas, and no copy was "
+                                "drawn. Its reply_figures are those this call asks for; "
+                                "draw a chart again only with a different kind, frame, "
+                                "select or period."
+                            )
+                        }
+                    )
+                    continue
                 try:
                     written = await executor(tool="write_component", args={"intent": intent})
                     component = written.get("component") if written.get("outcome") == "ok" else None
@@ -1849,24 +2175,27 @@ def build_orchestrator_tools(
                     )
                     break
                 landed = True
-                try:
-                    held = await _card_result(
-                        chart, component, frame=frame, on_canvas=on_canvas, cut=cut
+                drawn.append(
+                    await _card_entry(
+                        chart, component, title=title, frame=frame, on_canvas=on_canvas, cut=cut
                     )
-                except Exception:
-                    # The card is on the canvas, so only what a reply may state of
-                    # it is lost, and the charts after it are still drawn.
-                    logger.exception("make_charts: reading the figures of %r failed", title)
-                    held = _figures_unread()
-                entry = {"title": title, **held}
-                if cut is not None:
-                    entry["note"] = _cut_note(cut)
-                drawn.append(entry)
+                )
+                drawn_cards[identity] = {
+                    "component_id": component["component_id"],
+                    "revision": component["revision"],
+                }
+                tool_context.state[_DRAWN_CARDS_KEY] = {
+                    "invocation": tool_context.invocation_id,
+                    "drawn": drawn_cards,
+                }
         finally:
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
-            # `try`. A failed write is caught above.
-            count_call(tool_context.state, "make_charts" if landed else "make_charts_failed")
+            # `try`. A failed write is caught above. A call that read a card
+            # on the canvas gave figures, so it counts as one that drew.
+            count_call(
+                tool_context.state, "make_charts" if landed or read else "make_charts_failed"
+            )
         return drawn
 
     async def make_charts(charts: list[Chart], tool_context: ToolContext) -> dict[str, Any]:
@@ -1877,10 +2206,7 @@ def build_orchestrator_tools(
         values it would accept. A chart drawn whose values could not be read
         back says so under the code `figures_unread`.
         """
-        lock = chart_locks.get(tool_context.invocation_id)
-        if lock is None:
-            lock = chart_locks[tool_context.invocation_id] = asyncio.Lock()
-        async with lock:
+        async with _canvas_lock(tool_context):
             spent = _charts_spent(tool_context)
             if spent:
                 return spent
@@ -1900,45 +2226,47 @@ def build_orchestrator_tools(
             )
         return result
 
-    def ask_user(
-        question: str, options: list[AskOption], tool_context: ToolContext
-    ) -> dict[str, Any]:
-        """Ask the user a question before going on, offering the likely answers.
+    def ask_user(questions: list[AskQuestion], tool_context: ToolContext) -> dict[str, Any]:
+        """Ask the user one to three questions before going on, with the likely
+        answers to each. The user sees them together in one pause and answers
+        each by picking an option, writing their own answer, or leaving it to
+        you.
 
-        `options` are the answers to choose from, at least one; the user may
-        also write their own or skip. An option for a way of counting that a
-        search result names carries that count's spec_id, and the answer
-        names it when the user picks it. End your turn after calling it; the
-        answer comes back as the next message.
+        Ask only what changes the answer. Each question offers at least one
+        option. An option for a count or prices that a search result names
+        carries the spec_id the result gives it, and the answer names that
+        spec_id when the user picks it. Each spec_id goes on one option. End
+        your turn after calling ask_user. Every answer comes back as the next
+        message.
         """
-        if not options:
-            return _failed(
-                HarnessCode.TOOL_ARGUMENTS_INVALID, "ask_user needs at least one option to offer."
-            )
-        refused = _options_refusal(options, _named_spec_ids(tool_context))
+        refused = _questions_refusal(questions, _named_spec_ids(tool_context))
         if refused:
             return refused
         spent = _spend(tool_context, "ask_user")
         if spent:
             return spent
-        return _pend(tool_context, PendingAsk(question=question, options=list(options)))
+        return _pend(tool_context, PendingAsk(questions=list(questions)))
 
     def plan(brief: str, asks: list[AskedOutput], tool_context: ToolContext) -> dict[str, Any]:
         """Hand a question to the planner, which builds a plan that
         constructs the answer from the data. The user approves the plan
         before it runs.
 
-        `brief` is the whole question in full: every measure, place and
-        period. `asks` lists each output the user asked for, one per entry,
-        in the user's terms: a number, a ranking, a chart, a comparison; at
-        most six, each one short line. A figure over a span is an ask of its
-        own: "the total between 2010 and the latest" is one cumulative
-        number beside the yearly figures. A view added to help read the
-        answer is not an ask. The planner answers or declines each ask, so
-        an output left off the list can drop out of the plan unnoticed.
-        Each ask is `{"text", "by", "over"}`. Every party a search this turn
-        held open goes in some ask's `by` or `over`, and the plan keeps the
-        parties each ask lists in `by` together in one output.
+        `brief` is the whole question in full: every measure and place, and
+        the period the user named. When the user named none, say so, with
+        the year you chose if you chose one. The years a source holds are
+        not the question's period. `asks` lists each output the user asked
+        for, one per entry, in the user's terms: a number, a ranking, a
+        chart, a comparison; at least one and at most six, each one short line. One figure
+        the user asked for across several years is an ask of its own that
+        sets `across_years`: "the total between 2010 and the latest" is one
+        cumulative number beside the yearly figures. A view added to help
+        read the answer is not an ask. The planner answers or declines each
+        ask, so an output left off the list can drop out of the plan
+        unnoticed.
+        Each ask is `{"text", "by", "over", "across_years"}`. Every party a
+        search this turn held open goes in some ask's `by` or `over`, and the
+        plan keeps the parties each ask lists in `by` together in one output.
         End your turn after calling it; the plan's result comes back as the
         next message.
         """
@@ -1955,6 +2283,7 @@ def build_orchestrator_tools(
                 brief=brief,
                 asks=[text.strip() for text in texts],
                 ask_breakdowns=_ask_breakdowns(asks),
+                asks_across_years=_asks_across_years(asks),
             ),
         )
 
@@ -2075,6 +2404,22 @@ def build_orchestrator_tools(
                 "legal": exc.legal,
             }
 
+    def _forget_drawn(tool_context: ToolContext, removed: list[str]) -> None:
+        """Drop the cards `removed` took off from the turn's drawn cards, so a
+        later `make_charts` of one draws it again."""
+        held = tool_context.state.get(_DRAWN_CARDS_KEY) or {}
+        if not removed or held.get("invocation") != tool_context.invocation_id:
+            return
+        gone = set(removed)
+        tool_context.state[_DRAWN_CARDS_KEY] = {
+            "invocation": tool_context.invocation_id,
+            "drawn": {
+                identity: card
+                for identity, card in held["drawn"].items()
+                if card["component_id"] not in gone
+            },
+        }
+
     async def remove_cards_tool(
         tool_context: ToolContext,
         component_ids: list[str] | None = None,
@@ -2100,9 +2445,11 @@ def build_orchestrator_tools(
                 "Name the cards to take off, or set all_cards. Nothing changed.",
             )
         _canvas_series(tool_context)
-        removed, missing = await remove_cards(
-            component_ids=component_ids or [], all_cards=all_cards
-        )
+        async with _canvas_lock(tool_context):
+            removed, missing = await remove_cards(
+                component_ids=component_ids or [], all_cards=all_cards
+            )
+            _forget_drawn(tool_context, removed)
         if not removed and missing and len(missing) == len(component_ids or []):
             return _failed(
                 HarnessCode.CARD_NOT_FOUND,

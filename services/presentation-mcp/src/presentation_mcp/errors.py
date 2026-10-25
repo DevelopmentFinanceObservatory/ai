@@ -1,4 +1,4 @@
-"""Errors raised by `PlatformAssembler` for dfo-apis presentation-surface call failures.
+"""Errors raised by `PlatformAssembler` for apis presentation-surface call failures.
 
 Two classes: a parsed or classified RFC 9457 problem, and the transport
 failure that never got a response. `client.py`'s `request()` raises one of
@@ -13,7 +13,7 @@ from typing import Any
 
 
 class PlatformError(Exception):
-    """A dfo-apis presentation call failed with a parsed or classified RFC 9457 problem.
+    """An apis service presentation call failed with a parsed or classified RFC 9457 problem.
 
     `code` is only ever read off the wire, so an unmapped code and a body
     that never parsed as a problem document (both leave `code` as `None`)

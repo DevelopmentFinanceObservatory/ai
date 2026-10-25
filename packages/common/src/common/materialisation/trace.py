@@ -43,17 +43,23 @@ class MaterialisationTrace:
     from a bare materialisation (`read_derived_marker`) does it with
     `isinstance(trace, Trace)`, not by inspecting a tag.
 
-    `options` is the dfo-apis mint request's `options` the frame was registered
+    `options` is the apis mint request's `options` the frame was registered
     from, or `None` for a frame registered before the trace kept them. A frame
     registered under a pair `data_mcp.frame_materialisation.frame_ref_for` derives
     from its columns and groupby carries what that pair was derived from, which
     `data_mcp.mint_recovery` reads when the frame has no mint record.
+
+    `enrichment_stamp` is the stamp the pair is named under
+    (`data_mcp.frame_materialisation.recorded_stamp`): set on a frame minted with
+    party kinds whose artifact carried one, and `None` on any other frame and on one
+    registered with a trace that lacks the member.
     """
 
     upstream_trace: dict[str, Any]
     spec_id: str
     content_version: str
     options: dict[str, Any] | None = None
+    enrichment_stamp: str | None = None
 
     @property
     def frame_content_version(self) -> str:

@@ -43,8 +43,9 @@ from planner.plan import (
     DatasetRequirement,
     Entity,
     EvidenceRequirement,
+    anchored_over,
     keeps_one_level,
-    names_no_place,
+    retrieved_period,
     states_period_threshold,
 )
 from planner.records import (
@@ -52,6 +53,7 @@ from planner.records import (
     BreakdownDimension,
     EntityIn,
     Identifier,
+    PeriodThreshold,
     Predicate,
     StatVarReading,
 )
@@ -61,8 +63,12 @@ from planner.shapes import (
     MeasureCount,
     RoleDimension,
     ShapeVerb,
+    anchor_misses,
+    growth_endpoint_leaves,
+    level_filter,
     place_role,
     year_filter,
+    years_run_out,
 )
 from planner.shapes import aggregated as _aggregated
 from planner.shapes import compared as _compared
@@ -78,7 +84,7 @@ from planner.shapes import summed_sides as _summed_sides
 from planner.workflow import Period, SelectedSource
 
 from compiler.evidence import named_members, named_refs, open_axes_for, opens_place_axis
-from compiler.sources import stat_var_count
+from compiler.sources import bound_codes, stat_var_count
 
 # The code system behind each breakdown dimension: the `get_data` breakdown's
 # `code_system`, the open axis a source's family varies along for it, and the
@@ -91,6 +97,51 @@ BREAKDOWN_CODE_SYSTEMS: Mapping[BreakdownDimension, str] = {
 def breakdown_column(breakdown: Breakdown) -> str:
     """The frame column a retrieval broken down by `breakdown` names each row's code in."""
     return f"stat_var_{BREAKDOWN_CODE_SYSTEMS[breakdown.dimension]}"
+
+
+def breakdown_level(breakdown: Breakdown, source: SelectedSource) -> int | None:
+    """The level a retrieval of `source` broken down by `breakdown` reads.
+
+    With no code of the breakdown's code system named in the source's
+    identity, the level is the plan's own. Named codes set a floor, the
+    shallowest level at which the breakdown holds more than one group. For
+    several codes that is where their paths (`SelectedSource.code_paths`)
+    part: health (120) and population (130) share the parent social
+    infrastructure (100) at level 0 and part at level 1, so a breakdown of
+    the two reads level 1. For one code it is the level below it, its
+    children: health alone reads level 2, its subsectors. A code the graph
+    holds nothing below (`SelectedSource.leaf_codes`) keeps its own level.
+    A level the plan states deeper than the floor is kept.
+    `None` when a named code has no path recorded, so the level cannot be
+    known.
+    """
+    prop = BREAKDOWN_CODE_SYSTEMS[breakdown.dimension]
+    codes = bound_codes(source, prop)
+    if not codes:
+        return breakdown.level
+    paths = [path for code in codes if (path := source.code_paths.get(code))]
+    if len(paths) < len(codes):
+        return None
+    if len(paths) > 1:
+        return max(breakdown.level, _split_level(paths))
+    (path,) = paths
+    leaf = path[-1] in source.leaf_codes
+    return max(breakdown.level, len(path) - 1 if leaf else len(path))
+
+
+def _split_level(paths: Sequence[tuple[str, ...]]) -> int:
+    """The shallowest level at which `paths`, each ending at a different code, name more than one.
+
+    A path shorter than the level stands at its own code, as apis keeps a
+    code above the level it rolls the others up to. Paths to different codes
+    part at the deepest one's level at the latest.
+    """
+    deepest = max(len(path) for path in paths) - 1
+    return next(
+        level
+        for level in range(deepest + 1)
+        if len({path[min(level, len(path) - 1)] for path in paths}) > 1
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +173,9 @@ class ResolvedRole:
     breakdown: bool = False
     open: bool = False
     place: bool = False
+    mixed_levels: bool = False
+    levelled: bool = False
+    level_filterable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +198,7 @@ def shapes_for(
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
     order: Sequence[str],
+    whole_history: Mapping[str, int],
 ) -> tuple[dict[str, ResolvedShape], list[str]]:
     """Walk `operations` in `order`, resolving one `ResolvedShape` per operation that has one.
 
@@ -163,34 +218,142 @@ def shapes_for(
         sources: The source discovered for each retrieval, by *operation* id.
         order: Operation ids topologically ordered so every input precedes
             its reader.
+        whole_history: The first year on record of each dataset requirement
+            read from its dataset's first year, by requirement id, where its
+            shape starts (`planner.plan.HistorySplit.whole_history`). Every
+            other retrieval starts at its stated period.
 
     Returns:
         A `(shapes_by_id, issues)` pair: the shape resolved for each
         operation that has one, and one `f"{operation_id}: {reason}"` string
-        per operation whose own `rejects` check refused its input, for
-        `compiler.compile` to report as `INPUT_SHAPE_UNSUPPORTED`.
+        per operation that cannot be shaped, for `compiler.compile` to report
+        as `INPUT_SHAPE_UNSUPPORTED`. An operation cannot be shaped when its
+        own `rejects` check refused its input, when newer data leaves its
+        years empty (`planner.shapes.years_run_out`), when newer data takes a
+        growth's window year out of its input
+        (`planner.shapes.growth_endpoint_leaves`), or when it pairs an open
+        side with a side on a newest year not resolved over it
+        (`planner.shapes.anchor_misses`).
     """
     retrieve_by_requirement = {
         operation.requirement_id: operation.id
         for operation in operations.values()
         if isinstance(operation, RetrieveOperation)
     }
+    reads = {
+        op_id: [input_id for input_id in operation_inputs(operation) if input_id in operations]
+        for op_id, operation in operations.items()
+    }
+    # Shapes name their retrievals by requirement id (`FrameShape.roots`).
+    requirement_of = {
+        op_id: operation.requirement_id
+        for op_id, operation in operations.items()
+        if isinstance(operation, RetrieveOperation)
+    }
+    over = {
+        op_id: frozenset(requirement_of[root] for root in roots)
+        for op_id, roots in anchored_over(
+            reads,
+            rolling=[op_id for op_id, operation in operations.items() if rolls(operation)],
+            retrievals=requirement_of,
+        ).items()
+    }
     shapes: dict[str, ResolvedShape] = {}
     issues: list[str] = []
+    rolled: dict[str, frozenset[str]] = {}
     for op_id in order:
         operation = operations.get(op_id)
         if operation is None:
             continue
         built = _resolve(
-            operation, operations, shapes, requirements, sources, retrieve_by_requirement
+            operation,
+            operations,
+            shapes,
+            requirements,
+            sources,
+            retrieve_by_requirement,
+            whole_history,
         )
         if built is None:
             continue
         if isinstance(built, str):
             issues.append(f"{op_id}: {built}")
             continue
+        rolled[op_id] = frozenset().union(
+            *(rolled[input_id] for input_id in operation_inputs(operation)),
+            built.shape.roots if rolls(operation) else (),
+        )
+        sides = [shapes[input_id].shape for input_id in operation_inputs(operation)]
+        reason = (anchor_misses(sides, over[op_id]) if len(sides) > 1 else None) or _years_run_out(
+            operation, built.shape, sides, requirements, rolled=rolled[op_id]
+        )
+        if reason is not None:
+            issues.append(f"{op_id}: {reason}")
+            continue
         shapes[op_id] = built
     return shapes, issues
+
+
+def _years_run_out(
+    operation: Operation,
+    shape: FrameShape,
+    inputs: Sequence[FrameShape],
+    requirements: Mapping[str, EvidenceRequirement],
+    *,
+    rolled: frozenset[str],
+) -> str | None:
+    """`planner.shapes.years_run_out` for `shape`, `operation`'s output read from `inputs`, unless a rolling step reads a closed dataset under it.
+
+    A growth's window years must also be years its input holds
+    (`planner.shapes.growth_endpoint_leaves`).
+
+    `rolled` is every dataset requirement a rolling operation in `shape`'s
+    lineage reads. A dataset retrieved with a fixed end year holds no later
+    one, so `compiler.compile` reports a rolling step over it as
+    `ROLLING_NEEDS_OPEN_PERIOD`, as `planner.plan` refuses it before reading
+    any shape. A closed dataset no rolling step reads, such as the other
+    side of a `compare` with a newest-year filter, is read as any fixed last
+    year is.
+    """
+    closed = any(
+        isinstance(requirement := requirements.get(root), DatasetRequirement)
+        and not requirement.period_end_open
+        for root in rolled
+    )
+    if closed:
+        return None
+    if isinstance(operation, GrowthOperation):
+        (input_shape,) = inputs
+        window = Period(start=operation.window_start, end=operation.window_end)
+        leaves = growth_endpoint_leaves(input_shape, window, operation.rolling)
+        if leaves is not None:
+            return leaves
+    return years_run_out(shape)
+
+
+def rolls(operation: Operation) -> bool:
+    """Whether a period `operation` states follows the newest data."""
+    if isinstance(operation, GrowthOperation | RankOperation):
+        return operation.rolling is not None
+    if isinstance(operation, FilterOperation):
+        return any(
+            isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
+            for predicate in operation.predicates
+        )
+    return False
+
+
+def operation_inputs(operation: Operation) -> tuple[str, ...]:
+    """The ids of the operations `operation` reads, none for a retrieval."""
+    if isinstance(operation, RetrieveOperation):
+        return ()
+    if isinstance(operation, CompareOperation | SumOfOperation):
+        return (operation.left.input, operation.right.input)
+    if isinstance(operation, ShareOfOperation | QuotientOfOperation):
+        return (operation.numerator.input, operation.denominator.input)
+    if isinstance(operation, JoinOperation):
+        return (operation.left, operation.right)
+    return (operation.input,)
 
 
 def _input_shape(
@@ -217,9 +380,15 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
+    whole_history: Mapping[str, int],
 ) -> ResolvedShape | str | None:
     if isinstance(operation, RetrieveOperation):
-        return _retrieve_resolved(operation, requirements, sources)
+        return _retrieve_resolved(
+            operation,
+            requirements,
+            sources,
+            first_year=whole_history.get(operation.requirement_id),
+        )
     if isinstance(operation, AggregateOperation):
         upstream = _input_shape(operation.input, operations, shapes)
         return None if upstream is None else _aggregate_resolved(operation, upstream)
@@ -272,10 +441,10 @@ def _resolve(  # noqa: PLR0911 -- one isinstance branch per operation kind narro
 
 
 def unsummable_axes(source: SelectedSource) -> tuple[str, ...] | None:
-    """The open axes of `source`'s family that dfo-apis may not sum over, or `None` when it has none.
+    """The open axes of `source`'s family that apis may not sum over, or `None` when it has none.
 
     A family varying along no open axis differs in something no slot
-    states, so whether dfo-apis can sum it is unknown.
+    states, so whether apis can sum it is unknown.
     """
     if not source.open_axes:
         return None
@@ -302,6 +471,8 @@ def _retrieve_resolved(
     operation: RetrieveOperation,
     requirements: Mapping[str, EvidenceRequirement],
     sources: Mapping[str, SelectedSource],
+    *,
+    first_year: int | None,
 ) -> ResolvedShape | None:
     """The shape a fresh retrieval carries, with each role wrapped by its source column.
 
@@ -329,9 +500,10 @@ def _retrieve_resolved(
     that leaves its place axis open carries every level of place
     (`compiler.evidence.opens_place_axis`), and `compiler.evidence` refuses
     one under a requirement whose `across` does not name the place party. A
-    place-level filter may read a requirement whose `across` names the place
-    (`planner.plan.names_no_place`), but `compile._check_level_filters`
-    refuses one whose place word covers a flow axis.
+    place-level filter may read any open role, a flow side included, which
+    is the one role `compile` can ask `get_data` for the type column of. Its
+    years run on past its period, and start at `first_year` for a read of the
+    dataset's whole history (`planner.plan.retrieved_period`).
     """
     source = sources.get(operation.id)
     requirement = requirements.get(operation.requirement_id)
@@ -383,6 +555,11 @@ def _retrieve_resolved(
                 requirement_id=operation.requirement_id,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                # An open entity axis is the only retrieval role for which
+                # compilation can request the matching enrichment column.
+                # Breakdown codes are never entity types.
+                level_filterable=is_open,
             )
         )
         columns.append(
@@ -395,6 +572,8 @@ def _retrieve_resolved(
                 surplus=surplus,
                 open=is_open,
                 place=is_place,
+                mixed_levels=is_place and opens_place_axis(source.open_entity_axes),
+                level_filterable=is_open,
             )
         )
     if requirement.breakdown is not None:
@@ -417,11 +596,10 @@ def _retrieve_resolved(
     shape = _retrieved(
         requirement_id=operation.requirement_id,
         roles=tuple(dims),
-        period=requirement.period,
+        period=retrieved_period(requirement, first_year=first_year),
         measures=_separate_measures(source) if separate else 1,
         unsummable_axes=unsummable_axes(source) if separate else None,
-        place_typed=names_no_place(requirement),
-        mixed_levels=opens_place_axis(source.open_entity_axes),
+        end_open=requirement.period_end_open,
     )
     return ResolvedShape(shape=shape, columns=tuple(columns))
 
@@ -442,7 +620,15 @@ def _carry_columns(
     for dim in roles:
         prior = by_key.get((dim.role, dim.requirement_id))
         if prior is not None:
-            result.append(replace(prior, narrowed=dim.narrowed))
+            result.append(
+                replace(
+                    prior,
+                    narrowed=dim.narrowed,
+                    mixed_levels=dim.mixed_levels,
+                    levelled=dim.levelled,
+                    level_filterable=dim.level_filterable,
+                )
+            )
     return tuple(result)
 
 
@@ -468,16 +654,23 @@ def _aggregate_resolved(
         by_entity=by_entity,
         by_period=by_period,
         by_breakdown=by_breakdown,
+        step_id=operation.id,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 
 
 def _growth_resolved(operation: GrowthOperation, upstream: ResolvedShape) -> ResolvedShape | str:
-    reason = _rejects(ShapeVerb.GROWTH, upstream.shape, change=operation.change)
+    window = Period(start=operation.window_start, end=operation.window_end)
+    reason = _rejects(ShapeVerb.GROWTH, upstream.shape, change=operation.change, window=window)
     if reason is not None:
         return reason
-    window = Period(start=operation.window_start, end=operation.window_end)
-    shape = _grown(upstream.shape, change=operation.change, window=window)
+    shape = _grown(
+        upstream.shape,
+        change=operation.change,
+        window=window,
+        rolling=operation.rolling,
+        step_id=operation.id,
+    )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 
 
@@ -495,6 +688,7 @@ def _rank_resolved(operation: RankOperation, upstream: ResolvedShape) -> Resolve
         window=window,
         per_period=operation.per_period,
         reduction=operation.reduction,
+        rolling=operation.rolling,
     )
     if reason is not None:
         return reason
@@ -504,6 +698,8 @@ def _rank_resolved(operation: RankOperation, upstream: ResolvedShape) -> Resolve
         window=window,
         per_period=operation.per_period,
         limit=operation.limit,
+        rolling=operation.rolling,
+        step_id=operation.id,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 
@@ -556,27 +752,30 @@ def _filter_resolved(
     sources: Mapping[str, SelectedSource],
     retrieve_by_requirement: Mapping[str, str],
 ) -> ResolvedShape | str:
-    place_level = keeps_one_level(operation.predicates)
+    years = year_filter(upstream.shape.period, operation.predicates, drift=upstream.shape.drift)
+    if isinstance(years, str):
+        return years
+    levels = level_filter(upstream.columns, operation.predicates)
+    if isinstance(levels, str):
+        return levels
     reason = _rejects(
         ShapeVerb.FILTER,
         upstream.shape,
-        place_level=place_level,
+        place_level=keeps_one_level(operation.predicates),
+        place_level_available=levels.available,
         period_threshold=states_period_threshold(operation.predicates),
+        years=years,
     )
     if reason is not None:
         return reason
-    years = year_filter(upstream.shape.period, operation.predicates)
-    if isinstance(years, str):
-        return years
     narrowed_roles = _resolved_narrowed_roles(
         operation.predicates, upstream.columns, sources, retrieve_by_requirement
     )
     shape = _filtered(
         upstream.shape,
         narrowed_roles=narrowed_roles,
-        period=years.period,
-        pins_one_year=years.leaves_one_year,
-        keeps_one_level=place_level,
+        years=years,
+        levelled_role_keys=levels.role_keys,
     )
     return ResolvedShape(shape=shape, columns=_carry_columns(upstream.columns, shape.roles))
 

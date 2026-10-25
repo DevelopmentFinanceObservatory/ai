@@ -1,0 +1,3485 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.0.10"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 1688
+          },
+          "trace_id": "6cde9d31b2bb4379aa37be951877e335",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [],
+            "departures": [],
+            "operations": [],
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/FRA"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2025,
+                    "kind": "range",
+                    "start_year": 1960
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "count",
+                    "population_type": "Person",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": [
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "age"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "ageGroupClassification"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "armedForcesStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "assessmentType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "bachelorsDegreeMajor"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "candidatesStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "citizenship"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "courseSpecialization"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "economicActivitySource"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "economicSector"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "educationalAttainment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employment"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentExperienceStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "employmentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "enrollmentLevel"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "establishmentOwnership"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "ethnicity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "gender"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "governmentIdentifier"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "identityActivity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "incidentType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "industry"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "languageSpokenAtHome"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "literacyStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "maritalStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "medicalCondition"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "medicalSpecialization"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "nativity"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "occupation"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "occupationalCategory"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "originBackgroundType"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfBirth"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "placeOfResidenceClassification"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "race"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "registrationStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "religion"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "residentStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "schoolGradeLevel"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "vaccineDoseReceived"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "vaccineStatus"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "workCategory"
+                    },
+                    {
+                      "binding": {
+                        "state": "unbound"
+                      },
+                      "property": "workerClassification"
+                    }
+                  ]
+                },
+                "schema_version": 1,
+                "spec_id": "spec_3ef983d97d873161a306be4fd48aab87"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 66,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 66,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "download": {
+                  "licence": {
+                    "label": "OECD Terms and Conditions"
+                  },
+                  "rows": 66,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "France",
+                    "ref": "country/FRA",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Development Indicators",
+                            "ref": "dc/base/WorldDevelopmentIndicators"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "OECD DAC1",
+                            "ref": "provenance/OECDDAC1"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "France Demographics",
+                            "ref": "dc/base/France_Demographics"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "OECD Regional Demography Statistics Population",
+                            "ref": "dc/base/OECDRegionalDemography_Population"
+                          },
+                          "value_kind": "source"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Regional Statistics by NUTS Classification",
+                            "ref": "dc/base/EurostatData_Demographic_Balance_Crude_Rates"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "measurementMethod",
+                    "options": [
+                      {
+                        "value": {
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "OECDRegionalStatistics",
+                            "ref": "OECDRegionalStatistics"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "EurostatRegionalStatistics",
+                            "ref": "EurostatRegionalStatistics"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "account": "provider",
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC1",
+                    "label": "OECD DAC1",
+                    "ref": "provenance/OECDDAC1",
+                    "source": {
+                      "label": "Organisation for Economic Co-operation and Development (OECD)",
+                      "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                    }
+                  }
+                },
+                "inapplicable_slots": [
+                  "age",
+                  "ageGroupClassification",
+                  "armedForcesStatus",
+                  "assessmentType",
+                  "bachelorsDegreeMajor",
+                  "candidatesStatus",
+                  "citizenship",
+                  "courseSpecialization",
+                  "economicActivitySource",
+                  "economicSector",
+                  "educationalAttainment",
+                  "employment",
+                  "employmentExperienceStatus",
+                  "employmentStatus",
+                  "enrollmentLevel",
+                  "establishmentOwnership",
+                  "ethnicity",
+                  "gender",
+                  "governmentIdentifier",
+                  "identityActivity",
+                  "incidentType",
+                  "industry",
+                  "languageSpokenAtHome",
+                  "literacyStatus",
+                  "maritalStatus",
+                  "medicalCondition",
+                  "medicalSpecialization",
+                  "nativity",
+                  "occupation",
+                  "occupationalCategory",
+                  "originBackgroundType",
+                  "placeOfBirth",
+                  "placeOfResidenceClassification",
+                  "race",
+                  "registrationStatus",
+                  "religion",
+                  "residentStatus",
+                  "schoolGradeLevel",
+                  "vaccineDoseReceived",
+                  "vaccineStatus",
+                  "workCategory",
+                  "workerClassification"
+                ],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_group": {
+                  "label": "Demographics",
+                  "ref": "dc/g/Demographics"
+                },
+                "related_measures": [
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "growthRate"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_352a53b2f091fd9db4eb3c3bc167aa90"
+                    },
+                    "stat_var": {
+                      "label": "Rate of Population Growth",
+                      "ref": "GrowthRate_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "lifeExpectancy",
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_e11f200f4e653b447308b6024a9d4f83"
+                    },
+                    "stat_var": {
+                      "label": "Life Expectancy",
+                      "ref": "LifeExpectancy_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "population_type": "Person",
+                          "stat_type": "meanValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_fe0546a727824d5eab9daaa5bdad7db3"
+                    },
+                    "stat_var": {
+                      "label": "Mean count of person",
+                      "ref": "Mean_Count_Person"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "count",
+                          "measurement_denominator": {
+                            "ref": "area"
+                          },
+                          "population_type": "Person",
+                          "stat_type": "measuredValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_fba65d46f024e56a0fa491a2fce7f6c2"
+                    },
+                    "stat_var": {
+                      "label": "Population Density",
+                      "ref": "Count_Person_PerArea"
+                    }
+                  },
+                  {
+                    "definition": {
+                      "identity": {
+                        "entities": {
+                          "observationAbout": [
+                            "country/FRA"
+                          ]
+                        },
+                        "identity_version": "spec1",
+                        "requested_window": {
+                          "end_year": 2025,
+                          "kind": "range",
+                          "start_year": 1960
+                        },
+                        "shape": {
+                          "kind": "statvar_schema",
+                          "measured_property": "age",
+                          "population_type": "Person",
+                          "stat_type": "meanValue"
+                        },
+                        "slots": []
+                      },
+                      "schema_version": 1,
+                      "spec_id": "spec_2693219349af237f26cad469c5eddcbf"
+                    },
+                    "stat_var": {
+                      "label": "Average age of people",
+                      "ref": "Mean_Age_Person"
+                    }
+                  }
+                ],
+                "rendered_sentence": "France's total population, 1960 to 2025. OECD DAC1.",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "France"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "total population"
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:age",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "age",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:ageGroupClassification",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "ageGroupClassification",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:armedForcesStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "armedForcesStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:assessmentType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "assessmentType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:bachelorsDegreeMajor",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "bachelorsDegreeMajor",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:candidatesStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "candidatesStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:citizenship",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "citizenship",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:courseSpecialization",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "courseSpecialization",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:economicActivitySource",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "economicActivitySource",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:economicSector",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "economicSector",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:educationalAttainment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "educationalAttainment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employment",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employment",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentExperienceStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentExperienceStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:employmentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "employmentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:enrollmentLevel",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "enrollmentLevel",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:establishmentOwnership",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "establishmentOwnership",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:ethnicity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "ethnicity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:gender",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "gender",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:governmentIdentifier",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "governmentIdentifier",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:identityActivity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "identityActivity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:incidentType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "incidentType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:industry",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "industry",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:languageSpokenAtHome",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "languageSpokenAtHome",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:literacyStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "literacyStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:maritalStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "maritalStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:medicalCondition",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "medicalCondition",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:medicalSpecialization",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "medicalSpecialization",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nativity",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nativity",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:occupation",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "occupation",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:occupationalCategory",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "occupationalCategory",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:originBackgroundType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "originBackgroundType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfBirth",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfBirth",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:placeOfResidenceClassification",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "placeOfResidenceClassification",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:race",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "race",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:registrationStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "registrationStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:religion",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "religion",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:residentStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "residentStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:schoolGradeLevel",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "schoolGradeLevel",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:vaccineDoseReceived",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "vaccineDoseReceived",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:vaccineStatus",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "vaccineStatus",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:workCategory",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "workCategory",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:workerClassification",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "workerClassification",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "1960 to 2025"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "OECD DAC1"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "dfo",
+                      "label": "Development Finance Observatory"
+                    },
+                    {
+                      "id": "base",
+                      "label": "Data Commons by Google"
+                    }
+                  ],
+                  "label": "Total population",
+                  "measured_property": {
+                    "label": "count",
+                    "ref": "count"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 2774,
+                  "population_type": {
+                    "label": "Person",
+                    "ref": "Person"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "person_count_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "age group classification",
+                      "property": {
+                        "label": "ageGroupClassification",
+                        "ref": "ageGroupClassification"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "armed forces status",
+                      "property": {
+                        "label": "armedForcesStatus",
+                        "ref": "armedForcesStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "assessment type",
+                      "property": {
+                        "label": "assessmentType",
+                        "ref": "assessmentType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "bachelors degree major",
+                      "property": {
+                        "label": "bachelorsDegreeMajor",
+                        "ref": "bachelorsDegreeMajor"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "candidates status",
+                      "property": {
+                        "label": "candidatesStatus",
+                        "ref": "candidatesStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "citizenship",
+                      "property": {
+                        "label": "citizenship",
+                        "ref": "citizenship"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "course specialization",
+                      "property": {
+                        "label": "courseSpecialization",
+                        "ref": "courseSpecialization"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "economic activity source",
+                      "property": {
+                        "label": "economicActivitySource",
+                        "ref": "economicActivitySource"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "educational attainment",
+                      "property": {
+                        "label": "educationalAttainment",
+                        "ref": "educationalAttainment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment experience status",
+                      "property": {
+                        "label": "employmentExperienceStatus",
+                        "ref": "employmentExperienceStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "enrollment level",
+                      "property": {
+                        "label": "enrollmentLevel",
+                        "ref": "enrollmentLevel"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "establishment ownership",
+                      "property": {
+                        "label": "establishmentOwnership",
+                        "ref": "establishmentOwnership"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "ethnicity",
+                      "property": {
+                        "label": "ethnicity",
+                        "ref": "ethnicity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "government identifier",
+                      "property": {
+                        "label": "governmentIdentifier",
+                        "ref": "governmentIdentifier"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "identity activity",
+                      "property": {
+                        "label": "identityActivity",
+                        "ref": "identityActivity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "incident type",
+                      "property": {
+                        "label": "incidentType",
+                        "ref": "incidentType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "industry",
+                      "property": {
+                        "label": "industry",
+                        "ref": "industry"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "language spoken at home",
+                      "property": {
+                        "label": "languageSpokenAtHome",
+                        "ref": "languageSpokenAtHome"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "literacy status",
+                      "property": {
+                        "label": "literacyStatus",
+                        "ref": "literacyStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "medical condition",
+                      "property": {
+                        "label": "medicalCondition",
+                        "ref": "medicalCondition"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "medical specialization",
+                      "property": {
+                        "label": "medicalSpecialization",
+                        "ref": "medicalSpecialization"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "occupation",
+                      "property": {
+                        "label": "occupation",
+                        "ref": "occupation"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "occupational category",
+                      "property": {
+                        "label": "occupationalCategory",
+                        "ref": "occupationalCategory"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "origin background type",
+                      "property": {
+                        "label": "originBackgroundType",
+                        "ref": "originBackgroundType"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "place of residence classification",
+                      "property": {
+                        "label": "placeOfResidenceClassification",
+                        "ref": "placeOfResidenceClassification"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "race",
+                      "property": {
+                        "label": "race",
+                        "ref": "race"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "registration status",
+                      "property": {
+                        "label": "registrationStatus",
+                        "ref": "registrationStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "religion",
+                      "property": {
+                        "label": "religion",
+                        "ref": "religion"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "resident status",
+                      "property": {
+                        "label": "residentStatus",
+                        "ref": "residentStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "vaccine dose received",
+                      "property": {
+                        "label": "vaccineDoseReceived",
+                        "ref": "vaccineDoseReceived"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "vaccine status",
+                      "property": {
+                        "label": "vaccineStatus",
+                        "ref": "vaccineStatus"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "work category",
+                      "property": {
+                        "label": "workCategory",
+                        "ref": "workCategory"
+                      }
+                    },
+                    {
+                      "axis": "how",
+                      "label": "worker classification",
+                      "property": {
+                        "label": "workerClassification",
+                        "ref": "workerClassification"
+                      }
+                    },
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  }
+                },
+                "slot_options": [
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 0 To 15",
+                            "ref": "Years0To15"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 0 To 16",
+                            "ref": "Years0To16"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Years 0 To 17",
+                            "ref": "Years0To17"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Female",
+                            "ref": "Female"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "Male",
+                            "ref": "Male"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "NeverMarried",
+                            "ref": "NeverMarried"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  }
+                ],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age",
+                      "property": {
+                        "label": "age",
+                        "ref": "age"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "age group classification",
+                      "property": {
+                        "label": "ageGroupClassification",
+                        "ref": "ageGroupClassification"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "armed forces status",
+                      "property": {
+                        "label": "armedForcesStatus",
+                        "ref": "armedForcesStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "assessment type",
+                      "property": {
+                        "label": "assessmentType",
+                        "ref": "assessmentType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "bachelors degree major",
+                      "property": {
+                        "label": "bachelorsDegreeMajor",
+                        "ref": "bachelorsDegreeMajor"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "candidates status",
+                      "property": {
+                        "label": "candidatesStatus",
+                        "ref": "candidatesStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "citizenship",
+                      "property": {
+                        "label": "citizenship",
+                        "ref": "citizenship"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "course specialization",
+                      "property": {
+                        "label": "courseSpecialization",
+                        "ref": "courseSpecialization"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "economic activity source",
+                      "property": {
+                        "label": "economicActivitySource",
+                        "ref": "economicActivitySource"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "economic sector",
+                      "property": {
+                        "label": "economicSector",
+                        "ref": "economicSector"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "educational attainment",
+                      "property": {
+                        "label": "educationalAttainment",
+                        "ref": "educationalAttainment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment",
+                      "property": {
+                        "label": "employment",
+                        "ref": "employment"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment experience status",
+                      "property": {
+                        "label": "employmentExperienceStatus",
+                        "ref": "employmentExperienceStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "employment status",
+                      "property": {
+                        "label": "employmentStatus",
+                        "ref": "employmentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "enrollment level",
+                      "property": {
+                        "label": "enrollmentLevel",
+                        "ref": "enrollmentLevel"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "establishment ownership",
+                      "property": {
+                        "label": "establishmentOwnership",
+                        "ref": "establishmentOwnership"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "ethnicity",
+                      "property": {
+                        "label": "ethnicity",
+                        "ref": "ethnicity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "gender",
+                      "property": {
+                        "label": "gender",
+                        "ref": "gender"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "government identifier",
+                      "property": {
+                        "label": "governmentIdentifier",
+                        "ref": "governmentIdentifier"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "identity activity",
+                      "property": {
+                        "label": "identityActivity",
+                        "ref": "identityActivity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "incident type",
+                      "property": {
+                        "label": "incidentType",
+                        "ref": "incidentType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "industry",
+                      "property": {
+                        "label": "industry",
+                        "ref": "industry"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "language spoken at home",
+                      "property": {
+                        "label": "languageSpokenAtHome",
+                        "ref": "languageSpokenAtHome"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "literacy status",
+                      "property": {
+                        "label": "literacyStatus",
+                        "ref": "literacyStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "marital status",
+                      "property": {
+                        "label": "maritalStatus",
+                        "ref": "maritalStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "medical condition",
+                      "property": {
+                        "label": "medicalCondition",
+                        "ref": "medicalCondition"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "medical specialization",
+                      "property": {
+                        "label": "medicalSpecialization",
+                        "ref": "medicalSpecialization"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "nativity",
+                      "property": {
+                        "label": "nativity",
+                        "ref": "nativity"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "occupation",
+                      "property": {
+                        "label": "occupation",
+                        "ref": "occupation"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "occupational category",
+                      "property": {
+                        "label": "occupationalCategory",
+                        "ref": "occupationalCategory"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "origin background type",
+                      "property": {
+                        "label": "originBackgroundType",
+                        "ref": "originBackgroundType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of birth",
+                      "property": {
+                        "label": "placeOfBirth",
+                        "ref": "placeOfBirth"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "place of residence classification",
+                      "property": {
+                        "label": "placeOfResidenceClassification",
+                        "ref": "placeOfResidenceClassification"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "race",
+                      "property": {
+                        "label": "race",
+                        "ref": "race"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "registration status",
+                      "property": {
+                        "label": "registrationStatus",
+                        "ref": "registrationStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "religion",
+                      "property": {
+                        "label": "religion",
+                        "ref": "religion"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "resident status",
+                      "property": {
+                        "label": "residentStatus",
+                        "ref": "residentStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "school grade level",
+                      "property": {
+                        "label": "schoolGradeLevel",
+                        "ref": "schoolGradeLevel"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "vaccine dose received",
+                      "property": {
+                        "label": "vaccineDoseReceived",
+                        "ref": "vaccineDoseReceived"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "vaccine status",
+                      "property": {
+                        "label": "vaccineStatus",
+                        "ref": "vaccineStatus"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "work category",
+                      "property": {
+                        "label": "workCategory",
+                        "ref": "workCategory"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "how",
+                      "label": "worker classification",
+                      "property": {
+                        "label": "workerClassification",
+                        "ref": "workerClassification"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "France",
+                          "ref": "country/FRA"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2025,
+                          "start_year": 1960
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2025",
+                    "start": "1960"
+                  },
+                  "member_count": 47,
+                  "member_count_exact": true,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2025,
+                    "start_year": 1960
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "France",
+                      "ref": "country/FRA"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "dfo",
+                        "label": "Development Finance Observatory"
+                      },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC1",
+                      "label": "OECD DAC1",
+                      "ref": "provenance/OECDDAC1",
+                      "source": {
+                        "label": "Organisation for Economic Co-operation and Development (OECD)",
+                        "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age",
+                        "property": {
+                          "label": "age",
+                          "ref": "age"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "age group classification",
+                        "property": {
+                          "label": "ageGroupClassification",
+                          "ref": "ageGroupClassification"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "armed forces status",
+                        "property": {
+                          "label": "armedForcesStatus",
+                          "ref": "armedForcesStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "assessment type",
+                        "property": {
+                          "label": "assessmentType",
+                          "ref": "assessmentType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "bachelors degree major",
+                        "property": {
+                          "label": "bachelorsDegreeMajor",
+                          "ref": "bachelorsDegreeMajor"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "candidates status",
+                        "property": {
+                          "label": "candidatesStatus",
+                          "ref": "candidatesStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "citizenship",
+                        "property": {
+                          "label": "citizenship",
+                          "ref": "citizenship"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "course specialization",
+                        "property": {
+                          "label": "courseSpecialization",
+                          "ref": "courseSpecialization"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "economic activity source",
+                        "property": {
+                          "label": "economicActivitySource",
+                          "ref": "economicActivitySource"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "economic sector",
+                        "property": {
+                          "label": "economicSector",
+                          "ref": "economicSector"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "educational attainment",
+                        "property": {
+                          "label": "educationalAttainment",
+                          "ref": "educationalAttainment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment",
+                        "property": {
+                          "label": "employment",
+                          "ref": "employment"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment experience status",
+                        "property": {
+                          "label": "employmentExperienceStatus",
+                          "ref": "employmentExperienceStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "employment status",
+                        "property": {
+                          "label": "employmentStatus",
+                          "ref": "employmentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "enrollment level",
+                        "property": {
+                          "label": "enrollmentLevel",
+                          "ref": "enrollmentLevel"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "establishment ownership",
+                        "property": {
+                          "label": "establishmentOwnership",
+                          "ref": "establishmentOwnership"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "ethnicity",
+                        "property": {
+                          "label": "ethnicity",
+                          "ref": "ethnicity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "gender",
+                        "property": {
+                          "label": "gender",
+                          "ref": "gender"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "government identifier",
+                        "property": {
+                          "label": "governmentIdentifier",
+                          "ref": "governmentIdentifier"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "identity activity",
+                        "property": {
+                          "label": "identityActivity",
+                          "ref": "identityActivity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "incident type",
+                        "property": {
+                          "label": "incidentType",
+                          "ref": "incidentType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "industry",
+                        "property": {
+                          "label": "industry",
+                          "ref": "industry"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "language spoken at home",
+                        "property": {
+                          "label": "languageSpokenAtHome",
+                          "ref": "languageSpokenAtHome"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "literacy status",
+                        "property": {
+                          "label": "literacyStatus",
+                          "ref": "literacyStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "marital status",
+                        "property": {
+                          "label": "maritalStatus",
+                          "ref": "maritalStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "medical condition",
+                        "property": {
+                          "label": "medicalCondition",
+                          "ref": "medicalCondition"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "medical specialization",
+                        "property": {
+                          "label": "medicalSpecialization",
+                          "ref": "medicalSpecialization"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "nativity",
+                        "property": {
+                          "label": "nativity",
+                          "ref": "nativity"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "occupation",
+                        "property": {
+                          "label": "occupation",
+                          "ref": "occupation"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "occupational category",
+                        "property": {
+                          "label": "occupationalCategory",
+                          "ref": "occupationalCategory"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "origin background type",
+                        "property": {
+                          "label": "originBackgroundType",
+                          "ref": "originBackgroundType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of birth",
+                        "property": {
+                          "label": "placeOfBirth",
+                          "ref": "placeOfBirth"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "place of residence classification",
+                        "property": {
+                          "label": "placeOfResidenceClassification",
+                          "ref": "placeOfResidenceClassification"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "race",
+                        "property": {
+                          "label": "race",
+                          "ref": "race"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "registration status",
+                        "property": {
+                          "label": "registrationStatus",
+                          "ref": "registrationStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "religion",
+                        "property": {
+                          "label": "religion",
+                          "ref": "religion"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "resident status",
+                        "property": {
+                          "label": "residentStatus",
+                          "ref": "residentStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "school grade level",
+                        "property": {
+                          "label": "schoolGradeLevel",
+                          "ref": "schoolGradeLevel"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "vaccine dose received",
+                        "property": {
+                          "label": "vaccineDoseReceived",
+                          "ref": "vaccineDoseReceived"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "vaccine status",
+                        "property": {
+                          "label": "vaccineStatus",
+                          "ref": "vaccineStatus"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "work category",
+                        "property": {
+                          "label": "workCategory",
+                          "ref": "workCategory"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "how",
+                        "label": "worker classification",
+                        "property": {
+                          "label": "workerClassification",
+                          "ref": "workerClassification"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "France",
+                          "ref": "country/FRA"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_3ef983d97d873161a306be4fd48aab87"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 20,
+                "bind": 1,
+                "detect_edits": 0,
+                "materialise": 273,
+                "options": 155,
+                "reread_arcs": 1,
+                "resolve_survivors": 0,
+                "shape": 1185,
+                "validate": 0,
+                "walk": 0,
+                "where_places": 0
+              },
+              "total": 1635
+            },
+            "variable_text": "spec_3ef983d97d873161a306be4fd48aab87",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "dataset_resubmit",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "France's total population, 1960 to 2025. OECD DAC1.",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "France"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "total population"
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:age",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "age",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:ageGroupClassification",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "ageGroupClassification",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:armedForcesStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "armedForcesStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:assessmentType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "assessmentType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:bachelorsDegreeMajor",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "bachelorsDegreeMajor",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:candidatesStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "candidatesStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:citizenship",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "citizenship",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:courseSpecialization",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "courseSpecialization",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:economicActivitySource",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "economicActivitySource",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:economicSector",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "economicSector",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:educationalAttainment",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "educationalAttainment",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employment",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "employment",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employmentExperienceStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "employmentExperienceStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:employmentStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "employmentStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:enrollmentLevel",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "enrollmentLevel",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:establishmentOwnership",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "establishmentOwnership",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:ethnicity",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "ethnicity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:gender",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "gender",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:governmentIdentifier",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "governmentIdentifier",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:identityActivity",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "identityActivity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:incidentType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "incidentType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:industry",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "industry",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:languageSpokenAtHome",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "languageSpokenAtHome",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:literacyStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "literacyStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:maritalStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "maritalStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:medicalCondition",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "medicalCondition",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:medicalSpecialization",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "medicalSpecialization",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nativity",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "nativity",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:occupation",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "occupation",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:occupationalCategory",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "occupationalCategory",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:originBackgroundType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "originBackgroundType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:placeOfBirth",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "placeOfBirth",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:placeOfResidenceClassification",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "placeOfResidenceClassification",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:race",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "race",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:registrationStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "registrationStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:religion",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "religion",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:residentStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "residentStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:schoolGradeLevel",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "schoolGradeLevel",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:vaccineDoseReceived",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "vaccineDoseReceived",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:vaccineStatus",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "vaccineStatus",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:workCategory",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "workCategory",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:workerClassification",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "property_dcid": "workerClassification",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "1960 to 2025"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "OECD DAC1"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "status": "definite"
+      }
+    },
+    "structured_content": {
+      "spec_id": "spec_3ef983d97d873161a306be4fd48aab87",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_3ef983d97d873161a306be4fd48aab87: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"observationAbout\":[\"country/FRA\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"end_year\":2025,\"kind\":\"range\",\"start_year\":1960},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"count\",\"population_type\":\"Person\",\"stat_type\":\"measuredValue\"},\"slots\":[{\"binding\":{\"state\":\"unbound\"},\"property\":\"age\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"ageGroupClassification\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"armedForcesStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"assessmentType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"bachelorsDegreeMajor\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"candidatesStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"citizenship\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"courseSpecialization\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"economicActivitySource\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"economicSector\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"educationalAttainment\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"employment\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"employmentExperienceStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"employmentStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"enrollmentLevel\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"establishmentOwnership\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"ethnicity\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"gender\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"governmentIdentifier\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"identityActivity\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"incidentType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"industry\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"languageSpokenAtHome\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"literacyStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"maritalStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"medicalCondition\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"medicalSpecialization\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"nativity\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"occupation\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"occupationalCategory\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"originBackgroundType\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"placeOfBirth\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"placeOfResidenceClassification\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"race\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"registrationStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"religion\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"residentStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"schoolGradeLevel\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"vaccineDoseReceived\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"vaccineStatus\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"workCategory\"},{\"binding\":{\"state\":\"unbound\"},\"property\":\"workerClassification\"}]},\"spec_id\":\"spec_3ef983d97d873161a306be4fd48aab87\"}"
+}

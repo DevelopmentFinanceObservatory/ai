@@ -68,7 +68,7 @@ MAX_ENTITIES = 50
 Year = Annotated[int, Field(ge=1900, le=2100)]
 
 # How many places a rank keeps, as a rank requirement and its operation state
-# it. A component draws at most 24 series (dfo-apis's `MAX_SERIES_PER_COMPONENT`),
+# it. A component draws at most 24 series (the apis service's `MAX_SERIES_PER_COMPONENT`),
 # while the narration reads a longer ranking, and a question past 100 places asks
 # for a listing rather than a ranking.
 MAX_RANK_LIMIT = 100
@@ -250,7 +250,7 @@ class Breakdown(StrictModel):
 class StatVarReading(TitlelessEnum):
     """How a retrieval reads a source that binds a family of StatVars.
 
-    `sum` reads the family as one series, its members summed by dfo-apis at
+    `sum` reads the family as one series, its members summed by apis at
     retrieval. `separate` keeps one series per member StatVar.
     """
 
@@ -321,8 +321,22 @@ class RollingIssue(TitlelessEnum):
     # A period that follows the newest data reads a dataset retrieved with a
     # closed end, or one that cannot be retrieved with an open one.
     NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
-    # A relative period disagrees with the year stated beside it.
+    # Rolling years a run reads from one newest year stand for different
+    # newest years, or for one after the last year the datasets they read
+    # hold, so the years stated beside them are not the ones it reads.
     YEARS_DISAGREE = "rolling_years_disagree"
+    # A first year that follows the newest data meets a fixed last year, so
+    # newer data leaves no year (`planner.shapes.years_run_out`), or newer
+    # data takes a growth window's first or last year out of its input
+    # (`planner.shapes.growth_endpoint_leaves`).
+    YEARS_RUN_OUT = "rolling_years_run_out"
+    # A two-sided step pairs a side whose years follow the newest year with
+    # a side open to each series' newest year that the newest year is not
+    # resolved over (`planner.shapes.anchor_misses`).
+    SIDE_UNANCHORED = "rolling_side_unanchored"
+    # A filter's `ne` follows the newest data, or removes a year from years
+    # newer data moves (a dataset retrieved with `period_end_open`).
+    EXCLUSION_ROLLS = "rolling_exclusion"
     # The dataset's whole history holds more rows than one frame may.
     FRAME_TOO_LARGE = "rolling_frame_too_large"
 
@@ -416,26 +430,14 @@ def check_rolling_window(
     window_end: int | None,
     error: Callable[[str], Exception],
 ) -> None:
-    """Raise `error(fault)` when `rolling` disagrees with the years stated beside it.
+    """Raise `error(fault)` when `rolling` names a bound of a window that states no years.
 
-    A relative bound needs its year, and two relative bounds stand for one
-    newest year: `window_start - window_end` equals the difference of their
-    offsets. No `rolling` agrees with any years.
+    The newest year each relative bound stands for is checked across the
+    plan, every rolling year a run reads together against one newest year
+    (`planner.plan._check_rolling_years_agree`).
     """
-    if rolling is None:
-        return
-    if window_start is None or window_end is None:
+    if rolling is not None and (window_start is None or window_end is None):
         raise error("its `rolling` names a bound of a window it does not state")
-    if rolling.window_start is None or rolling.window_end is None:
-        return
-    stated = window_start - window_end
-    relative = rolling.window_start.offset - rolling.window_end.offset
-    if stated != relative:
-        raise error(
-            f"its window spans {-stated} years ({window_start}-{window_end}) and its "
-            f"`rolling` offsets span {-relative}; state the years the offsets give under "
-            "one newest year"
-        )
 
 
 ThresholdOp = Literal["gt", "gte", "lt", "lte", "eq", "ne"]
@@ -470,6 +472,23 @@ class PeriodThreshold(TaggedModel):
             "`period_end_open` on the dataset requirement read."
         ),
     )
+
+    @model_validator(mode="after")
+    def _keeps_the_newest_year_reachable(self) -> PeriodThreshold:
+        """Refuse `gt` at offset 0, which keeps only the years after the newest.
+
+        The run's newest year is the newest at least half the series hold
+        (`executor.run`), so the years after it belong to the fewer series
+        reporting past it, and to none when every series ends on it.
+        Offsets are 0 or less, so no other rolling bound sets a first
+        year after the newest.
+        """
+        if self.op == "gt" and self.rolling is not None and self.rolling.offset == 0:
+            raise ValueError(
+                "op `gt` with `rolling` at offset 0 keeps only the years after the newest year, "
+                "which most series do not hold; keep the newest year on with op `gte` at offset 0"
+            )
+        return self
 
 
 class EntityIn(TaggedModel):
@@ -513,7 +532,7 @@ class PlaceType(TitlelessEnum):
 
 
 class PlaceLevel(TaggedModel):
-    """Keep rows whose place is at `level`, for a requirement that names no place."""
+    """Keep rows whose role's entities are at `level`."""
 
     kind: Literal["place_level"] = Field(
         default="place_level", description="Tags this predicate as a level of place."
@@ -529,6 +548,22 @@ class PlaceLevel(TaggedModel):
             "no level. A place is at a level when this type is one of its types, except that "
             "a place carrying a Eurostat NUTS type is not a country."
         )
+    )
+    role: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_ENTITY_ROLE_CHARS,
+        description=(
+            "The role whose entities' types this keeps. Omit only when the input has one "
+            "resolvable entity role; old place filters omit it."
+        ),
+    )
+    strict: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        description=(
+            "Refuse if any entity on this role has unknown typing. New country-population "
+            "filters set this true; omitted legacy filters retain their exclude-unknown policy."
+        ),
     )
 
 
@@ -593,6 +628,20 @@ class EvidenceIssueCode(TitlelessEnum):
     GRAIN_AMBIGUOUS = "grain_ambiguous"
 
 
+class SeriesEntity(StrictModel):
+    """One entity of a retrieved series, as its statistics name it.
+
+    `role` and `ref` are the series' own; `label` is the name the approved
+    source gives `ref`, `None` where it gives none.
+    """
+
+    role: str = Field(description="The series' role column for this entity.")
+    ref: str = Field(description="The entity's value in that column.")
+    label: str | None = Field(
+        default=None, description="The approved source's name for `ref`, when it names one."
+    )
+
+
 class EvidenceIssue(StrictModel):
     """One finding about one requirement."""
 
@@ -609,6 +658,33 @@ class EvidenceIssue(StrictModel):
     required: JsonValue = Field(
         default=None,
         description="What was required, when this finding compares an expectation to an observation.",
+    )
+    # `stat_var`, `entities` and `magnitude` are left out of a dump while unset, which
+    # keeps the findings a model reads, and every stored one, unchanged.
+    stat_var: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda stat_var: stat_var is None,
+        description=(
+            "The StatVar of the one retrieved series a `window_short` or `coverage_gaps` "
+            "finding is about."
+        ),
+    )
+    entities: Annotated[tuple[SeriesEntity, ...], HASHED_WHEN_SET] = Field(
+        default=(),
+        exclude_if=lambda entities: not entities,
+        description=(
+            "The entities of the one retrieved series a `window_short` or `coverage_gaps` "
+            "finding is about."
+        ),
+    )
+    magnitude: Annotated[float | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The largest absolute value the one retrieved series a `window_short` or "
+            "`coverage_gaps` finding is about holds in any period, which ranks the series "
+            "an answer names."
+        ),
     )
 
 

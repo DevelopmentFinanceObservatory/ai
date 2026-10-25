@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -37,16 +37,21 @@ from harness.wire import (
     ComponentRevised,
     CompositionUpdated,
     Done,
+    ElicitationAnswer,
+    ElicitationQuestion,
     ElicitationRequest,
     ErrorFrame,
     InterruptDecision,
     InterruptResponse,
     MessageComplete,
     MessageDelta,
+    OptionAnswer,
     PlanProposed,
     PlanVersioned,
+    SkippedAnswer,
     StudioFrame,
     Suggestions,
+    TextAnswer,
     TurnRequest,
 )
 from pydantic import ValidationError
@@ -147,10 +152,13 @@ class Console:
 class RenderState:
     """Tracks narration in flight across one SSE segment, so a following
     frame starts on its own line and `message.complete` doesn't reprint text
-    its deltas already streamed."""
+    its deltas already streamed. `failed_steps` holds the step ids whose
+    latest frame was `failed`, so a later try's `complete` frame on one of
+    them prints its detail under the failed line it settles."""
 
     mid_line: bool = False
     narrated: bool = False
+    failed_steps: set[str] = field(default_factory=set)
 
     def break_line(self, console: Console) -> None:
         if self.mid_line:
@@ -298,15 +306,21 @@ _STEP_SYMBOL = {
 _STEP_COLOR = {"complete": "32", "failed": "1;31", "running": "33"}
 
 
-def _render_activity_step(frame: ActivityStep, console: Console) -> None:
+def _render_activity_step(frame: ActivityStep, console: Console, state: RenderState) -> None:
     status = frame.status.value
     symbol = _STEP_SYMBOL.get(status, "·")
     progress = f" ({frame.progress.completed}/{frame.progress.total})" if frame.progress else ""
     duration = f" {frame.duration_ms}ms" if frame.duration_ms is not None else ""
     line = f"  {symbol} {frame.label}{progress}{duration}"
     console.line(console.paint(line, _STEP_COLOR.get(status, "2")))
-    if status == "failed" and frame.detail:
-        console.line(console.paint(f"      {frame.detail}", "31"))
+    if status == "failed":
+        state.failed_steps.add(frame.step_id)
+        if frame.detail:
+            console.line(console.paint(f"      {frame.detail}", "31"))
+    elif frame.step_id in state.failed_steps:
+        state.failed_steps.discard(frame.step_id)
+        if status == "complete" and frame.detail:
+            console.line(console.paint(f"      {frame.detail}", "32"))
 
 
 def _render_component_created(frame: ComponentCreated, console: Console) -> None:
@@ -344,13 +358,16 @@ def _render_composition_updated(frame: CompositionUpdated, console: Console) -> 
 
 def _render_elicitation(frame: ElicitationRequest, console: Console) -> None:
     console.line()
-    console.line(console.paint(f"Question: {frame.question}", "1;36"))
-    for index, option in enumerate(frame.options or [], start=1):
-        detail = f" -- {option.description}" if option.description else ""
-        mark = " (recommended)" if option.recommended else ""
-        console.line(f"    {index}. {option.label}{detail}{mark}")
-    if frame.rationale:
-        console.line(console.paint(f"    -> {frame.rationale}", "2"))
+    count = len(frame.questions)
+    for number, question in enumerate(frame.questions, start=1):
+        heading = f"Question {number} of {count}" if count > 1 else "Question"
+        console.line(console.paint(f"{heading}: {question.question}", "1;36"))
+        for index, option in enumerate(question.options or [], start=1):
+            detail = f" -- {option.description}" if option.description else ""
+            mark = " (recommended)" if option.recommended else ""
+            console.line(f"    {index}. {option.label}{detail}{mark}")
+        if question.rationale:
+            console.line(console.paint(f"    -> {question.rationale}", "2"))
     console.line()
 
 
@@ -422,7 +439,7 @@ def render_frame(frame: StudioFrame, console: Console, state: RenderState) -> bo
         case PlanVersioned():
             _render_plan_versioned(frame, console)
         case ActivityStep():
-            _render_activity_step(frame, console)
+            _render_activity_step(frame, console, state)
         case ComponentCreated():
             _render_component_created(frame, console)
         case ComponentRevised():
@@ -498,39 +515,76 @@ async def prompt_plan_decision(
 
 async def prompt_elicitation_decision(
     frame: ElicitationRequest, console: Console, *, auto_yes: bool
-) -> tuple[InterruptDecision, str | None]:
-    if auto_yes:
-        if frame.options:
-            # The recommended option when there is one -- the same default
-            # a person reading the rationale would likely pick -- else the
-            # top-ranked (first) candidate, as before.
-            chosen = next((o for o in frame.options if o.recommended), frame.options[0])
-            console.line(console.paint(f"  -> answered '{chosen.label}' (--yes)", "2"))
-            return InterruptDecision.ANSWER, chosen.id
-        console.line(console.paint("  -> skipped (--yes)", "2"))
-        return InterruptDecision.SKIP, None
+) -> tuple[InterruptDecision, dict[str, ElicitationAnswer] | None]:
+    """The decision and per-question answers for one elicitation pause.
+
+    Each question takes an option number, free text when it allows it, or
+    "s" to leave it to the agent when it is skippable. "s" on a question
+    that is not skippable dismisses the whole pause when the frame allows
+    that. `--yes` picks each question's recommended option, else its first.
+    """
+    answers: dict[str, ElicitationAnswer] = {}
+    count = len(frame.questions)
+    for number, question in enumerate(frame.questions, start=1):
+        if auto_yes:
+            answer = _auto_answer(question)
+            if answer is None:
+                console.line(console.paint("  -> skipped (--yes)", "2"))
+                return InterruptDecision.SKIP, None
+            answers[question.id] = answer
+            labels = {option.id: option.label for option in question.options or []}
+            shown = labels[answer.option_id] if isinstance(answer, OptionAnswer) else "left to you"
+            console.line(console.paint(f"  -> answered '{shown}' (--yes)", "2"))
+            continue
+        label = f"Answer {number} of {count}" if count > 1 else "Answer"
+        answer = await _prompt_question(question, console, label=label, dismissable=frame.skippable)
+        if answer is None:
+            console.line(console.paint("  -> skipped, sending...", "2"))
+            return InterruptDecision.SKIP, None
+        answers[question.id] = answer
+    if not auto_yes:
+        console.line(console.paint("  -> answered, sending...", "2"))
+    return InterruptDecision.ANSWER, answers
+
+
+def _auto_answer(question: ElicitationQuestion) -> ElicitationAnswer | None:
+    """The question's recommended option, else its first; with no options,
+    the question left to the agent when it allows that, else None for a
+    whole-pause dismiss."""
+    if question.options:
+        chosen = next((o for o in question.options if o.recommended), question.options[0])
+        return OptionAnswer(kind="option", option_id=chosen.id)
+    if question.skippable:
+        return SkippedAnswer(kind="skipped")
+    return None
+
+
+async def _prompt_question(
+    question: ElicitationQuestion, console: Console, *, label: str, dismissable: bool
+) -> ElicitationAnswer | None:
+    """One question's answer read from the terminal, or None when the user
+    dismissed the whole pause."""
+    options = question.options or []
+    skippable = question.skippable or dismissable
     hints = []
-    if frame.allow_free_text:
+    if question.allow_free_text:
         hints.append("or type an answer")
-    if frame.skippable:
+    if skippable:
         hints.append("s=skip")
     suffix = f" ({', '.join(hints)})" if hints else ""
     while True:
-        console.write(console.paint(f"Answer{suffix}: ", "1"))
+        console.write(console.paint(f"{label}{suffix}: ", "1"))
         choice = (await _ainput()).strip()
-        if frame.skippable and choice.lower() in ("s", "skip"):
-            console.line(console.paint("  -> skipped, sending...", "2"))
-            return InterruptDecision.SKIP, None
-        if frame.options and choice.isdigit() and 1 <= int(choice) <= len(frame.options):
-            console.line(console.paint("  -> answered, sending...", "2"))
-            return InterruptDecision.ANSWER, frame.options[int(choice) - 1].id
-        if frame.allow_free_text and choice:
-            console.line(console.paint("  -> answered, sending...", "2"))
-            return InterruptDecision.ANSWER, choice
+        if skippable and choice.lower() in ("s", "skip"):
+            return SkippedAnswer(kind="skipped") if question.skippable else None
+        if options and choice.isdigit() and 1 <= int(choice) <= len(options):
+            return OptionAnswer(kind="option", option_id=options[int(choice) - 1].id)
+        if question.allow_free_text and choice:
+            return TextAnswer(kind="text", text=choice)
         console.line(
             "  (pick a number"
-            + (", type free text" if frame.allow_free_text else "")
-            + (", or 's' to skip" if frame.skippable else "")
+            + (", type free text" if question.allow_free_text else "")
+            + (", or 's' to skip" if skippable else "")
             + ")"
         )
 
@@ -676,10 +730,12 @@ async def ask(
             # unhandled frame type.
             return 2
         pause = frame
+        payload: str | None = None
+        answers: dict[str, ElicitationAnswer] | None = None
         if isinstance(pause, PlanProposed):
             decision, payload = await prompt_plan_decision(console, auto_yes=auto_yes)
         else:
-            decision, payload = await prompt_elicitation_decision(pause, console, auto_yes=auto_yes)
+            decision, answers = await prompt_elicitation_decision(pause, console, auto_yes=auto_yes)
         waiter.note_decision(pause, decision)
         resume = InterruptResponse(
             kind="interrupt.response",
@@ -688,6 +744,7 @@ async def ask(
             interrupt_id=pause.interrupt_id,
             decision=decision,
             payload=payload,
+            answers=answers,
         )
         path = "/api/studio/interrupt"
         body = resume.model_dump(mode="json", exclude_none=True)

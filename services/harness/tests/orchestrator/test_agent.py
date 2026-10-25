@@ -149,6 +149,10 @@ def test_the_instruction_has_a_reply_state_only_the_figures_a_drawn_card_returns
     text = " ".join(INSTRUCTION.split())
     assert "state only the values its reply_figures list, each with its period" in text
     assert "Name in state_values_for only a series whose value the user asked to be told" in text
+    assert (
+        "Calling make_charts again for a card already drawn returns its figures for the "
+        "series it names, without drawing it twice" in text
+    )
     assert "say what the card holds, its measure, places and years, and state no value" in text
     assert "Close with one conclusion drawn from holds" in text
     assert "compute nothing yourself" in text
@@ -159,6 +163,8 @@ def test_the_instruction_tells_the_agent_to_state_the_years_an_event_period_read
     text = " ".join(INSTRUCTION.split())
     assert "names a period by an event or an administration" in text
     assert "say the data ends earlier and answer with what it holds" in text
+    assert "ask a count or prices still open in one more ask_user call" in text
+    assert "the reading search chose" not in text
 
 
 def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternatives():
@@ -167,15 +173,28 @@ def test_the_instruction_has_search_elect_the_measure_and_asks_with_its_alternat
         "Put a word for how a flow is counted into `variable` only when the user said it, "
         "and let search elect the rest" in text
     )
+    assert "ask about each with ask_user, one question per choice, all in one call" in text
     assert (
-        "The count search chose is the first option, and the other counts the result names "
-        "follow. Label every option as the result labels that count, with the spec_id the "
-        "result gives it" in text
+        "The count search chose is the first option of the count question, and the other counts "
+        "the result names follow" in text
     )
     assert (
-        "When the user picks another count the result names, fetch its spec_id or name it in "
-        "the plan brief. Search again only for a choice the result does not name" in text
+        "Over several years, prices get a question of their own, even when the result lists no "
+        "`other_prices`. Its first option is the prices search read, in words and without a "
+        "spec_id. Each `other_prices` entry follows, or constant prices when the result lists "
+        "none" in text
     )
+    assert (
+        "When they pick prices the result does not name, search again with that unit on the "
+        "part, and put the count they chose, if any, in `variable`" in text
+    )
+    assert (
+        "A request that adds or combines measures from different sources, such as aid and debt, "
+        "goes to plan straight after search, without ask_user. The planner asks how to combine "
+        "them" in text
+    )
+    assert "in the user's words, except a count or prices, whose options are set out below" in text
+    assert "takes one question a turn" not in text
     assert "gross or net" not in text
 
 

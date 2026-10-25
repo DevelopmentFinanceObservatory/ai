@@ -21,6 +21,7 @@ graph, outside this package.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -37,17 +38,24 @@ from compiler.surface import (
     ToolSurfaceUnavailableError,
 )
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness.planner_seam import _not_ready
+from harness.sentences import refusal_sentence
 from planner.operations import Translation
 from planner.plan import (
     PLAN_STATE_KEY,
     AggregateRequirement,
+    AskAnswer,
     Coverage,
     DatasetRequirement,
     Entity,
+    FirstYear,
+    GrowthRequirement,
     Period,
     PinSource,
     Plan,
     PlanStatus,
+    RequirementSide,
+    ShareOfRequirement,
     Unit,
     UnsupportedOperation,
     WindowedPin,
@@ -58,11 +66,26 @@ from planner.plan import (
     plan_revision,
     save_pin_sources,
     save_windowed_pins,
+    split_of,
 )
-from planner.records import AmbiguousSourceReading, GroupBy, SourceNameCandidate
+from planner.records import (
+    AmbiguousSourceReading,
+    GroupBy,
+    RelativePeriod,
+    RollingWindow,
+    SourceNameCandidate,
+)
+from planner.shapes import pooling_remedy
 from planner.tool_results import Outcome, referred
 from planner.workflow import SelectedSource, ToolId
-from translator.discovery import DiscoveryRecord, load_log, requirement_revision, save_log
+from translator.discovery import (
+    DiscoveryRecord,
+    NamedGroup,
+    load_log,
+    name_pinned_groups,
+    requirement_revision,
+    save_log,
+)
 from translator.mechanical import TranslatorCore
 from translator.referral import Referral, ReferralKind, load_referral, save_referral
 from translator.tool import (
@@ -76,6 +99,7 @@ from translator.tool import (
 )
 
 from ..described_nodes import stat_var_node
+from ..split_plan import SPEC_DEBT_HISTORY, split_draft
 from .conftest import _spec
 
 DraftFactory = Callable[..., Plan]
@@ -480,8 +504,8 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
     [
         (
             {"unit": Unit(currency="USD", prices="constant", base_year=2015)},
-            {},
-            "requirement_unmeetable",
+            {"unit_ref": "SDG_CU_USD"},
+            "source_unusable",
             [],
         ),
         (
@@ -497,7 +521,7 @@ async def test_a_failed_proposal_reports_every_issue_at_once(
             [SPEC_KENYA],
         ),
     ],
-    ids=["constant-prices", "period-outside-coverage", "stated-source-not-found"],
+    ids=["constant-prices-over-current", "period-outside-coverage", "stated-source-not-found"],
 )
 async def test_an_unmeetable_requirement_comes_back_pointing_at_the_referral(
     real_schemas: list[ToolSchema],
@@ -915,6 +939,21 @@ def test_a_quotients_key_repair_names_both_of_its_axes(code: CompileIssueCode) -
     assert "`denominator_axis`" in repair
 
 
+@pytest.mark.parametrize(
+    ("code", "one_figure"),
+    [(CompileIssueCode.SHARE_AXIS_REQUIRED, True), (CompileIssueCode.ENTITY_REQUIRED, False)],
+)
+def test_a_side_pooling_members_is_repaired_as_its_reader_takes_them(
+    code: CompileIssueCode, one_figure: bool
+) -> None:
+    """An un-keyed share pools each side per year or into one figure. A whole
+    side of any other calculation pools per year: the repair cannot see the
+    calculation, so it leaves one figure to the issue's reason."""
+    repair = permitted_repair(code)
+
+    assert repair.endswith(pooling_remedy(one_figure=one_figure, each_side=True))
+
+
 @pytest.mark.parametrize("code", list(CompileIssueCode))
 def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
     code: CompileIssueCode,
@@ -953,7 +992,7 @@ def test_every_compile_issue_code_closes_on_one_well_formed_outcome(
             "annual_debt_service",
             {UnsupportedOperation.NO_OPERATION_COVERS},
         ),
-        (CompileIssueCode.REQUIREMENT_UNMEETABLE, "multilateral", set()),
+        (CompileIssueCode.SOURCE_UNUSABLE, "multilateral", set()),
     ],
 )
 async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decline(
@@ -996,7 +1035,7 @@ async def test_a_pair_no_unit_reconciles_refers_its_pinned_side_and_earns_a_decl
 
 def test_a_source_issue_is_tried_before_an_unmeetable_one() -> None:
     issues = [
-        CompileIssue(code=CompileIssueCode.REQUIREMENT_UNMEETABLE, reason="r", requirement_id="a"),
+        CompileIssue(code=CompileIssueCode.SOURCE_UNUSABLE, reason="r", requirement_id="a"),
         CompileIssue(code=CompileIssueCode.SOURCE_UNSELECTED, reason="r", requirement_id="b"),
     ]
 
@@ -1043,8 +1082,9 @@ _GROUP_CLOSED = {"destination": {"label": "Africa", "ref": "africa"}}
         (_GROUP_CLOSED, (GroupBy.PERIOD,), True),
         ({}, (GroupBy.PERIOD,), False),
         (_GROUP_CLOSED, (GroupBy.ENTITY, GroupBy.PERIOD), False),
+        (_GROUP_CLOSED, (), True),
     ],
-    ids=["group-closed", "member-closed", "summed-per-entity"],
+    ids=["group-closed", "member-closed", "summed-per-entity", "summed-to-one-figure"],
 )
 async def test_translate_names_the_group_a_pin_holds_across_to_and_keeps_the_pin(
     real_schemas: list[ToolSchema],
@@ -1173,6 +1213,173 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     assert ("named_in_place_of_across" in answer) is named
 
 
+SPEC_G7 = "spec_9c7a11e2" + "0" * 24
+_G7_BLOCK = _spec(
+    SPEC_G7,
+    "G7 countries' gross disbursements to Kenya",
+    coverage={"kind": "exact", "has_data": True, "window": {"start_year": 2015, "end_year": 2024}},
+    entities=[
+        {"role": "origin", "label": "Germany", "ref": "country/DEU"},
+        {"role": "origin", "label": "France", "ref": "country/FRA"},
+        {"role": "origin", "label": "United States of America", "ref": "country/USA"},
+        {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
+    ],
+    entity_groups={"origin": {"label": "G7", "ref": "GroupOfSeven"}},
+)
+
+
+@pytest.mark.parametrize(
+    ("numerator", "named"),
+    [("G7", False), ("Germany", True), (None, True)],
+    ids=["groups-own-share", "members-share", "total"],
+)
+async def test_a_group_a_shares_numerator_names_is_not_named_on_its_whole(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    numerator: str | None,
+    named: bool,
+) -> None:
+    """ODA to Kenya across donors, pinned to G7 and totalled each year.
+
+    Read alone, or as the whole of Germany's share, the total is G7's, so G7
+    is named on it. As the whole of G7's own share it would divide G7 by
+    itself, so it stays across every donor.
+    """
+    kenya = Entity(name="Kenya", role="recipient")
+    share = (
+        []
+        if numerator is None
+        else [
+            requirement(
+                id="part",
+                measure="official development assistance",
+                entities=[kenya, Entity(name=numerator, role="donor")],
+                unit=None,
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ]
+    )
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(SPEC_G7)],
+            evidence_requirements=[
+                requirement(
+                    id="oda",
+                    measure="official development assistance",
+                    entities=[kenya],
+                    across=("donor",),
+                    source_spec_id=SPEC_G7,
+                    unit=None,
+                ),
+                derived_requirement(id="total", input_id="oda"),
+                *share,
+            ],
+        )
+    )
+    save_pin_sources(context.state, {SPEC_G7: PinSource(block=_G7_BLOCK, settled=True)})
+
+    found = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+
+    g7 = Entity(name="G7", role="donor")
+    assert found == ((NamedGroup("oda", g7, "donor"),) if named else ())
+    total = _stored(context).requirement("oda")
+    assert isinstance(total, DatasetRequirement)
+    assert (total.entities, total.across) == (
+        ((kenya, g7), ()) if named else ((kenya,), ("donor",))
+    )
+
+
+SPEC_AFRICA_HISTORY = "spec_fb3cc27e" + "1" * 24
+
+
+async def test_a_group_a_pin_holds_is_named_on_a_dataset_and_its_whole_history_copy(
+    real_schemas: list[ToolSchema],
+    draft: DraftFactory,
+    pinning_decision: Callable[..., Any],
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """France's aid to every recipient, pinned to Africa, totalled each year beside a growth of the totals over the last five years.
+
+    The growth reads the dataset from its first year (2000) through copies
+    of the dataset and the totals. Africa is named on the dataset and on its
+    copy, and the copy keeps its own pin, the dataset over its whole history.
+    """
+    france = Entity(name="France", role="donor")
+    africa = Entity(name="Africa", role="recipient")
+    written = draft(
+        decisions=[pinning_decision(SPEC_AFRICA)],
+        evidence_requirements=[
+            requirement(
+                id="oda",
+                measure="official development assistance",
+                entities=[france],
+                across=("recipient",),
+                source_spec_id=SPEC_AFRICA,
+                unit=None,
+                period_end_open=True,
+            ),
+            derived_requirement(id="totals", input_id="oda"),
+            GrowthRequirement(
+                id="change",
+                input_id="totals",
+                window_start=2019,
+                window_end=2024,
+                rolling=RollingWindow(
+                    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+                ),
+            ),
+        ],
+        asks=["France's aid to Africa each year", "its growth over the last five years"],
+        answered=[AskAnswer(ask=0, outputs=("totals",)), AskAnswer(ask=1, outputs=("change",))],
+        first_years=[FirstYear(requirement_id="oda", year=2000)],
+    )
+    split = split_of(written)
+    assert [copy.copy_id for copy in split.copies] == ["oda_history", "totals_history"]
+    recorded = Plan.model_validate(
+        {
+            **written.model_dump(),
+            "evidence_requirements": [
+                item.model_copy(update={"source_spec_id": SPEC_AFRICA_HISTORY})
+                if item.id == "oda_history"
+                else item
+                for item in split.requirements
+            ],
+            "rolling_copies": split.copies,
+        }
+    )
+    context = context_holding(recorded)
+    save_pin_sources(context.state, {SPEC_AFRICA: PinSource(block=_AFRICA_BLOCK, settled=True)})
+
+    named = await name_pinned_groups(context, surface=FixtureSurface(schemas=real_schemas))
+
+    assert named == (NamedGroup("oda", africa, "recipient"),)
+    stored = _stored(context)
+    assert stored.rolling_copies == recorded.rolling_copies
+    for requirement_id, pin in (("oda", SPEC_AFRICA), ("oda_history", SPEC_AFRICA_HISTORY)):
+        rewritten = stored.requirement(requirement_id)
+        assert isinstance(rewritten, DatasetRequirement)
+        assert (rewritten.entities, rewritten.across, rewritten.source_spec_id) == (
+            (france, africa),
+            (),
+            pin,
+        )
+    keys = {"oda": requirement_revision(stored.requirement("oda"))}
+    assert load_log(context.state).definite_source_ids(
+        requirement_keys=keys, pinned={"oda": SPEC_AFRICA}
+    ) == {"oda"}
+
+
 async def test_translate_refers_a_search_never_issued_back_marked_not_issued(
     real_schemas: list[ToolSchema], draft: DraftFactory, context_holding: ContextHolding
 ) -> None:
@@ -1222,3 +1429,123 @@ def test_return_to_planner_carries_the_source_names_search_offered(
     assert result["outcome"] == "referred"
     assert result["referral"]["ambiguous_sources"] == [group.model_dump(mode="json")]
     assert result["referral"]["candidates"] == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(
+            {
+                "kind": ReferralKind.PINNED_SOURCE_NOT_FOUND.value,
+                "requirement_id": "debt_history",
+                "reason": f"'debt_history' pins {SPEC_DEBT_HISTORY!r}, which this revision's "
+                "discovery did not find.",
+            },
+            id="discovery-stop",
+        ),
+        pytest.param(
+            _compile_failure_action(
+                [
+                    CompileIssue(
+                        code=CompileIssueCode.SOURCE_UNUSABLE,
+                        reason=f"source {SPEC_DEBT_HISTORY} cannot serve requirement "
+                        "'debt_history': the source starts after the years asked",
+                        operation_id="debt_history",
+                        requirement_id="debt_history",
+                    )
+                ],
+                requirement_of={"debt_history": "debt_history"},
+            ).arguments,
+            id="compile-issue",
+        ),
+    ],
+)
+async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
+    real_schemas: list[ToolSchema],
+    decision: Callable[..., Any],
+    context_holding: ContextHolding,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, Any],
+) -> None:
+    """The model wrote `debt` and the split added the copy `debt_history`, so the referral names `debt` to the model.
+
+    The referral in session state keeps the copy's id, which the discovery
+    log's records key on.
+    """
+
+    async def run_translate(tool_context: Any, *, core: TranslatorCore) -> dict[str, object]:
+        return core.return_to_planner(tool_context=tool_context, **arguments)
+
+    monkeypatch.setattr(translator.tool, "run_translate", run_translate)
+    context = context_holding(split_draft(decision))
+
+    answer = await build_translate(surface=FixtureSurface(schemas=real_schemas))(context)
+
+    assert answer["kind"] == arguments["kind"]
+    assert answer["requirement_id"] == "debt"
+    assert "'debt'" in str(answer["reason"])
+    assert "debt_history" not in json.dumps(answer)
+    sentence = refusal_sentence(_not_ready(answer))
+    assert "'debt'" in sentence
+    assert "debt_history" not in sentence
+    stored = load_referral(context.state)
+    assert stored is not None
+    assert stored.requirement_id == "debt_history"
+
+
+def _offer(spec_id: str) -> dict[str, object]:
+    return {"spec_id": spec_id, "sentence": "external debt service paid"}
+
+
+def _withheld(spec_id: str) -> dict[str, object]:
+    return {"sentence": "external debt service paid", "dropped": [spec_id]}
+
+
+@pytest.mark.parametrize(
+    ("about", "stale_ids"),
+    [
+        ("debt_history", ["debt"]),
+        ("debt", ["debt_history"]),
+        ("other", ["debt_history", "debt"]),
+    ],
+    ids=["about-the-copy", "about-the-origin", "both-stale"],
+)
+def test_a_referral_joins_what_it_offers_a_copy_and_its_origin(
+    decision: Callable[..., Any], about: str, stale_ids: list[str]
+) -> None:
+    """Entries for `debt` and its copy `debt_history` become one entry for `debt`, the origin's own first, losing no source or repair."""
+    entries: dict[str, dict[str, object]] = {
+        "debt": {
+            "candidates": [_offer(SPEC_KENYA)],
+            "withheld": [_withheld("debt")],
+            "repair": "name 'Kenya' as debtor in `entities` and drop 'debtor' from `across`",
+        },
+        "debt_history": {
+            "candidates": [_offer(SPEC_KENYA), _offer(SPEC_OTHER)],
+            "withheld": [_withheld("debt_history")],
+            "repair": "name 'Kenya' as debtor on 'debt_history' and drop 'debtor' from `across`",
+        },
+    }
+    answer: dict[str, object] = {
+        "kind": ReferralKind.PINNED_SOURCE_NOT_FOUND.value,
+        "reason": "a pin was not found",
+        "requirement_id": about,
+        "candidates": [_offer(SPEC_THIRD)] if about == "other" else [],
+        **entries.get(about, {}),
+        "stale_pins": [{"requirement_id": step_id, **entries[step_id]} for step_id in stale_ids],
+    }
+
+    mapped = translator.tool.authored_answer(answer, split_of(split_draft(decision)))
+
+    joined = {
+        "candidates": [_offer(SPEC_KENYA), _offer(SPEC_OTHER)],
+        "withheld": [_withheld("debt"), _withheld("debt_history")],
+        "repair": entries["debt"]["repair"],
+    }
+    if about == "other":
+        assert mapped["stale_pins"] == [{"requirement_id": "debt", **joined}]
+        assert mapped["candidates"] == [_offer(SPEC_THIRD)]
+        return
+    assert mapped["stale_pins"] == []
+    assert mapped["requirement_id"] == "debt"
+    assert {field: mapped[field] for field in joined} == joined

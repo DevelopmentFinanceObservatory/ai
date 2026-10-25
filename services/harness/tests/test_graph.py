@@ -23,6 +23,7 @@ from typing import Any, cast
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
+from compiler.evidence import check_evidence, evidence_from_source
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -62,6 +63,7 @@ from harness.graph import answer as answer_module
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
+    _planner_refusal,
     _replan_refusal,
     _start_relayed,
 )
@@ -70,6 +72,8 @@ from harness.graph.state import (
     APPROVE_INTERRUPT,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_UNAVAILABLE_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
     UNREADABLE_PLAN_NOTE,
@@ -87,6 +91,7 @@ from planner.operations import AggregateOperation, GrowthOperation, RetrieveOper
 from planner.plan import (
     ASKS_STATE_KEY,
     AggregateRequirement,
+    Coverage,
     DatasetRequirement,
     Decision,
     Entity,
@@ -94,10 +99,21 @@ from planner.plan import (
     Period,
     PlanStatus,
     ResolvedBy,
+    authored,
+    open_window,
     plan_revision,
+    with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import EvidenceIssue, EvidenceIssueCode, GroupBy, Reduction, Severity
+from planner.records import (
+    EvidenceIssue,
+    EvidenceIssueCode,
+    GroupBy,
+    Reduction,
+    RelativePeriod,
+    RollingWindow,
+    Severity,
+)
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import ValidationError
 from translator.discovery import PartFault, PartNotResolvedError
@@ -114,6 +130,7 @@ from .orchestrator_fakes import (
     run_turn,
     visited_nodes,
 )
+from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -286,7 +303,7 @@ def _step_progress(event: Event) -> dict[str, Any] | None:
 class _ReportsThenWaits(ScriptedSurface):
     """`ScriptedSurface`, whose `get_data` sends one progress report and then
     waits for `release` before answering, standing in for data-mcp polling
-    a background dfo-apis operation."""
+    a background apis operation."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -864,9 +881,9 @@ _MULTISERIES_VIEW: dict[str, Any] = {
 
 
 def _population_view(*, plural: str) -> dict[str, Any]:
-    """The ONEcampaign/dfo-apis#953 population frame's view: one `stat_var`, seven countries, and
+    """The population frame's view: one `stat_var`, seven countries, and
     a `unit` column holding `USDollar` on some rows and null on others, which
-    dfo-apis reports as plural with the one non-null value listed. `plural`
+    apis reports as plural with the one non-null value listed. `plural`
     names a further dimension marked plural with two listed values."""
     return {
         "dimensions": [
@@ -885,7 +902,7 @@ def _population_view(*, plural: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("facet", ["measurementMethod", "provenance"])
 def test_stat_card_may_leave_plural_facets_unpinned(facet: str) -> None:
-    """dfo-apis refuses an unbound facet only when it splits a series, so a
+    """apis refuses an unbound facet only when it splits a series, so a
     population card pinning the country passes with `unit` = `{USDollar,
     null}` and a second plural facet column left unbound."""
     select = {"stat_var": "dcid:Count_Person", "observationAbout": "country/GTM"}
@@ -959,7 +976,7 @@ def test_select_binding_ok_permits_24_series(type_: str) -> None:
 
 @pytest.mark.parametrize("type_", ["bar_chart", "table"])
 def test_select_binding_ok_rejects_a_25th_series(type_: str) -> None:
-    """dfo-apis refuses a component past 24 series even though the catalogue
+    """apis refuses a component past 24 series even though the catalogue
     grammar's `maxItems` allows an array of 30."""
     select = {"observationAbout": _countries(25), "stat_var": "a"}
     reason = select_binding_ok(type_=type_, select=select, view={})
@@ -978,7 +995,7 @@ def test_select_binding_ok_counts_a_tables_cross_product_against_the_cap() -> No
 
 
 def _counted_view(**total_counts: int) -> dict[str, Any]:
-    """A `describe_frame` view whose dimensions carry dfo-apis's `total_count`."""
+    """A `describe_frame` view whose dimensions carry the apis service's `total_count`."""
     return {
         "dimensions": [
             {"name": name, "plural": count > 1, "values": [], "total_count": count}
@@ -1016,11 +1033,11 @@ def _counted_view(**total_counts: int) -> dict[str, Any]:
 def test_select_binding_ok_matches_dfo_apis_series_estimate(
     type_: str, select: dict[str, Any], view: dict[str, Any], estimate: int
 ) -> None:
-    """The harness computes dfo-apis's own estimate (`_check_series_estimate`
+    """The harness computes the apis service's own estimate (`_check_series_estimate`
     in dfo-data-tools' `assembler/resolve.py`): over every coordinate
     dimension, the bound array's length, 1 for a single bound value, and
     `max(total_count, 1)` for an unbound dimension, on every component type
-    the assembler resolves. Each case here is one dfo-apis refuses with
+    the assembler resolves. Each case here is one apis refuses with
     `MAX_SERIES_PER_COMPONENT`: an unbound plural dimension, a `line_chart`
     array past 24, and an unbound dimension multiplying a table's array.
     An unbound facet column counts 1 and a bound one counts its values."""
@@ -1135,7 +1152,7 @@ def test_select_binding_ok_counts_a_dimension_with_no_total_count_as_one() -> No
 
 
 def test_select_binding_ok_refuses_a_dimension_the_view_does_not_declare() -> None:
-    """dfo-apis estimates series over its own dimensions only, and refuses a
+    """apis estimates series over its own dimensions only, and refuses a
     select binding any other name as an invalid binding; the harness gives
     the same reason."""
     select = {"stat_var": "a", "donor": [f"donor/{index}" for index in range(30)]}
@@ -1881,7 +1898,7 @@ async def test_the_execute_node_runs_the_approved_workflow_through_the_surface(
 
 
 class _ServedPairsPlatform:
-    """presentation-mcp over dfo-apis, which serves a frame under the pair it
+    """presentation-mcp over apis, which serves a frame under the pair it
     minted: `describe_frame` refuses `frame_unavailable` on any other pair and
     answers ok on one it serves."""
 
@@ -1912,7 +1929,7 @@ async def test_a_final_retrieval_read_with_extra_columns_is_shown_by_its_manifes
     real_schemas: list[ToolSchema],
 ) -> None:
     """A retrieval the plan answers with is held by data-mcp under a pair of its
-    own once read with extra columns, and dfo-apis serves only its manifest's pair.
+    own once read with extra columns, and apis serves only its manifest's pair.
     `execute` hands on the manifest's pair, so `plan_done` describes the series
     and registers it for charting, while the total reading it was given the
     frame's own pair. Each frame is registered with the pair the store holds
@@ -1991,7 +2008,7 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
     state: dict[str, Any], node_input: dict[str, Any]
 ) -> None:
     """A hand-back event or kept ask recorded without store pairs names each
-    frame by the pair dfo-apis serves alone. Its frame is registered without
+    frame by the pair apis serves alone. Its frame is registered without
     a store pair, so the store is opened by the frame's own pair."""
     ctx = SimpleNamespace(state=dict(state))
     plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
@@ -2009,8 +2026,8 @@ async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(
     """`execute` hands `plan_done` the sentences `_stat_var_totals` writes,
     and `plan_done` gives each to the agent under `totals`."""
     sentence = (
-        'By default, the figures for "OECD Creditor Reporting System (CRS)" sum the '
-        "family's 74 indicators."
+        'By default, the figures for "OECD Creditor Reporting System (CRS)" are the '
+        "sum of 74 indicators."
     )
     monkeypatch.setattr(answer_module, "_stat_var_totals", lambda *a, **k: [sentence])
     plan = _seam_plan(schemas=real_schemas)
@@ -2568,6 +2585,266 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "code": "source_unverified",
         "message": "the source states no provenance",
     }
+
+
+_GET_DATA = ToolId(server="data-mcp", name="get_data")
+
+
+def _with_a_second_rolling_reader(decision: Callable[..., Decision]) -> PlannerPlan:
+    """`stored_split_plan` with `last_three`, a growth over the newest three
+    years, reading `debt` too, so the split has it read `debt_history`."""
+    plan = stored_split_plan(decision)
+    window = RollingWindow(
+        window_start=RelativePeriod(offset=-3), window_end=RelativePeriod(offset=0)
+    )
+    last_three = GrowthRequirement(
+        id="last_three", input_id="debt", window_start=2021, window_end=2024, rolling=window
+    )
+    draft = split_draft(decision)
+    split = with_authored_requirements(draft, [*authored(draft).evidence_requirements, last_three])
+    assert split.requirement("last_three").input_id == "debt_history"  # type: ignore[union-attr]
+    assert plan.translation is not None and plan.workflow is not None
+    (growth,) = [step for step in plan.workflow.steps if step.id == "last_five"]
+    return split.with_translation(
+        translation=plan.translation.model_copy(
+            update={
+                "operations": (
+                    *plan.translation.operations,
+                    GrowthOperation(
+                        id="last_three",
+                        requirement_id="last_three",
+                        input="debt_history",
+                        window_start=2021,
+                        window_end=2024,
+                        rolling=window,
+                    ),
+                ),
+                "terminal": (*plan.translation.terminal, "last_three"),
+            }
+        ),
+        workflow=plan.workflow.model_copy(
+            update={
+                "steps": (
+                    *plan.workflow.steps,
+                    growth.model_copy(update={"id": "last_three", "operation_id": "last_three"}),
+                ),
+                "terminal_steps": (*plan.workflow.terminal_steps, "last_three"),
+            }
+        ),
+    )
+
+
+_ROLLED_START = Refused(
+    revision="rev1",
+    refusal=RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET,
+    detail=(
+        "step 'last_five' would start in 1995, counted from 2023, before 2000, "
+        f"the first year {SPEC_DEBT_HISTORY} holds"
+    ),
+    step_id="last_five",
+    requirement_id="debt_history",
+    payload=ToolFailure(
+        code="rolling_window_outside_dataset",
+        message="The data for external debt service paid starts in 2000.",
+        retry_mode="do_not_retry",
+    ),
+)
+_REDISCOVERY = RediscoveryNeeded(
+    revision="rev1",
+    step_id="debt_history",
+    tool=_GET_DATA,
+    requirement_id="debt_history",
+    spec_id=SPEC_DEBT_HISTORY,
+    refusal=ToolFailure(
+        code="upstream_version_changed", message="", retry_mode="refresh_then_retry"
+    ),
+    completed=(),
+)
+_CAPABILITY = Refused(
+    revision="rev1",
+    refusal=RefusalKind.STEP_REFUSED,
+    detail="'get_data' refused: capability_unavailable",
+    step_id="debt_history",
+    requirement_id="debt_history",
+    payload=ToolFailure(
+        code="capability_unavailable",
+        message="this deployment cannot read debt_history's window",
+        retry_mode="do_not_retry",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("stop", "second_reader", "ids", "failed", "unavailable"),
+    [
+        pytest.param(
+            _ROLLED_START,
+            False,
+            ("last_five", "debt"),
+            {"last_five": "last_five"},
+            {},
+            id="rolled-start-before-the-copy",
+        ),
+        pytest.param(
+            _ROLLED_START,
+            True,
+            ("last_five", "debt"),
+            {"last_five": "last_five"},
+            {},
+            id="rolled-start-beside-a-second-reader",
+        ),
+        pytest.param(
+            _REDISCOVERY,
+            False,
+            ("debt", "debt"),
+            {"last_five": "last_five"},
+            {},
+            id="copy-retrieval-needs-rediscovery",
+        ),
+        pytest.param(
+            _REDISCOVERY,
+            True,
+            ("debt", "debt"),
+            {"last_five": "last_five", "last_three": "last_three"},
+            {},
+            id="copy-retrieval-read-by-two-rolling-steps",
+        ),
+        pytest.param(
+            _CAPABILITY,
+            False,
+            ("debt", "debt"),
+            {"last_five": "last_five"},
+            {SPEC_DEBT_HISTORY: "this deployment cannot read debt's window"},
+            id="copy-retrieval-capability-unavailable",
+        ),
+    ],
+)
+async def test_a_stop_on_a_copy_names_the_requirement_the_model_wrote(
+    decision: Callable[..., Decision],
+    stop: Refused | RediscoveryNeeded,
+    second_reader: bool,
+    ids: tuple[str, str],
+    failed: dict[str, str],
+    unavailable: dict[str, str],
+) -> None:
+    """A run stopped on a copy the split added (`debt_history`) names no copy.
+    The planner reads the step and requirement the model wrote (`debt`). The
+    agent and the plan record read the stop as landing on each step the model
+    wrote that reads the copy, `last_five` and, where it is there, `last_three`:
+    `debt` ran on its own pin and feeds `total`. A stop on `last_five` itself
+    lands on it alone. A capability the copy's retrieval lacks marks the
+    copy's own pin unavailable, and leaves `debt`'s."""
+    plan = stored_split_plan(decision)
+    readers = ["last_five"]
+    if second_reader:
+        plan = _with_a_second_rolling_reader(decision)
+        readers.append("last_three")
+    plan = PlannerPlan.model_validate(
+        {
+            **plan.model_dump(),
+            "asks": ["debt service each year", *(f"its change, {step}" for step in readers)],
+            "answered": [
+                {"ask": 0, "outputs": ["total"]},
+                *({"ask": n, "outputs": [step]} for n, step in enumerate(readers, start=1)),
+            ],
+        }
+    )
+
+    refusal = _planner_refusal(stop, plan=plan)
+    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
+    node_input = {"frame_refs": [], "frame_ref_steps": [], "failed_step": _failed_step(stop)}
+    (handed,) = [event async for event in plan_done(cast("Any", ctx), node_input)]
+
+    assert (refusal["step_id"], refusal["requirement_id"]) == ids
+    assert "debt_history" not in json.dumps(refusal)
+    assert "debt_history" not in json.dumps(handed)
+    (record,) = ctx.state[ORCHESTRATOR_PLAN_RECORDS_KEY]
+    assert [step["id"] for step in record["steps"] if step["failed"]] == list(
+        dict.fromkeys(failed.values())
+    )
+    result = json.loads(handed["text"].split("\n")[1])
+    assert result["failed_step"]["step_id"] == "last_five"
+    assert [
+        (entry["step"], entry["status"], entry.get("failed_at"))
+        for ask in result["asks"]
+        for entry in ask["answered_by"]
+    ] == [
+        ("total", "not_run", None),
+        *(
+            (step, "failed", failed[step]) if step in failed else (step, "not_run", None)
+            for step in readers
+        ),
+    ]
+    assert ctx.state[ORCHESTRATOR_UNAVAILABLE_KEY] == unavailable
+
+
+def test_a_stop_on_a_copy_renames_it_only_where_a_field_names_a_step(
+    decision: Callable[..., Decision],
+) -> None:
+    """The planner reads `debt` for the copy in the step, the requirement and
+    the tool's message. A ref the tool's `fix` holds keeps the text it has,
+    though it ends in the copy's id."""
+    plan = stored_split_plan(decision)
+    stop = RediscoveryNeeded(
+        revision="rev1",
+        step_id="debt_history",
+        tool=_GET_DATA,
+        requirement_id="debt_history",
+        spec_id=SPEC_DEBT_HISTORY,
+        refusal=ToolFailure(
+            code="upstream_version_changed",
+            message="debt_history needs its source found again",
+            retry_mode="refresh_then_retry",
+            fix={"topic": "debt_history", "path": "dc/topic/debt_history"},
+        ),
+        completed=(),
+    )
+
+    refusal = _planner_refusal(stop, plan=plan)
+
+    assert (refusal["step_id"], refusal["requirement_id"]) == ("debt", "debt")
+    assert refusal["refusal"]["message"] == "debt needs its source found again"
+    assert refusal["refusal"]["fix"] == {"topic": "debt_history", "path": "dc/topic/debt_history"}
+
+
+def test_a_window_short_gap_on_a_copy_names_the_origin_and_the_years_its_retrieval_requested(
+    decision: Callable[..., Decision], source: Callable[..., SelectedSource]
+) -> None:
+    """The copy keeps its origin's stated 2015-2024 and is retrieved from the
+    dataset's first year. The gap the planner reads names the origin and both."""
+    plan = stored_split_plan(decision)
+    copy = plan.requirement("debt_history")
+    assert isinstance(copy, DatasetRequirement)
+    retrieved = source(
+        spec_id=SPEC_DEBT_HISTORY,
+        coverage_window=Period(start=FIRST_YEAR, end=2023),
+        identity={"stat_var": "DebtServicePaid", "requested_window": open_window(FIRST_YEAR)},
+    )
+    findings = check_evidence(
+        copy.model_copy(update={"coverage": Coverage(on_missing="fail")}),
+        evidence_from_source(retrieved),
+    )
+    stop = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'debt_history' is not met by what 'get_data' returned",
+        step_id="debt_history",
+        requirement_id="debt_history",
+        issues=tuple(findings),
+    )
+
+    refusal = _planner_refusal(stop, plan=plan)
+
+    (gap,) = [issue for issue in refusal["issues"] if issue["code"] == "window_short"]
+    # A finding naming no series reads as it did before findings could name one.
+    assert set(gap) == {"code", "severity", "requirement_id", "detail", "found", "required"}
+    assert gap["requirement_id"] == "debt"
+    assert gap["detail"] == (
+        "the source covers 2000-2023, the requirement asks for 2015-2024, "
+        "and its retrieval requests every year from 2000"
+    )
+    assert "debt_history" not in json.dumps(refusal)
 
 
 @pytest.mark.parametrize("kind", list(RefusalKind))

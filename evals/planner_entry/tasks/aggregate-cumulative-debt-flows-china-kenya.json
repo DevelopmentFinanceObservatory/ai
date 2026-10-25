@@ -44,7 +44,10 @@
   ],
   "brief": "What is the cumulative net flow of external debt (disbursements minus principal repayments) from China to Kenya over the past five years (2020 to 2024) using World Bank International Debt Statistics?",
   "asks": [
-    "Cumulative net debt flow from China to Kenya over the past 5 years (2020-2024)",
+    {
+      "text": "Cumulative net debt flow from China to Kenya over the past 5 years (2020-2024)",
+      "across_years": true
+    },
     "Annual net debt flows from China to Kenya from 2020 to 2024"
   ],
   "required_kinds": [
@@ -60,6 +63,7 @@
     "distinction": "aggregate, not growth: a cumulative net flow sums five years, where a growth compares the two ends"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "What is the cumulative net flow of external debt (disbursements minus principal repayments) from China to Kenya over the past five years (2020 to 2024) using World Bank International Debt Statistics?",
     "answer_mode": "computed",
@@ -68,7 +72,7 @@
       {
         "kind": "dataset",
         "id": "net_flows",
-        "measure": "net financial flows on external debt",
+        "measure": "net flows on external debt",
         "entities": [
           {
             "name": "China",
@@ -82,7 +86,8 @@
         "period": {
           "start": 2020,
           "end": 2024
-        }
+        },
+        "source_code": "DT.NFL.DECT.CD"
       },
       {
         "kind": "aggregate",
@@ -108,76 +113,5 @@
         ]
       }
     ]
-  },
-  "alternative_payloads": [
-    {
-      "description": "Pin the IDS net flow candidate the second search found.",
-      "payload": {
-        "question": "What is the cumulative net flow of external debt (disbursements minus principal repayments) from China to Kenya over the past five years (2020 to 2024) using World Bank International Debt Statistics?",
-        "answer_mode": "computed",
-        "decisions": [
-          {
-            "slot": "source",
-            "description": "Which series the net debt flows are read from.",
-            "options": [
-              "IDS net financial flows from China to Kenya",
-              "another series"
-            ],
-            "chosen": "IDS net financial flows from China to Kenya",
-            "resolved_by": "planner_default",
-            "rationale": "The brief names World Bank International Debt Statistics, and this candidate is its net flow series for China to Kenya.",
-            "fixes": []
-          }
-        ],
-        "evidence_requirements": [
-          {
-            "kind": "dataset",
-            "id": "net_flows",
-            "measure": "net financial flows on external debt",
-            "entities": [
-              {
-                "name": "China",
-                "role": "creditor"
-              },
-              {
-                "name": "Kenya",
-                "role": "debtor"
-              }
-            ],
-            "period": {
-              "start": 2020,
-              "end": 2024
-            },
-            "source_spec_id": "spec_4a2f0e2f4ec1f26794379626d3ee75c0",
-            "decision_ids": [
-              "source"
-            ]
-          },
-          {
-            "kind": "aggregate",
-            "id": "cumulative",
-            "input_id": "net_flows",
-            "reduction": "sum",
-            "group_by": [
-              "entity"
-            ]
-          }
-        ],
-        "answered": [
-          {
-            "ask": 0,
-            "outputs": [
-              "cumulative"
-            ]
-          },
-          {
-            "ask": 1,
-            "outputs": [
-              "net_flows"
-            ]
-          }
-        ]
-      }
-    }
-  ]
+  }
 }

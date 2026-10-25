@@ -4,13 +4,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 146379,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 149865,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -30,12 +30,12 @@
         }
       ],
       "contents": {
-        "total_chars": 87495,
+        "total_chars": 87537,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87490
+            "chars": 87532
           },
           {
             "bucket": "text",
@@ -49,13 +49,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 179951,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 183437,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -75,12 +75,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120221,
+        "total_chars": 120263,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87490
+            "chars": 87532
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -104,13 +104,13 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 181271,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 184757,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -130,12 +130,12 @@
         }
       ],
       "contents": {
-        "total_chars": 120695,
+        "total_chars": 120737,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 87490
+            "chars": 87532
           },
           {
             "bucket": "functionResponse:get_skill",
@@ -169,13 +169,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 64537,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 67994,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -195,12 +195,12 @@
         }
       ],
       "contents": {
-        "total_chars": 7609,
+        "total_chars": 7622,
         "buckets": [
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7604
+            "chars": 7617
           },
           {
             "bucket": "text",
@@ -214,13 +214,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 98109,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 101566,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -240,7 +240,7 @@
         }
       ],
       "contents": {
-        "total_chars": 40335,
+        "total_chars": 40348,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -250,7 +250,7 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7604
+            "chars": 7617
           },
           {
             "bucket": "functionCall:get_skill",
@@ -269,13 +269,13 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 100058,
-      "system_instruction_chars": 16959,
-      "declaration_total_chars": 37433,
+      "total_chars": 103427,
+      "system_instruction_chars": 18721,
+      "declaration_total_chars": 39125,
       "declarations": [
         {
           "name": "propose_plan",
-          "chars": 33380
+          "chars": 35072
         },
         {
           "name": "adk_request_input",
@@ -295,7 +295,7 @@
         }
       ],
       "contents": {
-        "total_chars": 41438,
+        "total_chars": 41363,
         "buckets": [
           {
             "bucket": "functionResponse:get_skill",
@@ -305,12 +305,12 @@
           {
             "bucket": "text(seam-brief)",
             "count": 1,
-            "chars": 7604
+            "chars": 7617
           },
           {
             "bucket": "functionResponse:propose_plan",
             "count": 1,
-            "chars": 1052
+            "chars": 964
           },
           {
             "bucket": "functionCall:propose_plan",

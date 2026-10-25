@@ -116,13 +116,13 @@ def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
             "detail": {
                 "kind": "requirement_needs_repair",
                 "requirement_id": "aid_by_donor",
-                "constraint": "level_filter_on_flow_axis",
+                "constraint": "family_unsummable",
             },
         }
     )
 
     assert "'aid_by_donor'" in text
-    assert COMPILE_REASONS[CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS] in text
+    assert COMPILE_REASONS[CompileIssueCode.FAMILY_UNSUMMABLE] in text
 
 
 def test_the_budget_refusal_is_stated_as_a_per_entry_budget_in_the_user_s_terms() -> None:
@@ -212,7 +212,6 @@ def test_a_failure_code_sits_in_one_class_and_in_no_other_table() -> None:
     assert not (classed - seam) & (sentenced | {str(code) for code in ProblemCode})
     assert classed & {str(code) for code in CompileIssueCode} == {
         "entity_ambiguous",
-        "join_no_common_key_columns",
         "unknown_tool",
     }
 
@@ -338,12 +337,22 @@ def test_a_harness_refusal_states_its_code_and_retry_mode_as_plain_strings(
     assert type(refusal["retry_mode"]) is str
 
 
-def test_a_refused_select_does_not_ask_the_user_to_change_the_question() -> None:
-    """The model writes a chart's select, so a select refused as one to
-    correct reads another sentence than a card the user's request made
-    undrawable."""
+@pytest.mark.parametrize(
+    ("code", "user_caused"),
+    [
+        (HarnessCode.SELECT_INVALID, "constraint_violation"),
+        (HarnessCode.TOOL_ARGUMENTS_INVALID, "internal_error"),
+    ],
+)
+def test_what_the_model_wrote_does_not_ask_the_user_to_change_the_question(
+    code: str, user_caused: str
+) -> None:
+    """The model writes a chart's select and a tool call's arguments, so one
+    refused as to correct reads neither the advice to change the question nor
+    the sentence of another cause: a card the user's request made
+    undrawable, or a fault inside the system."""
     mode = RetryMode.CORRECT_AND_RETRY
+    sentence = failure_sentence(code, mode)
 
-    assert failure_sentence(HarnessCode.SELECT_INVALID, mode) != failure_sentence(
-        "constraint_violation", mode
-    )
+    assert sentence != failure_sentence(user_caused, mode)
+    assert str(_RETRY_ADVICE[mode]) not in sentence

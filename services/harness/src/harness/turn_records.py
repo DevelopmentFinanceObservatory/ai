@@ -47,7 +47,7 @@ from planner.records import (
     StrictModel,
 )
 from planner.workflow import ElectedMeasure, MeasureAlternative, ResolvedGroup
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
@@ -226,6 +226,9 @@ class PlanRecord(StrictModel):
     this record is a projection of it. `revision` is `plan_revision(plan)`
     and `approved_revision` the revision the user approved, `None` before
     approval. `decisions` are those `plan_display.shown_decisions` lists.
+    Periods, sources, warnings and steps name the requirements the model
+    wrote, with the copies the split added folded into them
+    (`plan_display.shown_plan`).
     `outputs` are the workflow's terminal step ids. `asks` are the outputs
     the user asked for, in the brief's order, each with the steps that
     answer it, its decline, or both. `declined` are the other parts of the
@@ -260,7 +263,7 @@ class PlanRecord(StrictModel):
         plan: Plan,
         *,
         searched: Collection[str] = (),
-        failed_step: str | None = None,
+        failed_steps: Collection[str] = (),
         run_id: str | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
@@ -268,21 +271,22 @@ class PlanRecord(StrictModel):
         Args:
             plan: A plan carrying a translation and a workflow.
             searched: Spec ids the turn's `search` calls returned.
-            failed_step: The id of the step the run stopped at, if any.
+            failed_steps: The ids of the steps the run's stop landed on, if any.
             run_id: The run the plan executed as, if the ledger admitted one.
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
         """
         assert plan.workflow is not None, "PlanRecord needs a compiled plan"
-        workflow = plan.workflow
+        shown = plan_display.shown_plan(plan)
+        assert shown.workflow is not None
         steps = tuple(
             PlanStep(
                 id=str(row["id"]),
                 label=str(row["label"]),
                 spec_id=_str_or_none(_args(row).get("spec_id")),
                 reading=_reading(_args(row).get("stat_vars")),
-                failed=row["id"] == failed_step,
+                failed=row["id"] in failed_steps,
             )
             for row in plan_display.step_rows(plan)
         )
@@ -291,8 +295,8 @@ class PlanRecord(StrictModel):
             status=plan.status,
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
-            periods=_periods(plan),
-            sources=_sources(plan, searched=searched),
+            periods=_periods(shown),
+            sources=_sources(shown, searched=searched),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -310,9 +314,9 @@ class PlanRecord(StrictModel):
                     requirement_id=issue.requirement_id,
                     detail=_first_line(issue.detail),
                 )
-                for issue in workflow.warnings
+                for issue in shown.workflow.warnings
             ),
-            outputs=tuple(workflow.terminal_steps),
+            outputs=tuple(shown.workflow.terminal_steps),
             steps=steps,
             run_id=run_id,
         )
@@ -369,8 +373,9 @@ class PlanRecord(StrictModel):
         (`harness.studio_state.ConversationState.prior_ledger_state`). The
         reading carries no spec block, so a later pin of it is confirmed by
         a fresh search. The reading states the source's measure, spec_id,
-        coverage kind, origin, how it is counted and the other counts it
-        offers (`ElectedMeasure.other_counts`) and, when the record states
+        coverage kind, origin, how it is counted, the other counts it
+        offers (`ElectedMeasure.other_counts`) and the other prices it offers
+        (its alternatives on axis `unit`) and, when the record states
         coverage, its window.
         """
         return tuple(
@@ -382,6 +387,13 @@ class PlanRecord(StrictModel):
                 alternatives=tuple(
                     CandidateReading(spec_id=other.spec_id, label=other.label)
                     for other in source.elected_measure.other_counts()
+                )
+                if source.elected_measure
+                else (),
+                other_prices=tuple(
+                    CandidateReading(spec_id=other.spec_id, label=other.label)
+                    for other in source.elected_measure.alternatives
+                    if other.axis == "unit"
                 )
                 if source.elected_measure
                 else (),
@@ -555,6 +567,21 @@ class CandidateReading(StrictModel):
     label: str
 
 
+class SiblingReading(StrictModel):
+    """The reading that offered a reading's spec_id as another reading of its flow.
+
+    `spec_id` is the offering reading's own. `axis` is `what` for another
+    count (`SearchReading.alternatives`) and `unit` for the same count in
+    other prices (`SearchReading.other_prices`). `label` is the offer's own
+    label ("net disbursements", "constant prices"), `None` when the
+    stored reading carries no label.
+    """
+
+    spec_id: str
+    axis: Literal["what", "unit"]
+    label: str | None = None
+
+
 class OpenAxisReading(StrictModel):
     """An entity axis a search left open, and how many members it holds when counted."""
 
@@ -603,14 +630,16 @@ class SearchReading(StrictModel):
     part gave. `unbound_qualifiers` and `flagged_match` explain a
     `qualifier_not_bound` refusal: its rejected phrase and the broader match
     search left unused. `fetch` is what a later `fetch` of `spec_id` returned.
-    `counted_as` is the measure the part's block names and `alternatives`
-    each other way of counting the flow it offers, with its spec_id
-    (`harness.tool_contracts.measure_choice`); both empty when it offers
-    none. `other_count_of` is the spec_id of the reading that offered this
-    one's spec_id among its `alternatives`, set on the reading a `fetch` of
-    such a spec_id gains (`harness.orchestrator_tools`): search elected that
-    reading's measure for the part, not this one's `counted_as`. It and
-    `observed_at` are stored and not rendered.
+    `counted_as` is the measure the part's block names, `alternatives`
+    each other way of counting the flow it offers and `other_prices` the
+    same count in each other prices it offers, each with its spec_id
+    (`harness.tool_contracts.measure_choice`); all empty when it offers
+    none. `sibling_of` names the reading that offered this one's spec_id
+    among its `alternatives` or `other_prices`, set on the reading a `fetch`
+    of such a spec_id gains (`harness.orchestrator_tools`), whose
+    `counted_as` is then the count it reads: the offered count, or the
+    offering reading's own in other prices. `observed_at` is stored and not
+    rendered.
     """
 
     text: str | None
@@ -645,9 +674,35 @@ class SearchReading(StrictModel):
     fetch: FetchReading | None = None
     counted_as: str | None = None
     alternatives: tuple[CandidateReading, ...] = ()
-    other_count_of: str | None = None
+    other_prices: tuple[CandidateReading, ...] = Field(
+        default=(), exclude_if=lambda prices: not prices
+    )
+    sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
     origin: Origin = "search"
     observed_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _stored_count_link(cls, data: Any) -> Any:
+        """A stored `other_count_of`, the bare spec_id of the offering reading,
+        reads as a `sibling_of` on axis `what`."""
+        if not isinstance(data, Mapping) or "other_count_of" not in data:
+            return data
+        data = dict(data)
+        offering = data.pop("other_count_of")
+        if offering is not None and "sibling_of" not in data:
+            data["sibling_of"] = {"spec_id": offering, "axis": "what"}
+        return data
+
+    @property
+    def other_count_of(self) -> str | None:
+        """The spec_id of the reading that offered this one as another count of
+        its flow (`sibling_of` on axis `what`): search elected that reading's
+        measure for the part, not this one's `counted_as`. `None` for any other
+        reading, a fetched price sibling included, whose count is the one search
+        elected."""
+        link = self.sibling_of
+        return link.spec_id if link is not None and link.axis == "what" else None
 
     @classmethod
     def from_part(
@@ -663,8 +718,9 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present. A `no_data` part's
-        `reason` is the reading's `refusal_code`, and `counted_as` and
-        `alternatives` are `harness.tool_contracts.measure_choice`'s.
+        `reason` is the reading's `refusal_code`, and `counted_as`,
+        `alternatives` and `other_prices` are
+        `harness.tool_contracts.measure_choice`'s.
         """
         window = part.get("window")
         return cls(
@@ -724,11 +780,8 @@ class SearchReading(StrictModel):
                 else None
             ),
             counted_as=_str_or_none(part.get("counted_as")),
-            alternatives=tuple(
-                CandidateReading(spec_id=str(a["spec_id"]), label=str(a.get("label") or ""))
-                for a in part.get("alternatives") or ()
-                if isinstance(a, Mapping) and a.get("spec_id")
-            ),
+            alternatives=_offers(part.get("alternatives")),
+            other_prices=_offers(part.get("other_prices")),
             origin=origin,
             observed_at=observed_at,
         )
@@ -740,6 +793,15 @@ class SearchReading(StrictModel):
         else:
             fetched = FetchReading(summary=_str_or_none(result.get("summary")))
         return self.model_copy(update={"fetch": fetched})
+
+
+def _offers(offers: Sequence[Any] | None) -> tuple[CandidateReading, ...]:
+    """A `measure_choice` list of `{spec_id, label}` offers, each with a spec_id."""
+    return tuple(
+        CandidateReading(spec_id=str(offer["spec_id"]), label=str(offer.get("label") or ""))
+        for offer in offers or ()
+        if isinstance(offer, Mapping) and offer.get("spec_id")
+    )
 
 
 def newest_per_spec_id(readings: Sequence[SearchReading]) -> list[SearchReading]:
@@ -760,23 +822,33 @@ def measure_choice_text(
     counted_as: str,
     alternatives: Sequence[CandidateReading | MeasureAlternative],
     *,
+    other_prices: Sequence[CandidateReading] = (),
     cap: int | None = None,
 ) -> str:
-    """How a source is counted and each other count with its spec_id.
+    """How a source is counted, each other count and each other prices, with its spec_id.
 
     For example "counted as gross disbursements; other counts: net
-    disbursements [spec_…]", at most `cap` characters when set. An
-    alternative past the cap is left out whole, since a cut spec_id pins
-    nothing. Empty when none is offered or none fits.
+    disbursements [spec_…]; other prices: constant prices [spec_…]", at
+    most `cap` characters when set. An offer past the cap is left out
+    whole, since a cut spec_id pins nothing, and so is every offer after it.
+    Empty when none is offered or none fits.
     """
-    text = f"counted as {counted_as}; other counts: "
-    others: list[str] = []
-    for alternative in alternatives:
-        other = f"{alternative.label} [{alternative.spec_id}]"
-        if cap is not None and len(text) + len(", ".join([*others, other])) > cap:
+    text = f"counted as {counted_as}"
+    offered = False
+    for lead, offers in (("other counts", alternatives), ("other prices", other_prices)):
+        listed: list[str] = []
+        for offer in offers:
+            entry = f"{offer.label} [{offer.spec_id}]"
+            section = f"; {lead}: " + ", ".join([*listed, entry])
+            if cap is not None and len(text) + len(section) > cap:
+                break
+            listed.append(entry)
+        if listed:
+            text += f"; {lead}: " + ", ".join(listed)
+            offered = True
+        if len(listed) < len(offers):
             break
-        others.append(other)
-    return text + ", ".join(others) if others else ""
+    return text if offered else ""
 
 
 # What marks a search part as a loose match: search's weak-score warning on a
@@ -1039,6 +1111,8 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         lines.append(f"   {facts}")
     if choice := _measure_choice(reading):
         lines.append(f"   {choice}")
+    if sibling := _sibling_text(reading):
+        lines.append(f"   {sibling}")
     if codes:
         lines.append(f"   warnings: {codes}")
     if reading.fetch is not None:
@@ -1052,7 +1126,27 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
 def _measure_choice(reading: SearchReading) -> str:
     if reading.counted_as is None:
         return ""
-    return measure_choice_text(reading.counted_as, reading.alternatives)
+    return measure_choice_text(
+        reading.counted_as, reading.alternatives, other_prices=reading.other_prices
+    )
+
+
+def _sibling_text(reading: SearchReading) -> str:
+    """What a fetched sibling reads and the reading that offered it.
+
+    "counted as net disbursements, another count of spec_…" on axis
+    `what`; "counted as gross disbursements in constant prices, other prices
+    of spec_…" on axis `unit`. Empty for a reading no other offered.
+    """
+    link = reading.sibling_of
+    if link is None:
+        return ""
+    if link.axis == "what":
+        measure = f"counted as {reading.counted_as}, " if reading.counted_as else ""
+        return f"{measure}another count of {link.spec_id}"
+    prices = f" in {link.label}" if link.label else ""
+    measure = f"counted as {reading.counted_as}{prices}, " if reading.counted_as else ""
+    return f"{measure}other prices of {link.spec_id}"
 
 
 def _reading_facts(reading: SearchReading) -> str:

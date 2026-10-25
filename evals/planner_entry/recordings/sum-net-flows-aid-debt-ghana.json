@@ -1,44 +1,56 @@
 {
   "answers": [
-    "01a0cc2a686fb9b0",
+    "0805a2cf18268d6a",
     "0dcee57a75c2a178",
-    "113743857111f7b3",
-    "2bf3af0dff4bd63c",
-    "423c66e9d2b6e10c",
-    "44c6eeabe0432440",
-    "6df83b30586a166b",
+    "3380b6dde6e16fda",
+    "59ce072085933201",
     "7647e72222d88a5b",
-    "7b9ab0b7935329e7",
-    "a7983453c3dd78b3",
-    "bdde37b80866fb6b",
-    "c575172c328d32d5",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "87fc15ef8660862d",
+    "9099e045960c63ae",
+    "96b1576708c248bf",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
+    "b1a733a51b31d92e",
+    "b433823d1c1e4234",
+    "c0412ae0536c314d",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:55:33+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:09+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 6259,
-            "output_tokens": 673
+            "input_tokens": 0,
+            "jev_input_tokens": 15286,
+            "jev_output_tokens": 3497,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 3150
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 2027
           },
-          "trace_id": "7a5ab677761c4e069d44832b12c608da",
+          "trace_id": "d9bac060f13144d494be8e4242556568",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
-            "departures": [],
+            "assumptions": [],
+            "departures": [
+              {
+                "binding_ref": "origin:",
+                "code": "whole_total_read",
+                "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -57,6 +69,9 @@
                   "entities": {
                     "destination": [
                       "country/GHA"
+                    ],
+                    "origin": [
+                      "DACOfficialDonors"
                     ]
                   },
                   "identity_version": "spec1",
@@ -101,7 +116,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_6a2240ef10e92c927ca5d00e78979a62"
+                "spec_id": "spec_0366a9f38cb7c8cd49f23404a4c86b36"
               },
               "resolved": {
                 "alternative_measures": [
@@ -112,6 +127,9 @@
                         "entities": {
                           "destination": [
                             "country/GHA"
+                          ],
+                          "origin": [
+                            "DACOfficialDonors"
                           ]
                         },
                         "identity_version": "spec1",
@@ -156,7 +174,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_4cfd0828010b64505d4e963f26b7cfef"
+                      "spec_id": "spec_abb43b75f91975a0c6c5773118dabd22"
                     },
                     "label": "gross disbursements",
                     "measure_axis_values": [
@@ -196,7 +214,7 @@
                         }
                       }
                     ],
-                    "served_rows": 3230,
+                    "served_rows": 65,
                     "served_rows_exact": true
                   }
                 ],
@@ -220,16 +238,16 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 3313
+                  "observation_count": 65
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 3313,
+                  "rows": 65,
                   "rows_exact": true,
-                  "series": 133,
+                  "series": 1,
                   "window": {
                     "end_year": 2024,
                     "start_year": 1960
@@ -241,16 +259,29 @@
                     "label": "Ghana",
                     "ref": "country/GHA",
                     "role": "destination"
-                  }
-                ],
-                "entity_options": [
+                  },
                   {
-                    "options": [],
-                    "role": "origin",
-                    "source": "observed",
-                    "truncated": true
+                    "entity_type": "DACGroup",
+                    "label": "official donors (DAC)",
+                    "ref": "DACOfficialDonors",
+                    "role": "origin"
                   }
                 ],
+                "entity_groups": {
+                  "origin": {
+                    "label": "official donors (DAC)",
+                    "side_classes": [
+                      "official",
+                      "private",
+                      "residual"
+                    ],
+                    "total": "DACOfficialDonors",
+                    "whole_of": [
+                      "official"
+                    ]
+                  }
+                },
+                "entity_options": [],
                 "facet_options": [
                   {
                     "axis": "provenance",
@@ -293,6 +324,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -308,41 +340,41 @@
                   }
                 },
                 "headline": {
-                  "observations": 93,
+                  "observations": 1,
                   "recent_years": [
                     {
-                      "observations": 93,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 93,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 93,
+                      "series": 1,
                       "year": 2024
                     },
                     {
-                      "observations": 99,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 99,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 99,
+                      "series": 1,
                       "year": 2023
                     },
                     {
-                      "observations": 103,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 103,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 103,
+                      "series": 1,
                       "year": 2022
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 93,
+                    "financingProvider": 1,
                     "financingRecipient": 1
                   },
-                  "series": 93,
+                  "series": 1,
                   "year": 2024,
                   "year_named": false
                 },
@@ -395,14 +427,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Net disbursements to Ghana from 133 providers for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a.",
-                "role_axis_facts": [
-                  {
-                    "member_count": 133,
-                    "members_available": true,
-                    "role": "origin"
-                  }
-                ],
+                "rendered_sentence": "Net disbursements to Ghana from official donors (DAC) for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a.",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -447,14 +472,16 @@
                   },
                   {
                     "binding_ref": "origin:",
-                    "entity_refs": [],
+                    "entity_refs": [
+                      "DACOfficialDonors"
+                    ],
                     "kind": "slot",
                     "role": "origin",
                     "segment": "heading",
                     "states": [
                       "origin:"
                     ],
-                    "text": "133 providers"
+                    "text": "official donors (DAC)"
                   },
                   {
                     "entity_refs": [],
@@ -668,7 +695,7 @@
                         "member_count": 2,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 1665,
+                        "served_rows": 65,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -682,7 +709,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 301,
+                        "served_rows": 20,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -695,7 +722,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 1018,
+                        "served_rows": 59,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -708,7 +735,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 3313,
+                        "served_rows": 65,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -721,7 +748,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 264,
+                        "served_rows": 28,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -862,7 +889,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -885,6 +912,10 @@
                     {
                       "label": "Ghana",
                       "ref": "country/GHA"
+                    },
+                    {
+                      "label": "official donors (DAC)",
+                      "ref": "DACOfficialDonors"
                     }
                   ],
                   "resolved_sources": [
@@ -893,6 +924,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -2728,7 +2760,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -2973,27 +3005,38 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_6a2240ef10e92c927ca5d00e78979a62"
+              "spec_id": "spec_0366a9f38cb7c8cd49f23404a4c86b36"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 12,
-                "bind": 1116,
+                "answer": 11,
+                "bind": 149,
                 "materialise": 29,
-                "options": 10,
-                "recall": 394,
-                "shape": 1269
+                "options": 30,
+                "phase_bind": 338,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 143,
+                "phase_place_bindings": 90,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 15,
+                "recall": 466,
+                "shape": 539,
+                "shape_admission": 1,
+                "shape_arcs": 1,
+                "shape_groups": 43,
+                "shape_labels": 0,
+                "shape_probe": 86,
+                "shape_probe_coverage": 3
               },
-              "total": 2830
+              "total": 1810
             },
             "variable_text": "net official development assistance",
             "warnings": [
-              {
-                "code": "role_scope_defaulted",
-                "message": "no provider was named; the answer was resolved across every provider with data.",
-                "severity": "warn"
-              },
               {
                 "code": "time_window_defaulted",
                 "message": "no time_text was given; the answer was resolved across every period with data.",
@@ -3002,6 +3045,14 @@
             ]
           },
           {
+            "assumptions": [
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every creditor"
+              }
+            ],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -3086,7 +3137,8 @@
                     },
                     {
                       "binding": {
-                        "state": "unbound"
+                        "ref": "PrincipalRepayment",
+                        "state": "value"
                       },
                       "property": "netOf"
                     },
@@ -3100,7 +3152,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_edc1dac07f6e951072ec6a2ac2d48852"
+                "spec_id": "spec_91b912f26fd6726b58af3535952acf3c"
               },
               "resolved": {
                 "available_at_place": true,
@@ -3116,23 +3168,23 @@
                       "label": "observations"
                     },
                     {
-                      "count": 2,
+                      "count": 1,
                       "label": "variables"
                     }
                   ],
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 110
+                  "observation_count": 55
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "Creative Commons Attribution License"
                   },
-                  "rows": 110,
+                  "rows": 55,
                   "rows_exact": true,
-                  "series": 2,
+                  "series": 1,
                   "window": {
                     "end_year": 2024,
                     "start_year": 1970
@@ -3188,6 +3240,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                     "label": "World Bank International Debt Statistics (IDS)",
                     "ref": "provenance/WorldBankInternationalDebtStatistics",
                     "source": {
@@ -3203,37 +3256,37 @@
                   }
                 },
                 "headline": {
-                  "observations": 2,
+                  "observations": 1,
                   "recent_years": [
                     {
-                      "observations": 2,
+                      "observations": 1,
                       "role_counts": {
                         "financingRecipient": 1
                       },
-                      "series": 2,
+                      "series": 1,
                       "year": 2024
                     },
                     {
-                      "observations": 2,
+                      "observations": 1,
                       "role_counts": {
                         "financingRecipient": 1
                       },
-                      "series": 2,
+                      "series": 1,
                       "year": 2023
                     },
                     {
-                      "observations": 2,
+                      "observations": 1,
                       "role_counts": {
                         "financingRecipient": 1
                       },
-                      "series": 2,
+                      "series": 1,
                       "year": 2022
                     }
                   ],
                   "role_counts": {
                     "financingRecipient": 1
                   },
-                  "series": 2,
+                  "series": 1,
                   "year": 2024,
                   "year_named": false
                 },
@@ -3248,31 +3301,7 @@
                 ],
                 "measure_axis_values": [],
                 "measure_label_axes": [],
-                "open_axis_facts": [
-                  {
-                    "distinct_count": 2,
-                    "property": "netOf",
-                    "undeclared_count": 0,
-                    "values": [
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "principal repayment",
-                          "ref": "PrincipalRepayment"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "servicing payment",
-                          "ref": "ServicingPayment"
-                        }
-                      }
-                    ],
-                    "varies": true
-                  }
-                ],
-                "rendered_sentence": "Ghana's financial flow for disbursement for net, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+                "rendered_sentence": "Ghana's net flows on external debt from all creditors, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
                 "sentence_plan": [
                   {
                     "axis": "where",
@@ -3307,46 +3336,33 @@
                     "entity_refs": [],
                     "kind": "slot",
                     "segment": "heading",
-                    "states": [],
-                    "text": "financial flow"
+                    "states": [
+                      "how:financialFlowType",
+                      "how:netOf",
+                      "how:nettingBasis",
+                      "axis:populationType",
+                      "axis:measuredProperty",
+                      "axis:statType"
+                    ],
+                    "text": "net flows on external debt"
                   },
                   {
                     "entity_refs": [],
                     "kind": "text",
                     "segment": "heading",
                     "states": [],
-                    "text": " for "
+                    "text": " from "
                   },
                   {
-                    "axis": "how",
-                    "binding_ref": "how:financialFlowType",
+                    "binding_ref": "origin:",
                     "entity_refs": [],
                     "kind": "slot",
-                    "property_dcid": "financialFlowType",
+                    "role": "origin",
                     "segment": "heading",
                     "states": [
-                      "how:financialFlowType"
+                      "origin:"
                     ],
-                    "text": "disbursement"
-                  },
-                  {
-                    "entity_refs": [],
-                    "kind": "text",
-                    "segment": "heading",
-                    "states": [],
-                    "text": " for "
-                  },
-                  {
-                    "axis": "how",
-                    "binding_ref": "how:nettingBasis",
-                    "entity_refs": [],
-                    "kind": "slot",
-                    "property_dcid": "nettingBasis",
-                    "segment": "heading",
-                    "states": [
-                      "how:nettingBasis"
-                    ],
-                    "text": "net"
+                    "text": "all creditors"
                   },
                   {
                     "axis": "how",
@@ -3420,10 +3436,30 @@
                   },
                   {
                     "axis": "how",
+                    "binding_ref": "how:financialFlowType",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "financialFlowType",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
                     "binding_ref": "how:netOf",
                     "entity_refs": [],
                     "kind": "slot",
                     "property_dcid": "netOf",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ""
+                  },
+                  {
+                    "axis": "how",
+                    "binding_ref": "how:nettingBasis",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "property_dcid": "nettingBasis",
                     "segment": "heading",
                     "states": [],
                     "text": ""
@@ -3504,7 +3540,7 @@
                       "label": "Development Finance Observatory"
                     }
                   ],
-                  "label": "Net flows on external debt (current US$)",
+                  "label": "Net flows on external debt",
                   "measured_property": {
                     "label": "amount",
                     "ref": "amount"
@@ -3514,8 +3550,8 @@
                     "label": "Nominal",
                     "ref": "Nominal"
                   },
-                  "member_count": 134,
-                  "member_digest": "872a95e44b0bd91ada493e44061988cd6f3bf2a7f3fece7056ae56e5ad3bbd07",
+                  "member_count": 69,
+                  "member_digest": "c6d8b5f430059bd83e32f83ccde0f96a6a9deb3c759521452f4f143bb6b43131",
                   "population_type": {
                     "label": "financial flow",
                     "ref": "FinancialFlow"
@@ -3533,6 +3569,14 @@
                     },
                     {
                       "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    {
+                      "axis": "how",
                       "label": "net of",
                       "property": {
                         "label": "net of",
@@ -3545,14 +3589,6 @@
                       "property": {
                         "label": "netting basis",
                         "ref": "nettingBasis"
-                      }
-                    },
-                    {
-                      "axis": "how",
-                      "label": "IDS creditor type",
-                      "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
                       }
                     },
                     {
@@ -3653,6 +3689,64 @@
                   {
                     "key": {
                       "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 10,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "bondholders (IDS creditor type)",
+                            "ref": "IDSCreditorTypePBND"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 55,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePROP"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 55,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "private creditors (IDS creditor type)",
+                            "ref": "IDSCreditorTypePRVT"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 48,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "commercial banks (IDS creditor type)",
+                            "ref": "IDSCreditorTypePCBK"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
                       "label": "net of",
                       "property": {
                         "label": "net of",
@@ -3661,8 +3755,6 @@
                     },
                     "options": [
                       {
-                        "served_rows": 55,
-                        "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "principal repayment",
@@ -3672,8 +3764,6 @@
                         }
                       },
                       {
-                        "served_rows": 55,
-                        "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "servicing payment",
@@ -3712,64 +3802,6 @@
                   {
                     "key": {
                       "axis": "how",
-                      "label": "IDS creditor type",
-                      "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
-                      }
-                    },
-                    "options": [
-                      {
-                        "served_rows": 21,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "bondholders (IDS creditor type)",
-                            "ref": "IDSCreditorTypePBND"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 110,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "other private creditors (IDS creditor type)",
-                            "ref": "IDSCreditorTypePROP"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 98,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "commercial banks (IDS creditor type)",
-                            "ref": "IDSCreditorTypePCBK"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      },
-                      {
-                        "served_rows": 110,
-                        "served_rows_exact": true,
-                        "value": {
-                          "ref": {
-                            "label": "private creditors (IDS creditor type)",
-                            "ref": "IDSCreditorTypePRVT"
-                          },
-                          "value_kind": "enum_value"
-                        }
-                      }
-                    ],
-                    "source": "observed",
-                    "truncated": true
-                  },
-                  {
-                    "key": {
-                      "axis": "how",
                       "label": "maturity band",
                       "property": {
                         "label": "maturity band",
@@ -3789,7 +3821,7 @@
                         }
                       },
                       {
-                        "served_rows": 110,
+                        "served_rows": 55,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3814,7 +3846,7 @@
                     },
                     "options": [
                       {
-                        "served_rows": 110,
+                        "served_rows": 55,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3825,12 +3857,73 @@
                         }
                       },
                       {
-                        "served_rows": 80,
+                        "served_rows": 40,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "not publicly guaranteed",
                             "ref": "NotPubliclyGuaranteed"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "financing resource",
+                      "property": {
+                        "label": "financing resource",
+                        "ref": "financingResource"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 49,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "debt instrument",
+                            "ref": "DebtInstrument"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": true
+                  },
+                  {
+                    "key": {
+                      "axis": "how",
+                      "label": "IDS concessionality",
+                      "property": {
+                        "label": "IDS concessionality",
+                        "ref": "idsConcessionality"
+                      }
+                    },
+                    "options": [
+                      {
+                        "served_rows": 40,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "non-concessional (IDS concessionality)",
+                            "ref": "IDSNonConcessional"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 110,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "concessional (IDS concessionality)",
+                            "ref": "IDSConcessional"
                           },
                           "value_kind": "enum_value"
                         }
@@ -3850,7 +3943,7 @@
                     },
                     "options": [
                       {
-                        "served_rows": 110,
+                        "served_rows": 55,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3875,7 +3968,7 @@
                     },
                     "options": [
                       {
-                        "served_rows": 777,
+                        "served_rows": 55,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3886,7 +3979,7 @@
                         }
                       },
                       {
-                        "served_rows": 752,
+                        "served_rows": 55,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -3897,12 +3990,34 @@
                         }
                       },
                       {
-                        "served_rows": 129,
+                        "served_rows": 64,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
                             "label": "private sector (IDS debtor type)",
                             "ref": "IDSDebtorTypePrivateSector"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 43,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "central bank (IDS debtor type)",
+                            "ref": "IDSDebtorTypeCB"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      },
+                      {
+                        "served_rows": 55,
+                        "served_rows_exact": true,
+                        "value": {
+                          "ref": {
+                            "label": "other public sector (IDS debtor type)",
+                            "ref": "IDSDebtorTypeOPS"
                           },
                           "value_kind": "enum_value"
                         }
@@ -3940,6 +4055,27 @@
                     },
                     "key": {
                       "axis": "how",
+                      "label": "IDS creditor type",
+                      "property": {
+                        "label": "IDS creditor type",
+                        "ref": "idsCreditorType"
+                      }
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "principal repayment",
+                          "ref": "PrincipalRepayment"
+                        },
+                        "value_kind": "enum_value"
+                      }
+                    },
+                    "key": {
+                      "axis": "how",
                       "label": "net of",
                       "property": {
                         "label": "net of",
@@ -3965,20 +4101,6 @@
                       "property": {
                         "label": "netting basis",
                         "ref": "nettingBasis"
-                      }
-                    },
-                    "summable": false
-                  },
-                  {
-                    "binding": {
-                      "kind": "unbound"
-                    },
-                    "key": {
-                      "axis": "how",
-                      "label": "IDS creditor type",
-                      "property": {
-                        "label": "IDS creditor type",
-                        "ref": "idsCreditorType"
                       }
                     },
                     "summable": false
@@ -4110,12 +4232,19 @@
                     "end": "2024",
                     "start": "1970"
                   },
-                  "member_count": 2,
+                  "member_count": 1,
                   "member_count_exact": false,
-                  "served_count": 2
+                  "served_count": 1,
+                  "source_codes": [
+                    {
+                      "code": "DT.NFL.DECT.CD",
+                      "exact": true,
+                      "provenance": "provenance/WorldBankInternationalDebtStatistics"
+                    }
+                  ]
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -4133,6 +4262,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/WorldBankInternationalDebtStatistics",
                       "label": "World Bank International Debt Statistics (IDS)",
                       "ref": "provenance/WorldBankInternationalDebtStatistics",
                       "source": {
@@ -4164,6 +4294,19 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
+                        "label": "IDS creditor type",
+                        "property": {
+                          "label": "IDS creditor type",
+                          "ref": "idsCreditorType"
+                        }
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "how",
                         "label": "net of",
                         "property": {
                           "label": "net of",
@@ -4171,7 +4314,12 @@
                         }
                       },
                       "provenance": "binder",
-                      "refs": []
+                      "refs": [
+                        {
+                          "label": "principal repayment",
+                          "ref": "PrincipalRepayment"
+                        }
+                      ]
                     },
                     {
                       "binding_kind": "value",
@@ -4190,19 +4338,6 @@
                           "ref": "Net"
                         }
                       ]
-                    },
-                    {
-                      "binding_kind": "unbound",
-                      "key": {
-                        "axis": "how",
-                        "label": "IDS creditor type",
-                        "property": {
-                          "label": "IDS creditor type",
-                          "ref": "idsCreditorType"
-                        }
-                      },
-                      "provenance": "binder",
-                      "refs": []
                     },
                     {
                       "binding_kind": "unbound",
@@ -5285,7 +5420,7 @@
                       "noun": "Lebanese pounds"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 1980,
                       "code": "LKR",
                       "constant_years": {
@@ -6286,19 +6421,35 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_edc1dac07f6e951072ec6a2ac2d48852"
+              "spec_id": "spec_91b912f26fd6726b58af3535952acf3c"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 3,
-                "bind": 1605,
-                "materialise": 29,
-                "options": 21,
-                "recall": 359,
-                "shape": 475
+                "answer": 2,
+                "bind": 224,
+                "materialise": 39,
+                "options": 13,
+                "phase_bind": 98,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 102,
+                "phase_place_bindings": 17,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 18,
+                "recall": 2,
+                "shape": 1507,
+                "shape_admission": 0,
+                "shape_arcs": 2,
+                "shape_groups": 5,
+                "shape_labels": 4,
+                "shape_probe": 1287,
+                "shape_probe_coverage": 5
               },
-              "total": 2492
+              "total": 2022
             },
             "variable_text": "net debt flows",
             "warnings": [
@@ -6315,7 +6466,7 @@
           "extract_skipped": true,
           "raw_query": "net flows to Ghana combining aid and debt"
         },
-        "rendered_sentence": "Net disbursements to Ghana from 133 providers for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a. Ghana's financial flow for disbursement for net, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS).",
+        "rendered_sentence": "Net disbursements to Ghana from official donors (DAC) for official development assistance, 1960 to 2024. Current US dollars \u00b7 OECD DAC2a. No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']. Ghana's net flows on external debt from all creditors, 1970 to 2024. Current US dollars \u00b7 World Bank International Debt Statistics (IDS). Assumed: every creditor.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -6365,7 +6516,9 @@
           },
           {
             "binding_ref": "origin:",
-            "entity_refs": [],
+            "entity_refs": [
+              "DACOfficialDonors"
+            ],
             "kind": "slot",
             "part_index": 0,
             "role": "origin",
@@ -6373,7 +6526,7 @@
             "states": [
               "origin:"
             ],
-            "text": "133 providers"
+            "text": "official donors (DAC)"
           },
           {
             "entity_refs": [],
@@ -6508,6 +6661,22 @@
           {
             "entity_refs": [],
             "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
             "segment": "heading",
             "states": [],
             "text": " "
@@ -6549,8 +6718,15 @@
             "kind": "slot",
             "part_index": 1,
             "segment": "heading",
-            "states": [],
-            "text": "financial flow"
+            "states": [
+              "how:financialFlowType",
+              "how:netOf",
+              "how:nettingBasis",
+              "axis:populationType",
+              "axis:measuredProperty",
+              "axis:statType"
+            ],
+            "text": "net flows on external debt"
           },
           {
             "entity_refs": [],
@@ -6558,41 +6734,19 @@
             "part_index": 1,
             "segment": "heading",
             "states": [],
-            "text": " for "
+            "text": " from "
           },
           {
-            "axis": "how",
-            "binding_ref": "how:financialFlowType",
+            "binding_ref": "origin:",
             "entity_refs": [],
             "kind": "slot",
             "part_index": 1,
-            "property_dcid": "financialFlowType",
+            "role": "origin",
             "segment": "heading",
             "states": [
-              "how:financialFlowType"
+              "origin:"
             ],
-            "text": "disbursement"
-          },
-          {
-            "entity_refs": [],
-            "kind": "text",
-            "part_index": 1,
-            "segment": "heading",
-            "states": [],
-            "text": " for "
-          },
-          {
-            "axis": "how",
-            "binding_ref": "how:nettingBasis",
-            "entity_refs": [],
-            "kind": "slot",
-            "part_index": 1,
-            "property_dcid": "nettingBasis",
-            "segment": "heading",
-            "states": [
-              "how:nettingBasis"
-            ],
-            "text": "net"
+            "text": "all creditors"
           },
           {
             "axis": "how",
@@ -6673,11 +6827,33 @@
           },
           {
             "axis": "how",
+            "binding_ref": "how:financialFlowType",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "financialFlowType",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
             "binding_ref": "how:netOf",
             "entity_refs": [],
             "kind": "slot",
             "part_index": 1,
             "property_dcid": "netOf",
+            "segment": "heading",
+            "states": [],
+            "text": ""
+          },
+          {
+            "axis": "how",
+            "binding_ref": "how:nettingBasis",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 1,
+            "property_dcid": "nettingBasis",
             "segment": "heading",
             "states": [],
             "text": ""
@@ -6757,29 +6933,61 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "every creditor"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 1,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "debt-ids": {
-            "content_version": "sha256:f937d0aa236f65365f738709e13d4d5f4b97a4a5dc82e90e5b613f2d90e07116",
+            "content_version": "sha256:80754856ac73dcb10bcd37b958cfd7cbb6782f276d2ce1da64dbfeadb45d56f6",
             "description": "Context for working with the World Bank's International Debt Statistics (IDS), the external debt of low- and middle-income countries as reported by the borrowers. Covers its sources, the debt stocks, flows, debt service, net flows and net transfers it reports and how they relate, the creditor and borrower breakdowns, the DFO's version of the data, the conversion to US dollars, projections, revisions and underreporting, how IDS differs from creditor-side data such as the CRS, and how its series codes are built. Load once IDS has been chosen for an analysis, or when working with IDS figures.",
             "id": "debt-ids",
             "name": "debt-ids"
           },
           "debt-profile": {
-            "content_version": "sha256:17795d00b244871293864f0df3ac39e9b491fe4dafe44b1ef9c23a1d6f8d4c9c",
+            "content_version": "sha256:bfc64969fb95497bfbfe65fefcde1628ae7b83ad5d61f12a5bc9eb7292fcdb7b",
             "description": "Context for describing a country's external debt: how much it owes and how that has changed, who borrowed, which creditors hold the debt, its cost and terms, debt service against exports and revenue, upcoming payments, debt flows, arrears and reserves, and comparisons with peers. Covers which measure answers each part, the traps in each, and what an external-only profile leaves out. Load for questions about a country's debt situation, how much it owes and to whom, how expensive its debt is, or what it pays each year. Questions about whether the debt is sustainable or at risk need the debt-sustainability skill as well.",
             "id": "debt-profile",
             "name": "debt-profile"
           },
           "debt-sustainability": {
-            "content_version": "sha256:2268e9638b27fd5aadde4c4d36ff05283e44fdd61fd547e9dfb34d200f0a16d8",
+            "content_version": "sha256:fc0168e253a3390966eb9b48bb33d317233ffcfb063eb47bf66dc85efaa82052",
             "description": "Context on how the IMF and World Bank assess whether a country's public debt is sustainable, and how far public data can approximate their assessments. Covers debt sustainability analyses (DSAs), which of the two frameworks applies to a country (the joint framework for low-income countries, LIC-DSF, or the IMF's framework for market-access countries, MAC-SRDSF), risk ratings against sustainability judgements, solvency against liquidity, the indicators and thresholds each framework uses, and why indicators built from debt and macroeconomic data differ from a DSA's. Carries the IMF's list of LIC DSAs with each country's latest risk of external debt distress. Load for questions about whether a country's debt is sustainable, its risk of debt distress or sovereign stress, which countries are at high risk or in debt distress, default risk, DSA ratings, debt thresholds or the debt sustainability frameworks.",
             "id": "debt-sustainability",
             "name": "debt-sustainability"
           },
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -6811,5 +7019,12 @@
       "raw_text": false
     }
   ],
-  "task": "sum-net-flows-aid-debt-ghana"
+  "task": "sum-net-flows-aid-debt-ghana",
+  "translation": {
+    "answers": [
+      "80144f90226324ec",
+      "dbccbbced18d5da9"
+    ],
+    "resolved": {}
+  }
 }

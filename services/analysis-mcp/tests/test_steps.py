@@ -997,3 +997,16 @@ async def test_aggregate_names_the_role_whose_party_totals_it_pools_out(
     assert step["left_out"] == [
         {"reason": "party_total", "count": 1, "of": "pooled_entities", "role": _PROVIDER}
     ]
+
+
+async def test_a_rank_of_donors_counts_its_left_out_totals_and_residuals_apart(store) -> None:
+    donors = {**_TWO_DONORS_AND_DAC, "d/R": "residual"}
+    frame_ref = await _root(store, ODA, _flows(donors, _KEN_GTM, ("2021",)), roles=_FLOW_ROLES)
+
+    result = await rank(frame_ref=frame_ref, rank_by=(_PROVIDER,), aggregation="sum")
+
+    step = await _own_step(store, result)
+    assert step["left_out"] == [
+        {"reason": "party_total", "count": 1, "of": "pooled_entities", "role": _PROVIDER},
+        {"reason": "party_residual", "count": 1, "of": "pooled_entities", "role": _PROVIDER},
+    ]

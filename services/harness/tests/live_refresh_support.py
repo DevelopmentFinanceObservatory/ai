@@ -1,5 +1,5 @@
-"""What the `harness.live_refresh` tests share: dfo-apis as a fake whose answers
-on the live-refresh routes are the ones dfo-apis recorded.
+"""What the `harness.live_refresh` tests share: apis as a fake whose answers
+on the live-refresh routes are the ones apis recorded.
 
 `RecordedApis` extends `replay_support.FakeApis` (the publish door and versions
 route) with the component read, the recipe read, the frame refresh, the replay
@@ -38,7 +38,7 @@ RECORDED: dict[str, dict[str, Any]] = json.loads(
         / "packages/common/tests/fixtures/dfo_apis_live_refresh_wire_pairs.json"
     ).read_text()
 )["pairs"]
-# The render dfo-apis recorded for a derived card, which every redraw here answers.
+# The render apis recorded for a derived card, which every redraw here answers.
 RECORDED_RENDER: dict[str, Any] = RECORDED["render.derived_card_with_anchor_warning"]["response"][
     "body"
 ]
@@ -72,10 +72,11 @@ def problem(name: str, *, status: int, code: str, retryable: bool = False) -> ht
 
 
 class RecordedApis(FakeApis):
-    """dfo-apis for a live refresh. `cards` maps a component id to the frame its
+    """apis for a live refresh. `cards` maps a component id to the frame its
     revision 1 is stored on, `heads` a dataset to its current version, and
     `rebuilding` a dataset whose rebuild is queued to the wait its answer names.
-    `render_answer` replaces the render's answer, or is raised in its place."""
+    `render_answer` replaces the render's answer, or is raised in its place, and
+    `versions_answer` the versions route's."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -83,6 +84,7 @@ class RecordedApis(FakeApis):
         self.heads: dict[str, str] = {}
         self.rebuilding: dict[str, float] = {}
         self.render_answer: httpx2.Response | Exception | None = None
+        self.versions_answer: httpx2.Response | None = None
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         answer = self._recorded_answer(request)
@@ -98,6 +100,8 @@ class RecordedApis(FakeApis):
             return self._live(path, request, admitted=principal == LIVE_PRINCIPAL)
         if path.startswith(_COMPONENT_PREFIX):
             return self._component(request)
+        if path.endswith("/versions") and self.versions_answer is not None:
+            return self.versions_answer
         if principal == PRINCIPAL and path.endswith(_RECIPE_SUFFIX):
             return self._recipe(path)
         if (
@@ -148,7 +152,7 @@ class RecordedApis(FakeApis):
 
     def _render(self, path: str, body: dict[str, Any]) -> httpx2.Response:
         """The recorded render, for a target whose recipe has the normal form of the
-        stored frame's, which is dfo-apis' acceptance rule for a derived card."""
+        stored frame's, which is apis' acceptance rule for a derived card."""
         if isinstance(self.render_answer, Exception):
             raise self.render_answer
         if self.render_answer is not None:

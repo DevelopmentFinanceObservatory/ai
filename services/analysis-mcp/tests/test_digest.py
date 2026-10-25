@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import random
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -31,10 +32,19 @@ from analysis_mcp.engine.growth import EntityGrowth, GrowthResult
 from analysis_mcp.engine.join import JoinResult, MatchedKey
 from analysis_mcp.engine.quotient_of import PeriodQuotient, run_quotient_of
 from analysis_mcp.engine.rank import EntityRank, RankResult, run_rank
-from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult
+from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_of
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
+from party_frames import (
+    GROUP_TOTAL,
+    OFFICIAL,
+    OFFICIAL_WHOLE,
+    PRIVATE,
+    PRIVATE_WHOLE,
+    PROVIDER,
+    provider_frame,
+)
 
 
 def _result(*, group_summaries: tuple[GroupSummary, ...], **overrides: object) -> AggregateResult:
@@ -1081,7 +1091,6 @@ def test_quotient_of_digest_has_no_pairs_line_when_no_key_holds_a_one_sided_peri
 
 def test_join_digest_carries_the_identity_block() -> None:
     digest = render_join_digest(
-        join_keys=("reporter",),
         result=JoinResult(
             frame=None,  # type: ignore[arg-type]
             left_resolved_unit="dcid:USDollar",
@@ -1090,6 +1099,7 @@ def test_join_digest_carries_the_identity_block() -> None:
             right_facet_selections=(),
             warnings=(),
             join_keys=("reporter",),
+            right_key_columns=("reporter",),
             matched_keys=matched_keys_of(
                 (
                     MatchedKey(
@@ -1102,6 +1112,8 @@ def test_join_digest_carries_the_identity_block() -> None:
             ),
             left_dropped_key_count=0,
             right_dropped_key_count=0,
+            left_unmatched_entity_count=0,
+            right_unmatched_entity_count=0,
         ),
         op_spec_hash="ops_" + "a" * 32,
         content_version="ocv_" + "b" * 32,
@@ -1254,3 +1266,239 @@ def test_control_characters_are_escaped_through_group_key_unit_warning_and_exclu
     system_lines = [line for line in digest.splitlines() if "SYSTEM:" in line]
     assert len(system_lines) == 4
     assert all(line.count("SYSTEM:") == 1 for line in system_lines)
+
+
+# Ethiopia's 2021 ODA from donors, in USD millions: two countries, one private foundation and
+# a group total holding the two countries, which a sum leaves out.
+_DONORS = {
+    "country/FRA": (OFFICIAL, 120.0),
+    "country/DEU": (OFFICIAL, 200.0),
+    "GatesFoundation": (PRIVATE, 30.0),
+    "DACEUInstitutionsAndMembers": (GROUP_TOTAL, 320.0),
+}
+_NO_PRIVATE = {name: row for name, row in _DONORS.items() if row[0] != PRIVATE}
+# The two whole totals DAC2A publishes for Ethiopia in 2021, which a sum across donors adds.
+_WHOLE_TOTALS = {
+    "DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6),
+    "DACPrivateDonors": (PRIVATE_WHOLE, 310.8),
+}
+
+
+def _identity() -> dict[str, Any]:
+    return {
+        "op_spec_hash": "ops_" + "a" * 32,
+        "content_version": "ocv_" + "b" * 32,
+        "execution_identity": _EI,
+    }
+
+
+def test_a_sum_over_donors_states_how_many_private_donors_it_holds_and_their_value() -> None:
+    result = run_aggregate(provider_frame(_DONORS), group_by=("time_period",), aggregation="sum")
+
+    digest = render_aggregate_digest(
+        group_by=("time_period",), aggregation="sum", result=result, **_identity()
+    )
+
+    assert "This sum of 3 providers includes 1 private donor (30)." in digest
+
+
+@pytest.mark.parametrize(
+    ("donors", "line"),
+    [
+        (
+            _WHOLE_TOTALS,
+            "This sum of 2 whole totals of providers includes 1 total of private donors (310.8).",
+        ),
+        # A whole total of a class no member has is summed beside the members.
+        (
+            {"DACPrivateDonors": (PRIVATE_WHOLE, 310.8), "country/FRA": (OFFICIAL, 120.0)},
+            "This sum of 1 whole total and 1 provider includes 1 total of private donors (310.8).",
+        ),
+        (
+            {"DACOfficialDonors": (OFFICIAL_WHOLE, 4267.6), "GatesFoundation": (PRIVATE, 30.0)},
+            "This sum of 1 whole total and 1 provider includes 1 private donor (30).",
+        ),
+    ],
+    ids=[
+        "whole-totals",
+        "private-whole-total-beside-a-member",
+        "whole-total-beside-a-private-member",
+    ],
+)
+def test_a_sum_of_whole_totals_names_them_as_totals_with_the_private_ones(
+    donors: dict[str, tuple[tuple[str, str, str], float]], line: str
+) -> None:
+    result = run_aggregate(provider_frame(donors), group_by=("time_period",), aggregation="sum")
+
+    digest = render_aggregate_digest(
+        group_by=("time_period",), aggregation="sum", result=result, **_identity()
+    )
+
+    assert line in digest.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("donors", "aggregation", "classes"),
+    [
+        (_NO_PRIVATE, "sum", True),
+        (_DONORS, "mean", True),
+        (_DONORS, "sum", False),
+        (_WHOLE_TOTALS, "sum", False),
+    ],
+    ids=["no-private-donor", "not-a-sum", "no-class-column", "whole-totals-no-class-column"],
+)
+def test_a_digest_names_no_private_donors_where_the_sum_holds_none_or_cannot_tell(
+    donors: dict[str, tuple[tuple[str, str, str], float]], aggregation: str, classes: bool
+) -> None:
+    result = run_aggregate(
+        provider_frame(donors, classes=classes), group_by=("time_period",), aggregation=aggregation
+    )
+
+    digest = render_aggregate_digest(
+        group_by=("time_period",), aggregation=aggregation, result=result, **_identity()
+    )
+
+    assert "private" not in digest
+
+
+@pytest.mark.parametrize(
+    ("donors", "group_by", "line"),
+    [
+        (_DONORS, (), "This sum of 3 providers includes 1 private donor (60 over 2 periods)."),
+        # Each year's sum is finite, and the private donor's value across both years is not.
+        (
+            {"country/FRA": (OFFICIAL, 1.0), "GatesFoundation": (PRIVATE, 1e308)},
+            ("time_period",),
+            "This sum of 2 providers includes 1 private donor.",
+        ),
+    ],
+    ids=["finite", "overflowing"],
+)
+def test_a_sum_over_several_years_states_the_private_value_over_them(
+    donors: dict[str, tuple[tuple[str, str, str], float]], group_by: tuple[str, ...], line: str
+) -> None:
+    result = run_aggregate(
+        provider_frame(donors, years=("2020", "2021")), group_by=group_by, aggregation="sum"
+    )
+
+    digest = render_aggregate_digest(
+        group_by=group_by, aggregation="sum", result=result, **_identity()
+    )
+
+    assert line in digest.splitlines()
+
+
+def test_a_rank_of_donors_tags_each_private_donor() -> None:
+    result = run_rank(
+        provider_frame(_DONORS),
+        rank_by=(PROVIDER,),
+        aggregation="sum",
+        window_start=None,
+        window_end=None,
+        ascending=False,
+    )
+
+    lines = render_rank_digest(rank_by=(PROVIDER,), result=result, **_identity()).splitlines()
+
+    tagged = [line for line in lines if "(private)" in line]
+    assert [line.split(":")[0] for line in tagged] == [f"  #3 {PROVIDER}=GatesFoundation (private)"]
+
+
+def _keyed_share_digest(
+    donors: dict[str, tuple[tuple[str, str, str], float]],
+) -> tuple[str, list[float]]:
+    result = run_share_of(
+        provider_frame(donors),
+        provider_frame(donors),
+        stat_var="dcid:share",
+        numerator_entity={},
+        denominator_entity={},
+        numerator_by=(PROVIDER,),
+    )
+    return (
+        render_share_of_digest(result=result, **_identity()),
+        [share.percent for share in result.period_shares],
+    )
+
+
+@pytest.mark.parametrize(
+    ("donors", "wording"),
+    [
+        (_DONORS, "Shares of the sum of the 3 listed providers, which includes 1 private donor."),
+        (_NO_PRIVATE, "Shares of the sum of the 2 listed providers."),
+    ],
+    ids=["with-private", "no-private"],
+)
+def test_each_donors_share_divides_by_the_listed_sum_and_says_so(
+    donors: dict[str, tuple[tuple[str, str, str], float]], wording: str
+) -> None:
+    digest, percents = _keyed_share_digest(donors)
+
+    assert wording in digest.splitlines()
+    assert sum(percents) == pytest.approx(100.0)
+
+
+def test_a_share_of_one_donor_over_the_pooled_donors_names_the_denominators_private_donors() -> (
+    None
+):
+    result = run_share_of(
+        provider_frame(_DONORS),
+        provider_frame(_DONORS),
+        stat_var="dcid:share",
+        numerator_entity={PROVIDER: "country/FRA"},
+        denominator_entity={},
+    )
+
+    digest = render_share_of_digest(result=result, **_identity())
+
+    assert "The denominator sum of 3 providers includes 1 private donor (30)." in digest
+    assert "listed" not in digest
+
+
+def test_a_quotient_over_the_pooled_donors_names_the_denominators_private_donors() -> None:
+    result = run_quotient_of(
+        provider_frame(_DONORS),
+        provider_frame(_DONORS),
+        stat_var="dcid:ratio",
+        numerator_entity={PROVIDER: "country/FRA"},
+        denominator_entity={},
+    )
+
+    digest = render_quotient_of_digest(result=result, **_identity())
+
+    assert "The denominator sum of 3 providers includes 1 private donor (30)." in digest
+
+
+@pytest.mark.parametrize(
+    ("run", "render"),
+    [(run_quotient_of, render_quotient_of_digest), (run_share_of, render_share_of_digest)],
+    ids=["quotient_of", "share_of"],
+)
+def test_a_private_donor_only_in_a_period_left_out_is_not_disclosed(run, render) -> None:
+    # 2021 divides 20 by 40; the private donor's 100 sits in 2020, which the
+    # denominator lacks, so it is no part of the figure.
+    numerator = provider_frame(
+        {"country/FRA": (OFFICIAL, 5.0), "GatesFoundation": (PRIVATE, 100.0)}, years=("2020",)
+    )
+    numerator_2021 = provider_frame(
+        {"country/FRA": (OFFICIAL, 10.0), "country/DEU": (OFFICIAL, 10.0)}
+    )
+    both_years = Frame.from_table(
+        columns=numerator.columns, table=pa.concat_tables([numerator.table, numerator_2021.table])
+    )
+    result = run(
+        both_years,
+        provider_frame({"country/FRA": (OFFICIAL, 40.0)}),
+        stat_var="dcid:ratio",
+        numerator_entity={},
+        denominator_entity={},
+    )
+
+    (pooled,) = result.numerator_pooled
+    assert (pooled.count, pooled.periods, pooled.private_count, pooled.private_value) == (
+        2,
+        1,
+        0,
+        0.0,
+    )
+    assert "private" not in render(result=result, **_identity())

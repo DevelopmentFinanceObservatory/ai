@@ -22,7 +22,13 @@ import httpx2
 import pyarrow as pa
 import pytest
 from common.materialisation import FrameTooLarge
-from common.place_type import PARTY_ROLES, kind_column, type_column
+from common.place_type import (
+    PARTY_ROLES,
+    class_column,
+    kind_column,
+    type_column,
+    whole_column,
+)
 from common.row_budget import RowBudget
 from compiler.evidence import EvidenceIssueCode, check_evidence, evidence_from_source
 from compiler.sources import source_from_spec_block
@@ -61,7 +67,14 @@ from harness.orchestrator_tools import (
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
-from harness.studio_state import ConversationState, land_component, remove_cards
+from harness.studio_edit import _revised_frames
+from harness.studio_state import (
+    ConversationState,
+    _apply_operations,
+    _next_manifest,
+    land_component,
+    remove_cards,
+)
 from harness.tool_contracts import (
     HarnessCode,
     ResolverError,
@@ -70,6 +83,7 @@ from harness.tool_contracts import (
     resolver_digest,
 )
 from harness.turn_records import SearchReading, loose_match_notes, render_readings
+from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
@@ -152,7 +166,25 @@ class FakeExecutor:
             return {"outcome": "ok", "frame_refs": [REF], "summary": "64 observations"}
         if tool == "describe_frame":
             return {"outcome": "ok", "view": VIEW}
-        return {"outcome": "ok", "component": self.written}
+        return (
+            self.described()
+            if tool == "describe_component"
+            else {"outcome": "ok", "component": self.written}
+        )
+
+    def described(self) -> dict[str, Any]:
+        """The written card read back, as presentation-mcp's
+        `describe_component` gives its head revision."""
+        return {
+            "outcome": "ok",
+            "frame_refs": [],
+            "component_body": {
+                "component_id": self.written["component_id"],
+                "revision": self.written["revision"],
+                "fact_summary": self.written["fact_summary"],
+            },
+            "resolved_payload": self.written["payload"],
+        }
 
     def land_component(self, component: dict[str, Any]) -> None:
         self.landed.append(component)
@@ -182,6 +214,7 @@ def _tools(
     dfo_faq_surface=None,
     recall_part=None,
     canvas_series=None,
+    canvas_cards=None,
     remove_cards=None,
 ):
     tools = build_orchestrator_tools(
@@ -191,6 +224,7 @@ def _tools(
         dfo_faq_surface=dfo_faq_surface,
         recall_part=recall_part,
         canvas_series=canvas_series,
+        canvas_cards=canvas_cards,
         remove_cards=remove_cards,
     )
     by_name = {fn.__name__: fn for fn in tools}
@@ -241,6 +275,14 @@ def test_no_tool_declaration_names_the_implementation_behind_it():
     assert not named
 
 
+def test_the_search_and_ask_user_declarations_carry_prices_beside_counts():
+    declarations = _declarations()
+
+    assert "`other_prices`, each with its spec_id and label" in declarations["search"]
+    ask_user = declarations["ask_user"]
+    assert "An option for a count or prices that a search result names" in ask_user
+
+
 def test_every_chart_field_is_described_and_select_json_shows_a_list_of_values():
     """A select is written in the dimension names its own frame's view lists,
     so the examples key on more than one name."""
@@ -281,15 +323,12 @@ def test_the_figure_fields_name_what_a_card_returns_for_them():
     assert listed in _word_runs(properties["state_period"]["description"], 1)
 
 
-def test_a_chart_title_carries_its_period_unless_the_period_moves():
+def test_a_chart_title_names_its_subject_and_leaves_the_period_to_the_tool():
     properties = Chart.model_json_schema()["properties"]
     title = properties["title"]["description"]
 
-    assert "the period it shows" in title
-    assert "a stat card's title carries the period" in title
-    assert "rolling: true" in title
-    assert "latest_periods" in title
-    assert "its title leaves out the years it shows" in title
+    assert "with no period or year" in title
+    assert "make_charts adds the period the card shows" in title
     assert "counted back from the latest data" in properties["latest_periods"]["description"]
 
 
@@ -1285,7 +1324,12 @@ async def test_the_download_surface_fetches_once_and_never_plans():
 
     assert "frames" in await tools["fetch"](SPEC_LIFE, ctx)
     assert "limit" in (await tools["fetch"](SPEC_LIFE, ctx))["error"]
-    assert "limit" in tools["plan"]("Kenya's aid as a share of GDP", [], ctx)["error"]
+    assert (
+        "limit"
+        in tools["plan"]("Kenya's aid as a share of GDP", ["Kenya's aid as a share of GDP"], ctx)[
+            "error"
+        ]
+    )
     assert pending_action(ctx.state) is None
 
 
@@ -1368,7 +1412,9 @@ async def test_a_card_whose_figures_cannot_be_read_keeps_its_entry_and_the_chart
     chart = _one_chart(frame_id_for(REF))[0]
 
     with caplog.at_level(logging.ERROR, logger=orchestrator_tools.__name__):
-        drawn = await tools["make_charts"]([chart | {"title": "Unread"}, chart], ctx)
+        drawn = await tools["make_charts"](
+            [chart | {"title": "Unread"}, chart | {"type": "table"}], ctx
+        )
 
     unread, after = drawn["charts"]
     assert (unread["title"], unread["reply_figures"]) == ("Unread", [])
@@ -1639,6 +1685,15 @@ def _one_chart(frame: str) -> list[dict[str, str]]:
     return [{"frame": frame, "type": "bar_chart", "title": "t", "select_json": select}]
 
 
+def _distinct_charts(frame: str, count: int) -> list[dict[str, Any]]:
+    """`count` charts of one frame that differ in the window they show, so none
+    repeats a card another draws."""
+    return [
+        chart | {"latest_periods": number}
+        for number, chart in enumerate(_one_chart(frame) * count, 1)
+    ]
+
+
 def _stated(failed: dict[str, Any]) -> tuple[Any, Any]:
     """The code and retry mode a failed answer or chart entry states."""
     return failed.get("code"), failed.get("retry_mode")
@@ -1657,11 +1712,12 @@ async def test_make_charts_spends_its_drawn_budget_only_on_calls_that_drew():
     for _ in range(BUDGETS["make_charts_failed"] - 1):
         failed = await tools["make_charts"](_one_chart("f999999"), ctx)
         assert "error" in failed["charts"][0]
-    for _ in range(BUDGETS["make_charts"]):
-        drawn = await tools["make_charts"](_one_chart(frame), ctx)
+    *charts, last = _distinct_charts(frame, BUDGETS["make_charts"] + 1)
+    for chart in charts:
+        drawn = await tools["make_charts"]([chart], ctx)
         assert "reply_figures" in drawn["charts"][0]
     writes = _writes(executor)
-    spent = await tools["make_charts"](_one_chart(frame), ctx)
+    spent = await tools["make_charts"]([last], ctx)
 
     assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
     assert "charts" not in spent
@@ -1756,7 +1812,7 @@ async def test_make_charts_reports_a_write_that_raised_and_draws_nothing_after_i
     tools, ctx = _tools(executor=executor)
     await tools["fetch"](SPEC_LIFE, ctx)
 
-    drawn = await tools["make_charts"](_one_chart(frame_id_for(REF)) * 3, ctx)
+    drawn = await tools["make_charts"](_distinct_charts(frame_id_for(REF), 3), ctx)
 
     assert ["error" if "error" in chart else "holds" for chart in drawn["charts"]] == results
     assert "RuntimeError" in drawn["charts"][-1]["error"]
@@ -1832,7 +1888,7 @@ WIDE_VIEW: dict[str, Any] = {
 }
 
 
-# The pair dfo-apis serves the retrieval under, whatever its rendering.
+# The pair apis serves the retrieval under, whatever its rendering.
 WIDE_REF = {"spec_id": SPEC_AID, "content_version": "cv_" + "c" * 32}
 SUMMED = {"by": ["time_period"], "op": "sum"}
 # The pair the store holds the summed retrieval under, as data-mcp names a
@@ -1927,6 +1983,11 @@ class HeldFrames:
             column = (kind_column if self.role in PARTY_ROLES else type_column)(self.role)
             rows = [{**row, column: self.cell(row[self.role])} for row in rows]
             roles.append(column)
+            if self.role in PARTY_ROLES:
+                # apis serves a party's class and whole cells beside its kind.
+                classes, whole = class_column(self.role), whole_column(self.role)
+                rows = [{**row, classes: "official", whole: "false"} for row in rows]
+                roles += [classes, whole]
         frame = Frame.build(role_keys=roles, rows=rows)
 
         async def read(*, max_rows: int) -> tuple[Frame, Any]:
@@ -1988,7 +2049,7 @@ class RowFrames(HeldFrames):
         ]
 
 
-_CUT_TITLE = re.compile(r"^Aid to Kenya \((\d+) largest of (\d+) in (\d{4})\)$")
+_CUT_TITLE = re.compile(r"^Aid to Kenya(, [^(]+)? \((\d+) largest of (\d+) in (\d{4})\)$")
 
 
 @pytest.mark.parametrize(
@@ -2014,7 +2075,9 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     executor, result = await _draw_wide(monkeypatch, RowFrames(values), view=view, type=type_)
 
     (intent,) = _intents(executor)
-    drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    covered, drawn, holding, period = _CUT_TITLE.match(intent["title"]).groups()
+    # A cut line chart or table draws every year its frame covers, and says so.
+    assert covered == (None if type_ == "bar_chart" else ", 1900 to 2024")
     members = intent["select"]["financingProvider"]
     assert (period, int(holding)) == ("2024", 20)
     assert len(members) == int(drawn) == kept
@@ -2023,7 +2086,8 @@ async def test_make_charts_cuts_a_select_over_the_cap_at_one_period(
     assert result["charts"][0]["title"] == intent["title"]
     assert result["charts"][0]["note"] == (
         f"This card draws the {kept} largest of the 20 members with a value in 2024, highest "
-        "first. Left out as group totals or members of another level: 0. Left out with no "
+        "first. Left out as group totals, unallocated amounts or members of another level: 0. "
+        "Left out with no "
         "value in 2024: 10. Say in the reply that it shows the largest of them in 2024."
     )
     # A bar chart is drawn at the period it was cut at. A line chart or table keeps its window.
@@ -2045,7 +2109,7 @@ TEN_PROVIDERS: dict[str, dict[str, float]] = {
 
 
 class BarPlatform(WideFrameExecutor):
-    """Draws a bar chart of `values` as dfo-apis binds one. Each selected
+    """Draws a bar chart of `values` as apis binds one. Each selected
     provider's points inside the intent's window, at the latest period every
     one of them holds, written into the catalogue's `bar_chart` payload, whose
     input frame is the one the intent names."""
@@ -2160,10 +2224,139 @@ async def test_make_charts_pins_a_cut_bar_chart_to_the_period_it_ranked_at(
     assert intent["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
 
 
+# `TEN_PROVIDERS` described as the frame apis serves them, over the years they hold.
+TEN_VIEW: dict[str, Any] = {**WIDE_VIEW, "coverage": ["2023", "2025"]}
+
+
+def _ten_select(provider: str | list[str]) -> str:
+    return json.dumps({"financingRecipient": "country/KEN", "financingProvider": provider})
+
+
+@pytest.mark.parametrize(
+    ("chart", "view", "title", "window"),
+    [
+        ({"type": "table"}, TEN_VIEW, "Aid to Kenya, 2023 to 2025", None),
+        # C and D share 2024 at the latest, so their bars are drawn there.
+        (
+            {"type": "bar_chart", "select_json": _ten_select(["C", "D"])},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            {"start": "2024", "end": "2024"},
+        ),
+        # A select listing no dimension draws one series, a bar for each period.
+        (
+            {"type": "bar_chart", "select_json": _ten_select("D")},
+            TEN_VIEW,
+            "Aid to Kenya, 2023 to 2025",
+            None,
+        ),
+        # C's latest value is of 2024, though the frame covers 2025.
+        (
+            {"type": "stat_card", "select_json": _ten_select("C")},
+            TEN_VIEW,
+            "Aid to Kenya, 2024",
+            None,
+        ),
+        (
+            {"type": "table", "latest_periods": 3},
+            TEN_VIEW,
+            "Aid to Kenya, last 3 years",
+            {"start": {"anchor": "latest", "offset": -2}, "end": {"anchor": "latest", "offset": 0}},
+        ),
+        # A rolling frame's years move on, so its card names none.
+        ({"type": "table"}, {**TEN_VIEW, "rolling": True}, "Aid to Kenya", None),
+    ],
+    ids=["range", "bar", "period_bars", "stat", "latest_periods", "rolling"],
+)
+async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
+    monkeypatch: pytest.MonkeyPatch,
+    chart: dict[str, Any],
+    view: dict[str, Any],
+    title: str,
+    window: dict[str, Any] | None,
+) -> None:
+    """The model names the subject and the tool writes the period once: a
+    table's or a period bar chart's first and last years, the year a bar
+    chart of listed providers is drawn and pinned at, the year of a stat
+    card's value, and periods counted back."""
+    executor, result = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=view, **chart
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == (title, window)
+    assert result["charts"][0]["title"] == title
+
+
+async def test_a_card_whose_frame_is_unread_names_no_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat card's period is its value's, read from the frame's rows, so a
+    frame the store does not hold gives none, and no period is guessed."""
+    executor, _ = await _draw_wide(
+        monkeypatch,
+        HeldFrames(held=False),
+        providers=10,
+        view=TEN_VIEW,
+        type="stat_card",
+        select_json=_ten_select("C"),
+    )
+
+    (intent,) = _intents(executor)
+    assert (intent["title"], intent.get("window")) == ("Aid to Kenya", None)
+
+
+@pytest.mark.parametrize(
+    ("title", "named"),
+    [
+        ("Aid to Kenya (2025)", "2025"),
+        ("Aid to Kenya in 2024", "2024"),
+        ("Aid to Kenya, 2023 to 2025", "2023"),
+    ],
+)
+async def test_make_charts_refuses_a_title_naming_a_year_of_its_frame(
+    monkeypatch: pytest.MonkeyPatch, title: str, named: str
+) -> None:
+    """Under a cap of two, the two largest of ten are ranked at 2023, the year
+    half of them hold. A title naming any year of the frame, 2025 the latest
+    included, is refused before a write, so no card states two periods; the
+    subject alone is drawn with the cut's period once."""
+    for module in (orchestrator_tools, chart_binding):
+        monkeypatch.setattr(module, "MAX_SERIES_PER_COMPONENT", 2)
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = BarPlatform(TEN_PROVIDERS)
+    executor.view = copy.deepcopy(TEN_VIEW)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    refused = await tools["make_charts"]([_wide_chart(type="bar_chart", title=title)], ctx)
+    drawn = await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    (entry,) = refused["charts"]
+    assert _stated(entry) == ("title_names_period", "correct_and_retry")
+    assert entry["fix"] == {"period": named}
+    (intent,) = _intents(executor)
+    assert (
+        intent["title"] == drawn["charts"][0]["title"] == "Aid to Kenya (2 largest of 10 in 2023)"
+    )
+
+
+async def test_make_charts_draws_a_title_naming_a_year_outside_its_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A year the frame does not cover is no period of the card."""
+    executor, _ = await _draw_wide(
+        monkeypatch, RowFrames(TEN_PROVIDERS), providers=10, view=TEN_VIEW, title="Agenda 2030"
+    )
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == "Agenda 2030, 2023 to 2025"
+
+
 async def test_a_cut_bar_chart_draws_every_bar_at_the_period_in_its_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A and B share 2024 as well, the period dfo-apis draws two bars at when
+    """A and B share 2024 as well, the period apis draws two bars at when
     no window names another. The payload holds their 2023 values."""
     executor = await _draw_ten(monkeypatch)
 
@@ -2293,7 +2486,7 @@ async def test_make_charts_cuts_a_frame_of_one_span_at_that_span(
         assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(29, 5, -1)]
     else:
         assert (intent["title"], intent["select"]) == (
-            "Aid to Kenya",
+            "Aid to Kenya, 2020 to 2024",
             {"financingRecipient": "country/KEN"},
         )
     assert intent.get("window") == window
@@ -2345,7 +2538,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     monkeypatch: pytest.MonkeyPatch, role: str, carried: bool
 ) -> None:
     """Group totals (the largest values here) are left out of the top N, and
-    out of its count, by the kind dfo-apis serves for the same retrieval; the
+    out of its count, by the kind apis serves for the same retrieval; the
     chart is drawn on the frame the model chose. A frame whose rows carry the
     kind or type column is ranked from those rows, with no second retrieval.
     That means parties among totals, or countries typed `Country` and
@@ -2360,7 +2553,7 @@ async def test_make_charts_ranks_parties_only_over_the_cap(
     (intent,) = _intents(executor)
     assert intent["frame_ref"] == WIDE_REF
     assert intent["select"][role] == [f"donor/{number:02d}" for number in range(24, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (24 largest of 25 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (24 largest of 25 in 2024)"
     assert "another level: 5." in result["charts"][0]["note"]
     assert _kind_reads(executor) == (0 if carried else 1)
 
@@ -2407,7 +2600,306 @@ async def test_make_charts_asks_a_frame_with_no_fetch_for_its_kinds_by_its_spec(
         assert "error" in result["charts"][0]
     else:
         assert calls == [asked]
-        assert result["charts"][0]["title"] == "t (24 largest of 30 in 2024)"
+        assert result["charts"][0]["title"] == "t, 2023 to 2024 (24 largest of 30 in 2024)"
+
+
+async def test_make_charts_cut_title_carries_one_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chart titled with the title of a card already cut, as the model copies
+    it from the first card's result, ends in one suffix."""
+    cut = "Aid to Kenya, 2023 to 2024 (24 largest of 30 in 2024)"
+
+    executor, _ = await _draw_wide(monkeypatch, HeldFrames(), type="table", title=cut)
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == cut
+
+
+class Landing:
+    """`executor`, each card it writes given an id of its own and landed on
+    `state`'s canvas with the intent it was written from, as the Studio
+    translator lands it. `describe_component` reads a card back as
+    presentation-mcp gives its head revision, or answers `described` when
+    set."""
+
+    def __init__(self, executor: FakeExecutor, state: ConversationState) -> None:
+        self.executor = executor
+        self.state = state
+        self.calls = executor.calls
+        self.cards: dict[str, dict[str, Any]] = {}
+        self.described: dict[str, Any] | Exception | None = None
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "describe_component":
+            self.calls.append((tool, args))
+            if isinstance(self.described, Exception):
+                raise self.described
+            card = self.cards[args["component_id"]]
+            return self.described or {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component_body": {
+                    "component_id": card["component_id"],
+                    "revision": card["revision"],
+                    "fact_summary": card["fact_summary"],
+                },
+                "resolved_payload": card["payload"],
+            }
+        written = await self.executor(tool=tool, args=args, on_progress=on_progress)
+        if tool != "write_component":
+            return written
+        component_id = f"cmp_{len(_intents(self.executor)):02d}"
+        component = written["component"] | {"component_id": component_id}
+        component["payload"] = component["payload"] | {"component_id": component_id}
+        self.cards[component_id] = component
+        return written | {"component": component}
+
+    def land_component(self, component: dict[str, Any]) -> None:
+        land_component(self.state, component, intent=_intents(self.executor)[-1])
+
+
+def _landing_tools(executor: FakeExecutor) -> tuple[Landing, dict[str, Any], SimpleNamespace]:
+    """The tools over `executor`, its cards landing on one conversation's
+    canvas, which the tools read through the Studio seams."""
+    state = ConversationState(conversation_id="c1")
+    landing = Landing(executor, state)
+    tools, ctx = _tools(
+        executor=landing,
+        canvas_series=state.canvas_series_ids,
+        canvas_cards=state.canvas_cards,
+        remove_cards=_remove_seam(state),
+    )
+    return landing, tools, ctx
+
+
+async def _draw_wide_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, Any],
+    second: dict[str, Any],
+    *,
+    later_turn: bool,
+) -> tuple[Landing, list[dict[str, Any]]]:
+    """Fetch the wide frame and draw `first` then `second`, in two calls of
+    one turn or, when `later_turn`, the second in the next turn."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    results = [await tools["make_charts"]([_wide_chart(**first)], ctx)]
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+    results.append(await tools["make_charts"]([_wide_chart(**second)], ctx))
+    return executor, results
+
+
+_TURNS = pytest.mark.parametrize("later_turn", [False, True], ids=["same_turn", "later_turn"])
+
+
+@_TURNS
+@pytest.mark.parametrize("asked", [{}, {"state_values_for": ["donor/03"], "state_span": True}])
+async def test_make_charts_does_not_draw_a_card_the_canvas_holds(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, asked: dict[str, Any]
+) -> None:
+    """The same title, kind, frame, select and cut drawn again, in the same
+    turn or a later one and whatever figures it asks for, writes no second
+    component and returns the first card with a notice."""
+    executor, (first, again) = await _draw_wide_twice(
+        monkeypatch, {"type": "table"}, {"type": "table", **asked}, later_turn=later_turn
+    )
+
+    assert len(_intents(executor)) == 1
+    (card,) = again["charts"]
+    assert card["title"] == first["charts"][0]["title"]
+    assert "already_on_canvas" in card
+
+
+@_TURNS
+async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A bar chart drawn again with a bar named reads that bar's value from
+    the series the card drew, past the twelve the platform's summary lists,
+    and writes nothing. In the same turn the largest and smallest come too;
+    a later turn began with the card's series on the canvas, so it states
+    only the bar named."""
+    values = {f"donor/{number:02d}": {"2023": 100.0 - number} for number in range(30)}
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(values))
+    executor, tools, ctx = _landing_tools(BarPlatform(values))
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"](
+        [_wide_chart(type="bar_chart", state_values_for=["donor/19"])], ctx
+    )
+
+    (card,) = again["charts"]
+    assert len(_intents(executor)) == 1
+    assert "already_on_canvas" in card
+    assert [args for tool, args in executor.calls if tool == "describe_component"] == [
+        {"component_id": "cmp_01"}
+    ]
+    # The turn keeps the card's id alone, none of its points.
+    assert [set(card) for card in ctx.state["orchestrator:drawn_cards"]["drawn"].values()] == [
+        {"component_id", "revision"}
+    ]
+    assert card["holds"]["series_count"] == 24
+    assert _figures(card) == [("Provider donor/19", 81.0, "2023")] + (
+        []
+        if later_turn
+        else [
+            ("Provider donor/00", 100.0, "2023", "largest"),
+            ("Provider donor/23", 77.0, "2023", "smallest"),
+        ]
+    )
+
+
+@_TURNS
+@pytest.mark.parametrize(
+    "described",
+    [
+        {"outcome": "refusal", "refusal": {"code": "not_found", "message": "gone"}},
+        {"outcome": "ok", "frame_refs": [], "component_body": {}, "resolved_payload": None},
+        TimeoutError("describe_component timed out"),
+    ],
+    ids=["refused", "no_resolved_payload", "raised"],
+)
+async def test_make_charts_refuses_a_card_on_the_canvas_it_cannot_read_back(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, described: dict[str, Any] | Exception
+) -> None:
+    """A card on the canvas whose head revision cannot be read is refused
+    under `figures_unread`, with no figure and no second copy written, and
+    the call spends the failed budget."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+    executor.described = described
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    (card,) = again["charts"]
+    assert len(_intents(executor)) == 1
+    assert "reply_figures" not in card
+    assert _stated(card) == (HarnessCode.FIGURES_UNREAD, "do_not_retry")
+    calls = ctx.state["orchestrator:calls"]
+    assert (calls["make_charts"], calls["make_charts_failed"]) == (1, 1)
+
+
+async def test_make_charts_counts_a_call_that_read_a_card_as_one_that_drew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rereads give figures, so they spend the drawn budget, not the failed
+    one: after three of them a fifth call still draws."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+
+    for _ in range(3):
+        assert (
+            "already_on_canvas" in (await tools["make_charts"]([_wide_chart()], ctx))["charts"][0]
+        )
+    drawn = await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    assert "error" not in drawn["charts"][0]
+    assert [intent["type"] for intent in _intents(executor)] == ["table", "bar_chart"]
+    calls = ctx.state["orchestrator:calls"]
+    assert (calls["make_charts"], calls.get("make_charts_failed", 0)) == (5, 0)
+
+
+@_TURNS
+@pytest.mark.parametrize("all_cards", [False, True], ids=["named", "all_cards"])
+async def test_make_charts_draws_again_a_card_remove_cards_took_off(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool, all_cards: bool
+) -> None:
+    """A card taken off the canvas, by its id or with every card, is drawn
+    again by a later call of the turn or of a later turn, and the card left
+    on is not."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    table, bars = _wide_chart(), _wide_chart(type="bar_chart")
+    await tools["make_charts"]([table, bars], ctx)
+
+    removed = await tools["remove_cards"](ctx, ["cmp_01"], all_cards=all_cards)
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+    again = await tools["make_charts"]([table, bars], ctx)
+
+    assert removed["removed"] == (["cmp_01", "cmp_02"] if all_cards else ["cmp_01"])
+    assert [intent["type"] for intent in _intents(executor)] == (
+        ["table", "bar_chart", "table", "bar_chart"]
+        if all_cards
+        else ["table", "bar_chart", "table"]
+    )
+    assert ["already_on_canvas" in card for card in again["charts"]] == [False, not all_cards]
+    assert executor.state.composition is not None
+    assert len(executor.state.composition.blocks) == 2
+
+
+async def test_make_charts_reads_a_card_the_user_added_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card the model took off and the user added back unchanged is the
+    same card, so a later turn's ask for it reads it and writes nothing."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    await tools["remove_cards"](ctx, ["cmp_01"])
+    state = executor.state
+    applied = _apply_operations(
+        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_01")]
+    )
+    assert isinstance(applied, tuple)
+    state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
+    ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 1
+    assert "already_on_canvas" in again["charts"][0]
+
+
+@_TURNS
+async def test_make_charts_draws_again_a_card_revised_since_it_was_drawn(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A card the user revised through Edit Card no longer draws the intent
+    it was written from, so asking for that intent draws it anew."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", HeldFrames)
+    executor, tools, ctx = _landing_tools(WideFrameExecutor())
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart()], ctx)
+    revised = executor.cards["cmp_01"] | {"revision": executor.cards["cmp_01"]["revision"] + 1}
+    _revised_frames(
+        executor.state, component_id="cmp_01", component=revised, patch={"title": "Renamed"}
+    )
+    executor.cards["cmp_01"] = revised
+    if later_turn:
+        ctx.invocation_id = "inv_2"
+
+    again = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert len(_intents(executor)) == 2
+    assert "already_on_canvas" not in again["charts"][0]
+
+
+@_TURNS
+async def test_make_charts_draws_a_card_of_another_kind_again(
+    monkeypatch: pytest.MonkeyPatch, later_turn: bool
+) -> None:
+    """A second chart of the same frame and select in another kind is drawn."""
+    executor, (_, second) = await _draw_wide_twice(
+        monkeypatch, {"type": "table"}, {"type": "bar_chart"}, later_turn=later_turn
+    )
+
+    assert len(_intents(executor)) == 2
+    assert "already_on_canvas" not in second["charts"][0]
 
 
 async def test_make_charts_counts_only_the_members_the_chart_lists(
@@ -2425,7 +2917,7 @@ async def test_make_charts_counts_only_the_members_the_chart_lists(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in range(8, 0, -1)]
-    assert intent["title"] == "Aid to Kenya (8 largest of 9 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024 (8 largest of 9 in 2024)"
 
 
 async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
@@ -2439,6 +2931,7 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 0
 
 
+@pytest.mark.parametrize("plan_unspent", [False, True], ids=["plan_spent", "plan_unspent"])
 @pytest.mark.parametrize(
     ("moves", "chart", "draws"),
     [
@@ -2450,10 +2943,10 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     ids=["fixed", "rolling", "latest_periods", "line_chart_latest_periods"],
 )
 async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
-    monkeypatch: pytest.MonkeyPatch,
     moves: dict[str, Any],
     chart: dict[str, Any],
     draws: int | None,
+    plan_unspent: bool,
 ) -> None:
     """A table that binds neither the six recipients nor the thirty providers
     is not narrowed: the model reads both dimensions and their counts. It is
@@ -2464,16 +2957,22 @@ async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
     view = copy.deepcopy(WIDE_VIEW) | moves
     view["dimensions"][2]["total_count"] = 6
 
-    executor, result = await _draw_wide(
-        monkeypatch, HeldFrames(), view=view, select_json="{}", **chart
-    )
+    executor = WideFrameExecutor(view=view)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    if not plan_unspent:
+        planned = tools["plan"](
+            "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+        )
+        assert planned[HANDED_OFF] == "plan"
+    result = await tools["make_charts"]([_wide_chart(select_json="{}", **chart)], ctx)
 
     error = result["charts"][0]["error"]
     assert "financingRecipient (6 values)" in error
     assert "financingProvider (30 values)" in error
     moving = bool(moves or chart)
     assert ("draws its largest members" in error) is not moving
-    assert ("ranking with a limit" in error) is moving
+    assert ("ranking with a limit" in error) is (moving and plan_unspent)
     assert (f"at most {draws} members" in error) is moving
     assert _stated(result["charts"][0]) == (
         HarnessCode.SERIES_LIMIT_EXCEEDED,
@@ -2502,7 +3001,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == [f"donor/{n:02d}" for n in (4, 3, 2, 1, 0)]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 
@@ -2514,7 +3013,7 @@ async def test_make_charts_orders_a_ranking_under_the_cap_highest_first(
 async def test_make_charts_keeps_the_listed_order_unless_asked_to_rank(
     monkeypatch: pytest.MonkeyPatch, chart: dict[str, Any]
 ) -> None:
-    """dfo-apis orders a bar chart's bars itself, so `order_by_value` leaves
+    """apis orders a bar chart's bars itself, so `order_by_value` leaves
     its select as listed."""
     listed = ["donor/00", "donor/03", "donor/01"]
     select = json.dumps({"financingRecipient": "country/KEN", "financingProvider": listed})
@@ -2554,7 +3053,7 @@ async def test_make_charts_keeps_a_table_under_the_platforms_row_cap(
 
     (intent,) = _intents(executor)
     assert len(intent["select"]["financingProvider"]) == 20
-    assert intent["title"] == "Aid to Kenya (20 largest of 30 in 2024)"
+    assert intent["title"] == "Aid to Kenya, 1925 to 2024 (20 largest of 30 in 2024)"
 
 
 @pytest.mark.parametrize(
@@ -2605,7 +3104,7 @@ async def test_make_charts_orders_a_member_with_no_value_at_the_period_last(
 
     (intent,) = _intents(executor)
     assert intent["select"]["financingProvider"] == ["donor/b", "donor/a", "donor/c"]
-    assert intent["title"] == "Aid to Kenya"
+    assert intent["title"] == "Aid to Kenya, 2023 to 2024"
     assert "note" not in result["charts"][0]
 
 
@@ -2628,7 +3127,7 @@ SIX_RECIPIENTS = [f"country/R{number}" for number in range(6)]
 
 
 class SixSeriesExecutor(FakeExecutor):
-    """Describes a frame of six series, one for each recipient, as dfo-apis
+    """Describes a frame of six series, one for each recipient, as apis
     lists a dimension, its values with the empty cells dropped. Five series
     are the United States' and the sixth, a total, has no provider."""
 
@@ -2936,7 +3435,10 @@ async def test_make_charts_offers_a_plan_for_an_unranked_select_only_while_one_i
     await tools["fetch"](SPEC_LIFE, ctx)
 
     unspent = await tools["make_charts"]([_wide_chart()], ctx)
-    tools["plan"]("Rank the providers of aid to Kenya", [], ctx)
+    planned = tools["plan"](
+        "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+    )
+    assert planned[HANDED_OFF] == "plan"
     spent = await tools["make_charts"]([_wide_chart()], ctx)
 
     assert "plan" in unspent["charts"][0]["error"]
@@ -2958,28 +3460,33 @@ def test_ask_user_records_the_question_and_refuses_a_second_hand_off():
     tools, ctx = _tools()
     _, later = _tools()
 
-    options = [{"label": "Republic of the Congo"}, {"label": "DR Congo"}]
+    questions = [
+        {
+            "question": "Which Congo?",
+            "options": [{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+        }
+    ]
 
-    assert _stated(tools["ask_user"]("Which Congo?", [], ctx)) == (
-        "tool_arguments_invalid",
-        "correct_and_retry",
-    )
+    assert "refusal" in tools["ask_user"]([], ctx)
     assert not ctx.actions.skip_summarization
-    asked = tools["ask_user"]("Which Congo?", options, ctx)
+    asked = tools["ask_user"](questions, ctx)
     later.state.update(ctx.state)
-    second = tools["plan"]("Congo's GDP", [], later)
+    second = tools["plan"]("Congo's GDP", ["Congo's GDP"], later)
 
     assert asked[HANDED_OFF] == "ask"
     assert ctx.actions.skip_summarization is True
     assert HANDED_OFF not in second
     assert not later.actions.skip_summarization
-    assert pending_action(ctx.state) == PendingAsk(question="Which Congo?", options=options)
+    assert pending_action(ctx.state) == PendingAsk(questions=questions)
     assert "already waiting on ask" in second["error"]
     assert _stated(second) == ("hand_off_pending", "do_not_retry")
 
 
-async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
-    # Search's answer to "Bilateral plus imputed multilateral aid from France to Kenya".
+@pytest.mark.parametrize("constant", [False, True], ids=["counts", "counts_and_prices"])
+async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constant: bool):
+    # Search's answer to "Bilateral plus imputed multilateral aid from France to
+    # Kenya", and the same answer offering the gross count in constant prices
+    # as dfo-apis lists it: axis "unit", labelled by its prices.
     envelope = json.loads(
         (
             Path(__file__).parents[2]
@@ -2989,6 +3496,10 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
             / "resolve_aid_france_kenya.json"
         ).read_text()
     )
+    if constant:
+        envelope["parts"][0]["spec"]["resolved"]["alternative_measures"].append(
+            {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}}
+        )
     tools, ctx = _tools(resolver=_resolver(resolver_digest(envelope)))
 
     found = await tools["search"]("aid from France to Kenya", ctx, [{"variable": "aid"}])
@@ -2998,52 +3509,129 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id():
     assert part["alternatives"] == [
         {"spec_id": "spec_c67524ce5da3bfd4d94994a76c560b28", "label": "net disbursements"}
     ]
+    assert part.get("other_prices") == (
+        [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
+    )
 
 
 SPEC_NET = "spec_" + "c" * 32
+SPEC_CONSTANT = "spec_" + "e" * 32
 # `FAMILY_BLOCK` counted as gross disbursements, offering net disbursements
-# under its own spec_id, as search's `resolved.alternative_measures` states it.
+# and constant prices, each under its own spec_id, as search's
+# `resolved.alternative_measures` states them.
 COUNTED_BLOCK = {
     **FAMILY_BLOCK,
     "resolved": {
         **FAMILY_BLOCK["resolved"],
         "measure_label": "gross disbursements",
         "alternative_measures": [
-            {"label": "net disbursements", "axis": "what", "definition": {"spec_id": SPEC_NET}}
+            {"label": "net disbursements", "axis": "what", "definition": {"spec_id": SPEC_NET}},
+            {"label": "constant prices", "axis": "unit", "definition": {"spec_id": SPEC_CONSTANT}},
         ],
     },
 }
 
 
+def _count_question(net: str) -> dict[str, Any]:
+    """`ask_user`'s question on how to count the aid: gross under `SPEC_AID`, net under `net`."""
+    return {
+        "question": "How should aid be counted?",
+        "options": [
+            {"label": "gross disbursements", "spec_id": SPEC_AID},
+            {"label": "net disbursements", "spec_id": net},
+        ],
+    }
+
+
+_PRICES_QUESTION = {
+    "question": "In which prices?",
+    "options": [{"label": "Current US dollars"}, {"label": "Constant 2023 US dollars"}],
+}
+
+
 @pytest.mark.parametrize(
-    ("net", "refused"),
+    ("questions", "refused"),
     [
-        (SPEC_NET, None),
-        ("spec_" + "d" * 32, "which no search result named this turn"),
-        (SPEC_AID, "is on more than one option"),
+        ([_count_question(SPEC_NET), _PRICES_QUESTION], None),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "Current US dollars"},
+                        {"label": "constant prices", "spec_id": SPEC_CONSTANT},
+                    ],
+                },
+            ],
+            None,
+        ),
+        ([_count_question("spec_" + "d" * 32)], "which no search result named this turn"),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "current prices", "spec_id": SPEC_AID},
+                        {"label": "constant prices", "spec_id": SPEC_CONSTANT},
+                    ],
+                },
+            ],
+            f"{SPEC_AID} is on more than one option",
+        ),
+        ([_count_question(SPEC_AID)], "is on more than one option"),
+        (
+            [
+                _count_question(SPEC_NET),
+                {
+                    "question": "Which count first?",
+                    "options": [{"label": "net disbursements", "spec_id": SPEC_NET}],
+                },
+            ],
+            f"{SPEC_NET} is on more than one option",
+        ),
+        ([], "it asks 0 questions, and ask_user takes 1 to 3"),
+        ([_PRICES_QUESTION] * 4, "it asks 4 questions, and ask_user takes 1 to 3"),
+        (
+            [_count_question(SPEC_NET), {"question": "In which prices?", "options": []}],
+            "question 'In which prices?' offers no option",
+        ),
     ],
-    ids=["offered", "unnamed", "repeated"],
+    ids=[
+        "offered",
+        "prices_offered",
+        "unnamed",
+        "elected_on_both_first_options",
+        "repeated",
+        "repeated_across_questions",
+        "no_question",
+        "four_questions",
+        "no_option",
+    ],
 )
 async def test_ask_user_offers_a_count_only_under_a_spec_id_this_turns_search_named(
-    net: str, refused: str | None
+    questions: list[dict[str, Any]], refused: str | None
 ):
     part = {"variable": "aid", "status": "definite", "spec_id": SPEC_AID}
     tools, ctx = _tools(resolver=_resolver(_digest({**part, "spec_block": COUNTED_BLOCK})))
     await tools["search"]("aid to Kenya", ctx, [{"variable": "aid"}])
-    options = [
-        {"label": "gross disbursements", "spec_id": SPEC_AID},
-        {"label": "net disbursements", "spec_id": net},
-    ]
 
-    asked = tools["ask_user"]("How should aid be counted?", options, ctx)
+    asked = tools["ask_user"](questions, ctx)
 
     if refused is None:
         assert asked[HANDED_OFF] == "ask"
-        assert pending_action(ctx.state).options[1].spec_id == SPEC_NET
+        pending = pending_action(ctx.state)
+        assert [question.question for question in pending.questions] == [
+            "How should aid be counted?",
+            "In which prices?",
+        ]
+        assert pending.questions[0].options[1].spec_id == SPEC_NET
     else:
         assert refused in asked["refusal"]
         assert asked["code"] == ToolErrorCode.REQUEST_INVALID.value
         assert ctx.state.get(ORCHESTRATOR_PENDING_KEY) is None
+        assert ctx.state.get(ORCHESTRATOR_CALLS_KEY, {}).get("ask_user") is None
 
 
 # Search's answer to "Bilateral plus imputed multilateral aid from France to
@@ -3083,12 +3671,71 @@ def _net_family_envelope() -> dict[str, Any]:
     }
 
 
-async def _searched_france_kenya(definition_surface) -> tuple[dict[str, Any], Any, FakeExecutor]:
-    """The tools after one search for aid from France to Kenya, with the
-    conversation's identities on record as `harness.studio` keeps them."""
+# The net count in constant prices, which the constant-prices sibling of the
+# elected gross count offers as its other count.
+FRANCE_KENYA_NET_CONSTANT = "spec_" + "d" * 32
+
+
+def _prices_offered() -> dict[str, Any]:
+    """Search's answer for aid from France to Kenya with its one sibling, under
+    `FRANCE_KENYA_NET`'s spec_id, offered as the gross count in constant
+    prices (axis `unit`)."""
+    envelope = copy.deepcopy(FRANCE_KENYA)
+    (sibling,) = envelope["parts"][0]["spec"]["resolved"]["alternative_measures"]
+    sibling.update(axis="unit", label="constant prices")
+    return envelope
+
+
+def _constant_prices_envelope() -> dict[str, Any]:
+    """Search's answer for the constant-prices sibling's definition: the gross
+    count search elected, offering current prices back and the net count in
+    constant prices."""
+    envelope = _net_family_envelope()
+    resolved = envelope["parts"][0]["spec"]["resolved"]
+    (current,) = resolved["alternative_measures"]
+    net = copy.deepcopy(current)
+    net["definition"]["spec_id"] = FRANCE_KENYA_NET_CONSTANT
+    resolved["alternative_measures"] = [
+        {**net, "label": "net disbursements"},
+        {**current, "axis": "unit", "label": "current prices"},
+    ]
+    resolved["measure_label"] = "gross disbursements"
+    return envelope
+
+
+# How search offers `FRANCE_KENYA_NET` beside the gross count it elected: the
+# search answer, the sibling's own definition, and the lines the offering
+# reading and the sibling's reading render, with `{gross}` and `{net}` for
+# the two spec_ids.
+_SIBLINGS = {
+    "another-count": (
+        FRANCE_KENYA,
+        _net_family_envelope,
+        (
+            "   counted as gross disbursements; other counts: net disbursements [{net}]",
+            "   counted as net disbursements, another count of {gross}",
+        ),
+    ),
+    "other-prices": (
+        _prices_offered(),
+        _constant_prices_envelope,
+        (
+            "   counted as gross disbursements; other prices: constant prices [{net}]",
+            "   counted as gross disbursements in constant prices, other prices of {gross}",
+        ),
+    ),
+}
+
+
+async def _searched_france_kenya(
+    definition_surface, envelope: dict[str, Any] = FRANCE_KENYA
+) -> tuple[dict[str, Any], Any, FakeExecutor]:
+    """The tools after one search for aid from France to Kenya answered by
+    `envelope`, with the conversation's identities on record as
+    `harness.studio` keeps them."""
     executor = FakeExecutor()
     tools = build_orchestrator_tools(
-        resolver=_resolver(resolver_digest(FRANCE_KENYA)),
+        resolver=_resolver(resolver_digest(envelope)),
         executor=executor,
         definition_surface=definition_surface,
     )
@@ -3101,11 +3748,13 @@ async def _searched_france_kenya(definition_surface) -> tuple[dict[str, Any], An
     return by_name, ctx, executor
 
 
-async def test_a_fetch_of_another_count_reads_its_own_block_and_gains_a_reading():
-    surface = FakeSurface(
-        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
-    )
-    tools, ctx, executor = await _searched_france_kenya(surface)
+@pytest.mark.parametrize("offered", _SIBLINGS)
+async def test_a_fetch_of_a_sibling_reads_its_own_block_and_gains_a_reading(offered: str):
+    """A fetched sibling gains a reading stating the count it reads, linked
+    to the reading that offered it, which a later turn renders."""
+    searched, definition, lines = _SIBLINGS[offered]
+    surface = FakeSurface(ToolCallResult(is_error=False, **search_result_parts(definition())))
+    tools, ctx, executor = await _searched_france_kenya(surface, searched)
 
     found = await tools["fetch"](FRANCE_KENYA_NET, ctx)
 
@@ -3124,18 +3773,51 @@ async def test_a_fetch_of_another_count_reads_its_own_block_and_gains_a_reading(
     )
     assert chosen.fetch is not None and chosen.fetch.summary == "64 observations"
     assert elected.fetch is None
-    assert (elected.other_count_of, chosen.other_count_of) == (None, elected.spec_id)
+    assert (elected.sibling_of, chosen.sibling_of and chosen.sibling_of.spec_id) == (
+        None,
+        elected.spec_id,
+    )
+    rendered = render_readings([elected, chosen], budget=10_000).text.splitlines()
+    for line in lines:
+        assert line.format(gross=elected.spec_id, net=FRANCE_KENYA_NET) in rendered
 
 
+@pytest.mark.parametrize(
+    ("offered", "count_of", "options", "chosen", "rationale"),
+    [
+        (
+            "another-count",
+            True,
+            ("gross disbursements", "net disbursements"),
+            "net disbursements",
+            "Chosen in place of gross disbursements, the measure search elected.",
+        ),
+        (
+            "other-prices",
+            False,
+            ("gross disbursements", "net disbursements"),
+            "gross disbursements",
+            "Search elected gross disbursements for this source.",
+        ),
+    ],
+)
 @pytest.mark.parametrize("gross_first", [True, False], ids=["gross-first", "net-first"])
-async def test_a_fetched_other_count_states_the_measure_search_elected(gross_first: bool):
+async def test_a_fetched_sibling_states_the_measure_search_elected(
+    gross_first: bool,
+    offered: str,
+    count_of: bool,
+    options: tuple[str, ...],
+    chosen: str,
+    rationale: str,
+):
     """The net count's own block names net as its measure and offers gross
     back; a plan pinning net after a fetch of it still says search elected
-    gross, whichever source the planner is shown first."""
-    surface = FakeSurface(
-        ToolCallResult(is_error=False, **search_result_parts(_net_family_envelope()))
-    )
-    tools, ctx, _ = await _searched_france_kenya(surface)
+    gross, whichever source the planner is shown first. The gross count in
+    constant prices settles as its own source: its block elects the gross
+    count search elected, and offers the net count in constant prices."""
+    searched, definition, _ = _SIBLINGS[offered]
+    surface = FakeSurface(ToolCallResult(is_error=False, **search_result_parts(definition())))
+    tools, ctx, _ = await _searched_france_kenya(surface, searched)
     await tools["fetch"](FRANCE_KENYA_NET, ctx)
     gross = FRANCE_KENYA["parts"][0]["spec"]["spec_id"]
     shown = [gross, FRANCE_KENYA_NET] if gross_first else [FRANCE_KENYA_NET, gross]
@@ -3152,11 +3834,12 @@ async def test_a_fetched_other_count_states_the_measure_search_elected(gross_fir
         "counted_as", FRANCE_KENYA_NET, choice, user=None
     )
 
-    assert pins[FRANCE_KENYA_NET].other_count_of == gross
+    assert pins[FRANCE_KENYA_NET].settled
+    assert pins[FRANCE_KENYA_NET].other_count_of == (gross if count_of else None)
     assert (decision.options, decision.chosen, decision.rationale) == (
-        ("gross disbursements", "net disbursements"),
-        "net disbursements",
-        "Chosen in place of gross disbursements, the measure search elected.",
+        options,
+        chosen,
+        rationale,
     )
 
 
@@ -3200,9 +3883,9 @@ async def test_a_fetch_of_another_count_search_cannot_read_is_refused_without_ge
 def test_plan_records_the_brief_once_per_turn():
     tools, ctx = _tools()
 
-    first = tools["plan"]("Kenya's aid as a share of GDP since 2010", [], ctx)
+    first = tools["plan"]("Kenya's aid as a share of GDP since 2010", ["the share since 2010"], ctx)
     ctx.state["orchestrator:pending"] = None  # the workflow took it
-    again = tools["plan"]("Kenya's aid as a share of GDP since 2010", [], ctx)
+    again = tools["plan"]("Kenya's aid as a share of GDP since 2010", ["the share since 2010"], ctx)
 
     assert first["status"].startswith("Recorded")
     assert pending_action({"orchestrator:pending": {"kind": "plan", "brief": "b"}}) == PendingPlan(
@@ -3214,6 +3897,7 @@ def test_plan_records_the_brief_once_per_turn():
 @pytest.mark.parametrize(
     "asks",
     [
+        [],
         [f"output {number}" for number in range(MAX_PLAN_ASKS + 1)],
         ["the total since 2010", "  "],
         ["x" * (MAX_ASK_CHARS + 1)],
@@ -3226,7 +3910,7 @@ def test_plan_refuses_asks_past_the_planner_limits_without_spending_the_call(ask
     recorded = tools["plan"]("France's aid to Guatemala", [" the total since 2010 "], ctx)
 
     assert refused["code"] == ToolErrorCode.REQUEST_INVALID.value
-    assert refused["legal"] == {"max_asks": MAX_PLAN_ASKS, "ask_chars": [1, MAX_ASK_CHARS]}
+    assert refused["legal"] == {"asks": [1, MAX_PLAN_ASKS], "ask_chars": [1, MAX_ASK_CHARS]}
     assert HANDED_OFF not in refused
     assert recorded[HANDED_OFF] == "plan"
     assert pending_action(ctx.state) == PendingPlan(
@@ -3357,6 +4041,27 @@ async def test_plan_names_the_parties_of_a_side_the_search_held_open_by_its_colu
     assert "held donor/creditor/exporter open" in refused["error"]
     assert not re.search(r'(?<!one of )"donor"', refused["error"])
     assert pending_action(ctx.state) is None
+
+
+async def test_plan_carries_the_asks_put_across_years_by_number():
+    tools, ctx = await _searched(_BY_CREDITOR)
+
+    recorded = tools["plan"](
+        "Total debt service between 2015 and 2022",
+        [
+            {"text": "Debt service by creditor", "by": ["creditor"]},
+            {"text": "The total between 2015 and 2022", "over": ["creditor"], "across_years": True},
+        ],
+        ctx,
+    )
+
+    assert recorded[HANDED_OFF] == "plan"
+    assert pending_action(ctx.state) == PendingPlan(
+        brief="Total debt service between 2015 and 2022",
+        asks=["Debt service by creditor", "The total between 2015 and 2022"],
+        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+        asks_across_years=[1],
+    )
 
 
 async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():
@@ -3526,7 +4231,7 @@ _COUNTS = "DFO holds 108,905 indicators in 92 datasets from 42 publishers."
     ("counts_result", "counts"),
     [
         (ToolCallResult(is_error=False, text=_COUNTS), _COUNTS),
-        # dfo-apis answers 503 while no search catalogue is published.
+        # apis answers 503 while no search catalogue is published.
         (
             ToolCallResult(is_error=True, structured_content={"code": "service_unavailable"}),
             COUNTS_UNAVAILABLE,
@@ -3724,7 +4429,7 @@ async def test_recall_is_limited_per_turn_and_unavailable_without_a_conversation
 
 
 class EmptyExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real zero-row mint (Kenya health spending,
+    """get_data's outcome for apis' real zero-row mint (Kenya health spending,
     1960-1970, on dev 2026-10-07): 200, `coverage.rows` 0 and an `empty_result` warning."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
@@ -3788,7 +4493,7 @@ async def test_fetch_of_empty_data_through_an_equivalent_spec_records_it_under_i
 
 
 class FacetRefusingExecutor(FakeExecutor):
-    """get_data's outcome for dfo-apis' real refusal of a Euro unit on Kenya and Ghana
+    """get_data's outcome for apis' real refusal of a Euro unit on Kenya and Ghana
     health spending (dev, 2026-10-07)."""
 
     async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):

@@ -107,6 +107,7 @@
     "distinction": "quotient_of, not share_of: external debt is a stock set against a year's GDP, not a part of it"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Kenya and Nigeria external debt as a share of GDP over time, using external debt stocks and GDP",
     "answer_mode": "computed",
@@ -130,7 +131,7 @@
           "start": 1970,
           "end": 2024
         },
-        "source_spec_id": "spec_73da03ce27f249bdeb35e7d4cf1b363d"
+        "source_spec_id": "spec_f4e114277b9cfbd5505e334cb870856f"
       },
       {
         "kind": "dataset",
@@ -148,7 +149,7 @@
           "start": 1960,
           "end": 2025
         },
-        "source_spec_id": "spec_7c65660e43f2418f209a844a76aeef4a"
+        "source_spec_id": "spec_79795ca354db2139ac4a1bf3a83b2872"
       },
       {
         "kind": "quotient_of",

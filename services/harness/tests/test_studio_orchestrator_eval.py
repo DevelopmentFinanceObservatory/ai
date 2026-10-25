@@ -403,7 +403,7 @@ async def test_a_judge_that_stays_unavailable_marks_the_case_and_the_run_goes_on
 
 
 class _ScriptedStudio:
-    """A client whose turn request pauses on one question and whose resume ends the turn."""
+    """A client whose turn request pauses on two questions and whose resume ends the turn."""
 
     def __init__(self) -> None:
         self.frames = {
@@ -411,17 +411,36 @@ class _ScriptedStudio:
                 {
                     "event": "elicitation.request",
                     "interrupt_id": "int_1",
-                    "question": "How should aid and debt be combined?",
-                    "options": [
-                        {"id": "opt_net", "label": "Net ODA plus total debt", "description": "d"},
-                        {"id": "opt_ppg", "label": "Net ODA plus PPG debt"},
+                    "questions": [
+                        {
+                            "id": "q1",
+                            "question": "How should the aid be counted?",
+                            "options": [
+                                {
+                                    "id": "spec_net",
+                                    "label": "Net disbursements",
+                                    "description": "d",
+                                },
+                                {"id": "spec_gross", "label": "Gross disbursements"},
+                            ],
+                        },
+                        {
+                            "id": "q2",
+                            "question": "Current or constant prices?",
+                            "options": [
+                                {"id": "o1", "label": "Constant 2023 US dollars"},
+                                {"id": "o2", "label": "Current US dollars"},
+                            ],
+                        },
                     ],
                 }
             ],
             "/api/studio/interrupt": [{"event": "done"}],
         }
+        self.sent: list[dict[str, Any]] = []
 
     def stream(self, method: str, path: str, **request: Any) -> Any:
+        self.sent.append(request["json"])
         lines = [f"data: {json.dumps(frame)}" for frame in self.frames[path]]
 
         class Response:
@@ -439,28 +458,55 @@ class _ScriptedStudio:
 
 
 @pytest.mark.parametrize(
-    ("turn_answer", "shown"),
+    ("scripted", "sent", "shown"),
     [
-        ({}, "Net ODA plus total debt"),
-        ({"elicitation_text": "Keep them separate"}, "Keep them separate"),
+        (
+            [],
+            {
+                "q1": {"kind": "option", "option_id": "spec_net"},
+                "q2": {"kind": "option", "option_id": "o1"},
+            },
+            ["Net disbursements", "Constant 2023 US dollars"],
+        ),
+        (
+            [{"option": 2}, {"skipped": True}],
+            {"q1": {"kind": "option", "option_id": "spec_gross"}, "q2": {"kind": "skipped"}},
+            ["Gross disbursements", "left to the agent"],
+        ),
+        (
+            [{"text": "Count commitments"}],
+            {
+                "q1": {"kind": "text", "text": "Count commitments"},
+                "q2": {"kind": "option", "option_id": "o1"},
+            },
+            ["Count commitments", "Constant 2023 US dollars"],
+        ),
     ],
 )
-async def test_the_judge_digest_carries_the_question_asked_and_the_answer_sent(
-    turn_answer: dict[str, str], shown: str
+async def test_every_question_of_a_pause_is_answered_and_shown_to_the_judge(
+    scripted: list[dict[str, Any]], sent: dict[str, Any], shown: list[str]
 ) -> None:
     run = _load("run")
-    turn = {"message": "Help me combine aid and debt", **turn_answer}
+    studio = _ScriptedStudio()
+    turn = {"message": "How much aid did France give?", "elicitation_answers": scripted}
 
-    frames, _, _, answers = await run._run_message_turn(_ScriptedStudio(), "conv", turn, [])
+    frames, _, missed, answers = await run._run_message_turn(studio, "conv", turn, [])
 
+    assert missed == []
+    assert studio.sent[-1]["answers"] == sent
+    assert "payload" not in studio.sent[-1]
     (asked,) = run._turn_digest(frames, answers)["elicitations"]
-    assert asked["question"] == "How should aid and debt be combined?"
-    assert [o["label"] for o in asked["options"]] == [
-        "Net ODA plus total debt",
-        "Net ODA plus PPG debt",
+    assert [q["question"] for q in asked["questions"]] == [
+        "How should the aid be counted?",
+        "Current or constant prices?",
     ]
-    assert asked["answer"] == shown
-    assert run._turn_digest(frames)["elicitations"][0]["answer"] is None
+    assert [o["label"] for o in asked["questions"][0]["options"]] == [
+        "Net disbursements",
+        "Gross disbursements",
+    ]
+    assert [q["answer"] for q in asked["questions"]] == shown
+    unanswered = run._turn_digest(frames)["elicitations"][0]["questions"]
+    assert [q["answer"] for q in unanswered] == [None, None]
 
 
 def test_the_judge_digest_orders_entries_across_lists() -> None:
@@ -469,7 +515,11 @@ def test_the_judge_digest_orders_entries_across_lists() -> None:
     run = _load("run")
     frames = [
         {"event": "component.created", "type": "line_chart", "fact_summary": {}},
-        {"event": "elicitation.request", "interrupt_id": "int_1", "question": "Combine how?"},
+        {
+            "event": "elicitation.request",
+            "interrupt_id": "int_1",
+            "questions": [{"id": "q1", "question": "Combine how?"}],
+        },
         {"event": "message.complete", "text": "Done."},
     ]
 
@@ -856,7 +906,12 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = _load("run")
-    question = {"event": "elicitation.request", "seq": 0, "interrupt_id": "int_1", "options": []}
+    question = {
+        "event": "elicitation.request",
+        "seq": 0,
+        "interrupt_id": "int_1",
+        "questions": [{"id": "q1", "question": "Which?", "options": []}],
+    }
     calls: list[str] = []
 
     async def fake_stream(client: object, path: str, body: dict) -> list[dict]:
@@ -868,9 +923,61 @@ async def test_a_question_with_no_options_and_no_answer_text_is_a_miss(
 
     assert calls == ["/api/studio/turn"]  # no resume was sent
     assert missed == [
-        "elicitation.request offered no options and the turn names no "
-        "elicitation_text to answer it with"
+        "elicitation.request question 1 offers 0 option(s) and the turn answers it with "
+        "{'option': 1}"
     ]
+
+
+@pytest.mark.parametrize(
+    ("rules", "violations"),
+    [
+        ({"min_questions": 2, "min_options": 2}, []),
+        ({"min_questions": 3}, ["t: elicitation asks 2 question(s), expected >= 3"]),
+        (
+            {"min_options": 3},
+            ["t: elicitation question 2 has 2 options, expected >= 3"],
+        ),
+        (
+            {"allow_free_text": True},
+            ["t: elicitation question 1 allow_free_text=False, expected True"],
+        ),
+        ({"skippable": True}, ["t: elicitation skippable=False, expected True"]),
+    ],
+)
+def test_an_elicitation_expectation_reads_every_question(
+    rules: dict[str, Any], violations: list[str]
+) -> None:
+    run = _load("run")
+    option = {"id": "o", "label": "x"}
+    pause = {
+        "event": "elicitation.request",
+        "interrupt_id": "int_1",
+        "skippable": False,
+        "questions": [
+            {"id": "q1", "question": "a", "options": [option] * 3, "allow_free_text": False},
+            {"id": "q2", "question": "b", "options": [option] * 2, "allow_free_text": True},
+        ],
+    }
+    turn = {"message": "q", "expect": {"elicitation": rules}}
+
+    assert run._check_turn_expectations(turn, [pause], label="t") == violations
+
+
+def test_a_figure_in_a_later_question_grounds_the_answer() -> None:
+    pause = {
+        "event": "elicitation.request",
+        "questions": [
+            {"id": "q1", "question": "Which count?", "options": [{"id": "o1", "label": "Net"}]},
+            {
+                "id": "q2",
+                "question": "Which prices?",
+                "options": [{"id": "o1", "label": "Constant 2023 US dollars, 12,345 a year"}],
+            },
+        ],
+    }
+
+    assert _ungrounded([pause], "It came to 12,345.") == []
+    assert _ungrounded([pause], "It came to 12,346.") != []
 
 
 def test_message_expectations_match_the_closing_text_case_insensitively() -> None:
@@ -1548,11 +1655,19 @@ def _composed(*frames: dict[str, Any]) -> dict[str, Any]:
     return {"event": "composition.updated", "manifest": {"blocks": blocks}}
 
 
+# Six places, Kenya among them, so a card of them is past the four series a
+# message may name without a figure.
+SIX_COUNTRIES = ("Kenya", "Ghana", "Uganda", "Senegal", "Malawi", "Zambia")
+
+
 def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> None:
     """With no `reply` expectation any drawn point may be stated. With one,
     a card gives what it gives unasked, and a card whose every series was on
-    the canvas as its turn began gives nothing. A card removed in between
-    is off the canvas, so drawing its series again is a new card."""
+    the canvas as its turn began gives nothing. A card on the canvas that a
+    later turn reads again, drawing nothing, gives the figures the case
+    lists, and naming a series of a held card is no fault. A card revised
+    in the turn is read at its new revision. A card removed in between is
+    off the canvas, so drawing its series again is a new card."""
     run = _load("run")
     kenya = _card_frame({"Kenya": {"1960": 48.5, "2024": 63.8}})
     again = kenya | {"component_id": "cmp_kenya_again"}
@@ -1574,6 +1689,29 @@ def test_the_runner_holds_a_turn_to_its_cards_as_the_case_lists_figures() -> Non
         "value_outside_reply_figures"
     ]
     assert rules(listed, drawn, removed, [again, _composed(again), recap]) == []
+    last = {"reply": {"states": [{"series": "Kenya", "which": "last"}]}}
+    assert rules(last, drawn, [recap]) == []
+    assert rules(last, drawn, removed, [recap]) == ["figure_missing"]
+
+    # A held card of six series names Kenya too, and the new Kenya card's
+    # own figure may be stated beside its name.
+    six = _card_frame({name: {"2023": 70.0 + n} for n, name in enumerate(SIX_COUNTRIES)})
+    line = _card_frame({"Kenya": {"2000": 52.0, "2023": 60.0}}, title="Kenya")
+    line["component_id"] = "cmp_kenya_line"
+    for entries in (line["payload"]["component"]["series"], line["fact_summary"]["series"]):
+        entries[0]["id"] = "s_kenya_line"
+    stood = {"event": "message.complete", "text": "In 2023 Kenya stood at 60.0 years."}
+    assert rules(listed, [six, _composed(six), said], [line, _composed(six, line), stood]) == []
+    # A held card the turn did not touch is exempt from the series rule.
+    remains = {"event": "message.complete", "text": "Kenya remains on the canvas."}
+    assert rules(listed, [six, _composed(six), said], [remains]) == []
+
+    # A card revised in the turn is read at its new revision.
+    revised = _card_frame({"Kenya": {"1960": 48.5, "2024": 66.2}}) | {"event": "component.revised"}
+    assert revised["component_id"] == kenya["component_id"]
+    now = {"event": "message.complete", "text": "In 2024 Kenya stood at 66.2 years."}
+    assert rules(last, drawn, [revised, now]) == []
+    assert "figure_missing" in rules(last, drawn, [revised, recap])
 
 
 def test_a_cut_card_is_held_to_its_title_and_its_series_count() -> None:

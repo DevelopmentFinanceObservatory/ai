@@ -1,34 +1,47 @@
 {
   "answers": [
-    "d111db0c8228baaf",
-    "d9e260beb1d73801",
-    "e7e3c48d56e3d761",
-    "e9dfc989425e71a0",
-    "f279c775491b5692"
+    "2be2794ec74054a8",
+    "5f3a48ab0060c649",
+    "a25aed12b2ed890f",
+    "c2ffed250abb8895",
+    "e9dfc989425e71a0"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-11T20:31:29+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:32+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "1f6ed6307bea979d38cc35c4e38e0da896c431ad",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 2978,
-            "output_tokens": 260
+            "input_tokens": 0,
+            "jev_input_tokens": 5386,
+            "jev_output_tokens": 1293,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 9987
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 6208
           },
-          "trace_id": "2d889e0a62e84c20ae6d8f5f45a09e88",
+          "trace_id": "43d188e5e3a44fad8b89ffb402c328e6",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [
+              {
+                "binding_ref": "origin:",
+                "kind": "open_role",
+                "refs": [],
+                "text": "every provider"
+              }
+            ],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -315,7 +328,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -340,7 +353,7 @@
                     "start_year": 2015
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -411,6 +424,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
                     "label": "OECD Creditor Reporting System (CRS)",
                     "ref": "provenance/OECDCreditorReportingSystem",
                     "source": {
@@ -532,29 +546,15 @@
                       {
                         "count": 11,
                         "value": {
-                          "label": "urban development and management",
-                          "ref": "CRSPurposeCode43030"
-                        }
-                      },
-                      {
-                        "count": 11,
-                        "value": {
                           "label": "sectors not specified",
                           "ref": "CRSPurposeCode99810"
                         }
                       },
                       {
-                        "count": 10,
+                        "count": 11,
                         "value": {
-                          "label": "public sector policy and administrative management",
-                          "ref": "CRSPurposeCode15110"
-                        }
-                      },
-                      {
-                        "count": 10,
-                        "value": {
-                          "label": "public finance management",
-                          "ref": "CRSPurposeCode15111"
+                          "label": "urban development and management",
+                          "ref": "CRSPurposeCode43030"
                         }
                       },
                       {
@@ -572,80 +572,17 @@
                         }
                       },
                       {
-                        "count": 9,
+                        "count": 10,
                         "value": {
-                          "label": "education facility and training",
-                          "ref": "CRSPurposeCode11120"
+                          "label": "public finance management",
+                          "ref": "CRSPurposeCode15111"
                         }
                       },
                       {
-                        "count": 9,
+                        "count": 10,
                         "value": {
-                          "label": "primary education",
-                          "ref": "CRSPurposeCode11220"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "health policy and administrative management",
-                          "ref": "CRSPurposeCode12110"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "large-scale water supply and sanitation system",
-                          "ref": "CRSPurposeCode14020"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "waste management and disposal",
-                          "ref": "CRSPurposeCode14050"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "legal and judicial development",
-                          "ref": "CRSPurposeCode15130"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "women's rights organisations, movements, and institutions",
-                          "ref": "CRSPurposeCode15170"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "social protection",
-                          "ref": "CRSPurposeCode16010"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "information and communication technology",
-                          "ref": "CRSPurposeCode22040"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "renewable energy generation using multiple technologies",
-                          "ref": "CRSPurposeCode23210"
-                        }
-                      },
-                      {
-                        "count": 9,
-                        "value": {
-                          "label": "business policy and administration",
-                          "ref": "CRSPurposeCode25010"
+                          "label": "public sector policy and administrative management",
+                          "ref": "CRSPurposeCode15110"
                         }
                       },
                       {
@@ -658,8 +595,71 @@
                       {
                         "count": 9,
                         "value": {
+                          "label": "business policy and administration",
+                          "ref": "CRSPurposeCode25010"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "education facility and training",
+                          "ref": "CRSPurposeCode11120"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "health policy and administrative management",
+                          "ref": "CRSPurposeCode12110"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "information and communication technology",
+                          "ref": "CRSPurposeCode22040"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "large-scale water supply and sanitation system",
+                          "ref": "CRSPurposeCode14020"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "legal and judicial development",
+                          "ref": "CRSPurposeCode15130"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "primary education",
+                          "ref": "CRSPurposeCode11220"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "renewable energy generation using multiple technologies",
+                          "ref": "CRSPurposeCode23210"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
                           "label": "small and medium-sized enterprise development",
                           "ref": "CRSPurposeCode32130"
+                        }
+                      },
+                      {
+                        "count": 9,
+                        "value": {
+                          "label": "social protection",
+                          "ref": "CRSPurposeCode16010"
                         }
                       },
                       {
@@ -670,66 +670,17 @@
                         }
                       },
                       {
-                        "count": 8,
+                        "count": 9,
                         "value": {
-                          "label": "upper secondary schooling",
-                          "ref": "CRSPurposeCode11320"
+                          "label": "waste management and disposal",
+                          "ref": "CRSPurposeCode14050"
                         }
                       },
                       {
-                        "count": 8,
+                        "count": 9,
                         "value": {
-                          "label": "medical service",
-                          "ref": "CRSPurposeCode12191"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "infectious disease control",
-                          "ref": "CRSPurposeCode12250"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "decentralisation and support to subnational government",
-                          "ref": "CRSPurposeCode15112"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "domestic revenue mobilisation",
-                          "ref": "CRSPurposeCode15114"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "support for democratic participation and civil society",
-                          "ref": "CRSPurposeCode15150"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "election",
-                          "ref": "CRSPurposeCode15151"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "support to end violence against women and girls",
-                          "ref": "CRSPurposeCode15180"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "road transport",
-                          "ref": "CRSPurposeCode21020"
+                          "label": "women's rights organisations, movements, and institutions",
+                          "ref": "CRSPurposeCode15170"
                         }
                       },
                       {
@@ -749,6 +700,34 @@
                       {
                         "count": 8,
                         "value": {
+                          "label": "decentralisation and support to subnational government",
+                          "ref": "CRSPurposeCode15112"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "domestic revenue mobilisation",
+                          "ref": "CRSPurposeCode15114"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "election",
+                          "ref": "CRSPurposeCode15151"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "emergency food assistance",
+                          "ref": "CRSPurposeCode72040"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
                           "label": "fishery development",
                           "ref": "CRSPurposeCode31320"
                         }
@@ -756,22 +735,8 @@
                       {
                         "count": 8,
                         "value": {
-                          "label": "trade facilitation",
-                          "ref": "CRSPurposeCode33120"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "multisector aid",
-                          "ref": "CRSPurposeCode43010"
-                        }
-                      },
-                      {
-                        "count": 8,
-                        "value": {
-                          "label": "rural development",
-                          "ref": "CRSPurposeCode43040"
+                          "label": "infectious disease control",
+                          "ref": "CRSPurposeCode12250"
                         }
                       },
                       {
@@ -784,29 +749,57 @@
                       {
                         "count": 8,
                         "value": {
-                          "label": "emergency food assistance",
-                          "ref": "CRSPurposeCode72040"
+                          "label": "medical service",
+                          "ref": "CRSPurposeCode12191"
                         }
                       },
                       {
-                        "count": 7,
+                        "count": 8,
                         "value": {
-                          "label": "education policy and administrative management",
-                          "ref": "CRSPurposeCode11110"
+                          "label": "multisector aid",
+                          "ref": "CRSPurposeCode43010"
                         }
                       },
                       {
-                        "count": 7,
+                        "count": 8,
                         "value": {
-                          "label": "teacher training",
-                          "ref": "CRSPurposeCode11130"
+                          "label": "road transport",
+                          "ref": "CRSPurposeCode21020"
                         }
                       },
                       {
-                        "count": 7,
+                        "count": 8,
                         "value": {
-                          "label": "vocational training",
-                          "ref": "CRSPurposeCode11330"
+                          "label": "rural development",
+                          "ref": "CRSPurposeCode43040"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "support for democratic participation and civil society",
+                          "ref": "CRSPurposeCode15150"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "support to end violence against women and girls",
+                          "ref": "CRSPurposeCode15180"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "trade facilitation",
+                          "ref": "CRSPurposeCode33120"
+                        }
+                      },
+                      {
+                        "count": 8,
+                        "value": {
+                          "label": "upper secondary schooling",
+                          "ref": "CRSPurposeCode11320"
                         }
                       },
                       {
@@ -814,6 +807,13 @@
                         "value": {
                           "label": "advanced technical and managerial training",
                           "ref": "CRSPurposeCode11430"
+                        }
+                      },
+                      {
+                        "count": 7,
+                        "value": {
+                          "label": "basic drinking water supply and basic sanitation",
+                          "ref": "CRSPurposeCode14030"
                         }
                       },
                       {
@@ -833,29 +833,15 @@
                       {
                         "count": 7,
                         "value": {
-                          "label": "water sector policy and administrative management",
-                          "ref": "CRSPurposeCode14010"
+                          "label": "disaster risk reduction",
+                          "ref": "CRSPurposeCode43060"
                         }
                       },
                       {
                         "count": 7,
                         "value": {
-                          "label": "basic drinking water supply and basic sanitation",
-                          "ref": "CRSPurposeCode14030"
-                        }
-                      },
-                      {
-                        "count": 7,
-                        "value": {
-                          "label": "human rights institutions and mechanisms",
-                          "ref": "CRSPurposeCode15160"
-                        }
-                      },
-                      {
-                        "count": 7,
-                        "value": {
-                          "label": "housing policy and administrative management",
-                          "ref": "CRSPurposeCode16030"
+                          "label": "education policy and administrative management",
+                          "ref": "CRSPurposeCode11110"
                         }
                       },
                       {
@@ -875,6 +861,13 @@
                       {
                         "count": 7,
                         "value": {
+                          "label": "food crop production",
+                          "ref": "CRSPurposeCode31161"
+                        }
+                      },
+                      {
+                        "count": 7,
+                        "value": {
                           "label": "formal sector financial intermediary",
                           "ref": "CRSPurposeCode24030"
                         }
@@ -882,8 +875,15 @@
                       {
                         "count": 7,
                         "value": {
-                          "label": "food crop production",
-                          "ref": "CRSPurposeCode31161"
+                          "label": "housing policy and administrative management",
+                          "ref": "CRSPurposeCode16030"
+                        }
+                      },
+                      {
+                        "count": 7,
+                        "value": {
+                          "label": "human rights institutions and mechanisms",
+                          "ref": "CRSPurposeCode15160"
                         }
                       },
                       {
@@ -910,13 +910,6 @@
                       {
                         "count": 7,
                         "value": {
-                          "label": "disaster risk reduction",
-                          "ref": "CRSPurposeCode43060"
-                        }
-                      },
-                      {
-                        "count": 7,
-                        "value": {
                           "label": "multisector education and training",
                           "ref": "CRSPurposeCode43081"
                         }
@@ -929,108 +922,24 @@
                         }
                       },
                       {
-                        "count": 6,
+                        "count": 7,
                         "value": {
-                          "label": "medical education and training",
-                          "ref": "CRSPurposeCode12181"
+                          "label": "teacher training",
+                          "ref": "CRSPurposeCode11130"
                         }
                       },
                       {
-                        "count": 6,
+                        "count": 7,
                         "value": {
-                          "label": "basic health infrastructure",
-                          "ref": "CRSPurposeCode12230"
+                          "label": "vocational training",
+                          "ref": "CRSPurposeCode11330"
                         }
                       },
                       {
-                        "count": 6,
+                        "count": 7,
                         "value": {
-                          "label": "health personnel development",
-                          "ref": "CRSPurposeCode12281"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "reproductive health care",
-                          "ref": "CRSPurposeCode13020"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "sexually transmitted disease control",
-                          "ref": "CRSPurposeCode13040"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "large-scale water supply system",
-                          "ref": "CRSPurposeCode14021"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "basic drinking water supply",
-                          "ref": "CRSPurposeCode14031"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "anti-corruption organisations and institutions",
-                          "ref": "CRSPurposeCode15113"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "facilitation of orderly, safe, regular and responsible migration and mobility",
-                          "ref": "CRSPurposeCode15190"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "civilian peace-building, conflict prevention and resolution",
-                          "ref": "CRSPurposeCode15220"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "employment creation",
-                          "ref": "CRSPurposeCode16020"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "social mitigation of HIV and AIDS",
-                          "ref": "CRSPurposeCode16064"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "transport policy and administrative management",
-                          "ref": "CRSPurposeCode21010"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "geothermal energy generation",
-                          "ref": "CRSPurposeCode23260"
-                        }
-                      },
-                      {
-                        "count": 6,
-                        "value": {
-                          "label": "informal and semi-formal financial intermediary",
-                          "ref": "CRSPurposeCode24040"
+                          "label": "water sector policy and administrative management",
+                          "ref": "CRSPurposeCode14010"
                         }
                       },
                       {
@@ -1050,15 +959,50 @@
                       {
                         "count": 6,
                         "value": {
-                          "label": "forestry policy and administrative management",
-                          "ref": "CRSPurposeCode31210"
+                          "label": "agro-industry",
+                          "ref": "CRSPurposeCode32161"
                         }
                       },
                       {
                         "count": 6,
                         "value": {
-                          "label": "forestry development",
-                          "ref": "CRSPurposeCode31220"
+                          "label": "anti-corruption organisations and institutions",
+                          "ref": "CRSPurposeCode15113"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "basic drinking water supply",
+                          "ref": "CRSPurposeCode14031"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "basic health infrastructure",
+                          "ref": "CRSPurposeCode12230"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "civilian peace-building, conflict prevention and resolution",
+                          "ref": "CRSPurposeCode15220"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "employment creation",
+                          "ref": "CRSPurposeCode16020"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "facilitation of orderly, safe, regular and responsible migration and mobility",
+                          "ref": "CRSPurposeCode15190"
                         }
                       },
                       {
@@ -1071,8 +1015,71 @@
                       {
                         "count": 6,
                         "value": {
-                          "label": "agro-industry",
-                          "ref": "CRSPurposeCode32161"
+                          "label": "forestry development",
+                          "ref": "CRSPurposeCode31220"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "forestry policy and administrative management",
+                          "ref": "CRSPurposeCode31210"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "geothermal energy generation",
+                          "ref": "CRSPurposeCode23260"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "health personnel development",
+                          "ref": "CRSPurposeCode12281"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "informal and semi-formal financial intermediary",
+                          "ref": "CRSPurposeCode24040"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "large-scale water supply system",
+                          "ref": "CRSPurposeCode14021"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "medical education and training",
+                          "ref": "CRSPurposeCode12181"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "reproductive health care",
+                          "ref": "CRSPurposeCode13020"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "sexually transmitted disease control",
+                          "ref": "CRSPurposeCode13040"
+                        }
+                      },
+                      {
+                        "count": 6,
+                        "value": {
+                          "label": "social mitigation of HIV and AIDS",
+                          "ref": "CRSPurposeCode16064"
                         }
                       },
                       {
@@ -1083,24 +1090,10 @@
                         }
                       },
                       {
-                        "count": 5,
+                        "count": 6,
                         "value": {
-                          "label": "basic life skills for adults",
-                          "ref": "CRSPurposeCode11230"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "early childhood education",
-                          "ref": "CRSPurposeCode11240"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "malaria control",
-                          "ref": "CRSPurposeCode12262"
+                          "label": "transport policy and administrative management",
+                          "ref": "CRSPurposeCode21010"
                         }
                       },
                       {
@@ -1113,106 +1106,8 @@
                       {
                         "count": 5,
                         "value": {
-                          "label": "population policy and administrative management",
-                          "ref": "CRSPurposeCode13010"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "family planning",
-                          "ref": "CRSPurposeCode13030"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "water resources conservation",
-                          "ref": "CRSPurposeCode14015"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "basic sanitation",
-                          "ref": "CRSPurposeCode14032"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "security system management and reform",
-                          "ref": "CRSPurposeCode15210"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "low-cost housing",
-                          "ref": "CRSPurposeCode16040"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "multisector aid for basic social services",
-                          "ref": "CRSPurposeCode16050"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "culture and cultural diversity",
-                          "ref": "CRSPurposeCode16061"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "statistical capacity building",
-                          "ref": "CRSPurposeCode16062"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "air transport",
-                          "ref": "CRSPurposeCode21050"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "communications policy and administrative management",
-                          "ref": "CRSPurposeCode22010"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "solar energy for centralised grid",
-                          "ref": "CRSPurposeCode23230"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "wind energy generation",
-                          "ref": "CRSPurposeCode23240"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "agricultural water resource",
-                          "ref": "CRSPurposeCode31140"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
-                          "label": "industrial and export crop production",
-                          "ref": "CRSPurposeCode31162"
+                          "label": "agricultural education and training",
+                          "ref": "CRSPurposeCode31181"
                         }
                       },
                       {
@@ -1225,13 +1120,6 @@
                       {
                         "count": 5,
                         "value": {
-                          "label": "agricultural education and training",
-                          "ref": "CRSPurposeCode31181"
-                        }
-                      },
-                      {
-                        "count": 5,
-                        "value": {
                           "label": "agricultural service",
                           "ref": "CRSPurposeCode31191"
                         }
@@ -1239,22 +1127,36 @@
                       {
                         "count": 5,
                         "value": {
-                          "label": "industrial policy and administrative management",
-                          "ref": "CRSPurposeCode32110"
+                          "label": "agricultural water resource",
+                          "ref": "CRSPurposeCode31140"
                         }
                       },
                       {
                         "count": 5,
                         "value": {
-                          "label": "industrial machinery manufacturing",
-                          "ref": "CRSPurposeCode32171"
+                          "label": "air transport",
+                          "ref": "CRSPurposeCode21050"
                         }
                       },
                       {
                         "count": 5,
                         "value": {
-                          "label": "oil and gas extraction",
-                          "ref": "CRSPurposeCode32262"
+                          "label": "basic life skills for adults",
+                          "ref": "CRSPurposeCode11230"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "basic sanitation",
+                          "ref": "CRSPurposeCode14032"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "biodiversity",
+                          "ref": "CRSPurposeCode41030"
                         }
                       },
                       {
@@ -1267,8 +1169,22 @@
                       {
                         "count": 5,
                         "value": {
-                          "label": "biodiversity",
-                          "ref": "CRSPurposeCode41030"
+                          "label": "communications policy and administrative management",
+                          "ref": "CRSPurposeCode22010"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "culture and cultural diversity",
+                          "ref": "CRSPurposeCode16061"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "early childhood education",
+                          "ref": "CRSPurposeCode11240"
                         }
                       },
                       {
@@ -1288,8 +1204,57 @@
                       {
                         "count": 5,
                         "value": {
+                          "label": "family planning",
+                          "ref": "CRSPurposeCode13030"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
                           "label": "general food assistance",
                           "ref": "CRSPurposeCode52010"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "industrial and export crop production",
+                          "ref": "CRSPurposeCode31162"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "industrial machinery manufacturing",
+                          "ref": "CRSPurposeCode32171"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "industrial policy and administrative management",
+                          "ref": "CRSPurposeCode32110"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "low-cost housing",
+                          "ref": "CRSPurposeCode16040"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "malaria control",
+                          "ref": "CRSPurposeCode12262"
+                        }
+                      },
+                      {
+                        "count": 5,
+                        "value": {
+                          "label": "multisector aid for basic social services",
+                          "ref": "CRSPurposeCode16050"
                         }
                       },
                       {
@@ -1300,87 +1265,52 @@
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "educational research",
-                          "ref": "CRSPurposeCode11182"
+                          "label": "oil and gas extraction",
+                          "ref": "CRSPurposeCode32262"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "health education",
-                          "ref": "CRSPurposeCode12261"
+                          "label": "population policy and administrative management",
+                          "ref": "CRSPurposeCode13010"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "tuberculosis control",
-                          "ref": "CRSPurposeCode12263"
+                          "label": "security system management and reform",
+                          "ref": "CRSPurposeCode15210"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "personnel development for population and reproductive health",
-                          "ref": "CRSPurposeCode13081"
+                          "label": "solar energy for centralised grid",
+                          "ref": "CRSPurposeCode23230"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "large-scale sanitation system",
-                          "ref": "CRSPurposeCode14022"
+                          "label": "statistical capacity building",
+                          "ref": "CRSPurposeCode16062"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "river basin development",
-                          "ref": "CRSPurposeCode14040"
+                          "label": "water resources conservation",
+                          "ref": "CRSPurposeCode14015"
                         }
                       },
                       {
-                        "count": 4,
+                        "count": 5,
                         "value": {
-                          "label": "support for media and free flow of information",
-                          "ref": "CRSPurposeCode15153"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "energy conservation and demand-side efficiency",
-                          "ref": "CRSPurposeCode23183"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "biofuel-fired power plant",
-                          "ref": "CRSPurposeCode23270"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "unspecified non-renewable energy generation",
-                          "ref": "CRSPurposeCode23310"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "electric power transmission and distribution for centralised grid",
-                          "ref": "CRSPurposeCode23630"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "business development service",
-                          "ref": "CRSPurposeCode25030"
+                          "label": "wind energy generation",
+                          "ref": "CRSPurposeCode23240"
                         }
                       },
                       {
@@ -1393,29 +1323,15 @@
                       {
                         "count": 4,
                         "value": {
-                          "label": "plant and post-harvest protection and pest control",
-                          "ref": "CRSPurposeCode31192"
+                          "label": "biofuel-fired power plant",
+                          "ref": "CRSPurposeCode23270"
                         }
                       },
                       {
                         "count": 4,
                         "value": {
-                          "label": "fishery research",
-                          "ref": "CRSPurposeCode31382"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "industrial development",
-                          "ref": "CRSPurposeCode32120"
-                        }
-                      },
-                      {
-                        "count": 4,
-                        "value": {
-                          "label": "cottage industry and handicraft",
-                          "ref": "CRSPurposeCode32140"
+                          "label": "business development service",
+                          "ref": "CRSPurposeCode25030"
                         }
                       },
                       {
@@ -1428,8 +1344,36 @@
                       {
                         "count": 4,
                         "value": {
-                          "label": "site preservation",
-                          "ref": "CRSPurposeCode41040"
+                          "label": "cottage industry and handicraft",
+                          "ref": "CRSPurposeCode32140"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "educational research",
+                          "ref": "CRSPurposeCode11182"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "electric power transmission and distribution for centralised grid",
+                          "ref": "CRSPurposeCode23630"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "energy conservation and demand-side efficiency",
+                          "ref": "CRSPurposeCode23183"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "fishery research",
+                          "ref": "CRSPurposeCode31382"
                         }
                       },
                       {
@@ -1437,6 +1381,83 @@
                         "value": {
                           "label": "food security policy and administrative management",
                           "ref": "CRSPurposeCode43071"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "health education",
+                          "ref": "CRSPurposeCode12261"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "industrial development",
+                          "ref": "CRSPurposeCode32120"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "large-scale sanitation system",
+                          "ref": "CRSPurposeCode14022"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "personnel development for population and reproductive health",
+                          "ref": "CRSPurposeCode13081"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "plant and post-harvest protection and pest control",
+                          "ref": "CRSPurposeCode31192"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "river basin development",
+                          "ref": "CRSPurposeCode14040"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "site preservation",
+                          "ref": "CRSPurposeCode41040"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "support for media and free flow of information",
+                          "ref": "CRSPurposeCode15153"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "tuberculosis control",
+                          "ref": "CRSPurposeCode12263"
+                        }
+                      },
+                      {
+                        "count": 4,
+                        "value": {
+                          "label": "unspecified non-renewable energy generation",
+                          "ref": "CRSPurposeCode23310"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "agricultural co-operative",
+                          "ref": "CRSPurposeCode31194"
                         }
                       },
                       {
@@ -1449,8 +1470,85 @@
                       {
                         "count": 3,
                         "value": {
-                          "label": "school feeding",
-                          "ref": "CRSPurposeCode11250"
+                          "label": "chemical production",
+                          "ref": "CRSPurposeCode32164"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "education and training in banking and financial services",
+                          "ref": "CRSPurposeCode24081"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "education and training in transport and storage",
+                          "ref": "CRSPurposeCode21081"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "energy education and training",
+                          "ref": "CRSPurposeCode23181"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "food safety and quality",
+                          "ref": "CRSPurposeCode43073"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "fossil fuel energy manufacturing",
+                          "ref": "CRSPurposeCode32167"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "general budget support",
+                          "ref": "CRSPurposeCode51010"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "household food security programme",
+                          "ref": "CRSPurposeCode43072"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "hydroelectric power plant",
+                          "ref": "CRSPurposeCode23220"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "immediate post-emergency reconstruction and rehabilitation",
+                          "ref": "CRSPurposeCode73010"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "labour rights",
+                          "ref": "CRSPurposeCode16070"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
+                          "label": "macroeconomic policy",
+                          "ref": "CRSPurposeCode15142"
                         }
                       },
                       {
@@ -1470,8 +1568,8 @@
                       {
                         "count": 3,
                         "value": {
-                          "label": "macroeconomic policy",
-                          "ref": "CRSPurposeCode15142"
+                          "label": "non-sector allocable administrative costs",
+                          "ref": "CRSPurposeCode91010"
                         }
                       },
                       {
@@ -1484,50 +1582,8 @@
                       {
                         "count": 3,
                         "value": {
-                          "label": "labour rights",
-                          "ref": "CRSPurposeCode16070"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "water transport",
-                          "ref": "CRSPurposeCode21040"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "education and training in transport and storage",
-                          "ref": "CRSPurposeCode21081"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "telecommunications",
-                          "ref": "CRSPurposeCode22020"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "energy education and training",
-                          "ref": "CRSPurposeCode23181"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "hydroelectric power plant",
-                          "ref": "CRSPurposeCode23220"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "education and training in banking and financial services",
-                          "ref": "CRSPurposeCode24081"
+                          "label": "relief co-ordination and support service",
+                          "ref": "CRSPurposeCode72050"
                         }
                       },
                       {
@@ -1540,22 +1596,8 @@
                       {
                         "count": 3,
                         "value": {
-                          "label": "agricultural co-operative",
-                          "ref": "CRSPurposeCode31194"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "chemical production",
-                          "ref": "CRSPurposeCode32164"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "fossil fuel energy manufacturing",
-                          "ref": "CRSPurposeCode32167"
+                          "label": "school feeding",
+                          "ref": "CRSPurposeCode11250"
                         }
                       },
                       {
@@ -1568,6 +1610,13 @@
                       {
                         "count": 3,
                         "value": {
+                          "label": "telecommunications",
+                          "ref": "CRSPurposeCode22020"
+                        }
+                      },
+                      {
+                        "count": 3,
+                        "value": {
                           "label": "trade education and training",
                           "ref": "CRSPurposeCode33181"
                         }
@@ -1575,134 +1624,8 @@
                       {
                         "count": 3,
                         "value": {
-                          "label": "household food security programme",
-                          "ref": "CRSPurposeCode43072"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "food safety and quality",
-                          "ref": "CRSPurposeCode43073"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "general budget support",
-                          "ref": "CRSPurposeCode51010"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "relief co-ordination and support service",
-                          "ref": "CRSPurposeCode72050"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "immediate post-emergency reconstruction and rehabilitation",
-                          "ref": "CRSPurposeCode73010"
-                        }
-                      },
-                      {
-                        "count": 3,
-                        "value": {
-                          "label": "non-sector allocable administrative costs",
-                          "ref": "CRSPurposeCode91010"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "lower secondary education",
-                          "ref": "CRSPurposeCode11260"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "general noncommunicable disease control",
-                          "ref": "CRSPurposeCode12310"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "control of harmful use of alcohol and drugs",
-                          "ref": "CRSPurposeCode12330"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "education and training in water supply and sanitation",
-                          "ref": "CRSPurposeCode14081"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "public procurement",
-                          "ref": "CRSPurposeCode15125"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "legislature and parliament strengthening",
-                          "ref": "CRSPurposeCode15152"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "reintegration and small arms and light weapons control",
-                          "ref": "CRSPurposeCode15240"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "social dialogue",
-                          "ref": "CRSPurposeCode16080"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "rail transport",
-                          "ref": "CRSPurposeCode21030"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "radio, television, print and online media",
-                          "ref": "CRSPurposeCode22030"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "energy research",
-                          "ref": "CRSPurposeCode23182"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "nuclear energy electric power plant and nuclear safety",
-                          "ref": "CRSPurposeCode23510"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "electric power transmission and distribution for isolated mini-grid",
-                          "ref": "CRSPurposeCode23631"
+                          "label": "water transport",
+                          "ref": "CRSPurposeCode21040"
                         }
                       },
                       {
@@ -1715,48 +1638,6 @@
                       {
                         "count": 2,
                         "value": {
-                          "label": "forestry education and training",
-                          "ref": "CRSPurposeCode31281"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "forest industry",
-                          "ref": "CRSPurposeCode32162"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "textile, leather and substitute production",
-                          "ref": "CRSPurposeCode32163"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "fertilizer plant",
-                          "ref": "CRSPurposeCode32165"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "pharmaceutical production",
-                          "ref": "CRSPurposeCode32168"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "transport equipment industry",
-                          "ref": "CRSPurposeCode32172"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
                           "label": "clean cooking appliance manufacturing, market development and distribution",
                           "ref": "CRSPurposeCode32174"
                         }
@@ -1764,22 +1645,8 @@
                       {
                         "count": 2,
                         "value": {
-                          "label": "regional trade agreement",
-                          "ref": "CRSPurposeCode33130"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "multilateral trade negotiation",
-                          "ref": "CRSPurposeCode33140"
-                        }
-                      },
-                      {
-                        "count": 2,
-                        "value": {
-                          "label": "import support for commodities",
-                          "ref": "CRSPurposeCode53040"
+                          "label": "control of harmful use of alcohol and drugs",
+                          "ref": "CRSPurposeCode12330"
                         }
                       },
                       {
@@ -1792,141 +1659,155 @@
                       {
                         "count": 2,
                         "value": {
+                          "label": "education and training in water supply and sanitation",
+                          "ref": "CRSPurposeCode14081"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "electric power transmission and distribution for isolated mini-grid",
+                          "ref": "CRSPurposeCode23631"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "energy research",
+                          "ref": "CRSPurposeCode23182"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "fertilizer plant",
+                          "ref": "CRSPurposeCode32165"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "forest industry",
+                          "ref": "CRSPurposeCode32162"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "forestry education and training",
+                          "ref": "CRSPurposeCode31281"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "general noncommunicable disease control",
+                          "ref": "CRSPurposeCode12310"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "import support for commodities",
+                          "ref": "CRSPurposeCode53040"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "legislature and parliament strengthening",
+                          "ref": "CRSPurposeCode15152"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "lower secondary education",
+                          "ref": "CRSPurposeCode11260"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "multilateral trade negotiation",
+                          "ref": "CRSPurposeCode33140"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "nuclear energy electric power plant and nuclear safety",
+                          "ref": "CRSPurposeCode23510"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "pharmaceutical production",
+                          "ref": "CRSPurposeCode32168"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "public procurement",
+                          "ref": "CRSPurposeCode15125"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "radio, television, print and online media",
+                          "ref": "CRSPurposeCode22030"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "rail transport",
+                          "ref": "CRSPurposeCode21030"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "regional trade agreement",
+                          "ref": "CRSPurposeCode33130"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
+                          "label": "reintegration and small arms and light weapons control",
+                          "ref": "CRSPurposeCode15240"
+                        }
+                      },
+                      {
+                        "count": 2,
+                        "value": {
                           "label": "rescheduling and refinancing",
                           "ref": "CRSPurposeCode60040"
                         }
                       },
                       {
-                        "count": 1,
+                        "count": 2,
                         "value": {
-                          "label": "primary education equivalent for adults",
-                          "ref": "CRSPurposeCode11232"
+                          "label": "social dialogue",
+                          "ref": "CRSPurposeCode16080"
                         }
                       },
                       {
-                        "count": 1,
+                        "count": 2,
                         "value": {
-                          "label": "tobacco use control",
-                          "ref": "CRSPurposeCode12320"
+                          "label": "textile, leather and substitute production",
+                          "ref": "CRSPurposeCode32163"
                         }
                       },
                       {
-                        "count": 1,
+                        "count": 2,
                         "value": {
-                          "label": "other noncommunicable disease prevention and treatment",
-                          "ref": "CRSPurposeCode12350"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "research for noncommunicable disease prevention and control",
-                          "ref": "CRSPurposeCode12382"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "removal of land mines and explosive remnants of war",
-                          "ref": "CRSPurposeCode15250"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "child soldier prevention and demobilisation",
-                          "ref": "CRSPurposeCode15261"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "narcotics control",
-                          "ref": "CRSPurposeCode16063"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "solar energy for isolated grids and standalone system",
-                          "ref": "CRSPurposeCode23231"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "solar thermal energy",
-                          "ref": "CRSPurposeCode23232"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "oil-fired electric power plant",
-                          "ref": "CRSPurposeCode23330"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "natural gas-fired electric power plant",
-                          "ref": "CRSPurposeCode23340"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "non-renewable waste-fired electric power plant",
-                          "ref": "CRSPurposeCode23360"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "district heating and cooling",
-                          "ref": "CRSPurposeCode23620"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "retail gas distribution",
-                          "ref": "CRSPurposeCode23640"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "retail distribution of liquid or solid fossil fuel",
-                          "ref": "CRSPurposeCode23641"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "electric mobility infrastructure",
-                          "ref": "CRSPurposeCode23642"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "monetary institution",
-                          "ref": "CRSPurposeCode24020"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "remittance facilitation, promotion and optimisation",
-                          "ref": "CRSPurposeCode24050"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "privatisation",
-                          "ref": "CRSPurposeCode25020"
+                          "label": "transport equipment industry",
+                          "ref": "CRSPurposeCode32172"
                         }
                       },
                       {
@@ -1939,22 +1820,36 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "fuelwood and charcoal",
-                          "ref": "CRSPurposeCode31261"
+                          "label": "cement, lime and plaster production",
+                          "ref": "CRSPurposeCode32166"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "forestry research",
-                          "ref": "CRSPurposeCode31282"
+                          "label": "child soldier prevention and demobilisation",
+                          "ref": "CRSPurposeCode15261"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "forestry service",
-                          "ref": "CRSPurposeCode31291"
+                          "label": "coal mining",
+                          "ref": "CRSPurposeCode32261"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "district heating and cooling",
+                          "ref": "CRSPurposeCode23620"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "electric mobility infrastructure",
+                          "ref": "CRSPurposeCode23642"
                         }
                       },
                       {
@@ -1974,36 +1869,29 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "cement, lime and plaster production",
-                          "ref": "CRSPurposeCode32166"
+                          "label": "forestry research",
+                          "ref": "CRSPurposeCode31282"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "modern biofuel manufacturing",
-                          "ref": "CRSPurposeCode32173"
+                          "label": "forestry service",
+                          "ref": "CRSPurposeCode31291"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "mineral prospection and exploration",
-                          "ref": "CRSPurposeCode32220"
+                          "label": "fuelwood and charcoal",
+                          "ref": "CRSPurposeCode31261"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "coal mining",
-                          "ref": "CRSPurposeCode32261"
-                        }
-                      },
-                      {
-                        "count": 1,
-                        "value": {
-                          "label": "non-agricultural alternative development",
-                          "ref": "CRSPurposeCode43050"
+                          "label": "general support for refugees and asylum seekers in donor countries",
+                          "ref": "CRSPurposeCode93010"
                         }
                       },
                       {
@@ -2016,6 +1904,62 @@
                       {
                         "count": 1,
                         "value": {
+                          "label": "mineral prospection and exploration",
+                          "ref": "CRSPurposeCode32220"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "modern biofuel manufacturing",
+                          "ref": "CRSPurposeCode32173"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "monetary institution",
+                          "ref": "CRSPurposeCode24020"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "narcotics control",
+                          "ref": "CRSPurposeCode16063"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "natural gas-fired electric power plant",
+                          "ref": "CRSPurposeCode23340"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "non-agricultural alternative development",
+                          "ref": "CRSPurposeCode43050"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "non-renewable waste-fired electric power plant",
+                          "ref": "CRSPurposeCode23360"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "oil-fired electric power plant",
+                          "ref": "CRSPurposeCode23330"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
                           "label": "other debt swap",
                           "ref": "CRSPurposeCode60062"
                         }
@@ -2023,8 +1967,78 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "general support for refugees and asylum seekers in donor countries",
-                          "ref": "CRSPurposeCode93010"
+                          "label": "other noncommunicable disease prevention and treatment",
+                          "ref": "CRSPurposeCode12350"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "primary education equivalent for adults",
+                          "ref": "CRSPurposeCode11232"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "privatisation",
+                          "ref": "CRSPurposeCode25020"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "remittance facilitation, promotion and optimisation",
+                          "ref": "CRSPurposeCode24050"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "removal of land mines and explosive remnants of war",
+                          "ref": "CRSPurposeCode15250"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "research for noncommunicable disease prevention and control",
+                          "ref": "CRSPurposeCode12382"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "retail distribution of liquid or solid fossil fuel",
+                          "ref": "CRSPurposeCode23641"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "retail gas distribution",
+                          "ref": "CRSPurposeCode23640"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "solar energy for isolated grids and standalone system",
+                          "ref": "CRSPurposeCode23231"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "solar thermal energy",
+                          "ref": "CRSPurposeCode23232"
+                        }
+                      },
+                      {
+                        "count": 1,
+                        "value": {
+                          "label": "tobacco use control",
+                          "ref": "CRSPurposeCode12320"
                         }
                       }
                     ],
@@ -2080,15 +2094,15 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "reimbursable grant",
-                          "ref": "CRSTypeOfFinance422"
+                          "label": "debt forgiveness of official development assistance claim on interest",
+                          "ref": "CRSTypeOfFinance611"
                         }
                       },
                       {
                         "count": 1,
                         "value": {
-                          "label": "debt forgiveness of official development assistance claim on interest",
-                          "ref": "CRSTypeOfFinance611"
+                          "label": "debt rescheduling of official development assistance claim on interest",
+                          "ref": "CRSTypeOfFinance621"
                         }
                       },
                       {
@@ -2101,8 +2115,8 @@
                       {
                         "count": 1,
                         "value": {
-                          "label": "debt rescheduling of official development assistance claim on interest",
-                          "ref": "CRSTypeOfFinance621"
+                          "label": "reimbursable grant",
+                          "ref": "CRSTypeOfFinance422"
                         }
                       }
                     ],
@@ -3822,7 +3836,7 @@
                   "served_count": 3687
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -3857,6 +3871,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDCreditorReportingSystem",
                       "label": "OECD Creditor Reporting System (CRS)",
                       "ref": "provenance/OECDCreditorReportingSystem",
                       "source": {
@@ -5715,7 +5730,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -5965,14 +5980,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 194,
-                "bind": 1386,
-                "materialise": 3035,
-                "options": 2340,
-                "recall": 488,
-                "shape": 1315
+                "answer": 186,
+                "bind": 178,
+                "materialise": 975,
+                "options": 2143,
+                "phase_bind": 267,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 1397,
+                "phase_place_bindings": 25,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 190,
+                "recall": 542,
+                "shape": 302,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 65,
+                "shape_labels": 1,
+                "shape_probe": 125,
+                "shape_probe_coverage": 2
               },
-              "total": 8758
+              "total": 6205
             },
             "variable_text": "official development assistance by sector",
             "warnings": [
@@ -5994,7 +6025,7 @@
           "extract_skipped": true,
           "raw_query": "Which three sectors received the most ODA in Kenya between 2015 and 2022?"
         },
-        "rendered_sentence": "Gross ODA disbursements to Kenya from 86 providers, 2015 to 2022. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+        "rendered_sentence": "Gross ODA disbursements to Kenya from 86 providers, 2015 to 2022. Current US dollars \u00b7 OECD Creditor Reporting System (CRS). Assumed: every provider.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -6184,11 +6215,43 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "every provider"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "oda-crs": {
-            "content_version": "sha256:e05bb92fbdaa0ed11aab39392867f0636937bae00282eb80bc9d187948ec2b5b",
+            "content_version": "sha256:fda2592588fe4cbe6e47ceb6f47db9be26fe8886cb337f240285456690607927",
             "description": "Context for working with the OECD Creditor Reporting System (CRS), the activity-level dataset of ODA, OOF, private sector instruments and private philanthropy reported by bilateral providers, multilateral organisations and foundations. Covers its attributes, coverage by year and against DAC1, the flow categories and bilateral/multilateral flags, the April 2026 core contribution records and their treatment in the DFO, and the double-counting traps with multilateral outflows, foundation funding and regional buckets. Load once the CRS has been chosen for an analysis, or when working with CRS records. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-crs",
             "name": "oda-crs"
@@ -6212,5 +6275,9 @@
       "raw_text": false
     }
   ],
-  "task": "rank-sectors-kenya"
+  "task": "rank-sectors-kenya",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

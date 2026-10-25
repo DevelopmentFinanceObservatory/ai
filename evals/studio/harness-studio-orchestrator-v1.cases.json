@@ -42,7 +42,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -84,7 +86,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya from 2015 to 2022",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya from 2015 to 2022"
+            ]
           }
         },
         {
@@ -138,14 +142,18 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
           "call": "plan",
           "args": {
             "brief": "Life expectancy in Kenya, any recent years",
-            "asks": []
+            "asks": [
+              "Life expectancy in Kenya, any recent years"
+            ]
           }
         },
         {
@@ -303,7 +311,15 @@
               }
             ],
             "question": "How fast did life expectancy grow in Kenya since 2000?",
-            "answer_mode": "computed"
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "life_expectancy_by_period"
+                ]
+              }
+            ]
           }
         },
         {
@@ -326,7 +342,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -427,7 +445,15 @@
               }
             ],
             "question": "How fast did life expectancy grow in Kenya since 2000?",
-            "answer_mode": "computed"
+            "answer_mode": "computed",
+            "answered": [
+              {
+                "ask": 0,
+                "outputs": [
+                  "life_expectancy_by_period"
+                ]
+              }
+            ]
           }
         },
         {
@@ -552,7 +578,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -600,7 +628,9 @@
           "call": "plan",
           "args": {
             "brief": "Growth of life expectancy in Kenya since 2000",
-            "asks": []
+            "asks": [
+              "Growth of life expectancy in Kenya since 2000"
+            ]
           }
         },
         {
@@ -1142,6 +1172,204 @@
       ]
     },
     {
+      "id": "orchestrator-live-a-ranking-with-no-period-named-ranks-one-year",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "Which providers give the most?",
+          "seed_spec": [
+            {
+              "spec": {
+                "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "FinancialFlow",
+                      "measured_property": "amount",
+                      "stat_type": "measuredValue",
+                      "measurement_qualifier": "Nominal"
+                    },
+                    "slots": [
+                      {
+                        "property": "crsCooperationModality",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsPurpose",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSPurposeCode110"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFinance",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFlow",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSTypeOfFlow10"
+                        }
+                      },
+                      {
+                        "property": "financialFlowType",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Disbursement"
+                        }
+                      },
+                      {
+                        "property": "nettingBasis",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Net"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "destination": [
+                        "country/KEN"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                },
+                "resolved": {
+                  "rendered_sentence": "Net ODA disbursements to Kenya from 55 providers for education, 1990 to 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS)."
+                }
+              },
+              "operations": []
+            }
+          ],
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "receive_seeds"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "ranking-reads-one-year",
+          "property": "The user named no period, and 1990 to 2024 is only the span of years the dataset they brought holds. The plan card and the closing message rank the providers for one year. A ranking by a total over 1990 to 2024 is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-a-total-with-no-period-named-keeps-the-years",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "What is the total across all providers?",
+          "seed_spec": [
+            {
+              "spec": {
+                "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_8f45830fb86f9deddcec7b59f848dd9c",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "FinancialFlow",
+                      "measured_property": "amount",
+                      "stat_type": "measuredValue",
+                      "measurement_qualifier": "Nominal"
+                    },
+                    "slots": [
+                      {
+                        "property": "crsCooperationModality",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsPurpose",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSPurposeCode110"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFinance",
+                        "binding": {
+                          "state": "unbound"
+                        }
+                      },
+                      {
+                        "property": "crsTypeOfFlow",
+                        "binding": {
+                          "state": "value",
+                          "ref": "CRSTypeOfFlow10"
+                        }
+                      },
+                      {
+                        "property": "financialFlowType",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Disbursement"
+                        }
+                      },
+                      {
+                        "property": "nettingBasis",
+                        "binding": {
+                          "state": "value",
+                          "ref": "Net"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "destination": [
+                        "country/KEN"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                },
+                "resolved": {
+                  "rendered_sentence": "Net ODA disbursements to Kenya from 55 providers for education, 1990 to 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS)."
+                }
+              },
+              "operations": []
+            }
+          ],
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "receive_seeds"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "total-across-providers-is-given-for-each-year-or-one-stated-year",
+          "property": "The user named no period, and 1990 to 2024 is only the span of years the dataset they brought holds. The result is a total across all providers for each year, or for one year the answer states as the year chosen, and no single figure summed over 1990 to 2024 is given as the answer. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
       "id": "orchestrator-live-a-period-outside-the-data-is-a-recorded-decision",
       "modes": [
         "live"
@@ -1322,7 +1550,11 @@
       "turns": [
         {
           "message": "Total aid from G7 to Africa since 1965",
-          "elicitation_text": "Add up the seven G7 countries' aid to Africa",
+          "elicitation_answers": [
+            {
+              "text": "Add up the seven G7 countries' aid to Africa"
+            }
+          ],
           "expect": {
             "terminal": "done",
             "min_components": 1
@@ -1344,7 +1576,11 @@
       "turns": [
         {
           "message": "Help me calculate net flows to Ghana combining aid and debt",
-          "elicitation_text": "Keep aid and debt flows as separate series; do not add them",
+          "elicitation_answers": [
+            {
+              "text": "Keep aid and debt flows as separate series; do not add them"
+            }
+          ],
           "expect": {
             "terminal": "done",
             "elicitation": {
@@ -1357,6 +1593,43 @@
         {
           "id": "combination-is-put-to-the-user",
           "property": "Before any figure that combines aid and debt flows is shown, the turn asks the user how to combine them, and the question or the closing message says that official development assistance loans appear in both the aid and the debt flows. Figures shown after the user's answer follow that answer. A combined figure shown before that question, or with no such question, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-count-and-prices-are-asked-in-one-pause",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "How much aid did France give to Africa between 2015 and 2023?",
+          "elicitation_answers": [
+            {
+              "option": 2
+            },
+            {
+              "option": 2
+            }
+          ],
+          "expect": {
+            "terminal": "done",
+            "min_components": 1,
+            "elicitation": {
+              "min_questions": 2,
+              "min_options": 2
+            }
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "count-and-prices-are-asked-together",
+          "property": "The turn asks how the aid is counted and whether the amounts are in current or constant prices as separate questions of one pause, before any figure is shown. Two pauses, one choice asked and the other left unasked, or a figure shown before the question, is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "the-fetch-follows-both-answers",
+          "property": "The figures shown after the answers are counted the way the answer to the counting question names and are in the prices the answer to the prices question names, as the closing message, a component title or a component source states. A figure counted or priced another way, with no sentence saying the chosen reading was unavailable, is a no. This property always applies and is never inapplicable."
         }
       ]
     },
@@ -2180,6 +2453,32 @@
         {
           "id": "reply-states-what-a-nearby-year-holds",
           "property": "The closing message names a second year, different from the year its ranking is for, and states how many donors that second year covers: a newer year with the number of donors it has so far, or an earlier year with the larger number of donors it had. The message may call them donors, providers or members; the count and the year are what is scored, whatever the noun. A message that names no second year, names one without a count, or says only that newer data is incomplete without a count, is a no. This property always applies and is never inapplicable."
+        }
+      ]
+    },
+    {
+      "id": "orchestrator-live-oda-recipient-country-ranking-uses-destination-axis",
+      "modes": [
+        "live"
+      ],
+      "turns": [
+        {
+          "message": "What are the top five ODA recipient countries in the latest year?",
+          "plan_decision": "approve",
+          "expect": {
+            "terminal": "done",
+            "step_tools": [
+              "get_data",
+              "filter",
+              "rank"
+            ]
+          }
+        }
+      ],
+      "rubrics": [
+        {
+          "id": "oda-recipient-countries-use-a-strict-recipient-population",
+          "property": "The plan and answer use a gross ODA disbursement flow, retain the latest available year, and rank the five largest recipient or destination countries. The plan opens the recipient or destination side, applies a Country population filter to that same side before ranking, and the answer names five recipient countries. A donor or origin ranking, a worldwide total, an unfiltered mix of organisations and countries, or a different aid measure is a no. This property always applies and is never inapplicable."
         }
       ]
     }

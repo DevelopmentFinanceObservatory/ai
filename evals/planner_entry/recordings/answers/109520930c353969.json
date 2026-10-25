@@ -1,0 +1,576 @@
+{
+  "answer": {
+    "is_error": false,
+    "meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "data-mcp",
+        "version": "4.0.10"
+      },
+      "org.one.dfo/search_envelope": {
+        "diagnostics": {
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
+          "timed_out": false,
+          "timing_ms": {
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 516
+          },
+          "trace_id": "08af2c3feed841efa80d9550675adf3f",
+          "warnings": []
+        },
+        "kind": "resolution",
+        "parts": [
+          {
+            "assumptions": [],
+            "departures": [],
+            "operations": [],
+            "spec": {
+              "definition": {
+                "identity": {
+                  "entities": {
+                    "observationAbout": [
+                      "country/KEN"
+                    ]
+                  },
+                  "identity_version": "spec1",
+                  "requested_window": {
+                    "end_year": 2024,
+                    "kind": "range",
+                    "start_year": 2015
+                  },
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "measured_property": "value",
+                    "population_type": "undata/who/SERIES-MAL_DOM_EXP",
+                    "stat_type": "measuredValue"
+                  },
+                  "slots": []
+                },
+                "schema_version": 1,
+                "spec_id": "spec_060933efd05a8bfac439d3fa0af09700"
+              },
+              "resolved": {
+                "available_at_place": true,
+                "confidence": "high",
+                "coverage": {
+                  "dimensions": [
+                    {
+                      "count": 1,
+                      "label": "sources"
+                    },
+                    {
+                      "count": 10,
+                      "label": "observations"
+                    },
+                    {
+                      "count": 1,
+                      "label": "variables"
+                    }
+                  ],
+                  "evidence": "facet_metadata",
+                  "has_data": true,
+                  "kind": "exact",
+                  "observation_count": 10,
+                  "window": {
+                    "end_year": 2024,
+                    "start_year": 2015
+                  }
+                },
+                "download": {
+                  "rows": 10,
+                  "rows_exact": true,
+                  "series": 1,
+                  "window": {
+                    "end_year": 2024,
+                    "start_year": 2015
+                  }
+                },
+                "entities": [
+                  {
+                    "entity_type": "Country",
+                    "label": "Kenya",
+                    "ref": "country/KEN",
+                    "role": "observationAbout"
+                  }
+                ],
+                "entity_options": [],
+                "facet_options": [
+                  {
+                    "axis": "provenance",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "World Health Organization (WHO)",
+                            "ref": "undata/p/WHO"
+                          },
+                          "value_kind": "source"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  },
+                  {
+                    "axis": "unit",
+                    "options": [
+                      {
+                        "value": {
+                          "ref": {
+                            "label": "United States dollars at constant prices",
+                            "ref": "undata/UNIT_MEASURE-CR_USD_K"
+                          },
+                          "value_kind": "enum_value"
+                        }
+                      }
+                    ],
+                    "source": "observed",
+                    "truncated": false
+                  }
+                ],
+                "facets": {
+                  "provenance": {
+                    "basis": "fallback",
+                    "data_commons": {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    },
+                    "documentation": "/api/graph/documentation/undata/p/WHO",
+                    "label": "World Health Organization (WHO)",
+                    "ref": "undata/p/WHO",
+                    "source": {
+                      "label": "World Health Organization (WHO)",
+                      "ref": "undata/p/WHO"
+                    }
+                  },
+                  "unit": {
+                    "basis": "fallback",
+                    "label": "United States dollars at constant prices",
+                    "ref": "undata/UNIT_MEASURE-CR_USD_K"
+                  }
+                },
+                "inapplicable_slots": [],
+                "measure_axis_values": [],
+                "measure_label_axes": [],
+                "related_measures": [],
+                "rendered_sentence": "Kenya's domestic expenditure on malaria, 2015 to 2024. US dollars \u00b7 World Health Organization (WHO).",
+                "sentence_plan": [
+                  {
+                    "axis": "where",
+                    "binding_ref": "where:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "where:"
+                    ],
+                    "text": "Kenya"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "'s"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "what",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "domestic expenditure on malaria"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": ", "
+                  },
+                  {
+                    "axis": "when",
+                    "binding_ref": "when:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "heading",
+                    "states": [
+                      "when:"
+                    ],
+                    "text": "2015 to 2024"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "heading",
+                    "states": [],
+                    "text": "."
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " "
+                  },
+                  {
+                    "axis": "unit",
+                    "binding_ref": "unit:",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "unit:"
+                    ],
+                    "text": "US dollars"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": " \u00b7 "
+                  },
+                  {
+                    "axis": "source",
+                    "entity_refs": [],
+                    "kind": "slot",
+                    "segment": "byline",
+                    "states": [
+                      "source:"
+                    ],
+                    "text": "World Health Organization (WHO)"
+                  },
+                  {
+                    "entity_refs": [],
+                    "kind": "text",
+                    "segment": "byline",
+                    "states": [],
+                    "text": "."
+                  }
+                ],
+                "shape": {
+                  "data_commons": [
+                    {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    }
+                  ],
+                  "label": "Domestic expenditure on malaria",
+                  "measured_property": {
+                    "label": "value",
+                    "ref": "value"
+                  },
+                  "measurement_denominator_unresolved": false,
+                  "member_count": 1,
+                  "member_digest": "0688845181b5a2167b359c975201119ec7be5b3ff7976f3425687187d532a50c",
+                  "population_type": {
+                    "label": "Domestic expenditure on malaria",
+                    "ref": "undata/who/SERIES-MAL_DOM_EXP"
+                  },
+                  "refine_supported": true,
+                  "shape_id": "undata/who/series-mal_dom_exp_value_measuredvalue",
+                  "slot_keys": [
+                    {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    {
+                      "axis": "source",
+                      "label": "data source"
+                    }
+                  ],
+                  "stat_type": {
+                    "label": "measuredValue",
+                    "ref": "measuredValue"
+                  },
+                  "upstream": {
+                    "data_commons": {
+                      "id": "un_system",
+                      "label": "UN System Data Commons"
+                    },
+                    "source": {
+                      "label": "World Health Organization (WHO)",
+                      "ref": "undata/p/WHO"
+                    }
+                  }
+                },
+                "slot_options": [],
+                "slots": [
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "ref": {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        },
+                        "value_kind": "entity"
+                      }
+                    },
+                    "key": {
+                      "axis": "where",
+                      "label": "place"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "value",
+                      "value": {
+                        "time_window": {
+                          "end_year": 2024,
+                          "start_year": 2015
+                        },
+                        "value_kind": "time_window"
+                      }
+                    },
+                    "key": {
+                      "axis": "when",
+                      "label": "time window"
+                    },
+                    "summable": false
+                  },
+                  {
+                    "binding": {
+                      "kind": "unbound"
+                    },
+                    "key": {
+                      "axis": "source",
+                      "label": "data source"
+                    },
+                    "summable": false
+                  }
+                ],
+                "stat_vars": {
+                  "data_date_range": {
+                    "end": "2024",
+                    "start": "2015"
+                  },
+                  "member_count": 1,
+                  "member_count_exact": true,
+                  "served_count": 1
+                },
+                "trace": {
+                  "capability_version": "cap_94e25737d859392c",
+                  "query_qualifiers": [],
+                  "requested_window": {
+                    "end_year": 2024,
+                    "start_year": 2015
+                  },
+                  "resolved_entities": [
+                    {
+                      "label": "Kenya",
+                      "ref": "country/KEN"
+                    }
+                  ],
+                  "resolved_sources": [
+                    {
+                      "data_commons": {
+                        "id": "un_system",
+                        "label": "UN System Data Commons"
+                      },
+                      "documentation": "/api/graph/documentation/undata/p/WHO",
+                      "label": "World Health Organization (WHO)",
+                      "ref": "undata/p/WHO",
+                      "source": {
+                        "label": "World Health Organization (WHO)",
+                        "ref": "undata/p/WHO"
+                      }
+                    }
+                  ],
+                  "slot_filters": [
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "where",
+                        "label": "place"
+                      },
+                      "provenance": "binder",
+                      "refs": [
+                        {
+                          "label": "Kenya",
+                          "ref": "country/KEN"
+                        }
+                      ]
+                    },
+                    {
+                      "binding_kind": "value",
+                      "key": {
+                        "axis": "when",
+                        "label": "time window"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    },
+                    {
+                      "binding_kind": "unbound",
+                      "key": {
+                        "axis": "source",
+                        "label": "data source"
+                      },
+                      "provenance": "binder",
+                      "refs": []
+                    }
+                  ]
+                },
+                "unresolved_slots": []
+              },
+              "spec_id": "spec_060933efd05a8bfac439d3fa0af09700"
+            },
+            "status": "definite",
+            "timing_ms": {
+              "by_step": {
+                "answer": 176,
+                "bind": 0,
+                "detect_edits": 0,
+                "materialise": 73,
+                "options": 0,
+                "reread_arcs": 0,
+                "resolve_survivors": 0,
+                "shape": 0,
+                "validate": 0,
+                "walk": 1,
+                "where_places": 0
+              },
+              "total": 250
+            },
+            "variable_text": "spec_060933efd05a8bfac439d3fa0af09700",
+            "warnings": []
+          }
+        ],
+        "query_echo": {
+          "entry_path": "dataset_resubmit",
+          "extract_skipped": true
+        },
+        "rendered_sentence": "Kenya's domestic expenditure on malaria, 2015 to 2024. US dollars \u00b7 World Health Organization (WHO).",
+        "schema_version": 1,
+        "sentence_plan": [
+          {
+            "axis": "where",
+            "binding_ref": "where:",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [
+              "where:"
+            ],
+            "text": "Kenya"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "'s"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "what",
+            "entity_refs": [],
+            "kind": "slot",
+            "part_index": 0,
+            "segment": "heading",
+            "states": [],
+            "text": "domestic expenditure on malaria"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": ", "
+          },
+          {
+            "axis": "when",
+            "binding_ref": "when:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "heading",
+            "states": [
+              "when:"
+            ],
+            "text": "2015 to 2024"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "heading",
+            "states": [],
+            "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " "
+          },
+          {
+            "axis": "unit",
+            "binding_ref": "unit:",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "unit:"
+            ],
+            "text": "US dollars"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": " \u00b7 "
+          },
+          {
+            "axis": "source",
+            "entity_refs": [],
+            "kind": "slot",
+            "segment": "byline",
+            "states": [
+              "source:"
+            ],
+            "text": "World Health Organization (WHO)"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "segment": "byline",
+            "states": [],
+            "text": "."
+          }
+        ],
+        "status": "definite"
+      }
+    },
+    "structured_content": {
+      "spec_id": "spec_060933efd05a8bfac439d3fa0af09700",
+      "status": "definite"
+    },
+    "text": "Search resolved the identity of spec_060933efd05a8bfac439d3fa0af09700: definite."
+  },
+  "call": "resolve_definition {\"identity\":{\"entities\":{\"observationAbout\":[\"country/KEN\"]},\"identity_version\":\"spec1\",\"requested_window\":{\"end_year\":2024,\"kind\":\"range\",\"start_year\":2015},\"shape\":{\"kind\":\"statvar_schema\",\"measured_property\":\"value\",\"population_type\":\"undata/who/SERIES-MAL_DOM_EXP\",\"stat_type\":\"measuredValue\"},\"slots\":[]},\"spec_id\":\"spec_060933efd05a8bfac439d3fa0af09700\"}"
+}

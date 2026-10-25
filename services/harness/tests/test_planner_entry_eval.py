@@ -5,9 +5,10 @@ and its summary scores runs as its README says.
 orchestrator tools, graph nodes and `PlannerSeam` over the task's recording, with a
 scripted model in place of the planner's. So a change to the planner's rules, the
 seam's brief or the orchestrator's search storage that leaves a reference plan
-refused, or a recording that no longer replays or lacks a first-year read the
-planner can make, fails here rather than in a paid run. No model, no network. The
-full-set test takes about 20 s: it runs one scripted entry for each of the 62 tasks'
+refused, a plan whose translation no longer compiles, or a recording that no longer
+replays or lacks a first-year read or a call the translation makes, fails here rather
+than in a paid run. No model, no network. The
+full-set test takes about 20 s: it runs one scripted entry for each of the 68 tasks'
 plans, and one more per task for the datasets its seam shows the planner.
 
 `evals/` sits outside the workspace, so its modules are loaded by file path.
@@ -18,6 +19,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
+import dataclasses
 import datetime
 import importlib.util
 import json
@@ -28,9 +31,12 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, get_args
 
 import pytest
+from compiler.surface import ToolSurfaceUnavailableError
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from langfuse.api import DatasetItem, NotFoundError
 from planner.plan import EvidenceRequirement
+from pydantic import ValidationError
 from submission.service import COMBINATION_OPTIONS, COMBINE_OPTION
 
 EVAL_DIR = Path(__file__).resolve().parents[3] / "evals" / "planner_entry"
@@ -52,6 +58,7 @@ summarise = _load("summarise")
 arms = _load("arms")
 langfuse_store = _load("langfuse_store")
 run = _load("run")
+recorder = _load("record")
 
 
 async def test_every_task_validates_and_the_set_covers_every_kind() -> None:
@@ -79,12 +86,23 @@ def _required_kind_unused(task: Any) -> dict[str, Any]:
     }
 
 
+def _years_misdeclared(task: Any) -> dict[str, Any]:
+    del task
+    return {"period_reduction": "none"}
+
+
+def _ask_unmarked(task: Any) -> dict[str, Any]:
+    return {"asks": [ask.text for ask in task.asks]}
+
+
 @pytest.mark.parametrize(
     ("change", "fault"),
     [
         (_search_reworded, "RecordingMismatchError"),
         (_ask_unanswered, "not accepted"),
         (_required_kind_unused, "lacks required kinds ['join']"),
+        (_years_misdeclared, "period_reduction is none, but the plan's is across_years"),
+        (_ask_unmarked, "not accepted: invalid_input/period_reduction_unstated"),
     ],
 )
 async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
@@ -96,6 +114,188 @@ async def test_a_broken_task_is_reported(change: Any, fault: str) -> None:
     faults = await validate.check_task(broken)
 
     assert any(fault in line for line in faults), faults
+
+
+def _task(task_id: str) -> Any:
+    return next(task for task in entry.load_tasks() if task.id == task_id)
+
+
+async def test_a_plan_propose_plan_accepts_but_the_translation_refuses_is_reported() -> None:
+    # GDP as a share of population: `propose_plan` admits it, and the compile refuses
+    # dividing US dollars by a count with `share_of`. Both pins' blocks are exact, so
+    # the translation needs no recorded call.
+    entry.quiet_logs()
+    task = _task("join-population-gdp-kenya")
+    payload = copy.deepcopy(task.reference_payload)
+    payload["evidence_requirements"][2] = {
+        "kind": "share_of",
+        "id": "table",
+        "numerator": {"input_id": "gdp"},
+        "denominator": {"input_id": "population"},
+    }
+    broken = entry.Task.model_validate({**task.model_dump(), "reference_payload": payload})
+
+    faults = await validate.check_task(broken)
+
+    assert any(
+        line.startswith("reference: translation requirement_needs_repair: share_units_differ@table")
+        for line in faults
+    ), faults
+
+
+async def test_a_translation_reads_only_the_search_recorded_under_the_arguments_it_sends_now() -> (
+    None
+):
+    # `growth-gdp-kenya` pins nothing, so `discover_source` searches. Its answer is the
+    # orchestrator's recorded search, filed under whatever arguments discovery sent.
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    schemas = await validate.tool_schemas()
+
+    async def translate(held: dict[str, Any], payload: Any) -> tuple[list[str], Any]:
+        calls = entry.TranslationCalls(held, schemas=schemas)
+        run = await validate.accepted_run(task, recording, payload, calls)
+        return validate.translation_faults(run, calls), calls
+
+    unrecorded, calls = await translate({}, reference)
+    (asked,) = calls.misses
+    answer = {
+        "is_error": False,
+        "structured_content": {},
+        "text": "",
+        "meta": {SEARCH_ENVELOPE_META_KEY: recording["searches"][0]["envelope"]},
+    }
+    held = {"calls": {asked: answer}}
+    recorded, _ = await translate(held, reference)
+    body = copy.deepcopy(dict(reference.body))
+    body["evidence_requirements"][0]["measure"] = "gross domestic product"
+    edited, calls = await translate(held, dataclasses.replace(reference, body=body))
+
+    assert unrecorded == [f"no recording for {asked}"]
+    assert asked.startswith("search ") and '"variable":"GDP"' in asked
+    assert recorded == []
+    assert len(edited) == 1 and '"variable":"gross domestic product"' in edited[0], edited
+    assert calls.unasked() == [asked]
+
+
+async def test_a_pin_over_other_years_is_moved_to_its_copy_over_the_requirements_period() -> None:
+    # `rank-top-donors-malawi` pins a search answered over every year, for a
+    # requirement over 1960 to 2025. `propose_plan` moves the pin to its copy over
+    # those years only when it reads the identity the search recorded, as a studio
+    # turn's conversation holds it; the translation then confirms the copy.
+    entry.quiet_logs()
+    task = _task("rank-top-donors-malawi")
+    recording = entry.load_recording(task.id)
+    reference = validate.task_payloads(task)[0]
+    pinned = reference.body["evidence_requirements"][0]["source_spec_id"]
+    calls = entry.TranslationCalls(
+        recording.get("translation") or {}, schemas=await validate.tool_schemas()
+    )
+
+    run = await validate.accepted_run(task, recording, reference, calls)
+
+    assert run.probe.plan is not None
+    (oda,) = (item for item in run.probe.plan.evidence_requirements if item.id == "oda")
+    assert oda.source_spec_id not in {None, pinned}
+    assert validate.translation_faults(run, calls) == []
+
+
+class _LiveClient:
+    """A data-mcp client whose every call `answer` answers, keeping what it was asked."""
+
+    def __init__(self, answer: Callable[[], Any]) -> None:
+        self.answer = answer
+        self.asked: list[str] = []
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], **_: Any) -> Any:
+        self.asked.append(entry.surface_key(name, arguments))
+        return await self.answer()
+
+
+def _searched(envelope: dict[str, Any]) -> Callable[[], Any]:
+    async def answer() -> Any:
+        return SimpleNamespace(
+            is_error=False,
+            structured_content={},
+            content=[],
+            meta={SEARCH_ENVELOPE_META_KEY: envelope},
+        )
+
+    return answer
+
+
+async def _refused_for_now() -> Any:
+    return SimpleNamespace(
+        is_error=True,
+        structured_content={"retry_mode": "retry_after_delay", "message": "busy"},
+        content=[],
+        meta=None,
+    )
+
+
+async def _cut() -> Any:
+    raise ToolSurfaceUnavailableError("search timed out")
+
+
+async def _broken() -> Any:
+    raise RuntimeError("connection reset")
+
+
+async def _stalled() -> Any:
+    await asyncio.sleep(30)
+
+
+@pytest.mark.parametrize(
+    ("answer", "refusal"),
+    [
+        (_refused_for_now, "refused for now"),
+        (_cut, "ToolSurfaceUnavailableError: search timed out"),
+        (_broken, "RuntimeError: connection reset"),
+        (_stalled, "ran past 0.5 s"),
+    ],
+)
+async def test_a_live_translation_that_cannot_be_replayed_is_not_recorded(
+    answer: Callable[[], Any], refusal: str
+) -> None:
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    # The translation's own answers left out, so its search goes to the live client.
+    recording = {**entry.load_recording(task.id), "translation": {}}
+    client = _LiveClient(answer)
+
+    with pytest.raises(recorder.TranslationRecordError) as raised:
+        await recorder._translation_calls(client, task, recording, wall_s=0.5)
+
+    assert raised.value.args[0].startswith("reference: ")
+    assert refusal in raised.value.args[0]
+    if answer is not _stalled:
+        assert client.asked[0] in raised.value.args[0]
+
+
+async def test_a_live_translation_records_each_call_a_replay_reads() -> None:
+    entry.quiet_logs()
+    task = _task("growth-gdp-kenya")
+    recording = {**entry.load_recording(task.id), "translation": {}}
+    client = _LiveClient(_searched(recording["searches"][0]["envelope"]))
+
+    kept = await recorder._translation_calls(client, task, recording, wall_s=60.0)
+
+    assert list(kept["calls"]) == client.asked
+    assert kept["calls"][client.asked[0]]["meta"][SEARCH_ENVELOPE_META_KEY]["parts"]
+
+
+def test_a_task_states_its_period_reduction_in_the_closed_vocabulary() -> None:
+    task = next(task for task in entry.load_tasks() if task.id == "aggregate-total-oda-kenya")
+
+    with pytest.raises(ValidationError) as refused:
+        entry.Task.model_validate({**task.model_dump(), "period_reduction": "one_year"})
+    with pytest.raises(ValidationError) as missing:
+        entry.Task.model_validate(task.model_dump(exclude={"period_reduction"}))
+
+    assert [error["type"] for error in refused.value.errors()] == ["enum"]
+    assert [error["type"] for error in missing.value.errors()] == ["missing"]
 
 
 def _tamper_answer(directory: Path, name: str) -> None:
@@ -138,6 +338,33 @@ def test_stray_recordings_name_files_no_task_uses(tmp_path: Path) -> None:
     assert stray[0] == entry.recording_path("removed-task", tmp_path)
     assert stray[1:] and all(path.parent.name == "answers" for path in stray[1:])
     assert not kept & {path.stem for path in stray[1:]}
+
+
+def test_a_translation_answer_is_stored_once_and_read_back(tmp_path: Path) -> None:
+    call = 'search {"parts":[{"variable":"GDP"}]}'
+    answer = {"is_error": False, "structured_content": {}, "text": "", "meta": {"envelope": 1}}
+    node = {"ref": "CRSPurposeCode999", "status": "not_held"}
+    translation = {
+        "calls": {call: answer},
+        "resolved": {"Kenya": None},
+        "nodes": {"CRSPurposeCode999": node},
+    }
+    task_ids = ("series-gdp-ghana", "aggregate-total-oda-kenya")
+    for task_id in task_ids:
+        recorded = {**entry.load_recording(task_id), "translation": translation}
+        entry.save_recording(task_id, recorded, tmp_path)
+
+    body = json.loads(entry.recording_path(task_ids[0], tmp_path).read_text())
+
+    name = entry.answer_id(call, answer)
+    assert body["translation"] == {
+        "answers": [name],
+        "resolved": {"Kenya": None},
+        "nodes": {"CRSPurposeCode999": node},
+    }
+    assert (tmp_path / "answers" / f"{name}.json").exists()
+    assert entry.load_recording(task_ids[0], tmp_path)["translation"] == translation
+    assert entry.stray_recordings(set(task_ids), tmp_path) == []
 
 
 class _StalledLlm(validate.ScriptedLlm):
@@ -273,6 +500,90 @@ async def test_a_record_credits_the_proposal_that_recorded_the_plan_and_an_ask_l
     assert (record["stop_reason"], record["first_proposal"]["outcome"]) == (stop, first)
 
 
+def _summing_years(payload: dict[str, Any]) -> dict[str, Any]:
+    """`payload` with every `aggregate` leaving `period` out of its `group_by`."""
+    requirements = [
+        {**requirement, "group_by": ["entity"]}
+        if requirement["kind"] == "aggregate"
+        else requirement
+        for requirement in payload["evidence_requirements"]
+    ]
+    return {**payload, "evidence_requirements": requirements}
+
+
+_COVERAGE_BRIEF = "aggregate-total-education-oda-kenya-coverage-brief"
+
+
+# Each task's reference plan, proposed after the same plan summing its years when
+# `summed_first`. The cases give the asks the plan holds as marked, what the record
+# says of the first proposal, and what it says of the accepted plan's years. A record
+# stripped of the period-reduction fields and the plan's marks reads the same, from the
+# task's marks.
+@pytest.mark.parametrize(
+    ("task_id", "summed_first", "marked", "first_code", "reductions", "reduction"),
+    [
+        (
+            "aggregate-total-oda-kenya",
+            False,
+            [0],
+            None,
+            [{"step": "total", "start": 2015, "end": 2022, "refused": False}],
+            "across_years",
+        ),
+        ("rank-top-donors-malawi", False, [], None, [], "none"),
+        (_COVERAGE_BRIEF, True, [], "period_reduction_unstated", [], "none"),
+    ],
+)
+async def test_a_record_says_what_the_accepted_plan_does_with_its_years(
+    task_id: str,
+    summed_first: bool,
+    marked: list[int],
+    first_code: str | None,
+    reductions: list[dict[str, Any]],
+    reduction: str,
+) -> None:
+    entry.quiet_logs()
+    task = next(task for task in entry.load_tasks() if task.id == task_id)
+    payloads = [_summing_years(task.reference_payload)] if summed_first else []
+    payloads.append(dict(task.reference_payload))
+    model = validate.ScriptedLlm(script=[[("propose_plan", payload)] for payload in payloads])
+
+    run = await entry.run_entry(
+        task, entry.load_recording(task.id), prefix_cache=None, model=model, timeout_s=60.0
+    )
+    record = entry.entry_record(
+        task=task, run=run, arm="a", rep=1, model="m", revision="r", experiment="e"
+    )
+
+    assert record["stop_reason"] == "accepted"
+    assert record["plan"]["asks_across_years"] == marked
+    assert record["first_proposal"]["code"] == first_code
+    assert record["period_reductions"] == reductions
+    assert record["period_reduction"] == reduction
+    assert entry.record_period_reduction(_before_the_mark(record), task) == reduction
+
+
+def _before_the_mark(record: dict[str, Any]) -> dict[str, Any]:
+    """`record` stripped of its reading of the plan's years and of the plan's ask marks."""
+    kept = {k: v for k, v in record.items() if not k.startswith("period_reduction")}
+    return {**kept, "plan": {k: v for k, v in record["plan"].items() if k != "asks_across_years"}}
+
+
+def test_an_unmarked_ask_digests_as_it_did_before_asks_carried_the_mark() -> None:
+    task = next(task for task in entry.load_tasks() if task.id == "rank-donor-each-year-kenya")
+    marked = entry.Task.model_validate(
+        {**task.model_dump(), "asks": [{**task.asks[0].model_dump(), "across_years": True}]}
+    )
+    recording = {"searches": [], "tools": {}}
+
+    # The pinned digest is the one `inputs_digest` gives this task over this recording
+    # when no ask is marked.
+    assert entry.inputs_digest(task, recording) == (
+        "dcda82f03fa9c004ffacfc14bc3fe4c66255aed890f6155ca84d79c395465afe"
+    )
+    assert entry.inputs_digest(marked, recording) != entry.inputs_digest(task, recording)
+
+
 def _record(
     arm: str,
     task: str,
@@ -288,10 +599,20 @@ def _record(
     misses: tuple[str, ...] = (),
     finished: bool = True,
     closed: str | None = None,
+    years: str | None = None,
+    plan: dict[str, Any] | None = None,
+    proposals: int = 1,
 ) -> dict[str, Any]:
+    """One run's record. `years` is the accepted plan's period reduction. A record given
+    none holds no reading and is read from `plan`, the accepted plan it holds. The last
+    of several `proposals` is accepted."""
     outcome, code = first
     tokens = (100, 50, 10, 0) if finished else (None, None, None, None)
+    accepted = {"outcome": "ok", "code": None, "message": "", "kinds": kinds, "args": {}}
+    kept = {} if years is None else {"period_reduction": years}
     return {
+        **kept,
+        "plan": plan,
         "arm": arm,
         "task": task,
         "rep": rep,
@@ -303,7 +624,8 @@ def _record(
         "stop_reason": stop,
         "plan_kinds": kinds if stop == "accepted" else None,
         "proposals": [
-            {"outcome": outcome, "code": code, "message": "", "kinds": kinds, "args": {}}
+            {"outcome": outcome, "code": code, "message": "", "kinds": kinds, "args": {}},
+            *([accepted] * (proposals - 1)),
         ],
         "first_proposal": {"outcome": outcome, "code": code},
         "calls": [
@@ -419,6 +741,73 @@ def test_the_summary_pairs_by_task_and_leaves_out_what_it_cannot_vouch_for() -> 
     # whose arm runs all errored, is no kind-pass task lost, and the task whose inputs
     # changed between the arms, worse in every arm run, pairs nothing.
     assert fired == {"First-proposal": False, "Kind": False, "p90": True, "More": True}
+
+
+async def _unmarked_plan(task: entry.Task, payload: dict[str, Any]) -> dict[str, Any]:
+    """`payload` as a plan stored without ask marks, accepted with the task's one ask
+    marked so that `propose_plan` takes its years summed."""
+    asked = entry.Task.model_validate(
+        {**task.model_dump(), "asks": [{**task.asks[0].model_dump(), "across_years": True}]}
+    )
+    run = await entry.run_entry(
+        asked,
+        entry.load_recording(task.id),
+        prefix_cache=None,
+        model=validate.ScriptedLlm(script=[[("propose_plan", payload)]]),
+        timeout_s=60.0,
+    )
+    assert run.probe.plan is not None
+    return run.probe.plan.model_dump(mode="json", exclude={"asks_across_years"})
+
+
+async def test_the_summary_holds_each_accepted_plan_to_its_tasks_years() -> None:
+    entry.quiet_logs()
+    tasks = {task.id: task for task in entry.load_tasks()}
+    top, total, series = "rank-top-donors-malawi", "aggregate-total-oda-kenya", "series-gdp-ghana"
+    summed, ranked = ["aggregate", "dataset"], ["dataset", "rank"]
+    # The plans a baseline record keeps: the coverage brief's years summed, where its
+    # task marks no ask, and the marked total's reference.
+    brief = tasks[_COVERAGE_BRIEF]
+    before = await _unmarked_plan(brief, _summing_years(brief.reference_payload))
+    marked_total = await _unmarked_plan(tasks[total], dict(tasks[total].reference_payload))
+    refused = ("invalid_input", "period_reduction_unstated")
+    records = [
+        # Refused for its years, then accepted keeping them.
+        _record("arm", brief.id, 1, kinds=summed, first=refused, years="none", proposals=2),
+        _record("arm", brief.id, 2, kinds=summed, years="none"),
+        # A ranking of every year summed, which only a revision without the rule accepts.
+        _record("arm", top, 1, kinds=ranked, years="unstated"),
+        _record("arm", top, 2, kinds=ranked, years="none"),
+        # A marked ask with one total, and a plan that kept the years the task sums.
+        _record("arm", total, 1, kinds=summed, years="across_years"),
+        _record("arm", total, 2, kinds=summed, years="none"),
+        _record("arm", series, 1, kinds=["dataset"], years="none"),
+        _record("arm", series, 2, kinds=["dataset"], first=("refused", None), stop="no_plan"),
+        # Records that keep no reading, read from their plans with the asks their task
+        # marks: one summing years its task keeps, one whose plan `Plan` refuses to
+        # validate, which counts as a miss, and one summing the years its task sums.
+        _record("baseline", brief.id, 1, kinds=summed, plan=before),
+        _record("baseline", brief.id, 2, kinds=summed, plan={**before, "answered": 1}),
+        _record("baseline", total, 1, kinds=summed, plan=marked_total),
+    ]
+
+    report, machine = summarise.build_report(
+        records, [tasks[t] for t in (brief.id, top, total, series)], arm="arm", baseline="baseline"
+    )
+
+    arm, baseline = machine["arms"]["arm"], machine["arms"]["baseline"]
+    assert (arm["years_expected"], arm["years_accepted"], arm["years_unloaded"]) == (5, 7, 0)
+    assert (arm["unmarked_reducing"], arm["unmarked_accepted"]) == (1, 5)
+    assert arm["period_first_refusals"] == 1
+    assert (arm["rule_tasks"], arm["rule_accepted"], arm["rule_runs"]) == (2, 4, 4)
+    assert arm["rule_mean_rounds"] == pytest.approx(5 / 4)
+    assert (baseline["years_expected"], baseline["years_accepted"]) == (1, 3)
+    assert baseline["years_unloaded"] == 1
+    assert (baseline["unmarked_reducing"], baseline["unmarked_accepted"]) == (1, 1)
+    assert (baseline["rule_accepted"], baseline["rule_runs"]) == (3, 3)
+    rows = {line.split(" | ")[0].strip("| "): line.split(" | ")[-1] for line in report.splitlines()}
+    assert rows[top] == "2/2, 2/2, 1/2 |"
+    assert rows[series] == "1/2, 2/2, 1/1 |"
 
 
 def test_the_summary_refuses_an_arm_run_under_two_experiments() -> None:

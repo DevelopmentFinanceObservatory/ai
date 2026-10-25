@@ -3,6 +3,7 @@ with a scripted model: answer, ask, plan, and what the agent reads after each.""
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from pathlib import Path
@@ -34,7 +35,7 @@ from harness.graph.plan_done import (
     StepSummary,
     _ask_status,
     _partial_result,
-    _stopped_steps,
+    _stop_causes,
 )
 from harness.graph.state import (
     APPROVE_INTERRUPT,
@@ -53,9 +54,10 @@ from harness.graph.state import (
     ORCHESTRATOR_UNAVAILABLE_KEY,
     UNREADABLE_PLAN_NOTE,
     AskOption,
+    AskQuestion,
     GraphState,
     PendingAsk,
-    ask_candidates,
+    ask_questions,
     pending_action,
 )
 from harness.graph.workflow import planner_entry
@@ -69,8 +71,10 @@ from harness.studio_translate import _RecordingSurface
 from harness.tool_contracts import HarnessCode
 from harness.turn_records import PlanAsk, PlanRecord
 from harness.wiring import handing_back_planner_failures
+from planner.agent import ToolContextSession
 from planner.plan import (
     ASK_BREAKDOWNS_STATE_KEY,
+    ASKS_ACROSS_YEARS_STATE_KEY,
     ASKS_STATE_KEY,
     AskAnswer,
     AskBreakdown,
@@ -159,121 +163,422 @@ async def test_an_answered_turn_ends_after_the_agent_without_a_pause():
     assert "route" in visited_nodes(events) and "ask" not in visited_nodes(events)
 
 
-async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words():
+_CONGO = {
+    "question": "Which Congo?",
+    "options": [{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
+}
+_SETTLED = "Each answered choice is settled. Do not ask it again."
+
+
+def _answers(**answers: dict[str, Any]) -> dict[str, Any]:
+    """The clarify interrupt's resume value: one answer per question id."""
+    return {"answers": answers}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_answers(q1={"kind": "option", "spec_id": "o1"}), {"spec_id": "o1"}],
+    ids=["answers", "legacy_pick"],
+)
+async def test_ask_pauses_with_generated_option_ids_and_hands_the_choice_back_in_words(
+    answer: dict[str, Any],
+):
     runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            question="Which Congo?",
-            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
-        ),
+        call("ask_user", questions=[_CONGO]),
         types.Part.from_text(text="The Republic of the Congo's GDP was $15.7 billion in 2024."),
     )
     await open_session(runner)
 
     pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
     assert pause.id == CLARIFY_INTERRUPT
-    assert pause.args["payload"]["candidates"] == [
-        {"spec_id": "o1", "label": "Republic of the Congo"},
-        {"spec_id": "o2", "label": "DR Congo"},
-    ]
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": "o1"}})
-    events = await run_turn(runner, types.Content(role="user", parts=[answer]))
+    assert pause.args["payload"] == {
+        "questions": [
+            {
+                "id": "q1",
+                "question": "Which Congo?",
+                "candidates": [
+                    {"spec_id": "o1", "label": "Republic of the Congo"},
+                    {"spec_id": "o2", "label": "DR Congo"},
+                ],
+            }
+        ]
+    }
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
     resumed = request_text(model.requests[-1])
     assert "GDP of Congo?" in resumed
-    assert "You asked the user: Which Congo?\nThe user chose: Republic of the Congo" in resumed
+    assert (
+        f"You asked the user: Which Congo?\nThe user chose: Republic of the Congo\n{_SETTLED}"
+        in resumed
+    )
     assert not carries_an_interrupt(model.requests[-1])
     assert not quotes_another_agent(model.requests[-1])
     assert not [e for e in events if e.error_code]
 
 
-async def test_a_count_option_pauses_under_its_spec_id_and_the_pick_hands_it_back():
-    gross, net = "spec_" + "a" * 32, "spec_" + "c" * 32
+_GROSS, _NET = "spec_" + "a" * 32, "spec_" + "c" * 32
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (
+            _answers(q1={"kind": "option", "spec_id": _NET}, q2={"kind": "skipped"}),
+            [
+                f"1. How should aid be counted? The user chose: net disbursements ({_NET})",
+                "2. In which prices? The user left this to you. Go on with Current US dollars.",
+                _SETTLED,
+            ],
+        ),
+        (
+            _answers(
+                q1={"kind": "option", "spec_id": "o3"},
+                q2={"kind": "text", "text": "2015 dollars"},
+            ),
+            [
+                "1. How should aid be counted? The user chose: Either",
+                "2. In which prices? The user answered in their own words: 2015 dollars",
+                _SETTLED,
+            ],
+        ),
+        (
+            _answers(q2={"kind": "option", "spec_id": "o2"}),
+            [
+                "1. How should aid be counted? The user left this to you. Go on with "
+                "gross disbursements.",
+                "2. In which prices? The user chose: Constant 2023 US dollars",
+                _SETTLED,
+            ],
+        ),
+        (
+            {"skip": True},
+            [
+                "1. How should aid be counted?",
+                "2. In which prices?",
+                "The user skipped the questions. Do not answer them",
+            ],
+        ),
+    ],
+    ids=["count_and_skipped", "other_and_free_text", "unanswered", "dismissed"],
+)
+async def test_several_questions_pause_together_and_each_answer_is_handed_back(
+    answer: dict[str, Any], expected: list[str]
+):
     block = {
-        "spec_id": gross,
+        "spec_id": _GROSS,
         "resolved": {
             "measure_label": "gross disbursements",
             "alternative_measures": [
-                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": net}}
+                {"label": "net disbursements", "axis": "what", "definition": {"spec_id": _NET}}
             ],
         },
     }
     runner, model = orchestrator_runner(
         call(
             "ask_user",
-            question="How should aid be counted?",
-            options=[
-                {"label": "gross disbursements", "spec_id": gross},
-                {"label": "net disbursements", "spec_id": net},
-                {"label": "Either"},
+            questions=[
+                {
+                    "question": "How should aid be counted?",
+                    "options": [
+                        {"label": "gross disbursements", "spec_id": _GROSS},
+                        {"label": "net disbursements", "spec_id": _NET},
+                        {"label": "Either"},
+                    ],
+                },
+                {
+                    "question": "In which prices?",
+                    "options": [
+                        {"label": "Current US dollars"},
+                        {"label": "Constant 2023 US dollars"},
+                    ],
+                },
             ],
         ),
         types.Part.from_text(text="Done."),
     )
-    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {gross: block}})
+    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_GROSS: block}})
 
     pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
-    assert pause.args["payload"]["candidates"] == [
-        {"spec_id": gross, "label": "gross disbursements"},
-        {"spec_id": net, "label": "net disbursements"},
-        {"spec_id": "o3", "label": "Either"},
+    assert pause.args["message"] == "How should aid be counted?"
+    assert pause.args["payload"]["questions"] == [
+        {
+            "id": "q1",
+            "question": "How should aid be counted?",
+            "candidates": [
+                {"spec_id": _GROSS, "label": "gross disbursements"},
+                {"spec_id": _NET, "label": "net disbursements"},
+                {"spec_id": "o3", "label": "Either"},
+            ],
+        },
+        {
+            "id": "q2",
+            "question": "In which prices?",
+            "candidates": [
+                {"spec_id": "o1", "label": "Current US dollars"},
+                {"spec_id": "o2", "label": "Constant 2023 US dollars"},
+            ],
+        },
     ]
-    answer = create_request_input_response(pause.id, {"result": {"spec_id": net}})
-    await run_turn(runner, types.Content(role="user", parts=[answer]))
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
-    assert f"The user chose: net disbursements ({net})" in request_text(model.requests[-1])
+    assert "\n".join(["You asked the user:", *expected]) in request_text(model.requests[-1])
+    assert not [e for e in events if e.error_code]
 
 
-async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such():
-    for answer, expected in [
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
-    ]:
-        runner, model = orchestrator_runner(
-            call("ask_user", question="Which Congo?", options=[{"label": "Republic of the Congo"}]),
-            types.Part.from_text(text="Done."),
-        )
-        await open_session(runner)
-        pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+# Search's answer to "Bilateral plus imputed multilateral aid from France to
+# Kenya": gross disbursements in current prices, offering net disbursements.
+_FRANCE_KENYA = json.loads(
+    (
+        Path(__file__).parents[2]
+        / "data-mcp"
+        / "tests"
+        / "fixtures"
+        / "resolve_aid_france_kenya.json"
+    ).read_text()
+)["parts"][0]["spec"]
+_FK_GROSS = _FRANCE_KENYA["spec_id"]
+_FK_NET = "spec_c67524ce5da3bfd4d94994a76c560b28"
+_FK_CONSTANT = "spec_" + "e" * 32
 
-        reply = create_request_input_response(pause.id, {"result": answer})
-        await run_turn(runner, types.Content(role="user", parts=[reply]))
 
-        assert expected in request_text(model.requests[-1])
+def _priced(alternative: dict[str, Any], qualifier: str) -> dict[str, Any]:
+    """`alternative` with its measure in `qualifier` prices."""
+    priced = copy.deepcopy(alternative)
+    priced["definition"]["identity"]["shape"]["measurement_qualifier"] = qualifier
+    for value in priced["measure_axis_values"]:
+        if value["axis"] == "measurementQualifier":
+            value["value"] = {"ref": qualifier, "label": qualifier}
+    return priced
+
+
+def _france_kenya_with_constant_prices(*, net_qualifier: str) -> dict[str, Any]:
+    """The France to Kenya block offering, besides net disbursements in
+    `net_qualifier` prices, the gross count in constant prices as dfo-apis
+    lists it: axis "unit", labelled by its prices."""
+    block = copy.deepcopy(_FRANCE_KENYA)
+    resolved = block["resolved"]
+    (net,) = resolved["alternative_measures"]
+    gross = {
+        "definition": copy.deepcopy(block["definition"]),
+        "measure_axis_values": resolved["measure_axis_values"],
+    }
+    constant = _priced(gross, "RealValue")
+    constant["definition"]["spec_id"] = _FK_CONSTANT
+    resolved["alternative_measures"] = [
+        _priced(net, net_qualifier),
+        {**constant, "label": "constant prices", "axis": "unit"},
+    ]
+    return block
+
+
+_COUNT_AND_PRICES = [
+    {
+        "question": "How should aid be counted?",
+        "options": [
+            {"label": "Gross disbursements", "spec_id": _FK_GROSS},
+            {"label": "Net disbursements", "spec_id": _FK_NET},
+        ],
+    },
+    {
+        "question": "In which prices?",
+        "options": [
+            {"label": "Current US dollars"},
+            {"label": "Constant US dollars", "spec_id": _FK_CONSTANT},
+        ],
+    },
+]
+_NET_LINE = f"1. How should aid be counted? The user chose: Net disbursements ({_FK_NET})"
+_CONSTANT_LINE = f"2. In which prices? The user chose: Constant US dollars ({_FK_CONSTANT})"
 
 
 @pytest.mark.parametrize(
-    ("answer", "expected"),
+    ("net_qualifier", "answer", "expected", "elected"),
     [
-        ({"spec_id": "o2"}, "The user chose: DR Congo"),
-        ({"text": "the big one"}, "The user answered in their own words: the big one"),
-        ({"skip": True}, "The user skipped the question. Do not answer it"),
+        (
+            "RealValue",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                _NET_LINE,
+                _CONSTANT_LINE,
+                "Together the answers ask for net disbursements in constant prices. Fetch "
+                f"{_FK_NET}, which this search listed with both.",
+            ],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                _NET_LINE,
+                _CONSTANT_LINE,
+                "Together the answers ask for net disbursements in constant prices, which this "
+                "search did not list. Search once for that reading.",
+            ],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET}, q2={"kind": "option", "spec_id": "o1"}
+            ),
+            [_NET_LINE, "2. In which prices? The user chose: Current US dollars"],
+            {_FK_NET},
+        ),
+        (
+            "Nominal",
+            _answers(q1={"kind": "skipped"}, q2={"kind": "option", "spec_id": _FK_CONSTANT}),
+            [
+                "1. How should aid be counted? The user left this to you. Go on with Gross "
+                "disbursements.",
+                _CONSTANT_LINE,
+            ],
+            set(),
+        ),
+        (
+            "Nominal",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_GROSS},
+                q2={"kind": "option", "spec_id": _FK_CONSTANT},
+            ),
+            [
+                f"1. How should aid be counted? The user chose: Gross disbursements ({_FK_GROSS})",
+                _CONSTANT_LINE,
+                "Together the answers ask for gross disbursements in constant prices. Fetch "
+                f"{_FK_CONSTANT}, which this search listed with both.",
+            ],
+            {_FK_GROSS, _FK_CONSTANT},
+        ),
+        (
+            "RealValue",
+            _answers(
+                q1={"kind": "option", "spec_id": _FK_NET}, q2={"kind": "option", "spec_id": "o1"}
+            ),
+            [
+                _NET_LINE,
+                "2. In which prices? The user chose: Current US dollars",
+                "This search listed net disbursements only in constant prices. For other "
+                "prices, search once for that reading.",
+            ],
+            {_FK_NET},
+        ),
+    ],
+    ids=[
+        "both_resolved",
+        "both_unlisted",
+        "only_count",
+        "only_prices",
+        "elected_picked",
+        "count_only_in_other_prices",
     ],
 )
-async def test_a_question_paused_with_bare_label_options_resumes(
-    answer: dict[str, Any], expected: str
+async def test_a_count_and_prices_picked_together_name_the_one_reading_with_both(
+    net_qualifier: str, answer: dict[str, Any], expected: list[str], elected: set[str]
 ):
+    """A count picked in one answer, search's own reading included, and
+    other prices in another, both of one search result, name the listed
+    reading measuring both, or ask for one search when none is listed. A
+    count listed only at the other price basis is said to be. Any other pair
+    reads answer by answer."""
+    block = _france_kenya_with_constant_prices(net_qualifier=net_qualifier)
     runner, model = orchestrator_runner(
-        call(
-            "ask_user",
-            question="Which Congo?",
-            options=[{"label": "Republic of the Congo"}, {"label": "DR Congo"}],
-        ),
-        types.Part.from_text(text="Done."),
+        call("ask_user", questions=_COUNT_AND_PRICES), types.Part.from_text(text="Done.")
     )
-    await open_session(runner)
-    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
-    asked = _stored_state(runner)[ORCHESTRATOR_ASKED_KEY]
-    asked["options"] = ["Republic of the Congo", "DR Congo"]
+    await open_session(runner, **{ORCHESTRATOR_SPECS_KEY: {_FK_GROSS: block}})
+    pause = single_pause(await run_turn(runner, types.UserContent("Aid from France to Kenya?")))
 
     reply = create_request_input_response(pause.id, {"result": answer})
     events = await run_turn(runner, types.Content(role="user", parts=[reply]))
 
     assert not [e for e in events if e.error_code]
+    assert "\n".join(["You asked the user:", *expected, _SETTLED]) in request_text(
+        model.requests[-1]
+    )
+    session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
+    assert session is not None
+    tool_context = SimpleNamespace(state=session.state, session=session)
+    chosen = ToolContextSession(cast(Any, tool_context)).elected_spec_ids()
+    assert {spec_id for spec_id in chosen if spec_id.startswith("spec_")} == elected
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        (
+            _answers(q1={"kind": "text", "text": "the big one"}),
+            "The user answered in their own words: the big one",
+        ),
+        ({"skip": True}, "The user skipped the question. Do not answer it"),
+    ],
+    ids=["legacy_text", "answers_text", "dismissed"],
+)
+async def test_a_free_text_answer_and_a_skip_are_handed_back_as_such(
+    answer: dict[str, Any], expected: str
+):
+    runner, model = orchestrator_runner(
+        call("ask_user", questions=[_CONGO]),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+
+    reply = create_request_input_response(pause.id, {"result": answer})
+    await run_turn(runner, types.Content(role="user", parts=[reply]))
+
     assert expected in request_text(model.requests[-1])
 
 
-def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["Republic of the Congo", "DR Congo"],
+        [{"label": "Republic of the Congo", "spec_id": None}, {"label": "DR Congo"}],
+    ],
+    ids=["bare_labels", "options"],
+)
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"spec_id": "o2"}, "The user chose: DR Congo"),
+        (_answers(q1={"kind": "option", "spec_id": "o2"}), "The user chose: DR Congo"),
+        ({"text": "the big one"}, "The user answered in their own words: the big one"),
+        ({"skip": True}, "The user skipped the question. Do not answer it"),
+    ],
+    ids=["legacy_pick", "answers_pick", "text", "dismissed"],
+)
+async def test_a_question_paused_in_the_one_question_shape_resumes(
+    options: list[Any], answer: dict[str, Any], expected: str
+):
+    """A question held in the one-question shape `{kind, question, options}`
+    resumes, whether its options are bare labels or option objects."""
+    runner, model = orchestrator_runner(
+        call("ask_user", questions=[_CONGO]),
+        types.Part.from_text(text="Done."),
+    )
+    await open_session(runner)
+    pause = single_pause(await run_turn(runner, types.UserContent("GDP of Congo?")))
+    _stored_state(runner)[ORCHESTRATOR_ASKED_KEY] = {
+        "kind": "ask",
+        "question": "Which Congo?",
+        "options": options,
+    }
+
+    reply = create_request_input_response(pause.id, {"result": answer})
+    events = await run_turn(runner, types.Content(role="user", parts=[reply]))
+
+    assert not [e for e in events if e.error_code]
+    assert f"You asked the user: Which Congo?\n{expected}" in request_text(model.requests[-1])
+
+
+def test_a_pending_question_stored_in_the_one_question_shape_reads_as_one_question():
     state = {
         ORCHESTRATOR_PENDING_KEY: {
             "kind": "ask",
@@ -285,16 +590,26 @@ def test_a_pending_question_stored_with_bare_label_options_reads_as_options():
     pending = pending_action(state)
 
     assert isinstance(pending, PendingAsk)
-    assert ask_candidates(pending.model_dump()["options"]) == [
-        {"spec_id": "o1", "label": "Republic of the Congo"},
-        {"spec_id": "o2", "label": "DR Congo"},
+    assert ask_questions(pending.questions) == [
+        {
+            "id": "q1",
+            "question": "Which Congo?",
+            "candidates": [
+                {"spec_id": "o1", "label": "Republic of the Congo"},
+                {"spec_id": "o2", "label": "DR Congo"},
+            ],
+        }
     ]
 
 
 async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_question():
     planner = RefusingPlanner()
     runner, model = orchestrator_runner(
-        call("plan", brief="Niger's Global Fund receipts as a share of health spending", asks=[]),
+        call(
+            "plan",
+            brief="Niger's Global Fund receipts as a share of health spending",
+            asks=["Niger's Global Fund receipts as a share of health spending"],
+        ),
         types.Part.from_text(text="The share could not be calculated."),
         planner=planner,
     )
@@ -333,7 +648,16 @@ async def test_a_planner_that_refuses_hands_back_and_the_agent_keeps_the_questio
             ["Kenya's aid since 2015"],
             [("the total",)],
         ),
-        ("ask_user", {"question": "Which years?", "options": [AskOption(label="2015")]}, [], []),
+        (
+            "ask_user",
+            {
+                "questions": [
+                    AskQuestion(question="Which years?", options=[AskOption(label="2015")])
+                ]
+            },
+            [],
+            [],
+        ),
     ],
 )
 async def test_the_planner_entry_runs_alone_from_a_plan_calls_hand_off(
@@ -370,9 +694,17 @@ async def test_the_planner_entry_runs_alone_from_a_plan_calls_hand_off(
 async def test_a_failed_plan_gives_the_plan_call_back_once():
     planner = RefusingPlanner()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
-        call("plan", brief="Kenya's CRS aid as a share of GDP", asks=[]),
-        call("plan", brief="Kenya's aid as a share of GDP, any source", asks=[]),
+        call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
+        call(
+            "plan",
+            brief="Kenya's CRS aid as a share of GDP",
+            asks=["Kenya's CRS aid as a share of GDP"],
+        ),
+        call(
+            "plan",
+            brief="Kenya's aid as a share of GDP, any source",
+            asks=["Kenya's aid as a share of GDP, any source"],
+        ),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
@@ -396,7 +728,7 @@ async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(fina
     whole) fails the same way for any brief, so the plan call is not given back
     and the hand-back does not offer one."""
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's aid as a share of GDP", asks=[]),
+        call("plan", brief="Kenya's aid as a share of GDP", asks=["Kenya's aid as a share of GDP"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=RefusingPlanner(final=final),
     )
@@ -412,16 +744,21 @@ async def test_only_a_refusal_another_brief_could_avoid_offers_another_plan(fina
 
 async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
     """A plan call lists the asks for its own plan only: a later call with
-    none leaves no earlier call's asks for the planner to account for."""
+    one ask and no breakdowns leaves no earlier call's asks, breakdowns, or
+    across-years marks for the planner to account for."""
     planner = RefusingPlanner()
     asks = ["a chart of France's aid to Guatemala", "the total since 2010 by donor"]
     runner, _ = orchestrator_runner(
         call(
             "plan",
             brief="France's aid to Guatemala since 2010",
-            asks=[asks[0], {"text": asks[1], "by": ["donor"]}],
+            asks=[asks[0], {"text": asks[1], "by": ["donor"], "across_years": True}],
         ),
-        call("plan", brief="France's bilateral aid to Guatemala", asks=[]),
+        call(
+            "plan",
+            brief="France's bilateral aid to Guatemala",
+            asks=["France's bilateral aid to Guatemala"],
+        ),
         types.Part.from_text(text="Could not be calculated."),
         planner=planner,
     )
@@ -429,16 +766,18 @@ async def test_each_plan_call_holds_the_planner_to_its_own_asks_alone():
 
     await run_turn(runner, types.UserContent("France's aid to Guatemala since 2010?"))
 
-    assert planner.asks == [tuple(asks), ()]
+    assert planner.asks == [tuple(asks), ("France's bilateral aid to Guatemala",)]
     assert planner.breakdowns == [(AskBreakdown(ask=1, by=("donor",)),), ()]
+    assert planner.across_years == [(1,), ()]
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    assert session.state.get(ASKS_STATE_KEY) is None
+    assert session.state.get(ASKS_STATE_KEY) == ["France's bilateral aid to Guatemala"]
     assert session.state.get(ASK_BREAKDOWNS_STATE_KEY) is None
+    assert session.state.get(ASKS_ACROSS_YEARS_STATE_KEY) is None
 
 
 async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when_not():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt", asks=[]),
+        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(FailingPlanner()),
     )
@@ -460,7 +799,7 @@ async def test_a_planner_seam_failure_is_handed_back_when_wrapped_and_fatal_when
     assert failures == [{"code": "internal_error"}]
 
     bare, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt", asks=[]), planner=FailingPlanner()
+        call("plan", brief="Kenya's debt", asks=["Kenya's debt"]), planner=FailingPlanner()
     )
     await open_session(bare)
     with pytest.raises(PlannerSeamError):
@@ -520,7 +859,11 @@ async def test_a_made_up_tool_name_keeps_adk_answer_and_logs_no_failure(caplog):
 
 async def test_an_approved_plan_runs_and_its_final_frames_come_back_to_the_agent():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         types.Part.from_text(text="Uganda next."),
         planner=ScriptedPlannerModel(),
@@ -604,7 +947,7 @@ async def test_the_hand_back_reports_each_ask_with_its_output_status_or_decline(
 
 class _BreakdownRefusingSurface(ScriptedSurface):
     """`ScriptedSurface` whose `get_data` refuses the breakdown it was asked for,
-    as dfo-apis refuses a code system it cannot read."""
+    as apis refuses a code system it cannot read."""
 
     async def call_tool(self, **kwargs: Any) -> ToolCallResult:
         if kwargs["tool"].name != "get_data":
@@ -648,9 +991,8 @@ async def test_a_breakdown_refused_at_run_time_hands_back_a_failed_step_and_ask(
     ]
     # An output the failed step does not feed, and that never ran, was not run.
     session = await runner.session_service.get_session(app_name="t", user_id="u", session_id="s")
-    workflow = Plan.model_validate_json(session.state["plan"]).workflow
-    stopped = _stopped_steps(workflow, "totals")
-    assert stopped == {"totals"}
+    stopped = _stop_causes(Plan.model_validate_json(session.state["plan"]), "totals")
+    assert stopped == {"totals": "totals"}
     upstream = PlanAsk(ask="the debt service series", outputs=("retrieve",))
     assert _ask_status(upstream, {}, {"step_id": "totals"}, stopped)["answered_by"] == [
         {"step": "retrieve", "status": "not_run"}
@@ -666,7 +1008,7 @@ def test_an_ask_answered_in_part_hands_back_its_steps_and_the_part_not_computed(
         not_computed="their total",
     )
 
-    assert _ask_status(ask, {}, None, set()) == {
+    assert _ask_status(ask, {}, None, {}) == {
         "ask": "bilateral, imputed and their total",
         "answered_by": [{"step": "joined", "status": "not_run"}],
         "not_computed": {"part": "their total", "reason": DECLINE_REASONS[code]},
@@ -938,7 +1280,11 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
     step's data, so the plan call is not given back and the step's spec_id
     is refused to `fetch`; another refusal leaves both open."""
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="That part is unavailable."),
         planner=ScriptedPlannerModel(),
         tool_surface=RefusingGetDataSurface(code),
@@ -963,7 +1309,11 @@ async def test_a_step_refused_for_a_missing_capability_closes_the_part_it_served
 
 async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not_a_frame():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Here is what the plan computed."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -993,7 +1343,11 @@ async def test_a_plan_whose_frames_cannot_be_described_hands_back_the_reason_not
 
 async def test_an_amendment_redrafts_and_the_amended_plan_runs():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1069,7 +1423,11 @@ async def test_an_answer_to_a_plan_stored_with_member_lists_gets_a_new_plan(
     start, the new card says why, and approving that one runs it."""
     surface = _CountingSurface()
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
@@ -1120,7 +1478,11 @@ async def test_a_plan_call_drafts_over_an_earlier_plan_stored_with_member_lists(
     and its card says nothing of the earlier one, which no card of this
     call showed."""
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
         executor=_describes,
@@ -1162,7 +1524,11 @@ async def test_execute_plans_again_when_the_approved_plan_was_stored_with_member
     )
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
@@ -1194,7 +1560,11 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 
     monkeypatch.setattr(execute_module, "execute_approved_plan", stored_unreadable)
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1219,7 +1589,11 @@ async def test_the_hand_back_carries_no_record_of_a_plan_stored_with_member_list
 async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_again():
     surface = _CountingSurface()
     runner, _ = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         planner=ScriptedPlannerModel(),
         tool_surface=surface,
         executor=_describes,
@@ -1243,11 +1617,15 @@ async def test_approving_a_superseded_revision_retrieves_nothing_and_proposes_ag
 
 async def test_a_hand_back_is_still_in_view_after_a_later_pause():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service", asks=[]),
+        call("plan", brief="Kenya's debt service", asks=["Kenya's debt service"]),
         call(
             "ask_user",
-            question="Which years?",
-            options=[{"label": "Since 2015"}, {"label": "Since 2020"}],
+            questions=[
+                {
+                    "question": "Which years?",
+                    "options": [{"label": "Since 2015"}, {"label": "Since 2020"}],
+                }
+            ],
         ),
         types.Part.from_text(text="Kenya's debt service since 2015 could not be calculated."),
     )
@@ -1271,8 +1649,8 @@ async def test_a_second_plan_call_runs_a_planner_that_never_sees_the_first_hand_
     planner_llm = RecordingLlm(script=[], agent_name="planner", scenario="replan")
     seam._agent.model = planner_llm
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt, first brief", asks=[]),
-        call("plan", brief="Kenya's debt, second brief", asks=[]),
+        call("plan", brief="Kenya's debt, first brief", asks=["Kenya's debt, first brief"]),
+        call("plan", brief="Kenya's debt, second brief", asks=["Kenya's debt, second brief"]),
         types.Part.from_text(text="Could not be calculated."),
         planner=handing_back_planner_failures(seam),
     )
@@ -1329,7 +1707,11 @@ async def test_the_plan_record_and_every_reading_reach_the_agent_past_wide_step_
     its block in that turn's record stays the one a later turn pins from."""
     monkeypatch.setattr(plan_display, "step_rows", _rows_led_by_a_wide_step(plan_display.step_rows))
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's debt service since 2015", asks=[]),
+        call(
+            "plan",
+            brief="Kenya's debt service since 2015",
+            asks=["Kenya's debt service since 2015"],
+        ),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=ScriptedSurface(),
@@ -1391,7 +1773,7 @@ class _NoisySurface(ScriptedSurface):
 
 async def test_step_summaries_reach_the_agent_without_frame_references_or_operation_notes():
     runner, model = orchestrator_runner(
-        call("plan", brief="Kenya's life expectancy", asks=[]),
+        call("plan", brief="Kenya's life expectancy", asks=["Kenya's life expectancy"]),
         types.Part.from_text(text="Charted."),
         planner=ScriptedPlannerModel(),
         tool_surface=_NoisySurface(),

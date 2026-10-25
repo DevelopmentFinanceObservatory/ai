@@ -30,8 +30,11 @@ The period policy is `quotient_of`'s, through the same
 `{time_period: value}` series is computed independently, each numerator key
 divides over the periods it shares with its denominator group, and every
 (key, period) either side holds outside them is recorded as a
-`period_unmatched` exclusion with its side. A key sharing no period at all
-refuses (`ShareOfGrainMismatchError`). This is the proceeding side of the
+`period_unmatched` exclusion with its side. A key sharing no period with
+its group is left out of the result and named
+(`ShareOfResult.keys_without_shared_period`), as `quotient_of` leaves it
+out; the call refuses (`ShareOfGrainMismatchError`) only when no key shares
+a period. This is the proceeding side of the
 partial-overlap policy in `analysis_mcp.engine.common`. A denominator
 period whose summed value is exactly zero makes the ratio undefined and
 refuses (`ShareOfNonFiniteResultError`) before any division is attempted.
@@ -60,13 +63,15 @@ every numerator key -- the same total an un-keyed call already computes.
 When non-empty, `denominator_by` must be **total** over `numerator_by`
 (every numerator_by column has an entry): a partial mapping has no defined
 pairing for the column(s) it leaves out (`ShareOfKeyUnknownError`). A
-numerator key with no matching denominator group under this mapping
-refuses distinctly (`ShareOfKeyUnmatchedError`). `numerator_by=()` (the
-default) computes a single total, with no key.
+numerator key with no matching denominator group under this mapping is left
+out and recorded as `unmatched_key` (`ShareOfResult.unmatched_keys`), as
+`quotient_of` records it; the call refuses (`ShareOfKeyUnmatchedError`) only
+when no numerator key has a group. `numerator_by=()` (the default) computes
+a single total, with no key.
 
 Every result row states what it holds. Its `value` is the share in per cent
 (numerator / denominator x 100), its `unit` is
-`common.unit_refs.PERCENT_UNIT`, the ref dfo-apis writes on a published
+`common.unit_refs.PERCENT_UNIT`, the ref apis writes on a published
 share such as a "% of GDP" series, and its `stat_var` is the caller-supplied
 `stat_var`, the operation's own minted ref, as `quotient_of` labels its
 rows. A computed share and a published one therefore compare and plot
@@ -95,6 +100,7 @@ from analysis_mcp.engine.columnar import repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
+    PooledParties,
     combine_exclusions,
     cross_side_differing_facet_axes,
     cross_side_one_sided_facet_axes,
@@ -109,23 +115,26 @@ from analysis_mcp.engine.two_sided import (
     ResultCoverage,
     denominator_key_columns,
     divide_cell,
+    key_sample,
     pair_periods,
+    record_unmatched_keys,
     record_unmatched_periods,
     result_coverage,
+    split_keys,
     sum_side,
 )
 
 
 class ShareOfGrainMismatchError(Exception):
-    """A numerator key shares no period with its denominator group, so it
-    has no share to report.
+    """No numerator key shares a period with its denominator group, so the
+    call has no share to report.
 
-    `numerator_periods`/`denominator_periods` are that key's own periods on
-    each side, sorted, and `key` names it -- empty (`()`) for an un-keyed
-    call, where this whole call has exactly one implicit key. A multi-key
-    call reports the first key, in sorted order, sharing no period. Both
-    tuples empty means a side's entity binding matched no row: both sides
-    for an un-keyed call, the numerator for a keyed one.
+    `numerator_periods`/`denominator_periods` are every period the
+    numerator's keys and their denominator groups hold on each side,
+    sorted. `key` names the call's one key when it has exactly one, and is
+    empty (`()`) otherwise, an un-keyed call included. Both tuples empty
+    means a side's entity binding matched no row: both sides for an
+    un-keyed call, the numerator for a keyed one.
     """
 
     def __init__(
@@ -241,23 +250,31 @@ class ShareOfKeyUnknownError(Exception):
 
 
 class ShareOfKeyUnmatchedError(Exception):
-    """A numerator key, realised from its own frame's rows, has no matching
-    denominator group under `denominator_by`'s own mapping -- every row on
-    the denominator side was grouped by the columns `denominator_by` maps
-    `numerator_by` to, and none of those groups carries this particular
-    combination of values. `available` lists every denominator key this
-    call did realise, sorted, for a retry to compare against.
+    """No numerator key has a denominator group under `denominator_by`'s
+    mapping, so the call has no share to report.
+    `numerator_keys`/`denominator_keys` are each side's sample of keys
+    (`analysis_mcp.engine.two_sided.key_sample`), each as `(column, value)`
+    pairs under that side's own column names;
+    `numerator_key_count`/`denominator_key_count` are how many keys each side
+    holds.
     """
 
     def __init__(
         self,
         *,
-        key: Sequence[tuple[str, str]],
-        available: Sequence[tuple[tuple[str, str], ...]],
+        numerator_keys: Sequence[KeyPairs],
+        denominator_keys: Sequence[KeyPairs],
+        numerator_key_count: int,
+        denominator_key_count: int,
     ) -> None:
-        self.key = tuple(key)
-        self.available = tuple(available)
-        super().__init__(f"no denominator group matches numerator key {dict(self.key)!r}")
+        self.numerator_keys = tuple(numerator_keys)
+        self.denominator_keys = tuple(denominator_keys)
+        self.numerator_key_count = numerator_key_count
+        self.denominator_key_count = denominator_key_count
+        super().__init__(
+            f"none of the numerator's {numerator_key_count} key(s) has a denominator group "
+            f"among the denominator's {denominator_key_count}"
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -289,8 +306,18 @@ class ShareOfResult:
     entities each period's denominator sums
     (`analysis_mcp.engine.two_sided.ResultCoverage`).
 
+    Two sorted tuples name the dropped keys, the numerator keys the frame
+    holds no row for: `unmatched_keys`, with no denominator group, and
+    `keys_without_shared_period`, which pair and share no period with their
+    group. `dropped_key_count` is their total, as
+    `analysis_mcp.engine.quotient_of.QuotientOfResult.dropped_key_count`
+    counts its own.
+
     `stat_var` labels every output row; `numerator_stat_var` and
     `denominator_stat_var` are the StatVars each side resolved to.
+    `numerator_pooled` and `denominator_pooled` hold what each side's sums
+    pooled in each flow party role (`analysis_mcp.engine.common.PooledParties`),
+    read from the cells behind `frame`'s rows, so a cell left out adds nothing.
     """
 
     frame: Frame
@@ -308,10 +335,18 @@ class ShareOfResult:
     numerator_coverage_fraction: float
     denominator_coverage_fraction: float
     period_shares: tuple[PeriodShare, ...]
+    unmatched_keys: tuple[KeyPairs, ...] = ()
+    keys_without_shared_period: tuple[KeyPairs, ...] = ()
     numerator_only_periods: tuple[KeyPeriods, ...] = ()
     denominator_only_periods: tuple[KeyPeriods, ...] = ()
     coverage: ResultCoverage = field(default_factory=ResultCoverage)
     exclusions: Exclusions = field(default_factory=Exclusions)
+    numerator_pooled: tuple[PooledParties, ...] = ()
+    denominator_pooled: tuple[PooledParties, ...] = ()
+
+    @property
+    def dropped_key_count(self) -> int:
+        return len(self.unmatched_keys) + len(self.keys_without_shared_period)
 
 
 def _exceeding_whole_warnings(period_shares: Sequence[PeriodShare]) -> tuple[str, ...]:
@@ -420,6 +455,7 @@ def run_share_of(
             entity=denominator_entity,
             by=denominator_columns,
             pinned_unit=denominator_pinned_unit,
+            numerator_by=numerator_by,
         )
     numerator_grouped, denominator_grouped = numerator.by_key, denominator.by_key
     numerator_unit, denominator_unit = numerator.unit, denominator.unit
@@ -515,43 +551,41 @@ def run_share_of(
             ),
         )
 
-    # In per-axis mode (`denominator_columns` non-empty) every numerator key
-    # must find its own denominator group, by construction one-to-one
+    # In per-axis mode (`denominator_columns` non-empty) a numerator key
+    # pairs with the denominator group of the same values
     # (`denominator_columns` is `denominator_by` mapped through
-    # `numerator_by`'s own order, so a numerator key tuple and its matching
-    # denominator key tuple carry identical values). In pooled mode
-    # (`denominator_columns` empty) every numerator key shares the single
-    # `()` group.
+    # `numerator_by`'s own order), and a key with no group is left out and
+    # recorded. In pooled mode (`denominator_columns` empty) every numerator
+    # key shares the single `()` group.
     pooled = not denominator_columns
-    numerator_keys = sorted(numerator_grouped)
-    for key in numerator_keys:
-        if not pooled and key not in denominator_grouped:
-            raise ShareOfKeyUnmatchedError(
-                key=tuple(zip(numerator_by, key, strict=True)),
-                available=tuple(
-                    tuple(zip(numerator_by, other_key, strict=True))
-                    for other_key in sorted(denominator_grouped)
-                ),
-            )
+    paired_keys, unmatched_keys = split_keys(sorted(numerator_grouped), denominator, pooled=pooled)
+    if not paired_keys:
+        raise ShareOfKeyUnmatchedError(
+            numerator_keys=key_sample(numerator, numerator_by),
+            denominator_keys=key_sample(denominator, denominator_columns),
+            numerator_key_count=len(numerator_grouped),
+            denominator_key_count=len(denominator_grouped),
+        )
     pairing = pair_periods(
-        numerator, denominator, numerator_by=numerator_by, paired_keys=numerator_keys, pooled=pooled
+        numerator, denominator, numerator_by=numerator_by, paired_keys=paired_keys, pooled=pooled
     )
+    # A key sharing no period is left out and named
+    # (`pairing.keys_without_shared_period`); with no key sharing one,
+    # including a call whose two sides both hold no row (a typo'd entity
+    # binding on each side), there is no share to report.
+    if not pairing.matched_periods:
+        unshared = pairing.keys_without_shared_period
+        raise ShareOfGrainMismatchError(
+            numerator_periods=pairing.numerator_periods,
+            denominator_periods=pairing.denominator_periods,
+            key=unshared[0] if len(unshared) == 1 else (),
+        )
 
     period_shares: list[PeriodShare] = []
     for key, shared in pairing.shared.items():
         numerator_by_period = numerator_grouped[key]
         denominator_by_period = denominator_grouped[() if pooled else key]
         key_pairs = tuple(zip(numerator_by, key, strict=True))
-        # A key sharing no period has no share to report, including a key
-        # whose two sides both hold no row (a typo'd entity binding on each
-        # side); the call refuses at the first such key rather than return
-        # a result missing it.
-        if not shared:
-            raise ShareOfGrainMismatchError(
-                numerator_periods=sorted(numerator_by_period),
-                denominator_periods=sorted(denominator_by_period),
-                key=key_pairs,
-            )
         for period in shared:
             numerator_value = numerator_by_period[period]
             denominator_value = denominator_by_period[period]
@@ -574,6 +608,7 @@ def run_share_of(
                 )
             )
 
+    shared_cells = [(key, period) for key, shared in pairing.shared.items() for period in shared]
     output_frame = frame_keeping_role_types(
         {
             STAT_VAR_COLUMN: repeated(stat_var, len(period_shares)),
@@ -616,20 +651,31 @@ def run_share_of(
         numerator_coverage_fraction=pairing.numerator_coverage_fraction,
         denominator_coverage_fraction=pairing.denominator_coverage_fraction,
         period_shares=tuple(period_shares),
+        unmatched_keys=tuple(tuple(zip(numerator_by, key, strict=True)) for key in unmatched_keys),
+        keys_without_shared_period=pairing.keys_without_shared_period,
         numerator_only_periods=pairing.numerator_only_periods,
         denominator_only_periods=pairing.denominator_only_periods,
         coverage=result_coverage(
-            ((key, period) for key, shared in pairing.shared.items() for period in shared),
+            shared_cells,
             keyed=bool(numerator_by),
             denominator=denominator,
             pooled=pooled,
         ),
         exclusions=record_unmatched_periods(
-            combine_exclusions(numerator.exclusions, denominator.exclusions),
+            record_unmatched_keys(
+                combine_exclusions(numerator.exclusions, denominator.exclusions),
+                numerator=numerator,
+                numerator_by=numerator_by,
+                keys=unmatched_keys,
+            ),
             pairing,
             numerator=numerator,
             denominator=denominator,
             numerator_by=numerator_by,
             denominator_columns=denominator_columns,
+        ),
+        numerator_pooled=numerator.pooled_over(shared_cells),
+        denominator_pooled=denominator.pooled_over(
+            (() if pooled else key, period) for key, period in shared_cells
         ),
     )

@@ -47,6 +47,7 @@
     "distinction": "quotient_of, not share_of: dollars per person divides one measure by another in a different unit"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much ODA per person did Ethiopia receive in each year from 2015 to 2022?",
     "answer_mode": "computed",
@@ -66,9 +67,18 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34",
+        "source_spec_id": "spec_8dc3f3185c6b30b0e957c63c46dc0623",
         "across": [
           "donor"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "period"
         ]
       },
       {
@@ -84,13 +94,13 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_1e9da2216ce1f42b9898d137395ead6b"
+        "source_spec_id": "spec_708673100a385d71415ca62ac4c0092e"
       },
       {
         "kind": "quotient_of",
         "id": "per_person",
         "numerator": {
-          "input_id": "oda"
+          "input_id": "total"
         },
         "denominator": {
           "input_id": "population"
@@ -106,77 +116,5 @@
       }
     ]
   },
-  "alternative_payloads": [
-    {
-      "description": "Total the donors by year first, then divide by the population.",
-      "payload": {
-        "question": "How much ODA per person did Ethiopia receive in each year from 2015 to 2022?",
-        "answer_mode": "computed",
-        "decisions": [],
-        "evidence_requirements": [
-          {
-            "kind": "dataset",
-            "id": "oda",
-            "measure": "ODA",
-            "entities": [
-              {
-                "name": "Ethiopia",
-                "role": "recipient"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2022
-            },
-            "source_spec_id": "spec_37f5f7871b99f1cc44f265ffeb169f34",
-            "across": [
-              "donor"
-            ]
-          },
-          {
-            "kind": "aggregate",
-            "id": "total",
-            "input_id": "oda",
-            "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
-          },
-          {
-            "kind": "dataset",
-            "id": "population",
-            "measure": "population",
-            "entities": [
-              {
-                "name": "Ethiopia"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2022
-            },
-            "source_spec_id": "spec_1e9da2216ce1f42b9898d137395ead6b"
-          },
-          {
-            "kind": "quotient_of",
-            "id": "per_person",
-            "numerator": {
-              "input_id": "total"
-            },
-            "denominator": {
-              "input_id": "population"
-            }
-          }
-        ],
-        "answered": [
-          {
-            "ask": 0,
-            "outputs": [
-              "per_person"
-            ]
-          }
-        ]
-      }
-    }
-  ]
+  "alternative_payloads": []
 }

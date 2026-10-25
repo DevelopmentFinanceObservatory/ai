@@ -14,6 +14,7 @@ from analysis_mcp.engine.join import (
     JoinAmbiguousKeyError,
     JoinNoCommonKeyColumnsError,
     JoinResultTooLargeError,
+    JoinRightKeysPartialError,
     JoinUnknownKeyError,
     run_join,
 )
@@ -292,6 +293,120 @@ def test_auto_detect_with_only_one_side_declaring_a_role_column_still_proceeds()
     result = run_join(world_total, single_reporter)
     assert result.join_keys == ()
     assert len(result.matched_keys) == 2
+
+
+# Cross-column keys (`right_keys`) ----------------------------------------------
+
+
+def _who_mortality(*, place: str = "dcid:country/KEN") -> Frame:
+    """A WHO-shaped series keyed on `observationAbout`."""
+    return Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:WHO_MortalityUnder5",
+                "observationAbout": place,
+                "time_period": year,
+                "value": value,
+                "unit": None,
+            }
+            for year, value in (("2020", 41.0), ("2021", 39.5))
+        ],
+    )
+
+
+def _crs_receipts(*, place: str = "dcid:country/KEN") -> Frame:
+    """A CRS-shaped series keyed on `destination`, already pooled over donors."""
+    return Frame.build(
+        role_keys=["destination"],
+        rows=[
+            {
+                "stat_var": "dcid:ODA_Health",
+                "destination": place,
+                "time_period": year,
+                "value": value,
+                "unit": None,
+            }
+            for year, value in (("2020", 120.0), ("2021", 130.0), ("2022", 140.0))
+        ],
+    )
+
+
+def test_right_keys_pairs_a_left_column_with_a_differently_named_right_column() -> None:
+    """Kenya under `observationAbout` matches Kenya under `destination` by
+    value, and the output key column takes the left side's name."""
+    result = run_join(
+        _who_mortality(),
+        _crs_receipts(),
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.join_keys == ("observationAbout",)
+    assert result.right_key_columns == ("destination",)
+    assert [
+        (dict(m.key), m.time_period, m.left_value, m.right_value)
+        for m in result.matched_keys.rows()
+    ] == [
+        ({"observationAbout": "dcid:country/KEN"}, "2020", 41.0, 120.0),
+        ({"observationAbout": "dcid:country/KEN"}, "2021", 39.5, 130.0),
+    ]
+    assert (result.left_dropped_key_count, result.right_dropped_key_count) == (0, 1)
+    assert "destination" not in result.frame.columns
+    assert "observationAbout" in result.frame.columns
+
+
+def test_right_keys_with_different_places_matches_nothing_and_counts_both_sides() -> None:
+    """Kenya against Uganda: the pair compares values, so nothing pairs
+    and every key on both sides is dropped."""
+    result = run_join(
+        _who_mortality(),
+        _crs_receipts(place="dcid:country/UGA"),
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert len(result.matched_keys) == 0
+    assert (result.left_dropped_key_count, result.right_dropped_key_count) == (2, 3)
+
+
+def test_right_keys_naming_a_column_the_right_frame_lacks_refuses() -> None:
+    with pytest.raises(JoinUnknownKeyError) as exc_info:
+        run_join(
+            _who_mortality(),
+            _crs_receipts(),
+            join_keys=("observationAbout",),
+            right_keys={"observationAbout": "origin"},
+        )
+    assert (exc_info.value.parameter, exc_info.value.columns) == ("right_keys", ("origin",))
+    assert exc_info.value.available == ("destination",)
+
+
+def test_right_keys_left_column_must_be_on_the_left_frame() -> None:
+    with pytest.raises(JoinUnknownKeyError) as exc_info:
+        run_join(
+            _who_mortality(),
+            _crs_receipts(),
+            join_keys=("destination",),
+            right_keys={"destination": "destination"},
+        )
+    assert (exc_info.value.parameter, exc_info.value.columns) == ("join_keys", ("destination",))
+    assert exc_info.value.available == ("observationAbout",)
+
+
+def test_right_keys_that_leaves_a_join_key_out_refuses() -> None:
+    left = _frame([_row(recipient="dcid:KEN")], role_keys=["reporter", "recipient"])
+    right = _frame(
+        [_row(recipient="dcid:KEN", stat_var="dcid:Y")], role_keys=["reporter", "recipient"]
+    )
+    with pytest.raises(JoinRightKeysPartialError) as exc_info:
+        run_join(
+            left,
+            right,
+            join_keys=("reporter", "recipient"),
+            right_keys={"recipient": "recipient"},
+        )
+    assert exc_info.value.columns == ("reporter",)
 
 
 # Determinism -------------------------------------------------------------------

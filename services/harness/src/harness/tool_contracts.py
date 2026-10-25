@@ -20,6 +20,7 @@ from common.skills import ordered_skill_ids
 from compiler.sources import (
     DESCRIBED_SHAPE_KIND,
     block_groups,
+    bound_refs,
     open_entity_axes_of,
     resolved_source_mentions,
     total_reading,
@@ -92,6 +93,9 @@ class HarnessCode(StrEnum):
     DEADLINE_EXCEEDED = "deadline_exceeded"
     # A chart the `make_charts` tool was asked for and did not draw.
     CHART_NOT_DRAWN = "chart_not_drawn"
+    # A `make_charts` title naming a year of the frame it draws: the tool
+    # writes a card's period.
+    TITLE_NAMES_PERIOD = "title_names_period"
     # A tool called after its budget of calls for the turn is spent.
     TOOL_BUDGET_SPENT = "tool_budget_spent"
     # A tool call whose arguments do not fit the tool's schema.
@@ -127,7 +131,7 @@ class HarnessCode(StrEnum):
     # not published. The frame store could not be reached or refused the read,
     # the dataset's versions could not be read, the replay recipe could not be
     # built, the store no longer holds the frame, no publisher is wired, and
-    # dfo-apis holds the frame under a recipe of another normal form.
+    # apis holds the frame under a recipe of another normal form.
     STORE_UNAVAILABLE = "store_unavailable"
     STORE_REFUSED = "store_refused"
     DATASET_VERSIONS_UNAVAILABLE = "dataset_versions_unavailable"
@@ -142,6 +146,7 @@ class HarnessCode(StrEnum):
 _RETRY_MODES: Mapping[HarnessCode, RetryMode] = {
     HarnessCode.TOOL_ARGUMENTS_INVALID: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.SELECT_INVALID: RetryMode.CORRECT_AND_RETRY,
+    HarnessCode.TITLE_NAMES_PERIOD: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.FIELD_CREATE_ONLY: RetryMode.CORRECT_AND_RETRY,
     HarnessCode.STATE_NOT_SAVED: RetryMode.RETRY_AFTER_DELAY,
     HarnessCode.MEMBER_KIND_UNREAD: RetryMode.RETRY_AFTER_DELAY,
@@ -430,11 +435,11 @@ def graph_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
     `definite` part binding a named set as its published total carries
     `group_readings`, a sentence each saying so (`_total_readings`). A
     `definite` part whose count Search elected beside others carries
-    `counted_as` and `alternatives`, each by its own spec_id
-    (`measure_choice`), and `source_codes`, the publisher codes of the family
-    it found, each with its source's label when the part binds that source
-    (`data_mcp.digest.source_codes`). The top-level fields above read the
-    first part only.
+    `counted_as`, with `alternatives` (other counts) and `other_prices`, each
+    by its own spec_id (`measure_choice`), and `source_codes`, the publisher
+    codes of the family it found, each with its source's label when the part
+    binds that source (`data_mcp.digest.source_codes`). The top-level fields
+    above read the first part only.
 
     `skills`, on every branch, reads the whole envelope: the skills the
     envelope's `skills` map attaches to any part's specs, as
@@ -479,8 +484,11 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     candidate its digest offers keyed by its spec_id (`_offered_specs`).
     `harness.graph.state.store_search` stores them, so `fetch` and the
     planner's pins read a part's or a picked candidate's block with no
-    second `search` call. The top-level `spec_block` holds
-    the first part's block the same way. `kind` is what the envelope says
+    second `search` call. Each block a part carries holds the refs the
+    part's entity texts bound (`compiler.sources.bound_refs`) under
+    `_bound_refs`, which `compiler.sources.source_from_spec_block` reads
+    back, so a pin names an entity by the refs its text bound. The
+    top-level `spec_block` holds the first part's block the same way. `kind` is what the envelope says
     of itself: a resolution, a catalogue, or a declined question, `resolution`
     when it states none. The skills it names for `get_skill` are
     `graph_envelope`'s own `skills`.
@@ -488,14 +496,30 @@ def resolver_digest(envelope: dict[str, Any]) -> dict[str, Any]:
     digest = graph_envelope(envelope)
     raw_parts = envelope.get("parts") or []
     raw_part = raw_parts[0] if raw_parts else {}
-    digest["spec_block"] = raw_part.get("spec") if digest.get("status") == "definite" else None
+    digest["spec_block"] = (
+        _with_bound_refs(raw_part, raw_part.get("spec"))
+        if digest.get("status") == "definite"
+        else None
+    )
     for part, summary in zip(raw_parts, digest.get("part_digests") or [], strict=False):
-        summary["spec_block"] = part.get("spec") if summary.get("status") == "definite" else None
+        summary["spec_block"] = (
+            _with_bound_refs(part, part.get("spec"))
+            if summary.get("status") == "definite"
+            else None
+        )
         summary["candidate_blocks"] = {
-            spec["spec_id"]: spec for spec in _offered_specs(part) if spec.get("spec_id")
+            spec["spec_id"]: _with_bound_refs(part, spec)
+            for spec in _offered_specs(part)
+            if spec.get("spec_id")
         }
     digest["kind"] = envelope.get("kind") or "resolution"
     return digest
+
+
+def _with_bound_refs(part: Mapping[str, Any], spec: Any) -> Any:
+    """`spec`, a block `part` carries, with the part's `bound_refs` under `_bound_refs` when it has any."""
+    refs = bound_refs(part)
+    return {**spec, "_bound_refs": refs} if refs and isinstance(spec, Mapping) else spec
 
 
 def _offered_specs(part: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -610,26 +634,32 @@ def _part_summary(envelope: dict[str, Any], part: dict[str, Any]) -> dict[str, A
 
 
 def measure_choice(spec: Mapping[str, Any]) -> dict[str, Any]:
-    """The count Search elected for `spec` and the other counts it offers, as data.
+    """The count Search elected for `spec` and the other counts and prices it offers, as data.
 
     `counted_as` is `resolved.measure_label`. `alternatives` holds each
-    `resolved.alternative_measures` entry on axis "what" as `{spec_id, label}`,
-    in wire order; an entry missing its spec_id or label is left out, as
-    data-mcp's `digest._measure_choice` leaves it out. Empty when no
-    alternative remains.
+    `resolved.alternative_measures` entry on axis "what" (another count,
+    "net disbursements") and `other_prices` each on axis "unit" (the same
+    count in other prices, "constant prices"), both as `{spec_id, label}`
+    in wire order. An entry missing its spec_id or label is left out, as
+    data-mcp's `digest._measure_choice` leaves it out, and so is a list
+    left empty. Empty when no alternative remains.
     """
     resolved = spec.get("resolved") or {}
     label = resolved.get("measure_label")
-    alternatives = [
-        {"spec_id": spec_id, "label": alternative["label"]}
-        for alternative in resolved.get("alternative_measures") or ()
-        if alternative.get("axis") == "what"
-        and alternative.get("label")
-        and (spec_id := (alternative.get("definition") or {}).get("spec_id"))
-    ]
-    if not isinstance(label, str) or not label or not alternatives:
+    choice: dict[str, Any] = {}
+    for axis, key in (("what", "alternatives"), ("unit", "other_prices")):
+        offered = [
+            {"spec_id": spec_id, "label": alternative["label"]}
+            for alternative in resolved.get("alternative_measures") or ()
+            if alternative.get("axis") == axis
+            and alternative.get("label")
+            and (spec_id := (alternative.get("definition") or {}).get("spec_id"))
+        ]
+        if offered:
+            choice[key] = offered
+    if not isinstance(label, str) or not label or not choice:
         return {}
-    return {"counted_as": label, "alternatives": alternatives}
+    return {"counted_as": label, **choice}
 
 
 def _total_readings(spec: Mapping[str, Any]) -> list[str]:
@@ -637,17 +667,21 @@ def _total_readings(spec: Mapping[str, Any]) -> list[str]:
 
     Search states no departure for a set read whole, so this is where the
     reading is said. A set read as its members has search's own
-    `group_read_as_members` departure.
+    `group_read_as_members` departure. A block whose sets are not readable
+    has none.
     """
+    try:
+        groups = block_groups(spec)
+    except ValueError:
+        logger.warning("search: named sets of %s are not readable", spec.get("spec_id"))
+        return []
     entities = (spec.get("resolved") or {}).get("entities") or ()
     labels = {
         str(entity["ref"]): str(entity["label"])
         for entity in entities
         if isinstance(entity, Mapping) and entity.get("ref") and entity.get("label")
     }
-    return [
-        text for group in block_groups(spec) if (text := total_reading(group, labels)) is not None
-    ]
+    return [text for group in groups if (text := total_reading(group, labels)) is not None]
 
 
 def _unapplied_phrases(no_data: Mapping[str, Any]) -> dict[str, Any]:

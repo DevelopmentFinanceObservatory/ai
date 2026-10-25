@@ -15,8 +15,9 @@ schema is declared safely for refusals too.
 
 `role_keys` and `stat_var_count` are read off the frame `store_result_and_render`
 already holds, via `observed_shape` below -- no verb signature changes.
-`dropped_key_count` is the one shape fact a frame cannot state, the keys a
-verb left out of it, so the verb passes it to `store_result_and_render`.
+`dropped_key_count` and `right_dropped_key_count` are the shape facts a
+frame cannot state, the keys a verb left out of it, so the verb passes them
+to `store_result_and_render`.
 
 Every verb declares version "1" until the toolkit's first release. Until
 then a deploy ships the harness's capability pins and the servers together,
@@ -52,10 +53,16 @@ class VerbResult(BaseModel):
       them -- `()` for a keyless verb output.
     - `stat_var_count`: distinct `stat_var`s the frame carries; 0 when
       `rows` is 0.
-    - `dropped_key_count`: how many of the numerator's keys a keyed
-      `quotient_of` holds no row for: those with no denominator group, those
-      sharing no period with it, and those whose every matched cell has a
-      zero denominator. 0 for an un-keyed call and for every other verb.
+    - `dropped_key_count`: how many keys of the first input (`frame_ref`)
+      the result holds no row for. For a keyed `quotient_of` or `share_of`,
+      the numerator keys with no denominator group, those sharing no period
+      with their group, and for `quotient_of` also those whose every
+      matched cell has a zero denominator. For a `join` on role columns,
+      the left side's entities that matched in no period. 0 for an
+      un-keyed call and for every other verb.
+    - `right_dropped_key_count`: how many of a `join`'s right-side
+      (`right_frame_ref`) entities matched in no period. 0 for a join on
+      `time_period` alone and for every other verb.
     - `ranked_before_limit`: how many entries a `rank` call with a `limit`
       ranked before the limit cut them to `rows`: entities, or entity
       periods with `per_period`. `None` for a call with no `limit` and for
@@ -72,6 +79,7 @@ class VerbResult(BaseModel):
     role_keys: tuple[str, ...] = ()
     stat_var_count: int = Field(ge=0)
     dropped_key_count: int = Field(default=0, ge=0)
+    right_dropped_key_count: int = Field(default=0, ge=0)
     ranked_before_limit: int | None = Field(default=None, ge=0)
     exclusions: tuple[Exclusion, ...] = ()
     time: Time = Field(default_factory=Observation)

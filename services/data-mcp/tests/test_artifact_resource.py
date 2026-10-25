@@ -14,7 +14,7 @@ from fastmcp import Client
 from mcp import MCPError
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .test_client import _client, _problem_body
+from .test_client import _client, _problem_body, _settings
 
 Handler = (
     Callable[[httpx2.Request], httpx2.Response]
@@ -79,8 +79,10 @@ def _snapshot_response(
     }
 
 
-async def _call_read_artifact(handler: Handler, uri: str) -> list[Any]:
-    async with _client(handler) as upstream:
+async def _call_read_artifact(
+    handler: Handler, uri: str, *, site_origin: str | None = None
+) -> list[Any]:
+    async with _client(handler, settings=_settings(dfo_site_origin=site_origin)) as upstream:
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             return await client.read_resource(uri)
@@ -121,6 +123,21 @@ async def test_happy_path_reads_the_absolute_download_link_and_metadata() -> Non
     assert doc["rendering"] == {"bundle": False, "format": "parquet", "layout": "frame"}
     assert "url_expires_at" not in doc
     assert "expires_in_s" not in doc
+
+
+async def test_the_link_sits_on_the_site_origin_when_one_is_set() -> None:
+    """The website proxies the same root-relative path to dfo-apis with its own ID
+    token. The snapshot read itself goes to dfo-apis."""
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=_snapshot_response())
+
+    contents = await _call_read_artifact(handler, _uri(), site_origin="https://site.example")
+
+    assert _doc(contents)["url"] == "https://site.example" + _LINK
+    assert [r.url.host for r in requests] == ["localhost"]
 
 
 async def test_call_uses_retry_true_and_the_default_timeout() -> None:

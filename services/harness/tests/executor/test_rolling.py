@@ -32,7 +32,13 @@ from executor.outcomes import (
     RefusalKind,
     Refused,
 )
-from executor.run import MAX_ATTEMPTS_PER_STEP, _first_year_kept, _waves, execute_approved_plan
+from executor.run import (
+    _NAMED_YEARS_REMEDY,
+    MAX_ATTEMPTS_PER_STEP,
+    _first_year_kept,
+    _waves,
+    execute_approved_plan,
+)
 from planner.operations import (
     AggregateOperation,
     FilterOperation,
@@ -44,14 +50,17 @@ from planner.operations import (
 )
 from planner.plan import (
     AggregateRequirement,
+    AskAnswer,
     DatasetRequirement,
     Decision,
     Entity,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     Period,
     Plan,
     PlanStatus,
+    split_of,
 )
 from planner.records import PeriodThreshold, RelativePeriod, RollingWindow
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
@@ -68,7 +77,7 @@ LAST_FIVE = RollingWindow(
 LEFT_OUT = {"root": 0, "coordinates": {"recipient": "country/UGA"}}
 
 
-def _anchor(period: str = "2023") -> ToolCallResult:
+def _anchor(period: str = "2024") -> ToolCallResult:
     """`resolve_anchor`'s answer naming `period` as the newest."""
     return ok({"anchor_key": ANCHOR_KEY, "period": period, "left_out": [LEFT_OUT]})
 
@@ -83,23 +92,30 @@ def rolling_plan(
 ) -> PlanFactory:
     """Return a factory for an approved plan whose growth and filter follow the newest year.
 
-    `debt` is retrieved, `change` is its growth over the last five years and
-    `newest` keeps its newest year, both planned against 2024. `rolling=False`
-    plans the same years fixed. `second_retrieval=True` adds a population
-    retrieval and its total, which neither rolling step reads.
+    `debt` is retrieved from `start` to 2024, `change` is its growth over the
+    last five years and `newest` keeps its newest year, both planned against
+    `newest`. `rolling=False` plans the same years fixed.
+    `second_retrieval=True` adds a population retrieval and its total, which
+    neither rolling step reads.
     """
 
-    def _plan(*, rolling: bool = True, second_retrieval: bool = False) -> Plan:
-        window: dict[str, Any] = {"window_start": 2019, "window_end": 2024}
+    def _plan(
+        *,
+        rolling: bool = True,
+        second_retrieval: bool = False,
+        newest: int = 2024,
+        start: int = 2015,
+    ) -> Plan:
+        window: dict[str, Any] = {"window_start": newest - 5, "window_end": newest}
         if rolling:
             window["rolling"] = LAST_FIVE
-        newest = (
+        kept = (
             PeriodThreshold(
-                op="eq", year=2024, rolling=RelativePeriod(offset=0) if rolling else None
+                op="eq", year=newest, rolling=RelativePeriod(offset=0) if rolling else None
             ),
         )
         requirements: list[Any] = [
-            requirement(period_end_open=rolling),
+            requirement(period=Period(start=start, end=2024), period_end_open=rolling),
             GrowthRequirement(
                 id="growth_of_debt",
                 decision_ids=["measure"],
@@ -110,14 +126,14 @@ def rolling_plan(
                 id="newest_year",
                 decision_ids=["measure"],
                 input_id="annual_debt_service",
-                predicates=newest,
+                predicates=kept,
             ),
         ]
         operations: list[Any] = [
             RetrieveOperation(id="debt", requirement_id="annual_debt_service", spec_id=SPEC_KENYA),
             GrowthOperation(id="change", requirement_id="growth_of_debt", input="debt", **window),
             FilterOperation(
-                id="newest", requirement_id="newest_year", input="debt", predicates=newest
+                id="newest", requirement_id="newest_year", input="debt", predicates=kept
             ),
         ]
         terminal = ["change", "newest"]
@@ -156,6 +172,11 @@ def rolling_plan(
             question="How has Kenya's debt service changed over the last five years?",
             decisions=[decision()],
             evidence_requirements=requirements,
+            first_years=[
+                FirstYear(requirement_id=r.id, year=r.period.start)
+                for r in requirements
+                if isinstance(r, DatasetRequirement) and r.period_end_open
+            ],
             status=PlanStatus.DRAFT,
         )
         translation = Translation(operations=operations, terminal=terminal)
@@ -196,7 +217,7 @@ def _answers(plan: Plan) -> dict[str, list[ToolCallResult]]:
 def _surface(
     plan: Plan, real_schemas: list[ToolSchema], manifest: dict[str, Any], **overrides: Any
 ) -> ScriptedSurface:
-    """A surface answering every tool of `plan`, and `resolve_anchor` with 2023 as the newest year."""
+    """A surface answering every tool of `plan`, and `resolve_anchor` with 2024 as the newest year."""
     responses: dict[str, Any] = {
         "get_data": [ok(manifest)],
         "resolve_anchor": [_anchor()],
@@ -321,7 +342,8 @@ async def test_the_newest_period_is_resolved_once_over_the_retrievals_the_rollin
     # The population retrieval no rolling step reads is no part of the period.
     assert sent["roots"] == [manifest()["frame_ref"]]
     assert {population["spec_id"] for population in sent["populations"]} == {SPEC_KENYA}
-    assert len(outcome.anchors) == 1
+    # Both groups rest on the debt retrieval, named once.
+    assert [anchor.roots for anchor in outcome.anchors] == [("debt",)]
     # The wave's two rolling steps were in flight together.
     assert surface.max_concurrency == 2
 
@@ -329,11 +351,19 @@ async def test_the_newest_period_is_resolved_once_over_the_retrievals_the_rollin
 # --- What a rolling step is sent, and what the run records -----------------------------
 
 
+@pytest.mark.parametrize(
+    ("newest", "window"), [("2024", ("2019", "2024")), ("2025", ("2020", "2025"))]
+)
 async def test_a_rolling_steps_years_are_written_from_the_newest_period(
-    rolling_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+    rolling_plan: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    newest: str,
+    window: tuple[str, str],
 ) -> None:
+    # Planned against 2024: a newest year on it or after it runs.
     plan = rolling_plan()
-    surface = _surface(plan, real_schemas, manifest())
+    surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_anchor(newest)])
 
     outcome = await _run(plan, surface)
 
@@ -341,9 +371,8 @@ async def test_a_rolling_steps_years_are_written_from_the_newest_period(
     (sent,) = _calls(surface, "resolve_anchor")
     (growth,) = _calls(surface, "growth")
     (kept,) = _calls(surface, "filter")
-    # Planned against 2024; the data's newest year is 2023.
-    assert (growth["window_start"], growth["window_end"]) == ("2018", "2023")
-    assert [predicate["value"] for predicate in kept["predicates"]] == ["2023"]
+    assert (growth["window_start"], growth["window_end"]) == window
+    assert [predicate["value"] for predicate in kept["predicates"]] == [newest]
     assert growth["anchor_key"] == kept["anchor_key"] == ANCHOR_KEY
     # One population value reaches the resolution and every rolling call.
     assert growth["rolling"]["population"] == kept["rolling"]["population"] == sent["populations"]
@@ -351,10 +380,43 @@ async def test_a_rolling_steps_years_are_written_from_the_newest_period(
     assert outcome.anchors == (
         AnchorResult(
             anchor_key=ANCHOR_KEY,
-            period="2023",
+            period=newest,
             left_out=(LeftOutSeries.model_validate(LEFT_OUT),),
+            # The run writes the group's steps, the retrievals it rests on
+            # and the populations it sent.
+            steps=("change", "newest"),
+            roots=("debt",),
+            populations=tuple(sent["populations"]),
         ),
     )
+
+
+async def test_a_newest_period_before_the_plans_stops_the_run_before_any_rolling_step(
+    rolling_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
+) -> None:
+    # Planned against 2024; fewer than half the series now hold 2024, so the
+    # newest year is 2023 and the years the user approved are not the ones read.
+    plan = rolling_plan()
+    surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_anchor("2023")])
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Refused), outcome
+    assert outcome.refusal is RefusalKind.ROLLING_ANCHOR_BEHIND_PLAN
+    assert outcome.step_id == "change"
+    assert outcome.payload is not None
+    assert outcome.payload.code == ExecutorCode.ROLLING_ANCHOR_BEHIND_PLAN
+    assert classify_refusal(outcome.payload) is Disposition.STOP
+    assert outcome.payload.fix == {
+        "remedy": outcome.payload.fix["remedy"],
+        "anchor": "2023",
+        "planned_anchor": "2024",
+    }
+    for named in ("2023", "2024"):
+        assert named in outcome.payload.message
+    assert [record.step_id for record in outcome.completed] == ["debt"]
+    assert [anchor.period for anchor in outcome.anchors] == ["2023"]
+    assert not _calls(surface, "growth") and not _calls(surface, "filter")
 
 
 async def test_a_fixed_plan_resolves_no_period_and_its_records_are_unchanged(
@@ -383,6 +445,7 @@ async def test_a_fixed_plan_resolves_no_period_and_its_records_are_unchanged(
             "role_keys",
             "stat_var_count",
             "dropped_key_count",
+            "right_dropped_key_count",
             "ranked_before_limit",
         }
 
@@ -511,22 +574,39 @@ async def test_a_rolling_plan_refuses_a_capability_table_that_pins_no_resolve_an
 
 
 @pytest.mark.parametrize(
-    "served",
+    ("served", "named_years"),
     [
-        ToolRefusal.rolling_anchor_unresolved(
-            detail="no_qualifying_period", reason="no period is held by half of every population"
+        (
+            ToolRefusal.rolling_anchor_unresolved(
+                detail="no_qualifying_period",
+                reason="no period is held by half of every population",
+            ),
+            True,
         ),
-        ToolRefusal.rolling_grain_unsupported(
-            reason="a root frame holds periods that are no calendar year", periods=["2023-01"]
+        (
+            ToolRefusal.rolling_grain_unsupported(
+                reason="a root frame holds periods that are no calendar year", periods=["2023-01"]
+            ),
+            True,
+        ),
+        # Named years cannot help two sides that name no entity in common.
+        (
+            ToolRefusal.rolling_anchor_unresolved(
+                detail="pairing_shares_no_key",
+                reason="the two sides of the pairing share no key",
+                context={"keys": {"reporter": "reporter"}},
+            ),
+            False,
         ),
     ],
-    ids=["no_qualifying_period", "grain"],
+    ids=["no_qualifying_period", "grain", "pairing_shares_no_key"],
 )
 async def test_a_newest_period_the_data_cannot_give_stops_the_run_with_words_for_the_user(
     rolling_plan: PlanFactory,
     manifest: ManifestFactory,
     real_schemas: list[ToolSchema],
     served: ToolRefusal,
+    named_years: bool,
 ) -> None:
     plan = rolling_plan()
     surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_served(served)])
@@ -544,6 +624,7 @@ async def test_a_newest_period_the_data_cannot_give_stops_the_run_with_words_for
     assert outcome.payload.message != served.message
     assert "resolve_anchor" not in outcome.payload.message
     assert outcome.payload.fix["remedy"] not in outcome.payload.message
+    assert (outcome.payload.fix["remedy"] == _NAMED_YEARS_REMEDY) is named_years
     assert outcome.payload.fix.items() >= served.fix.items()
     assert [record.step_id for record in outcome.completed] == ["debt"]
     assert not _calls(surface, "growth") and not _calls(surface, "filter")
@@ -585,9 +666,10 @@ async def test_a_refusal_of_the_runs_own_newest_period_is_an_internal_error(
 async def test_a_rolled_start_before_the_datasets_first_year_is_refused_before_the_verb(
     rolling_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    # The retrieved series start in 2015. A newest year of 2018 puts the
-    # five-year growth's start in 2013; the filter keeps 2018, which is held.
-    plan = rolling_plan()
+    # Search states the dataset from 2010, and the retrieved series start in
+    # 2015. A newest year of 2018 puts the five-year growth's start in 2013;
+    # the filter keeps 2018, which is held.
+    plan = rolling_plan(newest=2018, start=2010)
     surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_anchor("2018")])
 
     outcome = await _run(plan, surface)
@@ -617,7 +699,7 @@ async def test_a_rolled_start_before_the_datasets_first_year_is_refused_before_t
 async def test_a_rolled_start_on_the_datasets_first_year_runs(
     rolling_plan: PlanFactory, manifest: ManifestFactory, real_schemas: list[ToolSchema]
 ) -> None:
-    plan = rolling_plan()
+    plan = rolling_plan(newest=2020)
     surface = _surface(plan, real_schemas, manifest(), resolve_anchor=[_anchor("2020")])
 
     outcome = await _run(plan, surface)
@@ -625,6 +707,160 @@ async def test_a_rolled_start_on_the_datasets_first_year_runs(
     assert isinstance(outcome, Accepted), outcome
     (growth,) = _calls(surface, "growth")
     assert growth["window_start"] == "2015"
+
+
+@pytest.fixture
+def plan_of(
+    decision: Callable[..., Decision],
+    source: Callable[..., SelectedSource],
+    real_schemas: list[ToolSchema],
+) -> PlanFactory:
+    """Return a factory for an approved plan over the requirements and operations it is given.
+
+    Each dataset requirement is discovered as the Kenya `source`;
+    `first_years` states the first year on record of the datasets it names.
+    """
+
+    def _plan(
+        requirements: list[Any],
+        operations: list[Any],
+        *,
+        terminal: list[str],
+        first_years: dict[str, int],
+        decisions: tuple[Decision, ...] = (),
+        asks: tuple[str, ...] = (),
+        answered: tuple[AskAnswer, ...] = (),
+        across_years: tuple[int, ...] = (),
+    ) -> Plan:
+        draft = Plan(
+            question="How has Kenya's debt service changed?",
+            decisions=[decision(), *decisions],
+            evidence_requirements=requirements,
+            asks=list(asks),
+            answered=list(answered),
+            asks_across_years=list(across_years),
+            first_years=[FirstYear(requirement_id=r, year=y) for r, y in first_years.items()],
+            status=PlanStatus.DRAFT,
+        )
+        # The plan runs as admission records it, with each whole-history read split off.
+        split = split_of(draft)
+        draft = Plan.model_validate(
+            {
+                **draft.model_dump(),
+                "evidence_requirements": split.requirements,
+                "rolling_copies": split.copies,
+            }
+        )
+        translation = Translation(operations=operations, terminal=terminal)
+        compiled = compile_plan(
+            plan=draft,
+            translation=translation,
+            schemas={schema.name: schema for schema in real_schemas},
+            discovered={
+                r.id: source() for r in split.requirements if isinstance(r, DatasetRequirement)
+            },
+        )
+        assert compiled.workflow is not None, compiled.issues
+        return draft.with_translation(translation=translation, workflow=compiled.workflow).approve(
+            at=datetime.now(UTC)
+        )
+
+    return _plan
+
+
+def _series(manifest: dict[str, Any], *, first: str, latest: dict[str, str]) -> dict[str, Any]:
+    """`manifest` holding one series of Kenya's from `first` and one per entity of `latest`, each ending in its year."""
+    template = manifest["statistics"][0]
+    manifest["statistics"][:] = [
+        {
+            **template,
+            "entities": [{"role": "recipient", "ref": ref}],
+            "first": {"value": 1.0, "period": first},
+            "latest": {"value": 1.0, "period": year},
+            "observations": int(year) - int(first) + 1,
+        }
+        for ref, year in latest.items()
+    ]
+    return manifest
+
+
+async def test_a_lagging_anchor_leaves_a_rolling_filter_five_years_of_a_dataset_read_from_its_first_year(
+    plan_of: PlanFactory,
+    manifest: ManifestFactory,
+    real_schemas: list[ToolSchema],
+    requirement: Callable[..., DatasetRequirement],
+) -> None:
+    """Two of three series end in 2023, so the anchor is 2023, the year the filter
+    is planned from, and the dataset's stated 2020-2024 would leave the filter 2020
+    on. It reads the dataset from 1990 instead, through its own retrieval, so it
+    keeps 2019-2023, and the total beside it keeps the stated years and reports the
+    two series short of 2024."""
+    since = (PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-4)),)
+    total = AggregateRequirement(
+        id="total",
+        decision_ids=["measure"],
+        input_id="annual_debt_service",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.ENTITY,),
+    )
+    plan = plan_of(
+        [
+            requirement(period=Period(start=2020, end=2024), period_end_open=True),
+            total,
+            FilterRequirement(
+                id="recent_years",
+                decision_ids=["measure"],
+                input_id="annual_debt_service",
+                predicates=since,
+            ),
+        ],
+        [
+            RetrieveOperation(id="debt", requirement_id="annual_debt_service", spec_id=SPEC_KENYA),
+            RetrieveOperation(
+                id="debt_history",
+                requirement_id="annual_debt_service_history",
+                spec_id=SPEC_KENYA,
+            ),
+            AggregateOperation(
+                id="sum",
+                requirement_id="total",
+                input="debt",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.ENTITY,),
+            ),
+            FilterOperation(
+                id="recent", requirement_id="recent_years", input="debt_history", predicates=since
+            ),
+        ],
+        terminal=["sum", "recent"],
+        first_years={"annual_debt_service": 1990},
+        asks=("the total debt service", "debt service over the last five years"),
+        answered=(
+            AskAnswer(ask=0, outputs=("total",)),
+            AskAnswer(ask=1, outputs=("recent_years",)),
+        ),
+        across_years=(0,),
+    )
+    assert [(c.copy_id, c.origin_id) for c in plan.rolling_copies] == [
+        ("annual_debt_service_history", "annual_debt_service")
+    ]
+    held = _series(
+        manifest(),
+        first="1990",
+        latest={"country/KEN": "2024", "country/GHA": "2023", "country/UGA": "2023"},
+    )
+    surface = _surface(plan, real_schemas, held, resolve_anchor=[_anchor("2023")])
+
+    outcome = await _run(plan, surface)
+
+    assert isinstance(outcome, Accepted), outcome
+    (recent,) = _calls(surface, "filter")
+    assert [predicate["value"] for predicate in recent["predicates"]] == ["2019"]
+    short = {
+        record.requirement_id: [gap.code.value for gap in record.gaps]
+        for record in outcome.evidence
+    }
+    assert short["annual_debt_service"].count("window_short") == 2
 
 
 async def test_an_answer_naming_no_newest_period_stops_the_run(

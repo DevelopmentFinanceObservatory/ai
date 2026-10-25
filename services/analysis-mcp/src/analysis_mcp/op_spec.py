@@ -49,7 +49,9 @@ from common.place_type import PlaceLevel
 from common.rolling import (
     ANCHOR_KEY_PATTERN,
     canonical_bindings,
+    canonical_keys,
     canonical_levels,
+    canonical_strict_levels,
     population_order,
 )
 from dfo_frame_grammar import shift_period
@@ -66,10 +68,12 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     PlainSerializer,
     PlainValidator,
     SerializerFunctionWrapHandler,
+    Tag,
     TypeAdapter,
     WithJsonSchema,
     field_validator,
@@ -155,6 +159,18 @@ class RootPopulation(BaseModel):
         AfterValidator(canonical_levels),
         HASHED_WHEN_SET,
     ] = Field(default_factory=dict)
+    strict_levels: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...],
+        AfterValidator(canonical_strict_levels),
+        HASHED_WHEN_SET,
+    ] = ()
+
+    @model_validator(mode="after")
+    def _strict_levels_are_held(self) -> RootPopulation:
+        unknown = sorted(set(self.strict_levels) - set(self.levels))
+        if unknown:
+            raise ValueError(f"strict_levels name columns without a level: {unknown!r}")
+        return self
 
     @model_serializer(mode="wrap")
     def _without_unset_levels(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
@@ -163,13 +179,65 @@ class RootPopulation(BaseModel):
         dumped = handler(self)
         if not dumped["levels"]:
             del dumped["levels"]
+        if not dumped["strict_levels"]:
+            del dumped["strict_levels"]
         return dumped
 
 
-def _canonical_populations(populations: tuple[RootPopulation, ...]) -> tuple[RootPopulation, ...]:
-    """`populations` in its one spelling (`common.rolling`): ordered by
-    `spec_id`, then by each entry's RFC 8785 bytes, with an entry stated twice
-    kept once."""
+class PairingPopulation(BaseModel):
+    """The series a keyed verb (`share_of` or `quotient_of` with
+    `denominator_by`, `join` with `join_keys`) pairs key by key.
+
+    `pair` holds the populations of the verb's two sides, left then right,
+    each flat or pairing. `keys` maps each key column of the left side's frame
+    to the right side's column holding the same entities, as the verb's own
+    arguments state them (`common.rolling.anchor_populations`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # The advertised schema gives a side's populations as plain objects, since a
+    # recursive schema keeps every tool schema that holds a population from
+    # being inlined. The compiler writes the value, and validation holds its shape.
+    pair: Annotated[
+        tuple[Populations, Populations],
+        WithJsonSchema(
+            {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+                "description": "The populations of the left side, then of the right side.",
+            }
+        ),
+    ]
+    keys: Annotated[
+        dict[
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+        ],
+        Field(min_length=1),
+        AfterValidator(canonical_keys),
+    ]
+
+
+def _population_kind(value: object) -> str:
+    """`pair` for a pairing population, as a JSON object or a model, else `root`."""
+    if isinstance(value, PairingPopulation) or (isinstance(value, Mapping) and "pair" in value):
+        return "pair"
+    return "root"
+
+
+Population = Annotated[
+    Annotated[RootPopulation, Tag("root")] | Annotated[PairingPopulation, Tag("pair")],
+    Discriminator(_population_kind),
+]
+
+
+def _canonical_populations(populations: tuple[Population, ...]) -> tuple[Population, ...]:
+    """`populations` in its one spelling (`common.rolling`): flat entries
+    ordered by `spec_id`, then pairings, each by its RFC 8785 bytes, with an
+    entry stated twice kept once."""
     keyed = {
         population_order(population.model_dump(mode="json")): population
         for population in populations
@@ -178,14 +246,16 @@ def _canonical_populations(populations: tuple[RootPopulation, ...]) -> tuple[Roo
 
 
 # The populations the latest period is taken over: one `RootPopulation` for
-# each root dataset of the recipe a rolling call belongs to. The caller builds
-# it, since a call on one branch of a recipe cannot see the other roots, and
-# every rolling call of one recipe carries the same value.
+# each root dataset of the recipe a rolling call belongs to, and one
+# `PairingPopulation` for each keyed verb whose two sides both count. The
+# caller builds it, since a call on one branch of a recipe cannot see the other
+# roots, and every rolling call of one recipe carries the same value.
 # `_canonical_populations` gives it one spelling, so the same populations hash
 # the same however they were listed.
 Populations = Annotated[
-    tuple[RootPopulation, ...], Field(min_length=1), AfterValidator(_canonical_populations)
+    tuple[Population, ...], Field(min_length=1), AfterValidator(_canonical_populations)
 ]
+PairingPopulation.model_rebuild()
 
 
 class WindowRolling(BaseModel):
@@ -355,6 +425,7 @@ class PlaceLevelPredicate(BaseModel):
     kind: Literal["place_level"] = "place_level"
     column: str = Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)
     level: PlaceLevel
+    strict: Annotated[bool, HASHED_WHEN_SET] = False
 
 
 # The closed predicate vocabulary: a row-value predicate is one of these
@@ -755,7 +826,16 @@ class JoinOpSpec(_OpSpecBase):
     a non-empty tuple pins the key list explicitly instead of relying on
     that auto-detection. The key list stays minimal and closed: no facet
     or unit column may be named here, only a role column present on both
-    sides.
+    sides, or, under `right_keys`, a left column and its right counterpart.
+
+    `right_keys` pairs each `join_keys` column with the right frame's own
+    column holding the same entities, by name, as `denominator_by` does for
+    `numerator_by`: `{"observationAbout": "destination"}` matches a WHO
+    series' Kenya with a CRS series' Kenya by value, and the output's key
+    column takes the left name. Left empty, each `join_keys` column keys
+    both sides under its own name. When non-empty it names every
+    `join_keys` column and nothing else. A partial mapping pairs the columns
+    it leaves out with nothing, so it is refused here.
 
     `left_unit`/`right_unit` pin each side's unit independently, the same
     shape `CompareOpSpec.left_unit`/`right_unit` use.
@@ -766,8 +846,32 @@ class JoinOpSpec(_OpSpecBase):
     join_keys: tuple[
         Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)], ...
     ] = ()
+    right_keys: Annotated[
+        dict[
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+            Annotated[str, Field(min_length=1, max_length=_MAX_COLUMN_NAME_CHARS)],
+        ],
+        HASHED_WHEN_SET,
+    ] = Field(default_factory=dict)
     left_unit: PinnedUnit | None = None
     right_unit: PinnedUnit | None = None
+
+    @model_validator(mode="after")
+    def _right_keys_name_every_join_key(self) -> Self:
+        unknown = sorted(set(self.right_keys) - set(self.join_keys))
+        if unknown:
+            raise ValueError(
+                f"right_keys names column(s) join_keys does not carry: {unknown}. "
+                f"join_keys: {list(self.join_keys)}."
+            )
+        missing = sorted(set(self.join_keys) - set(self.right_keys))
+        if self.right_keys and missing:
+            raise ValueError(
+                f"right_keys leaves out join_keys column(s): {missing}. Name the right "
+                "frame's column for each, or leave right_keys empty to match every key "
+                "under its own name."
+            )
+        return self
 
 
 class FilterOpSpec(_OpSpecBase):

@@ -44,6 +44,7 @@
     "distinction": "comparison, not join: the question asks for the difference between Kenya's and Uganda's totals"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much more ODA did Kenya receive than Uganda in each year from 2015 to 2022?",
     "answer_mode": "computed",
@@ -61,16 +62,17 @@
           {
             "name": "Uganda",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_e252e254ec3c99261cd035db0f5db327"
       },
       {
         "kind": "aggregate",
@@ -124,16 +126,17 @@
               {
                 "name": "Uganda",
                 "role": "recipient"
+              },
+              {
+                "name": "official donors (DAC)",
+                "role": "donor"
               }
             ],
             "period": {
               "start": 2015,
               "end": 2022
             },
-            "source_spec_id": "spec_5dbeab57abc81b02d35603fa10c24303",
-            "across": [
-              "donor"
-            ]
+            "source_spec_id": "spec_e252e254ec3c99261cd035db0f5db327"
           },
           {
             "kind": "aggregate",

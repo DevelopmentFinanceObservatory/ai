@@ -12,7 +12,13 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from harness.plan_display import _label, operation_rows, requirement_rows, step_rows
+from harness.plan_display import (
+    _label,
+    operation_rows,
+    requirement_rows,
+    shown_plan,
+    step_rows,
+)
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -37,6 +43,7 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     JoinRequirement,
     Period,
@@ -46,13 +53,14 @@ from planner.plan import (
     RequirementSide,
     ShareOfRequirement,
     SumOfRequirement,
-    names_no_place,
 )
 from planner.records import (
     Breakdown,
     BreakdownDimension,
     DenominatorScope,
     EntityIn,
+    EvidenceIssue,
+    EvidenceIssueCode,
     GroupBy,
     GrowthChange,
     PeriodThreshold,
@@ -64,6 +72,7 @@ from planner.records import (
     Reduction,
     RelativePeriod,
     RollingWindow,
+    Severity,
     StatVarReading,
     ValueThreshold,
 )
@@ -79,6 +88,8 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+
+from .split_plan import SPEC_DEBT, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -99,9 +110,10 @@ def _population_decision(decision: DecisionFactory, **overrides: object) -> Deci
 #
 # Mirrors `tests/planner/test_plan.py::_every_kind_plan`: `dataset_a` feeds
 # `totals_a` (aggregate), which feeds `growth_a` (growth) and `rank_a` (rank);
-# `dataset_b` feeds `filtered_b` (filter); `joined` (join), `share_a`
-# (share_of), `quotient_a` (quotient_of), `comparison_a` (comparison) and
-# `sum_a` (sum_of) each read `totals_a` and `filtered_b`. Every requirement id below is also its operation id and its
+# `dataset_b` feeds `filtered_b` (filter); `joined` (join) reads `filtered_b`
+# and `dataset_a`; `share_a` (share_of), `quotient_a` (quotient_of),
+# `comparison_a` (comparison) and `sum_a` (sum_of) each read `totals_a` and
+# `filtered_b`. Every requirement id below is also its operation id and its
 # workflow step id, so the same id names one thing throughout a row.
 
 _EVERY_KIND_REQUIREMENT_ID: dict[type, str] = {
@@ -162,7 +174,7 @@ def _every_kind_requirements() -> list[EvidenceRequirement]:
         reduction=Reduction.MEAN,
     )
     joined = JoinRequirement(
-        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="totals_a"
+        id="joined", decision_ids=["measure"], left_id="filtered_b", right_id="dataset_a"
     )
     share_a = ShareOfRequirement(
         id="share_a",
@@ -246,7 +258,7 @@ def _every_kind_translation() -> Translation:
                 reduction=Reduction.MEAN,
             ),
             JoinOperation(
-                id="joined", requirement_id="joined", left="filtered_b", right="totals_a"
+                id="joined", requirement_id="joined", left="filtered_b", right="dataset_a"
             ),
             ShareOfOperation(
                 id="share_a",
@@ -314,7 +326,7 @@ def _every_kind_workflow() -> Workflow:
             _step("growth_a", tool="growth", from_steps=("totals_a",)),
             _step("filtered_b", tool="filter", from_steps=("dataset_b",)),
             _step("rank_a", tool="rank", from_steps=("dataset_a",)),
-            _step("joined", tool="join", from_steps=("filtered_b", "totals_a")),
+            _step("joined", tool="join", from_steps=("filtered_b", "dataset_a")),
             _step("share_a", tool="share_of", from_steps=("totals_a", "filtered_b")),
             _step("quotient_a", tool="quotient_of", from_steps=("totals_a", "filtered_b")),
             _step("comparison_a", tool="compare", from_steps=("totals_a", "filtered_b")),
@@ -536,7 +548,9 @@ def test_operation_rows_carries_id_kind_requirement_id_and_sentence(
 # --- A minimal retrieve-then-aggregate plan ------------------------------------
 
 
-def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
+def _retrieve_then_aggregate_plan(
+    decision: DecisionFactory, group_by: tuple[GroupBy, ...] = (GroupBy.PERIOD,)
+) -> Plan:
     dataset = DatasetRequirement(
         id="annual_debt_service",
         decision_ids=["measure"],
@@ -549,7 +563,7 @@ def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
         decision_ids=["measure"],
         input_id="annual_debt_service",
         reduction=Reduction.SUM,
-        group_by=(GroupBy.PERIOD,),
+        group_by=group_by,
     )
     draft = Plan(
         question="How much has Kenya paid in debt service each year?",
@@ -566,7 +580,7 @@ def _retrieve_then_aggregate_plan(decision: DecisionFactory) -> Plan:
                 requirement_id="annual_totals",
                 input="annual_debt_service",
                 reduction=Reduction.SUM,
-                group_by=(GroupBy.PERIOD,),
+                group_by=group_by,
             ),
         ],
         terminal=["annual_totals"],
@@ -661,17 +675,37 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
     ]
 
 
+@pytest.mark.parametrize(
+    ("group_by", "label", "sentence"),
+    [
+        pytest.param(
+            (GroupBy.PERIOD,),
+            "Total external debt service paid by year",
+            "The total of external debt service paid, grouped by year.",
+            id="by-year",
+        ),
+        pytest.param(
+            (),
+            "Total external debt service paid as one figure over all the years and parties read",
+            "The total of external debt service paid, as one figure over all the years and "
+            "parties read.",
+            id="one-figure",
+        ),
+    ],
+)
 def test_a_retrieve_then_aggregate_plan_produces_two_labelled_steps(
-    decision: DecisionFactory,
+    decision: DecisionFactory, group_by: tuple[GroupBy, ...], label: str, sentence: str
 ) -> None:
-    plan = _retrieve_then_aggregate_plan(decision)
+    plan = _retrieve_then_aggregate_plan(decision, group_by)
 
     rows = step_rows(plan)
 
     assert [row["id"] for row in rows] == ["annual_debt_service", "annual_totals"]
     labels = [row["label"] for row in rows]
     assert labels[0] == "Fetch external debt service paid for Kenya"
-    assert labels[1] == "Total external debt service paid by year"
+    assert labels[1] == label
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+    assert sentences["annual_totals"] == sentence
     # Never a bare tool name.
     assert "get_data" not in labels[0]
     assert "aggregate" not in labels[1]
@@ -940,6 +974,13 @@ def test_a_rank_sentence_states_its_population_and_whether_it_is_per_period(
     assert "ranks exactly the entities named" in sentence
     assert "the window is collapsed into one ranking" in sentence
 
+    one_year = named_rank.model_copy(update={"window_start": 2020, "window_end": 2020})
+    one_year_plan = plan.model_copy(update={"evidence_requirements": [dataset, narrowed, one_year]})
+    one_year_sentence = next(
+        row for row in requirement_rows(one_year_plan) if row["id"] == "rank_named"
+    )["sentence"]
+    assert one_year_sentence.endswith("; ranks 2020.")
+
     bottom_two = named_rank.model_copy(update={"direction": RankDirection.LOWEST_FIRST, "limit": 2})
     limited = Plan(
         question="q",
@@ -1099,15 +1140,19 @@ def _pooled_recipient_share_sentence(
     *,
     denominator_entity: str | None = None,
 ) -> str:
-    """The card sentence for ODA per recipient, pooled over the last of `denominator_steps`.
+    """The card sentence for the UK's ODA per recipient, pooled over the last of `denominator_steps`.
 
-    A rank over the population cites the `population` decision.
+    The dataset names six recipients for the steps' filters to keep. A rank
+    over the population cites the `population` decision.
     """
     dataset = DatasetRequirement(
         id="dataset",
         decision_ids=["measure"],
         measure="ODA",
-        entities=[Entity(name="UK", role="donor"), Entity(name="Kenya", role="recipient")],
+        entities=[
+            Entity(name="UK", role="donor"),
+            *(Entity(name=name, role="recipient") for name in _SIX),
+        ],
         period=Period(start=2015, end=2024),
     )
     share = ShareOfRequirement(
@@ -1562,7 +1607,7 @@ def _open_axis_rank_plan(
     keeping `level` between the retrieval and the rank. A `dataset` that
     names its places, or covers a flow party, is ranked directly.
     """
-    levelled = names_no_place(dataset)
+    levelled = "country" in dataset.across
     ranks = "kept" if levelled else "health_spending"
     predicates = (PlaceLevel(level=level),)
     rank = RankRequirement(
@@ -1724,7 +1769,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
         id="share",
         decision_ids=["measure"],
         numerator=RequirementSide(input_id="nigeria"),
-        denominator=RequirementSide(input_id="countries"),
+        denominator=RequirementSide(input_id="world"),
     )
     plan = Plan(
         question="What share of the world's GDP is Nigeria's?",
@@ -1733,6 +1778,7 @@ def test_a_pooled_share_names_the_level_its_denominator_keeps(
             nigeria,
             every_place,
             _filter("countries", "gdp", PlaceLevel(level=PlaceType.COUNTRY)),
+            _total("countries", id_="world"),
             share,
         ],
     )
@@ -1988,7 +2034,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its 1,554 StatVars by default",
+            "summed over its 1,554 indicators by default",
         ),
         (
             {
@@ -1996,7 +2042,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 StatVars",
+            "summed over its 3 indicators",
         ),
         (
             {
@@ -2004,7 +2050,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate StatVars",
+            "kept as 2 separate indicators",
         ),
         (
             {
@@ -2013,7 +2059,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.RULE,
             },
-            "summed over its StatVars by default",
+            "summed over its indicators by default",
         ),
         (
             {
@@ -2021,7 +2067,17 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as separate StatVars",
+            "kept as separate indicators",
+        ),
+        (
+            {
+                "served_count": None,
+                "stat_var_member_count": 27,
+                "stat_var_member_count_exact": False,
+                "stat_var_reading": StatVarReading.SEPARATE,
+                "stat_var_reading_set_by": ReadingSetBy.RULE,
+            },
+            "kept as separate indicators by default",
         ),
     ],
     ids=[
@@ -2030,6 +2086,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
         "separate-by-the-plan",
         "one-confirmed-summed",
         "uncounted-separate",
+        "floor-count-separate",
     ],
 )
 def test_the_dataset_sentence_states_how_a_family_is_read(
@@ -2087,15 +2144,49 @@ def test_a_breakdown_by_sector_reads_on_the_retrieval_the_total_and_the_rank(
         f"rolled up to {rolled_up_to}."
     )
     assert sentences["total"] == "The total of aid, grouped by year and by sector."
+    one_figure = plan.model_copy(
+        update={"evidence_requirements": [aid, _total("aid").model_copy(update={"group_by": ()})]}
+    )
+    assert {row["id"]: row["sentence"] for row in requirement_rows(one_figure)}["total"] == (
+        "The total of aid, as one figure over all the years, parties and codes read."
+    )
     assert sentences["ranked"].startswith(
         "Ranks by the total of aid: ranks every sector the source holds; "
     )
     assert _label(plan.requirement("ranked"), plan) == "Rank the top 10 sectors by the total of aid"
 
 
-def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
-    decision: DecisionFactory,
+# A source naming health (120) and population (130), which share social
+# infrastructure (100) at the top level.
+_HEALTH_AND_POPULATION: dict[str, Any] = {
+    "identity": {
+        "slots": [
+            {
+                "property": "crsPurpose",
+                "binding": {"state": "set", "refs": ["CRSPurposeCode120", "CRSPurposeCode130"]},
+            }
+        ]
+    },
+    "code_paths": {
+        "CRSPurposeCode120": ("CRSPurposeCode100", "CRSPurposeCode120"),
+        "CRSPurposeCode130": ("CRSPurposeCode100", "CRSPurposeCode130"),
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("named", "rolled_up_to"),
+    [
+        ({}, "the top level of its hierarchy"),
+        (_HEALTH_AND_POPULATION, "level 1 below the top of its hierarchy"),
+    ],
+    ids=["no-sector-named", "health-and-population"],
+)
+def test_a_breakdown_states_the_level_it_reads_and_no_reading_of_the_family(
+    decision: DecisionFactory, named: dict[str, Any], rolled_up_to: str
 ) -> None:
+    """The plan states level 0; a source naming two sectors that share their top-level
+    parent reads them where they part, and the card says so."""
     plan = _one_requirement_compiled_plan(
         decision,
         definition=None,
@@ -2104,13 +2195,13 @@ def test_a_breakdown_states_no_reading_of_the_family_it_sums_within_each_code(
         stat_var_member_count=705,
         stat_var_reading=StatVarReading.SEPARATE,
         stat_var_reading_set_by=ReadingSetBy.PLAN,
+        **named,
     )
 
     (dataset_row,) = [row for row in requirement_rows(plan) if row["id"] == "dataset_a"]
 
     assert dataset_row["sentence"] == (
-        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to the top level of "
-        "its hierarchy."
+        f"{_SOURCE_SENTENCE}. Broken down by sector, each code rolled up to {rolled_up_to}."
     )
 
 
@@ -2153,6 +2244,8 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
                 predicates=(PeriodThreshold(op="eq", year=2024, rolling=latest),),
             ),
         ],
+        # The dataset starts where the plan does, so reading it whole splits nothing.
+        first_years=[FirstYear(requirement_id="debt", year=2015)],
     )
 
     sentences = {str(row["id"]): row["sentence"] for row in requirement_rows(plan)}
@@ -2175,3 +2268,101 @@ def test_a_period_that_follows_the_newest_data_says_so_beside_its_years(
         _label(plan.requirement("last_five"), plan)
         == f"Growth in {measure}, 2019-2024, following the newest year"
     )
+
+
+# --- A plan whose dataset is read from its first year -------------------------------
+
+
+def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFactory) -> None:
+    """`debt_history` is code's copy of `debt` for the rolling growth. The card names
+    `debt` once, and the growth reads `debt`'s source."""
+    plan = stored_split_plan(decision)
+
+    steps = step_rows(plan)
+
+    assert [row["id"] for row in steps] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
+    assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
+    assert "debt_history" not in repr([steps, requirement_rows(plan), operation_rows(plan)])
+
+
+def test_the_card_states_a_series_answer_over_the_years_the_plan_states(
+    decision: DecisionFactory,
+) -> None:
+    """The copy reads from 2000. The total beside it keeps 2015-2024."""
+    plan = stored_split_plan(decision)
+
+    total = next(row for row in step_rows(plan) if row["id"] == "total")
+
+    assert str(total["description"]).endswith("Result: one figure per year, 2015-2024.")
+
+
+def test_the_shown_plan_is_the_authored_plan_with_the_compiled_parts_folded(
+    decision: DecisionFactory,
+) -> None:
+    """Sources and bindings of the copy go together, and a warning on the copy names its origin once."""
+    plan = stored_split_plan(decision)
+
+    shown = shown_plan(plan)
+
+    assert shown == shown_plan(shown)
+    assert (shown.rolling_copies, shown.first_years) == ((), ())
+    growth = shown.requirement("last_five")
+    assert isinstance(growth, GrowthRequirement)
+    assert growth.input_id == "debt"
+    assert shown.workflow is not None
+    assert [(b.requirement_id, b.spec_id) for b in shown.workflow.evidence_bindings] == [
+        ("debt", SPEC_DEBT)
+    ]
+    assert [source.spec_id for source in shown.workflow.sources] == [SPEC_DEBT]
+    assert [issue.requirement_id for issue in shown.workflow.warnings] == ["debt"]
+
+
+def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and its copy both read short of 2015-2024, and the copy says its
+    retrieval asks for every year from 2000. The card shows one gap for
+    `debt`, the copy's, in the words of the plan the model wrote, beside the
+    origin's own warning of another code."""
+    plan = stored_split_plan(decision)
+    assert plan.workflow is not None
+
+    def issue(code: EvidenceIssueCode, requirement_id: str, detail: str) -> EvidenceIssue:
+        return EvidenceIssue(
+            code=code, severity=Severity.WARNING, requirement_id=requirement_id, detail=detail
+        )
+
+    copy_gap = (
+        "requirement 'debt_history': the source covers 2000-2023, the requirement asks for "
+        "2015-2024, and its retrieval requests every year from 2000"
+    )
+    warned = plan.model_copy(
+        update={
+            "workflow": plan.workflow.model_copy(
+                update={
+                    "warnings": (
+                        issue(
+                            EvidenceIssueCode.WINDOW_SHORT,
+                            "debt",
+                            "the source covers 2016-2023, the requirement asks for 2015-2024",
+                        ),
+                        issue(EvidenceIssueCode.UNIT_UNVERIFIED, "debt", "no unit stated"),
+                        issue(EvidenceIssueCode.WINDOW_SHORT, "debt_history", copy_gap),
+                    )
+                }
+            )
+        }
+    )
+
+    shown = shown_plan(warned).workflow
+
+    assert shown is not None
+    assert [(w.requirement_id, w.code, w.detail) for w in shown.warnings] == [
+        ("debt", EvidenceIssueCode.UNIT_UNVERIFIED, "no unit stated"),
+        (
+            "debt",
+            EvidenceIssueCode.WINDOW_SHORT,
+            copy_gap.replace("'debt_history'", "'debt'"),
+        ),
+    ]

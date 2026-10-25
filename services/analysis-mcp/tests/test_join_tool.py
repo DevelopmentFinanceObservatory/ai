@@ -177,6 +177,192 @@ async def test_duplicate_join_key_refuses_op_spec_invalid_rather_than_crashing(s
     assert result.structured_content["code"] == "op_spec_invalid"
 
 
+# Cross-column keys (`right_keys`) ----------------------------------------------
+
+
+def _place_series(*, stat_var: str, role: str, place: str, years: tuple[str, ...]) -> Frame:
+    return Frame.build(
+        role_keys=[role],
+        rows=[
+            {"stat_var": stat_var, role: place, "time_period": year, "value": float(position)}
+            for position, year in enumerate(years, start=1)
+        ],
+    )
+
+
+async def _who_and_crs(
+    store: InMemoryMaterialisationStore, *, crs_place: str
+) -> tuple[dict[str, str], dict[str, str]]:
+    """A WHO series on `observationAbout` for Kenya and a CRS series on
+    `destination` for `crs_place`, seeded into `store`."""
+    who = _place_series(
+        stat_var="dcid:WHO_MortalityUnder5",
+        role="observationAbout",
+        place="dcid:country/KEN",
+        years=("2020", "2021"),
+    )
+    crs = _place_series(
+        stat_var="dcid:ODA_Health", role="destination", place=crs_place, years=("2020", "2021")
+    )
+    return await _seed_custom_frame(store, who), await _seed_custom_frame(store, crs)
+
+
+async def test_right_keys_joins_a_who_series_to_a_crs_series_naming_the_same_place(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert result.structured_content["role_keys"] == ["observationAbout"]
+    assert "2 matched key(s)" in result.content[0].text
+    assert "observationAbout=destination" in result.content[0].text
+
+
+async def test_right_keys_with_different_places_matches_nothing_and_reports_dropped_keys(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/UGA")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert result.structured_content["rows"] == 0
+    assert [
+        (exclusion["side"], exclusion["reason"], exclusion["rows"], exclusion["entities"])
+        for exclusion in result.structured_content["exclusions"]
+    ] == [
+        ("left", "unmatched_key", 2, {"observationAbout": ["dcid:country/KEN"]}),
+        ("right", "unmatched_key", 2, {"destination": ["dcid:country/UGA"]}),
+    ]
+    assert "0 matched key(s) (2 left-only, 2 right-only, dropped)" in result.content[0].text
+
+
+@pytest.mark.parametrize(
+    ("left_cells", "right_cells", "counts"),
+    [
+        # Kenya matches in 2020 only, so it keeps a row and is not counted,
+        # though each side holds a year of it the other lacks.
+        pytest.param(
+            (("KEN", "2019"), ("KEN", "2020"), ("UGA", "2020"), ("TZA", "2020")),
+            (("KEN", "2020"), ("KEN", "2021"), ("GHA", "2020")),
+            (2, 1),
+            id="one-sided",
+        ),
+        # Both sides hold Kenya, in years that never overlap, so it has no row
+        # and counts on each side.
+        pytest.param(
+            (("KEN", "2010"), ("KEN", "2011"), ("UGA", "2020")),
+            (("KEN", "2018"), ("UGA", "2020")),
+            (1, 1),
+            id="disjoint-years",
+        ),
+    ],
+)
+async def test_a_join_counts_each_sides_keys_it_matched_in_no_period(
+    seeded,
+    left_cells: tuple[tuple[str, str], ...],
+    right_cells: tuple[tuple[str, str], ...],
+    counts: tuple[int, int],
+) -> None:
+    store, _handles = seeded
+    who = Frame.build(
+        role_keys=["observationAbout"],
+        rows=[
+            {
+                "stat_var": "dcid:WHO_MortalityUnder5",
+                "observationAbout": f"dcid:country/{place}",
+                "time_period": year,
+                "value": 1.0,
+            }
+            for place, year in left_cells
+        ],
+    )
+    crs = Frame.build(
+        role_keys=["destination"],
+        rows=[
+            {
+                "stat_var": "dcid:ODA_Health",
+                "destination": f"dcid:country/{place}",
+                "time_period": year,
+                "value": 2.0,
+            }
+            for place, year in right_cells
+        ],
+    )
+
+    result = await join(
+        frame_ref=await _seed_custom_frame(store, who),
+        right_frame_ref=await _seed_custom_frame(store, crs),
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "destination"},
+    )
+
+    assert result.is_error is False
+    assert (
+        result.structured_content["dropped_key_count"],
+        result.structured_content["right_dropped_key_count"],
+    ) == counts
+
+
+async def test_right_keys_naming_a_column_the_right_frame_lacks_refuses_role_ambiguous(
+    seeded,
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref,
+        right_frame_ref=crs_ref,
+        join_keys=("observationAbout",),
+        right_keys={"observationAbout": "origin"},
+    )
+
+    assert result.structured_content["code"] == "role_ambiguous"
+    assert result.structured_content["fix"] == {
+        "parameter": "right_keys",
+        "columns": ["origin"],
+        "available": ["destination"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("join_keys", "right_keys"),
+    [
+        pytest.param((), {"observationAbout": "destination"}, id="key-outside-join-keys"),
+        pytest.param(
+            ("observationAbout", "sector"),
+            {"observationAbout": "destination"},
+            id="join-key-left-out",
+        ),
+    ],
+)
+async def test_right_keys_that_disagrees_with_join_keys_refuses_op_spec_invalid(
+    seeded, join_keys: tuple[str, ...], right_keys: dict[str, str]
+) -> None:
+    store, _handles = seeded
+    who_ref, crs_ref = await _who_and_crs(store, crs_place="dcid:country/KEN")
+
+    result = await join(
+        frame_ref=who_ref, right_frame_ref=crs_ref, join_keys=join_keys, right_keys=right_keys
+    )
+
+    assert result.structured_content["code"] == "op_spec_invalid"
+
+
 # Success: one real analyst question end to end, through the registered tool ----
 
 

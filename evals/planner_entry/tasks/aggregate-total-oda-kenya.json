@@ -22,7 +22,10 @@
   ],
   "brief": "Total official development assistance Kenya received from all donors between 2015 and 2022.",
   "asks": [
-    "Total ODA to Kenya from all donors, 2015 to 2022"
+    {
+      "text": "Total ODA to Kenya from all donors, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -32,6 +35,7 @@
     "dataset",
     "aggregate"
   ],
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "Total official development assistance Kenya received from all donors between 2015 and 2022.",
     "answer_mode": "computed",
@@ -45,15 +49,17 @@
           {
             "name": "Kenya",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_e511b06cd1033739fdaf8f1d028368d3"
       },
       {
         "kind": "aggregate",

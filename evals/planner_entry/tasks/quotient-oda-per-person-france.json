@@ -53,6 +53,7 @@
     "distinction": "quotient_of, not share_of: aid per French resident divides dollars by people, two measures in different units"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much aid (official development assistance) does France provide per person from 1960 to 2025?",
     "answer_mode": "computed",
@@ -87,7 +88,7 @@
           "start": 1960,
           "end": 2025
         },
-        "source_spec_id": "spec_c04173eccb9a875a8b840576c2dc87ac"
+        "source_spec_id": "spec_7d60591d2d2ee2d4e4a20049f42d1211"
       },
       {
         "kind": "quotient_of",

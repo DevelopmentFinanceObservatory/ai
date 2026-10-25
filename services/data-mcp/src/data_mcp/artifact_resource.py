@@ -1,12 +1,16 @@
-"""The artifact resource: reads dfo-apis' snapshot route and returns an artifact's stable download link.
+"""The artifact resource: reads apis' snapshot route and returns an artifact's stable download link.
 
 Each artifact in a manifest carries a root-relative link,
 `/api/datasets/{id}/{content_version}/files/{digest}`. The link never
 expires: a GET on it answers 302 to an object-store URL signed for a few
 minutes, so the signed URL is minted at the moment of use and never sits in a
 manifest, a tool result or this resource's response. This module holds no key
-and signs nothing. It resolves the link against the dfo-apis origin this
-service calls and returns the absolute URL beside the artifact's metadata.
+and signs nothing. It resolves the link against the public origin,
+`UpstreamClient.public_url` (the website, which proxies apis' paths, when
+`DFO_SITE_ORIGIN` is set), and returns the absolute URL beside the artifact's
+metadata. This service's own fetches take the root-relative link
+(`artifact_link`, `artifact_link_by_rendering`) and GET it on the apis
+origin through `UpstreamClient.stream_link`.
 `get_data_tool.py` strips the link from the manifest it returns; each
 artifact's `resource_uri` (`manifest.py`) points here, so a caller pulls a link
 only when it needs one.
@@ -21,7 +25,7 @@ nowhere to live on that wire. So this module never reaches for
 `ToolErrorCode`/`RetryMode` -- the four retry modes stay on the tool path --
 and instead puts a stable, lowercase marker at the head of the `ResourceError`
 message itself, as `"<code>: <prose>"` (`_refuse`). That marker mirrors
-dfo-apis' own snapshot-route vocabulary verbatim (`spec_not_found`,
+apis' own snapshot-route vocabulary verbatim (`spec_not_found`,
 `snapshot_not_found`, `snapshot_revoked`, `artifact_expired`,
 `service_unavailable`), plus three this module owns for a failure upstream never
 sees (`upstream_response_unusable`, `request_invalid`,
@@ -227,7 +231,7 @@ def _root_relative_link(url: object) -> str:
 
     `ArtifactEntryModel.url` upstream is a bare, unconstrained `str`. A scheme
     or a host (`//host/...`) would send the caller to an origin other than the
-    dfo-apis this service calls. `urlsplit` can also raise `ValueError` on
+    apis this service calls. `urlsplit` can also raise `ValueError` on
     malformed input.
     """
     refusal = "the matched artifact entry's url is not a root-relative link"
@@ -245,14 +249,15 @@ def _root_relative_link(url: object) -> str:
 async def read_artifact(
     subject_id: str, content_version: str, artifact_digest: str
 ) -> dict[str, Any]:
-    """Read one artifact's stable download link off dfo-apis' snapshot route.
+    """Read one artifact's stable download link off apis' snapshot route.
 
     Reading this resource looks up the artifact identified by `subject_id`
     (a `spec_` id), `content_version`, and `artifact_digest` -- a metadata
     lookup, with no graph call and no re-derivation. The returned `url` is the
-    absolute form of the artifact's stable link. It does not expire: a GET on
-    it answers 302 to an object-store URL signed for a few minutes, so a caller
-    follows redirects and reads the link again only if it lost it.
+    artifact's stable link on the public origin (`UpstreamClient.public_url`).
+    It does not expire: a GET on it answers 302 to an object-store URL signed
+    for a few minutes, so a caller follows redirects and reads the link again
+    only if it lost it.
 
     Args:
         subject_id: The `spec_` id this artifact's manifest was minted
@@ -270,6 +275,51 @@ async def read_artifact(
             message is `"<code>: <prose>"`; the JSON-RPC `code` fastmcp
             assigns carries no meaning and must not be matched on.
     """
+    link, entry = await _resolve_artifact(subject_id, content_version, artifact_digest)
+    return _link_document(
+        subject_id=subject_id, content_version=content_version, link=link, entry=entry
+    )
+
+
+async def artifact_link(subject_id: str, content_version: str, artifact_digest: str) -> str:
+    """The root-relative stable link `read_artifact` reads, for this service's own
+    fetch through `UpstreamClient.stream_link`.
+
+    Raises:
+        fastmcp.exceptions.ResourceError: On every failure `read_artifact` raises for.
+    """
+    link, _ = await _resolve_artifact(subject_id, content_version, artifact_digest)
+    return link
+
+
+async def artifact_link_by_rendering(
+    subject_id: str, content_version: str, rendering: Mapping[str, object]
+) -> tuple[str, str] | None:
+    """The digest and root-relative stable link of the first artifact the snapshot
+    lists under `rendering`, or `None` when it lists none.
+
+    `frame_materialisation` reads a version's canonical frame this way: dfo-apis
+    links it on the version record, so the snapshot lists it and a mint's own
+    response does not. The digest comes from the snapshot, so the caller checks the
+    bytes against it.
+
+    Raises:
+        fastmcp.exceptions.ResourceError: On every failure `read_artifact` raises
+            for, except a missing artifact, which returns `None`.
+    """
+    _validate_pair(subject_id=subject_id, content_version=content_version)
+    payload, manifest = await _read_snapshot(subject_id, content_version)
+    # `strip_manifest` validated `payload["artifacts"]` entry for entry, in order.
+    for raw_entry, entry in zip(payload["artifacts"], manifest.artifacts, strict=True):
+        if entry.rendering == dict(rendering):
+            return entry.artifact_digest, _root_relative_link(raw_entry.get("url"))
+    return None
+
+
+async def _resolve_artifact(
+    subject_id: str, content_version: str, artifact_digest: str
+) -> tuple[str, ArtifactEntry]:
+    """The artifact's root-relative stable link and its stripped manifest entry."""
     _validate_uri_parts(
         subject_id=subject_id, content_version=content_version, artifact_digest=artifact_digest
     )
@@ -283,41 +333,7 @@ async def read_artifact(
         # `payload["artifacts"]`, including the one `_select_raw_artifact`
         # just matched by the same digest field.
         raise AssertionError("digest matched in the raw payload but not in the stripped manifest")
-    return _link_document(
-        subject_id=subject_id,
-        content_version=content_version,
-        raw_entry=raw_entry,
-        entry=stripped_entry,
-    )
-
-
-async def read_artifact_by_rendering(
-    subject_id: str, content_version: str, rendering: Mapping[str, object]
-) -> dict[str, Any] | None:
-    """`read_artifact`'s document for the first artifact the snapshot lists under
-    `rendering`, or `None` when it lists none.
-
-    `frame_materialisation` reads a version's canonical frame this way: dfo-apis
-    links it on the version record, so the snapshot lists it and a mint's own
-    response does not. The digest comes from the snapshot, so the caller checks the
-    bytes against the document's `artifact_digest`.
-
-    Raises:
-        fastmcp.exceptions.ResourceError: On every failure `read_artifact` raises
-            for, except a missing artifact, which returns `None`.
-    """
-    _validate_pair(subject_id=subject_id, content_version=content_version)
-    payload, manifest = await _read_snapshot(subject_id, content_version)
-    # `strip_manifest` validated `payload["artifacts"]` entry for entry, in order.
-    for raw_entry, entry in zip(payload["artifacts"], manifest.artifacts, strict=True):
-        if entry.rendering == dict(rendering):
-            return _link_document(
-                subject_id=subject_id,
-                content_version=content_version,
-                raw_entry=raw_entry,
-                entry=entry,
-            )
-    return None
+    return _root_relative_link(raw_entry.get("url")), stripped_entry
 
 
 async def _read_snapshot(subject_id: str, content_version: str) -> tuple[dict[str, Any], Manifest]:
@@ -363,17 +379,16 @@ def _link_document(
     *,
     subject_id: str,
     content_version: str,
-    raw_entry: dict[str, Any],
+    link: str,
     entry: ArtifactEntry,
 ) -> dict[str, Any]:
-    """The document `read_artifact` returns for one listed artifact: its absolute
-    stable link beside its metadata."""
-    link = _root_relative_link(raw_entry.get("url"))
+    """The document `read_artifact` returns for one listed artifact: its stable link
+    on the public origin beside its metadata."""
     return {
         "subject_id": subject_id,
         "content_version": content_version,
         "artifact_digest": entry.artifact_digest,
-        "url": get_client().absolute_url(link),
+        "url": get_client().public_url(link),
         "media_type": entry.media_type,
         "bytes": entry.bytes,
         "rendering": entry.rendering,

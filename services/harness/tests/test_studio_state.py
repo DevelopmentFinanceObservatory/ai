@@ -59,12 +59,20 @@ from harness.studio_state import (
     _digest_entry,
     _next_manifest,
     _PendingInterrupt,
+    _PendingQuestion,
     land_component,
     make_recall_part,
     remove_cards,
 )
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
-from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
+from harness.wire import (
+    AddOp,
+    ComponentType,
+    CompositionActor,
+    CompositionBlock,
+    CompositionManifest,
+    MutationOp,
+)
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
 
@@ -380,11 +388,15 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         drawn_cards.chart("bar_chart", series), drawn_cards.stored(codes)
     )
     state = ConversationState(conversation_id=CONVERSATION)
-    land_component(state, card)
+    intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
+    land_component(state, card, intent=intent)
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
     assert state.canvas_series_ids() == ids
+    assert state.canvas_cards() == [
+        {"component_id": card_id, "intent": intent, "revision": card["revision"]}
+    ]
     assert len(state.components[card_id]["fact_summary"]["series"]) == 12
     model_facing = json.dumps(
         [
@@ -398,6 +410,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
         ]
     )
     assert "series_ids" not in model_facing
+    assert "drawn_card" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -407,6 +420,36 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     state.components[card_id].update(studio_state.drawn_series_ids(fewer))
     assert state.canvas_series_ids() == ids[:1]
+
+
+def test_a_drawn_card_is_listed_while_the_canvas_holds_the_revision_it_was_drawn_as() -> None:
+    """A card taken off the canvas is not listed, and listed again once the
+    user adds it back unchanged; one the canvas holds at a later revision is
+    not listed."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    for card_id in ("cmp_one", "cmp_two"):
+        card = {"component_id": card_id, "type": "line_chart", "revision": 1}
+        land_component(state, card, intent={"title": card_id})
+
+    def listed() -> list[str]:
+        return [card["component_id"] for card in state.canvas_cards()]
+
+    assert studio_state.remove_cards(state, ["cmp_one"], all_cards=False)[0] == ["cmp_one"]
+    assert listed() == ["cmp_two"]
+
+    applied = studio_state._apply_operations(
+        state, state.composition, [AddOp(op=MutationOp.ADD, component_id="cmp_one")]
+    )
+    assert isinstance(applied, tuple)
+    state.composition = _next_manifest(state.composition, applied[0], actor=CompositionActor.USER)
+    assert listed() == ["cmp_two", "cmp_one"]
+
+    revised = [
+        block.model_copy(update={"revision": 2}) if block.component_id == "cmp_two" else block
+        for block in state.composition.blocks
+    ]
+    state.composition = _next_manifest(state.composition, revised, actor=CompositionActor.USER)
+    assert listed() == ["cmp_one"]
 
 
 def test_an_entry_stored_without_series_ids_gives_those_its_fact_summary_lists() -> None:
@@ -1087,7 +1130,7 @@ def test_a_closed_turn_keeps_no_block_for_a_spec_id_only_offered_as_a_candidate(
     assert state.earlier_block(candidate) is None
 
 
-# The definitions dfo-apis served for Guatemala's nominal GDP over every year
+# The definitions apis served for Guatemala's nominal GDP over every year
 # (turn 0's orchestrator search) and over 1960 to 2024 (turn 2's translator
 # discovery) in a recorded Studio session. They differ only in
 # `requested_window`.
@@ -1771,7 +1814,12 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
         kind="plan",
         plan_version=2,
         plan_revision="rev_1",
-        option_ids=frozenset({"spec_b", "spec_a"}),
+        questions=(
+            _PendingQuestion(
+                id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
+            ),
+        ),
+        skippable=True,
         step_order=("step_b", "step_a"),
         step_labels={"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"},
         resuming_segment="seg_1",
@@ -1813,7 +1861,12 @@ async def test_round_trip_of_every_durable_field(session_service) -> None:
     assert pending.kind == "plan"
     assert pending.plan_version == 2
     assert pending.plan_revision == "rev_1"
-    assert pending.option_ids == frozenset({"spec_a", "spec_b"})
+    assert pending.questions == (
+        _PendingQuestion(
+            id="q1", question="Which count?", options={"spec_a": "Net"}, skippable=True
+        ),
+    )
+    assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")
     assert pending.step_labels == {"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"}
     assert pending.resuming_segment == "seg_1"
@@ -2663,6 +2716,20 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
+    assert (pending.questions, pending.legacy) == ((), False)
+
+
+def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:
+    """Its flat `option_ids` become question `q1`'s options with no labels,
+    and the pause is skippable as a whole."""
+    entry = {"adk_id": "clarify", "kind": "elicitation", "option_ids": ["spec_a", "o2"]}
+
+    pending = studio_state._deserialize_pending({"int_1": entry})["int_1"]
+
+    assert pending.questions == (
+        _PendingQuestion(id="q1", question="", options={"spec_a": None, "o2": None}),
+    )
+    assert (pending.skippable, pending.legacy) == (True, True)
 
 
 def test_a_recorded_identity_keeps_the_set_its_places_were_asked_for_as():

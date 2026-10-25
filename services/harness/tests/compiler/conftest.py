@@ -203,6 +203,13 @@ JOIN_PARAMETERS: dict[str, Any] = {
         "frame_ref": FRAME_REF_PARAMETER,
         "right_frame_ref": FRAME_REF_PARAMETER,
         "join_keys": {"type": "array", "items": {"type": "string"}, "default": []},
+        "right_keys": {
+            "anyOf": [
+                {"type": "object", "additionalProperties": {"type": "string"}},
+                {"type": "null"},
+            ],
+            "default": None,
+        },
         "left_unit": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
         "right_unit": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
     },
@@ -239,6 +246,7 @@ _PREDICATE_ITEM: dict[str, Any] = {
                 "kind": {"const": "place_level"},
                 "column": {"type": "string"},
                 "level": {"type": "string"},
+                "strict": {"type": "boolean", "default": False},
             },
             "required": ["column", "level"],
             "additionalProperties": False,

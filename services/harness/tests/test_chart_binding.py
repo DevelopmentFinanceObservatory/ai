@@ -159,7 +159,7 @@ def test_top_members_ranks_no_row_without_a_member() -> None:
 
 def test_top_members_matches_a_converted_unit_as_the_select_names_it() -> None:
     """A stored frame holds a converted unit as a `UnitRequest`. A select
-    names it as dfo-apis's view does, `currency/prices/base_year`."""
+    names it as the apis service's view does, `currency/prices/base_year`."""
     unit = UnitRequest(currency="USD", prices="constant", base_year=2023)
     rows = _provider_rows({"A": {"2024": 1.0}, "B": {"2024": 2.0}}, unit=unit)
 
@@ -193,7 +193,8 @@ def test_top_members_ranks_nothing_across_unlike_values(other: dict[str, Any]) -
 
 def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
     """A group total such as the G7, a residual and a party with no kind are
-    left out of a ranking of donors."""
+    left out of a ranking of donors. A private donor, of kind `party` with
+    its class in a column of its own, ranks beside the others."""
     cells = {
         "DACOfficialDonors": "total",
         "GroupOfSeven": "total",
@@ -201,9 +202,14 @@ def test_comparable_members_keeps_the_parties_of_a_flow_role() -> None:
         "Unknown": "untyped",
         "Germany": "party",
         "Japan": "party",
+        "GatesFoundation": "party",
     }
 
-    assert comparable_members(cells, dimension="financingProvider") == {"Germany", "Japan"}
+    assert comparable_members(cells, dimension="financingProvider") == {
+        "Germany",
+        "Japan",
+        "GatesFoundation",
+    }
 
 
 def test_comparable_members_keeps_the_places_at_the_level_most_share() -> None:

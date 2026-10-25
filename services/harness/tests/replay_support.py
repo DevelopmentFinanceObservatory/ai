@@ -1,5 +1,5 @@
 """What the `harness.recipe_replay` and `harness.live_refresh` tests share:
-dfo-apis' publish door, replay lookup and versions route as a fake behind
+the apis service's publish door, replay lookup and versions route as a fake behind
 `httpx2.MockTransport`, its mint and snapshot of one dataset as a canned upstream,
 and frames of that dataset at two versions, each version named by the token its
 canonical frame mints.
@@ -77,7 +77,7 @@ SECOND_VALUES = {
 
 
 def version_of(values: Mapping[str, Mapping[str, float]]) -> str:
-    """The `content_version` dfo-apis mints for the frame of `values`."""
+    """The `content_version` apis mints for the frame of `values`."""
     return mint_content_version(frame_sha256=frame_sha256(reporter_frame(values)))
 
 
@@ -101,7 +101,7 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
     """data-mcp's upstream client over `handler`.
 
     A version's description (`GET /api/datasets/{id}/{content_version}/description`)
-    answers 404 `not_found`, as dfo-apis does for a version stored without a record, so
+    answers 404 `not_found`, as apis does for a version stored without a record, so
     `get_data` renders its digest without a description. The Datasets capabilities route
     answers 200, so the client's probe after that 404 finds the surface mounted. Every
     other request reaches `handler`.
@@ -119,26 +119,46 @@ def data_mcp_client(handler: Callable[[httpx2.Request], httpx2.Response]) -> Ups
 
 
 class FakeApis:
-    """dfo-apis' publish door, replay lookup and versions route over plain dicts.
+    """The apis service's publish door, replay lookup and versions route over plain dicts.
 
-    `frames` holds each published pair's rows, `recipes` its recipe, and `versions`
-    each dataset's listed versions. A pair keeps its first recipe and refuses one
+    `frames` holds each published pair's rows, `recipes` its recipe, `versions`
+    each dataset's listed versions, and `enrichment_stamp` the stamp the versions
+    answer lists, none when `None`. A pair keeps its first recipe and refuses one
     with another normal form or replay key, and a replay key names one frame, as
-    dfo-apis' recipe store has it.
+    apis' recipe store has it.
     """
 
     def __init__(self) -> None:
         self.frames: dict[Pair, list[dict[str, Any]]] = {}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, Any]]] = {}
+        self.enrichment_stamp: str | None = None
         self.requests: list[httpx2.Request] = []
         self.publish_answer: httpx2.Response | None = None
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
+        path = request.url.path
+        # The versions route is open to every caller and answers in one page here.
+        if path.endswith("/versions"):
+            spec_id = path.split("/")[-2]
+            return httpx2.Response(
+                200,
+                json={
+                    "schema_version": 1,
+                    "spec_id": spec_id,
+                    "versions": self.versions.get(spec_id, []),
+                    "next_cursor": None,
+                    "complete": True,
+                }
+                | (
+                    {}
+                    if self.enrichment_stamp is None
+                    else {"enrichment_stamp": self.enrichment_stamp}
+                ),
+            )
         if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
             return problem(403, "publish_not_permitted")
-        path = request.url.path
         if path == "/api/datasets/frames/publish":
             return self.publish_answer or self._publish(
                 json.loads(gzip.decompress(request.content))
@@ -152,16 +172,6 @@ class FakeApis:
         if path.startswith("/api/datasets/frames/") and path.endswith("/recipe"):
             spec_id, content_version = path.split("/")[-3:-1]
             return self._recipe((spec_id, content_version))
-        if path.endswith("/versions"):
-            spec_id = path.split("/")[-2]
-            return httpx2.Response(
-                200,
-                json={
-                    "schema_version": 1,
-                    "spec_id": spec_id,
-                    "versions": self.versions.get(spec_id, []),
-                },
-            )
         raise AssertionError(f"unexpected call to {path}")
 
     def _recipe(self, key: Pair) -> httpx2.Response:
@@ -227,7 +237,7 @@ class FakeApis:
 
 
 class Upstream:
-    """dfo-apis' mint for one dataset: the current version's manifest, its frame
+    """apis' mint for one dataset: the current version's manifest, its frame
     file by artifact digest, and the version's snapshot, which lists its canonical
     frame beside the frame file. `move` serves other rows as the next version."""
 

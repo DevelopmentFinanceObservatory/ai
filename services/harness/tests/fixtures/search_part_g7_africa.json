@@ -1,0 +1,1096 @@
+{
+  "comment": "dev `search`'s part for gross ODA disbursements in constant prices from G7 to Africa since 1965, recorded by the planner-entry eval (aggregate-cumulative-oda-g7-africa). Search restates the text 'G7' and binds the set it labels 'Group of Seven' (GroupOfSeven) on `origin`. `entity_refs`, the refs each entity text bound, is the apis field the recording predates, added as apis states it. `resolved.unit_conversion` is left out.",
+  "envelope": {
+    "kind": "resolution",
+    "diagnostics": {
+      "warnings": []
+    },
+    "parts": [
+      {
+        "assumptions": [],
+        "departures": [],
+        "operations": [],
+        "restatement": {
+          "entities": [
+            {
+              "role_text": "from",
+              "text": "G7"
+            },
+            {
+              "role_text": "to",
+              "text": "Africa"
+            }
+          ],
+          "operations": [],
+          "sources": [],
+          "time_text": "since 1965",
+          "unit_text": "constant US dollars",
+          "variable_text": "Gross disbursements of official development assistance"
+        },
+        "entity_refs": [
+          {
+            "text": "G7",
+            "refs": [
+              "GroupOfSeven"
+            ]
+          },
+          {
+            "text": "Africa",
+            "refs": [
+              "DACAfrica"
+            ]
+          }
+        ],
+        "spec": {
+          "definition": {
+            "identity": {
+              "entities": {
+                "destination": [
+                  "DACAfrica"
+                ],
+                "origin": [
+                  "GroupOfSeven"
+                ]
+              },
+              "facets": {
+                "unit": {
+                  "request": {
+                    "base_year": 2024,
+                    "currency": "USD",
+                    "prices": "constant"
+                  },
+                  "state": "value"
+                }
+              },
+              "identity_version": "spec1",
+              "requested_window": {
+                "kind": "range",
+                "start_year": 1965
+              },
+              "shape": {
+                "kind": "statvar_schema",
+                "measured_property": "amount",
+                "measurement_qualifier": "Nominal",
+                "population_type": "FinancialFlow",
+                "stat_type": "measuredValue"
+              },
+              "slots": [
+                {
+                  "binding": {
+                    "ref": "DAC2aAidType206",
+                    "state": "value"
+                  },
+                  "property": "dac2aAidType"
+                },
+                {
+                  "binding": {
+                    "state": "unbound"
+                  },
+                  "property": "dacTypeOfFinance"
+                },
+                {
+                  "binding": {
+                    "ref": "Disbursement",
+                    "state": "value"
+                  },
+                  "property": "financialFlowType"
+                },
+                {
+                  "binding": {
+                    "ref": "Gross",
+                    "state": "value"
+                  },
+                  "property": "nettingBasis"
+                }
+              ]
+            },
+            "schema_version": 1,
+            "spec_id": "spec_845c457b3bab756a9a3e765e3cf8e8be"
+          },
+          "resolved": {
+            "alternative_measures": [
+              {
+                "axis": "what",
+                "definition": {
+                  "identity": {
+                    "entities": {
+                      "destination": [
+                        "DACAfrica"
+                      ],
+                      "origin": [
+                        "GroupOfSeven"
+                      ]
+                    },
+                    "facets": {
+                      "unit": {
+                        "request": {
+                          "base_year": 2024,
+                          "currency": "USD",
+                          "prices": "constant"
+                        },
+                        "state": "value"
+                      }
+                    },
+                    "identity_version": "spec1",
+                    "requested_window": {
+                      "kind": "range",
+                      "start_year": 1965
+                    },
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "measured_property": "amount",
+                      "measurement_qualifier": "Nominal",
+                      "population_type": "FinancialFlow",
+                      "stat_type": "measuredValue"
+                    },
+                    "slots": [
+                      {
+                        "binding": {
+                          "ref": "DAC2aAidType206",
+                          "state": "value"
+                        },
+                        "property": "dac2aAidType"
+                      },
+                      {
+                        "binding": {
+                          "state": "unbound"
+                        },
+                        "property": "dacTypeOfFinance"
+                      },
+                      {
+                        "binding": {
+                          "ref": "Disbursement",
+                          "state": "value"
+                        },
+                        "property": "financialFlowType"
+                      },
+                      {
+                        "binding": {
+                          "ref": "Net",
+                          "state": "value"
+                        },
+                        "property": "nettingBasis"
+                      }
+                    ]
+                  },
+                  "schema_version": 1,
+                  "spec_id": "spec_f06f2c2187db7ad3d405d56910e2f98b"
+                },
+                "label": "net disbursements",
+                "measure_axis_values": [
+                  {
+                    "axis": "populationType",
+                    "value": {
+                      "label": "financial flow",
+                      "ref": "FinancialFlow"
+                    }
+                  },
+                  {
+                    "axis": "measuredProperty",
+                    "value": {
+                      "label": "amount",
+                      "ref": "amount"
+                    }
+                  },
+                  {
+                    "axis": "measurementQualifier",
+                    "value": {
+                      "label": "nominal",
+                      "ref": "Nominal"
+                    }
+                  },
+                  {
+                    "axis": "financialFlowType",
+                    "value": {
+                      "label": "disbursement",
+                      "ref": "Disbursement"
+                    }
+                  },
+                  {
+                    "axis": "nettingBasis",
+                    "value": {
+                      "label": "net",
+                      "ref": "Net"
+                    }
+                  }
+                ],
+                "served_rows": 60,
+                "served_rows_exact": true
+              }
+            ],
+            "available_at_place": true,
+            "confidence": "high",
+            "coverage": {
+              "dimensions": [
+                {
+                  "count": 1,
+                  "label": "sources"
+                },
+                {
+                  "count": 60,
+                  "label": "observations"
+                },
+                {
+                  "count": 1,
+                  "label": "variables"
+                }
+              ],
+              "evidence": "facet_metadata",
+              "has_data": true,
+              "kind": "exact",
+              "observation_count": 60,
+              "window": {
+                "end_year": 2024,
+                "start_year": 1965
+              }
+            },
+            "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
+            "download": {
+              "licence": {
+                "label": "OECD Terms and Conditions"
+              },
+              "rows": 60,
+              "rows_exact": true,
+              "series": 1,
+              "window": {
+                "end_year": 2024,
+                "start_year": 1965
+              }
+            },
+            "entities": [
+              {
+                "entity_type": "DACGroup",
+                "label": "Africa (DAC)",
+                "ref": "DACAfrica",
+                "role": "destination"
+              },
+              {
+                "entity_type": "Grouping",
+                "label": "Group of Seven",
+                "ref": "GroupOfSeven",
+                "role": "origin"
+              }
+            ],
+            "entity_groups": {
+              "destination": {
+                "entity_type": "Continent",
+                "label": "Africa",
+                "ref": "africa",
+                "total": "DACAfrica"
+              },
+              "origin": {
+                "entity_type": "Grouping",
+                "label": "Group of Seven",
+                "ref": "GroupOfSeven",
+                "total": "GroupOfSeven"
+              }
+            },
+            "entity_options": [],
+            "facet_options": [
+              {
+                "axis": "provenance",
+                "options": [
+                  {
+                    "value": {
+                      "ref": {
+                        "label": "OECD DAC2A",
+                        "ref": "provenance/OECDDAC2A"
+                      },
+                      "value_kind": "source"
+                    }
+                  }
+                ],
+                "source": "observed",
+                "truncated": false
+              },
+              {
+                "axis": "unit",
+                "options": [
+                  {
+                    "value": {
+                      "ref": {
+                        "label": "US Dollar",
+                        "ref": "CurrencyUSD"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  }
+                ],
+                "source": "observed",
+                "truncated": false
+              }
+            ],
+            "facets": {
+              "provenance": {
+                "account": "provider",
+                "basis": "fallback",
+                "data_commons": {
+                  "id": "dfo",
+                  "label": "Development Finance Observatory"
+                },
+                "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
+                "label": "OECD DAC2A",
+                "ref": "provenance/OECDDAC2A",
+                "source": {
+                  "label": "Organisation for Economic Co-operation and Development (OECD)",
+                  "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                }
+              },
+              "unit": {
+                "basis": "bound",
+                "currency": "USD",
+                "label": "US Dollar",
+                "ref": "CurrencyUSD",
+                "request_basis": {
+                  "base_year": "declared_default",
+                  "currency": "bound",
+                  "prices": "bound"
+                }
+              }
+            },
+            "headline": {
+              "named_window": {
+                "start_year": 1965
+              },
+              "observations": 1,
+              "recent_years": [
+                {
+                  "observations": 1,
+                  "role_counts": {
+                    "financingProvider": 1,
+                    "financingRecipient": 1
+                  },
+                  "series": 1,
+                  "year": 2024
+                },
+                {
+                  "observations": 1,
+                  "role_counts": {
+                    "financingProvider": 1,
+                    "financingRecipient": 1
+                  },
+                  "series": 1,
+                  "year": 2023
+                },
+                {
+                  "observations": 1,
+                  "role_counts": {
+                    "financingProvider": 1,
+                    "financingRecipient": 1
+                  },
+                  "series": 1,
+                  "year": 2022
+                }
+              ],
+              "role_counts": {
+                "financingProvider": 1,
+                "financingRecipient": 1
+              },
+              "series": 1,
+              "year": 2024,
+              "year_named": true
+            },
+            "inapplicable_slots": [
+              "dacTypeOfFinance",
+              "financialObligationType"
+            ],
+            "measure_axis_values": [
+              {
+                "axis": "populationType",
+                "value": {
+                  "label": "financial flow",
+                  "ref": "FinancialFlow"
+                }
+              },
+              {
+                "axis": "measuredProperty",
+                "value": {
+                  "label": "amount",
+                  "ref": "amount"
+                }
+              },
+              {
+                "axis": "measurementQualifier",
+                "value": {
+                  "label": "nominal",
+                  "ref": "Nominal"
+                }
+              },
+              {
+                "axis": "financialFlowType",
+                "value": {
+                  "label": "disbursement",
+                  "ref": "Disbursement"
+                }
+              },
+              {
+                "axis": "nettingBasis",
+                "value": {
+                  "label": "gross",
+                  "ref": "Gross"
+                }
+              }
+            ],
+            "measure_label": "gross disbursements",
+            "measure_label_axes": [
+              "populationType",
+              "measuredProperty",
+              "measurementQualifier",
+              "financialFlowType",
+              "nettingBasis"
+            ],
+            "rendered_sentence": "Gross disbursements to Africa (DAC) from Group of Seven for official development assistance, 1965 to 2024. Constant 2024 US dollars \u00b7 OECD DAC2a.",
+            "sentence_plan": [
+              {
+                "axis": "what",
+                "entity_refs": [],
+                "kind": "slot",
+                "segment": "heading",
+                "states": [
+                  "how:financialFlowType",
+                  "how:nettingBasis",
+                  "axis:populationType",
+                  "axis:measuredProperty"
+                ],
+                "text": "Gross disbursements"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": " to "
+              },
+              {
+                "axis": "where",
+                "binding_ref": "where:",
+                "entity_refs": [
+                  "DACAfrica"
+                ],
+                "kind": "slot",
+                "role": "destination",
+                "segment": "heading",
+                "states": [
+                  "where:"
+                ],
+                "text": "Africa (DAC)"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": " from "
+              },
+              {
+                "binding_ref": "origin:",
+                "entity_refs": [
+                  "GroupOfSeven"
+                ],
+                "kind": "slot",
+                "role": "origin",
+                "segment": "heading",
+                "states": [
+                  "origin:"
+                ],
+                "text": "Group of Seven"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": " for "
+              },
+              {
+                "axis": "how",
+                "binding_ref": "how:dac2aAidType",
+                "entity_refs": [],
+                "kind": "slot",
+                "property_dcid": "dac2aAidType",
+                "segment": "heading",
+                "states": [
+                  "how:dac2aAidType"
+                ],
+                "text": "official development assistance"
+              },
+              {
+                "axis": "how",
+                "binding_ref": "how:dacTypeOfFinance",
+                "entity_refs": [],
+                "kind": "slot",
+                "property_dcid": "dacTypeOfFinance",
+                "segment": "heading",
+                "states": [],
+                "text": ""
+              },
+              {
+                "axis": "how",
+                "binding_ref": "how:financialFlowType",
+                "entity_refs": [],
+                "kind": "slot",
+                "property_dcid": "financialFlowType",
+                "segment": "heading",
+                "states": [],
+                "text": ""
+              },
+              {
+                "axis": "how",
+                "binding_ref": "how:nettingBasis",
+                "entity_refs": [],
+                "kind": "slot",
+                "property_dcid": "nettingBasis",
+                "segment": "heading",
+                "states": [],
+                "text": ""
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": ", "
+              },
+              {
+                "axis": "when",
+                "binding_ref": "when:",
+                "entity_refs": [],
+                "kind": "slot",
+                "segment": "heading",
+                "states": [
+                  "when:"
+                ],
+                "text": "1965 to 2024"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "heading",
+                "states": [],
+                "text": "."
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "byline",
+                "states": [],
+                "text": " "
+              },
+              {
+                "axis": "unit",
+                "binding_ref": "unit:",
+                "entity_refs": [],
+                "kind": "slot",
+                "segment": "byline",
+                "states": [
+                  "unit:",
+                  "axis:measurementQualifier"
+                ],
+                "text": "Constant 2024 US dollars"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "byline",
+                "states": [],
+                "text": " \u00b7 "
+              },
+              {
+                "axis": "source",
+                "entity_refs": [],
+                "kind": "slot",
+                "segment": "byline",
+                "states": [
+                  "source:"
+                ],
+                "text": "OECD DAC2a"
+              },
+              {
+                "entity_refs": [],
+                "kind": "text",
+                "segment": "byline",
+                "states": [],
+                "text": "."
+              }
+            ],
+            "shape": {
+              "data_commons": [
+                {
+                  "id": "dfo",
+                  "label": "Development Finance Observatory"
+                }
+              ],
+              "label": "gross disbursements (official development assistance)",
+              "measured_property": {
+                "label": "amount",
+                "ref": "amount"
+              },
+              "measurement_denominator_unresolved": false,
+              "measurement_qualifier": {
+                "label": "Nominal",
+                "ref": "Nominal"
+              },
+              "member_count": 1,
+              "member_digest": "1a36e1a7292b1bfff95a5415de0be74cac7bb033217ed50e79faa8ce51a224c0",
+              "population_type": {
+                "label": "financial flow",
+                "ref": "FinancialFlow"
+              },
+              "refine_supported": true,
+              "shape_id": "financialflow_amount_measuredvalue_nominal_family_f096b1ba",
+              "slot_keys": [
+                {
+                  "axis": "how",
+                  "label": "aid type",
+                  "property": {
+                    "label": "DAC 2a aid type",
+                    "ref": "dac2aAidType"
+                  }
+                },
+                {
+                  "axis": "how",
+                  "label": "financial flow type",
+                  "property": {
+                    "label": "financial flow type",
+                    "ref": "financialFlowType"
+                  }
+                },
+                {
+                  "axis": "how",
+                  "label": "netting basis",
+                  "property": {
+                    "label": "netting basis",
+                    "ref": "nettingBasis"
+                  }
+                },
+                {
+                  "axis": "how",
+                  "label": "DAC type of finance",
+                  "property": {
+                    "label": "DAC type of finance",
+                    "ref": "dacTypeOfFinance"
+                  }
+                },
+                {
+                  "axis": "where",
+                  "label": "place"
+                },
+                {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                {
+                  "axis": "source",
+                  "label": "data source"
+                }
+              ],
+              "stat_type": {
+                "label": "measuredValue",
+                "ref": "measuredValue"
+              }
+            },
+            "skills": [
+              "oda-dac2a"
+            ],
+            "slot_options": [
+              {
+                "key": {
+                  "axis": "how",
+                  "label": "aid type",
+                  "property": {
+                    "label": "DAC 2a aid type",
+                    "ref": "dac2aAidType"
+                  }
+                },
+                "options": [
+                  {
+                    "member_count": 2,
+                    "parent": "DAC2aAidType206",
+                    "relation": "child",
+                    "served_rows": 60,
+                    "served_rows_exact": true,
+                    "value": {
+                      "ref": {
+                        "label": "ODA loans and other long-term capital",
+                        "ref": "DAC2aAidType218"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  },
+                  {
+                    "member_count": 1,
+                    "parent": "DAC2aAidType206",
+                    "relation": "child",
+                    "served_rows": 60,
+                    "served_rows_exact": true,
+                    "value": {
+                      "ref": {
+                        "label": "ODA grant",
+                        "ref": "DAC2aAidType201"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  },
+                  {
+                    "member_count": 1,
+                    "relation": "root",
+                    "served_rows": 59,
+                    "served_rows_exact": true,
+                    "value": {
+                      "ref": {
+                        "label": "free-standing technical co-operation",
+                        "ref": "DAC2aAidType207"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  },
+                  {
+                    "member_count": 1,
+                    "relation": "root",
+                    "served_rows": 50,
+                    "served_rows_exact": true,
+                    "value": {
+                      "ref": {
+                        "label": "developmental food aid",
+                        "ref": "DAC2aAidType213"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  },
+                  {
+                    "member_count": 1,
+                    "relation": "root",
+                    "served_rows": 30,
+                    "served_rows_exact": true,
+                    "value": {
+                      "ref": {
+                        "label": "humanitarian aid",
+                        "ref": "DAC2aAidType216"
+                      },
+                      "value_kind": "enum_value"
+                    }
+                  }
+                ],
+                "source": "observed",
+                "truncated": false
+              }
+            ],
+            "slots": [
+              {
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "ref": {
+                      "label": "official development assistance",
+                      "ref": "DAC2aAidType206"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                },
+                "key": {
+                  "axis": "how",
+                  "label": "aid type",
+                  "property": {
+                    "label": "DAC 2a aid type",
+                    "ref": "dac2aAidType"
+                  }
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "ref": {
+                      "label": "disbursement",
+                      "ref": "Disbursement"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                },
+                "key": {
+                  "axis": "how",
+                  "label": "financial flow type",
+                  "property": {
+                    "label": "financial flow type",
+                    "ref": "financialFlowType"
+                  }
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "ref": {
+                      "label": "gross",
+                      "ref": "Gross"
+                    },
+                    "value_kind": "enum_value"
+                  }
+                },
+                "key": {
+                  "axis": "how",
+                  "label": "netting basis",
+                  "property": {
+                    "label": "netting basis",
+                    "ref": "nettingBasis"
+                  }
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "unbound"
+                },
+                "key": {
+                  "axis": "how",
+                  "label": "DAC type of finance",
+                  "property": {
+                    "label": "DAC type of finance",
+                    "ref": "dacTypeOfFinance"
+                  }
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "ref": {
+                      "label": "Africa (DAC)",
+                      "ref": "DACAfrica"
+                    },
+                    "value_kind": "entity"
+                  }
+                },
+                "key": {
+                  "axis": "where",
+                  "label": "place"
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "time_window": {
+                      "end_year": 2024,
+                      "start_year": 1965
+                    },
+                    "value_kind": "time_window"
+                  }
+                },
+                "key": {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                "summable": false
+              },
+              {
+                "binding": {
+                  "kind": "unbound"
+                },
+                "key": {
+                  "axis": "source",
+                  "label": "data source"
+                },
+                "summable": false
+              }
+            ],
+            "stat_vars": {
+              "data_date_range": {
+                "end": "2024",
+                "start": "1965"
+              },
+              "member_count": 1,
+              "member_count_exact": true,
+              "served_count": 1
+            },
+            "trace": {
+              "capability_version": "cap_94e25737d859392c",
+              "default_reading": {
+                "applied": true,
+                "removed_stat_vars": []
+              },
+              "query_qualifiers": [
+                {
+                  "disposition": "bound",
+                  "named": [
+                    {
+                      "label": "official development assistance",
+                      "ref": "DAC2aAidType206"
+                    }
+                  ],
+                  "selected": [],
+                  "slot": "dac2aAidType",
+                  "text": "official development assistance"
+                }
+              ],
+              "requested_window": {
+                "start_year": 1965
+              },
+              "resolved_entities": [
+                {
+                  "label": "Africa (DAC)",
+                  "ref": "DACAfrica"
+                },
+                {
+                  "label": "Group of Seven",
+                  "ref": "GroupOfSeven"
+                }
+              ],
+              "resolved_sources": [
+                {
+                  "data_commons": {
+                    "id": "dfo",
+                    "label": "Development Finance Observatory"
+                  },
+                  "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
+                  "label": "OECD DAC2a",
+                  "ref": "provenance/OECDDAC2A",
+                  "source": {
+                    "label": "Organisation for Economic Co-operation and Development (OECD)",
+                    "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd"
+                  }
+                }
+              ],
+              "slot_filters": [
+                {
+                  "binding_kind": "value",
+                  "key": {
+                    "axis": "how",
+                    "label": "aid type",
+                    "property": {
+                      "label": "DAC 2a aid type",
+                      "ref": "dac2aAidType"
+                    }
+                  },
+                  "provenance": "text_recognized",
+                  "refs": [
+                    {
+                      "label": "official development assistance",
+                      "ref": "DAC2aAidType206"
+                    }
+                  ]
+                },
+                {
+                  "binding_kind": "value",
+                  "key": {
+                    "axis": "how",
+                    "label": "financial flow type",
+                    "property": {
+                      "label": "financial flow type",
+                      "ref": "financialFlowType"
+                    }
+                  },
+                  "provenance": "text_recognized",
+                  "refs": [
+                    {
+                      "label": "disbursement",
+                      "ref": "Disbursement"
+                    }
+                  ]
+                },
+                {
+                  "binding_kind": "value",
+                  "key": {
+                    "axis": "how",
+                    "label": "netting basis",
+                    "property": {
+                      "label": "netting basis",
+                      "ref": "nettingBasis"
+                    }
+                  },
+                  "provenance": "text_recognized",
+                  "refs": [
+                    {
+                      "label": "gross",
+                      "ref": "Gross"
+                    }
+                  ]
+                },
+                {
+                  "binding_kind": "unbound",
+                  "key": {
+                    "axis": "how",
+                    "label": "DAC type of finance",
+                    "property": {
+                      "label": "DAC type of finance",
+                      "ref": "dacTypeOfFinance"
+                    }
+                  },
+                  "provenance": "binder",
+                  "refs": []
+                },
+                {
+                  "binding_kind": "value",
+                  "key": {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  "provenance": "binder",
+                  "refs": [
+                    {
+                      "label": "Africa (DAC)",
+                      "ref": "DACAfrica"
+                    }
+                  ]
+                },
+                {
+                  "binding_kind": "value",
+                  "key": {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  "provenance": "binder",
+                  "refs": []
+                },
+                {
+                  "binding_kind": "unbound",
+                  "key": {
+                    "axis": "source",
+                    "label": "data source"
+                  },
+                  "provenance": "binder",
+                  "refs": []
+                }
+              ]
+            },
+            "unresolved_slots": []
+          },
+          "spec_id": "spec_845c457b3bab756a9a3e765e3cf8e8be"
+        },
+        "status": "definite",
+        "timing_ms": {
+          "by_step": {
+            "answer": 176,
+            "bind": 138,
+            "materialise": 58,
+            "options": 116,
+            "phase_bind": 635,
+            "phase_check_entities": 0,
+            "phase_derive_shapes": 0,
+            "phase_facet_requests": 8,
+            "phase_materialise": 0,
+            "phase_outcome": 396,
+            "phase_place_bindings": 730,
+            "phase_prune_and_rank": 0,
+            "phase_resolve_places": 0,
+            "phase_settle": 13,
+            "recall": 336,
+            "shape": 1129,
+            "shape_admission": 1,
+            "shape_arcs": 1,
+            "shape_groups": 52,
+            "shape_labels": 0,
+            "shape_probe": 0
+          },
+          "total": 3735
+        },
+        "variable_text": "Gross disbursements of official development assistance",
+        "warnings": []
+      }
+    ]
+  }
+}

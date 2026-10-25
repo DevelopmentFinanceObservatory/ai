@@ -310,6 +310,19 @@ class _CanvasView:
     hidden: list[str]
 
 
+@dataclass(frozen=True)
+class _PendingQuestion:
+    """One question of a pending elicitation, as `/interrupt` checks an
+    answer against it and writes it into the turn's record."""
+
+    id: str
+    question: str
+    # Each offered option id to its label. A label is `None` on a question
+    # restored from before questions were kept (`legacy`).
+    options: dict[str, str | None] = field(default_factory=dict)
+    skippable: bool = False
+
+
 @dataclass
 class _PendingInterrupt:
     """One wire interrupt id, mapped back to its ADK interrupt."""
@@ -321,7 +334,15 @@ class _PendingInterrupt:
     # compared against this rather than against `plan_version`, so a stale
     # plan card cannot approve a later plan sharing its version number.
     plan_revision: str | None = None
-    option_ids: frozenset[str] = frozenset()
+    # An elicitation's questions, in frame order. Empty for a plan.
+    questions: tuple[_PendingQuestion, ...] = ()
+    # The elicitation frame's top-level `skippable`. When true, the whole
+    # pause may be dismissed with `decision: "skip"`.
+    skippable: bool = False
+    # An elicitation stored before questions were kept: its one question is
+    # lifted from the flat option ids, and `/interrupt` also takes the
+    # single-answer `payload` for it.
+    legacy: bool = False
     # A "plan" interrupt's workflow step order at the moment `plan.proposed`
     # was built (`_RecordingSurface._step_order`, `studio_translate.py`).
     # Restored before a resumed segment starts so activity steps stay
@@ -338,9 +359,9 @@ class _PendingInterrupt:
     # once that segment ends, win or lose; a crashed segment leaves it set,
     # and the same answer resumes again on a fresh segment.
     resuming_segment: str | None = None
-    # The decision and payload `/interrupt` was called with, recorded
-    # alongside `resuming_segment` so a retried resume can be verified
-    # against what actually resumed.
+    # The decision, payload and answers `/interrupt` was called with,
+    # recorded alongside `resuming_segment` so a retried resume can be
+    # verified against what actually resumed.
     answer: dict[str, Any] | None = None
 
 
@@ -701,6 +722,18 @@ class ConversationState:
             ids += [str(series_id) for series_id in held]
         return ids
 
+    def canvas_cards(self) -> list[dict[str, Any]]:
+        """The cards on the canvas that `make_charts` drew, in canvas order,
+        each its id with the intent it was written from and the revision it
+        was drawn as. A card the canvas holds at another revision, revised
+        since it was drawn, is not listed."""
+        cards: list[dict[str, Any]] = []
+        for block in self.composition.blocks if self.composition is not None else []:
+            drawn = (self.components.get(block.component_id) or {}).get(_DRAWN_CARD)
+            if isinstance(drawn, dict) and drawn.get("revision") == block.revision:
+                cards.append({"component_id": block.component_id, **drawn})
+        return cards
+
     def recall_part(
         self,
         *,
@@ -735,7 +768,7 @@ class ConversationState:
                 "part": part,
                 "component_id": component_id,
                 "on_canvas": composed,
-                **_without_series_ids(entry),
+                **_model_entry(entry),
             }
         key = "plans" if part == "plan" else "readings"
         holding = [number for number, t in enumerate(self.turns, start=1) if t.get(key)]
@@ -1122,7 +1155,17 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "kind": p.kind,
             "plan_version": p.plan_version,
             "plan_revision": p.plan_revision,
-            "option_ids": sorted(p.option_ids),
+            "questions": [
+                {
+                    "id": q.id,
+                    "question": q.question,
+                    "options": dict(q.options),
+                    "skippable": q.skippable,
+                }
+                for q in p.questions
+            ],
+            "skippable": p.skippable,
+            "legacy": p.legacy,
             "step_order": list(p.step_order),
             "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
@@ -1132,21 +1175,42 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
     }
 
 
-def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
-    return {
-        interrupt_id: _PendingInterrupt(
-            adk_id=entry["adk_id"],
-            kind=entry["kind"],
-            plan_version=entry.get("plan_version"),
-            plan_revision=entry.get("plan_revision"),
-            option_ids=frozenset(entry.get("option_ids") or ()),
-            step_order=tuple(entry.get("step_order") or ()),
-            step_labels=dict(entry.get("step_labels") or {}),
-            resuming_segment=entry.get("resuming_segment"),
-            answer=entry.get("answer"),
+def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
+    pending = _PendingInterrupt(
+        adk_id=entry["adk_id"],
+        kind=entry["kind"],
+        plan_version=entry.get("plan_version"),
+        plan_revision=entry.get("plan_revision"),
+        step_order=tuple(entry.get("step_order") or ()),
+        step_labels=dict(entry.get("step_labels") or {}),
+        resuming_segment=entry.get("resuming_segment"),
+        answer=entry.get("answer"),
+    )
+    if "questions" in entry:
+        pending.questions = tuple(
+            _PendingQuestion(
+                id=q["id"],
+                question=q["question"],
+                options=dict(q["options"]),
+                skippable=q["skippable"],
+            )
+            for q in entry["questions"]
         )
-        for interrupt_id, entry in data.items()
-    }
+        pending.skippable = entry["skippable"]
+        pending.legacy = entry["legacy"]
+    elif pending.kind == "elicitation":
+        # Saved before questions were kept. The flat `option_ids` lift into
+        # one question `q1` whose labels are unknown, and every such frame
+        # was skippable as a whole.
+        options: dict[str, str | None] = dict.fromkeys(entry.get("option_ids") or ())
+        pending.questions = (_PendingQuestion(id="q1", question="", options=options),)
+        pending.skippable = True
+        pending.legacy = True
+    return pending
+
+
+def _deserialize_pending(data: dict[str, Any]) -> dict[str, _PendingInterrupt]:
+    return {interrupt_id: _deserialize_entry(entry) for interrupt_id, entry in data.items()}
 
 
 def _serialize_durable(state: ConversationState) -> dict[str, Any]:
@@ -1997,6 +2061,20 @@ def make_canvas_series(store: StudioStore) -> Any:
     return canvas_series
 
 
+def make_canvas_cards(store: StudioStore) -> Any:
+    """The seam `make_charts` reads the cards it drew on the canvas through
+    (`ConversationState.canvas_cards`), bound to a store and resolved to the
+    conversation at CALL time, as `make_recall_part` is. Empty when there is
+    no conversation."""
+
+    def canvas_cards() -> list[dict[str, Any]]:
+        key = current_conversation_key.get()
+        conversation = store.current(*key) if key is not None else None
+        return conversation.canvas_cards() if conversation is not None else []
+
+    return canvas_cards
+
+
 def make_remove_cards(store: StudioStore) -> Any:
     """The orchestrator's `remove_cards` seam, bound to a store and resolved
     to the conversation at CALL time, as `make_recall_part` is."""
@@ -2120,10 +2198,11 @@ def _digest_block(component_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     title, fact summary and what it shows bounded. An `entities` list
     shorter than the names the card draws carries an `entities_truncated`
     label. The stored entry stays whole for `recall_part`
-    and the composition "add" op. Its `_SERIES_IDS` are left out."""
+    and the composition "add" op. Its `_SERIES_IDS` and `_DRAWN_CARD` are
+    left out."""
     block: dict[str, Any] = {
         "component_id": _cut_text(component_id, _BLOCK_ID_BYTES),
-        **_without_series_ids(entry),
+        **_model_entry(entry),
     }
     if isinstance(block.get("type"), str):
         block["type"] = _cut_text(block["type"], _BLOCK_TYPE_BYTES)
@@ -2328,6 +2407,12 @@ def _leading_sentences(text: str, cap: int) -> str:
 # The key of a stored component entry holding the id of every series the card
 # draws. No digest, listing or recall states it, and `canvas_series_ids` reads it.
 _SERIES_IDS = "series_ids"
+# The key of a stored entry holding, for a card `make_charts` drew, the intent
+# it was written from and the revision it was drawn as, so a later turn's
+# `make_charts` of the same intent reads the card's figures rather than
+# drawing it again while the canvas holds that revision (`canvas_cards`). No
+# digest, listing or recall states it either.
+_DRAWN_CARD = "drawn_card"
 
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
@@ -2360,9 +2445,10 @@ def drawn_series_ids(component: dict[str, Any]) -> dict[str, list[str]]:
     return {_SERIES_IDS: [one.id for one in series if one.id]}
 
 
-def _without_series_ids(entry: dict[str, Any]) -> dict[str, Any]:
-    """A stored entry as a model may read it, without its `_SERIES_IDS`."""
-    return {key: value for key, value in entry.items() if key != _SERIES_IDS}
+def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """A stored entry as a model may read it, without its `_SERIES_IDS` and
+    `_DRAWN_CARD`."""
+    return {key: value for key, value in entry.items() if key not in {_SERIES_IDS, _DRAWN_CARD}}
 
 
 def _turn_component_entry(
@@ -2487,7 +2573,10 @@ def _block_index(composition: CompositionManifest | None, component_id: str) -> 
 
 
 def land_component(
-    conversation: ConversationState, component: dict[str, Any]
+    conversation: ConversationState,
+    component: dict[str, Any],
+    *,
+    intent: dict[str, Any] | None = None,
 ) -> Literal["created", "held"]:
     """Land `component` on `conversation`'s canvas. `harness.studio_translate`
     calls this at drain time for a write `make_charts` stamped through
@@ -2495,7 +2584,9 @@ def land_component(
 
     Always records the component's digest entry
     (`conversation.components`), so a card is findable by `recall` and the
-    canvas digest whether or not it lands a block. `auto_add=False` means
+    canvas digest whether or not it lands a block, and for a card
+    `make_charts` wrote from `intent`, that intent with the revision it
+    was drawn as (`canvas_cards`). `auto_add=False` means
     there is no block to append: the component still streams to the
     client, but nothing here composes for it, and the return is `"held"`.
     Otherwise a new block is appended and the return is `"created"`.
@@ -2506,6 +2597,8 @@ def land_component(
     conversation digest reads it.
     """
     entry = _digest_entry(component)
+    if intent is not None:
+        entry[_DRAWN_CARD] = {"intent": intent, "revision": int(component["revision"])}
     conversation.components[component["component_id"]] = entry
     conversation.turn_components.append(
         _turn_component_entry(

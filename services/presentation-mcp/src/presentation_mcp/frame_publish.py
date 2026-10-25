@@ -1,28 +1,28 @@
-"""Builds the wire body for dfo-apis' publish door
+"""Builds the wire body for the apis service's publish door
 (`POST /api/datasets/frames/publish`) out of an analysis-mcp-minted frame
 already sitting in the shared materialisation store, and reads that store
 to get it.
 
 `PlatformAssembler`'s own publish hook (`client.py`) calls `publish_body_for`
 before a platform call that needs an `ops_`/`ocv_` ref published, and posts
-its result verbatim. dfo-apis pins its own `dfo-spec-kit` revision, which can
+its result verbatim. apis pins its own `dfo-spec-kit` revision, which can
 differ from this repo's, so it re-renders and re-digests frame1 from
 `role_keys`/`rows` on its own side (see `publish_models.PublishFrameRequest`'s own docstring on the
-dfo-apis side for why). `publish_body` only reproduces `dfo_frame_grammar.Frame
+apis side for why). `publish_body` only reproduces `dfo_frame_grammar.Frame
 .build`'s own two arguments from an already-built `Frame`, never a
 grammar-rev-dependent rendering.
 
 The body also carries the frame's `recipe` (`common.recipe.build_recipe`): the
 tree of op-specs that computed it, its roots' mint records, and the two hashes
-dfo-apis indexes it by. A frame whose recipe cannot be built is published
+apis indexes it by. A frame whose recipe cannot be built is published
 without the field and the reason is logged at warning with the pair: an
 ancestor's trace has left the store, or a root was registered before data-mcp
 wrote mint records and has not been minted since. This service has no recovery
-routine for such a root (`data_mcp.mint_recovery` needs dfo-apis' dataset
-versions), so its recipe is written later through dfo-apis' recipe route.
+routine for such a root (`data_mcp.mint_recovery` needs apis' dataset
+versions), so its recipe is written later through apis' recipe route.
 
-dfo-apis' publish body forbids unknown fields, so a dfo-apis deployment that
-predates `recipe` refuses every body that carries one. dfo-apis must therefore
+The apis service's publish body forbids unknown fields, so an apis deployment that
+predates `recipe` refuses every body that carries one. apis must therefore
 deploy first. There is no retry without the field: a publish that dropped the
 recipe on a refusal would leave the frame without one for good.
 
@@ -34,7 +34,7 @@ The body also carries the frame's `steps` (`common.steps.assemble_steps`): the
 step record of each operation along its ancestry, with a `retrieve` step for each
 root. A frame with an ancestor whose stored trace holds no step, has left the
 store or fails a store check, or with a root that has no mint record, is
-published without the field, logged at warning with the pair, and dfo-apis
+published without the field, logged at warning with the pair, and apis
 records its steps as unknown. A step list over the door's byte bound sheds
 its coverage members, largest first, until it fits (`_shed_coverage`). An
 unusable stored step (`common.steps.StepRecordInvalidError`) or a step list
@@ -82,7 +82,7 @@ from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
-# dfo-apis' `MAX_RECIPE_BYTES`: the most bytes of compact JSON its publish door
+# apis' `MAX_RECIPE_BYTES`: the most bytes of compact JSON its publish door
 # accepts as a recipe. A larger one is left out of the body (`_recipe_or_none`), so
 # the door never refuses a frame for the size of its recipe.
 _RECIPE_CEILING_BYTES = 1_000_000
@@ -93,12 +93,12 @@ _RECIPE_CEILING_BYTES = 1_000_000
 _MAX_SERVED_STEPS = 64
 _MAX_STEPS_BYTES = 65_536
 
-# dfo-apis' `description.steps.MAX_CARD_STEPS`: the steps a card drawn from a
+# apis' `description.steps.MAX_CARD_STEPS`: the steps a card drawn from a
 # published frame serves after the frame's own, its selection and a stat card's
 # change.
 _MAX_CARD_STEPS = 2
 
-# dfo-apis' publish door's step bound (`description.steps.MAX_COMPUTED_STEPS`), so
+# The apis service's publish door's step bound (`description.steps.MAX_COMPUTED_STEPS`), so
 # that a card drawn from the frame serves at most `_MAX_SERVED_STEPS`.
 _MAX_STEPS = _MAX_SERVED_STEPS - _MAX_CARD_STEPS
 
@@ -135,7 +135,7 @@ class PublishBodyNotBuildable(Exception):  # noqa: N818 -- named for what it rep
     naming no input content versions (a `Trace` predating that field), a
     corrupted/oversized stored object the store's own read-time checks
     caught, an unusable stored step among its ancestry, or a step list over
-    the door's bounds. dfo-apis' publish door would refuse the identical body
+    the door's bounds. The apis service's publish door would refuse the identical body
     on every retry, so this refuses now instead of letting that repeat.
     """
 
@@ -197,8 +197,8 @@ def publish_body(
     (see `_wire_row_slices` for the row mappings). Rows are encoded one
     slice at a time, so the whole row list never exists as Python objects.
 
-    A place-type or party-kind column (`common.place_type.enrichment_role`)
-    beside its place column is left out. dfo-apis labels each series and table
+    A place-type, party-kind, party-class or party-whole column
+    (`common.place_type.enrichment_role`) beside its place column is left out. apis labels each series and table
     row by joining every role's value, so the column would label a continent
     "Africa / Continent". It is a function of its place column, so the
     published rows stay distinct.

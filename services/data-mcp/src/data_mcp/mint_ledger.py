@@ -1,23 +1,23 @@
-"""The upstream mints this process holds a dfo-apis mint slot for on behalf of outside callers.
+"""The upstream mints this process holds an apis service mint slot for on behalf of outside callers.
 
-A `get_data` call under `EXTERNAL_CALL_BUDGET` gives its mint POST at most 32 s. dfo-apis
+A `get_data` call under `EXTERNAL_CALL_BUDGET` gives its mint POST at most 32 s. apis
 runs a synchronous mint for up to `UPSTREAM_SYNC_MINT_TIMEOUT_S` whether or not its client
 is still waiting, and holds one of its mint slots (`mint_max_concurrency`, 4) until the mint
 ends. A call can therefore give up on a mint that holds its slot for about 90 s more, and a
 caller that repeats the call every few seconds starts a new mint each time.
 
-`MintLedger` holds one `HeldMint` per mint POST, from the moment it is sent until dfo-apis
+`MintLedger` holds one `HeldMint` per mint POST, from the moment it is sent until apis
 answers it, or until `UPSTREAM_SYNC_MINT_TIMEOUT_S` plus `MINT_LEDGER_MARGIN_S` after it was
-sent when no answer comes. The margin covers the rendering and store writes dfo-apis does
+sent when no answer comes. The margin covers the rendering and store writes apis does
 after the fetch its own timeout bounds, which can run a few seconds past it. It refuses a
 mint while it holds `limit` others, and refuses a mint whose request matches one it holds,
 which would start the same work twice. A POST whose connection failed started nothing
 upstream, but the client cannot tell that from a timeout, so its mint is held for the whole
 window too.
 
-`get_data` counts only mints made under a budget that does not wait out dfo-apis'
+`get_data` counts only mints made under a budget that does not wait out apis'
 synchronous mint (`CallBudget.waits_out_sync_mint`), which is `EXTERNAL_CALL_BUDGET`. A
-mint under `DIRECT_CALL_BUDGET` waits longer than dfo-apis runs one, so it leaves nothing
+mint under `DIRECT_CALL_BUDGET` waits longer than apis runs one, so it leaves nothing
 running behind it, and the harness's own calls are not limited here. The ledger is per
 process; `Settings.external_mint_concurrency` states what that means across instances.
 """
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from data_mcp.deadline import UPSTREAM_SYNC_MINT_TIMEOUT_S
 from data_mcp.tool_errors import ToolRefusal
 
-# Margin past `UPSTREAM_SYNC_MINT_TIMEOUT_S` a held mint's slot stays reserved: dfo-apis'
+# Margin past `UPSTREAM_SYNC_MINT_TIMEOUT_S` a held mint's slot stays reserved: apis'
 # own timeout bounds the fetch alone, and its rendering and store writes after the fetch
 # can hold the mint's permit a few seconds longer.
 MINT_LEDGER_MARGIN_S = 5.0
@@ -40,7 +40,7 @@ class HeldMint:
     """One mint POST the ledger holds a slot for, in seconds on the call deadline's clock.
 
     `answer_by` is the latest the POST can still be waiting for its answer, the end of
-    the deadline it was sent under. `expires_at` is when dfo-apis has stopped running it.
+    the deadline it was sent under. `expires_at` is when apis has stopped running it.
     """
 
     request_key: str
@@ -55,7 +55,7 @@ class HeldMint:
 
 
 class MintLedger:
-    """The mints one process holds dfo-apis mint slots for.
+    """The mints one process holds apis mint slots for.
 
     `admit` and `answered` run on the event loop with no await between a check and
     its update, so concurrent calls see a consistent ledger without a lock.
@@ -96,7 +96,7 @@ class MintLedger:
         return mint
 
     def answered(self, mint: HeldMint) -> None:
-        """Free `mint`'s slot: dfo-apis answered its POST, so the mint holds no slot there.
+        """Free `mint`'s slot: apis answered its POST, so the mint holds no slot there.
 
         An answer that arrives after the mint's window has ended finds it already
         dropped.

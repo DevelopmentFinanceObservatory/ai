@@ -26,7 +26,10 @@ column for raises `UnboundColumnError` before the call.
 `_COLUMN_SITES` lists every argument `compiler.compile` writes a role column
 into, per tool. `tests/executor/test_wide_frame.py` compiles and runs every
 verb over a flow frame and fails if a flow-axis name reaches a call, so a
-column-naming argument missing from the table shows there.
+column-naming argument missing from the table shows there. The same table
+says which arguments narrow a frame to named entities (`entity_narrowings`),
+which the executor reads to refuse a step that reads only entities a
+retrieval left out.
 
 A rolling step also names columns in `rolling.population`, and those are
 columns of the workflow's retrieved frames, whichever frame the step reads.
@@ -59,6 +62,9 @@ FRAME_PARAMETER = "frame_ref"
 # the member of it listing the populations the newest period is taken over.
 ROLLING_PARAMETER = "rolling"
 _POPULATION = "population"
+# The member of a pairing population holding the populations of its two sides
+# (`common.rolling`).
+_PAIR = "pair"
 # The members of one population that are keyed by column name.
 _POPULATION_COLUMN_MEMBERS = ("bindings", "levels")
 
@@ -124,10 +130,19 @@ def frame_columns(
     """
     keys = normalize_role_keys(role_keys)
     by_axis = columns_on_axes(axis_by_column, keys)
-    return FrameColumns(
-        role_keys=keys,
-        columns={name: name if name in keys else by_axis.get(name) for name in compiled},
-    )
+
+    def bound(name: str) -> str | None:
+        if name in keys:
+            return name
+        for suffix in ("_type", "_party_kind"):
+            if name.endswith(suffix):
+                role = name.removesuffix(suffix)
+                role_column = by_axis.get(role, role)
+                candidate = f"{role_column}{suffix}" if role_column is not None else None
+                return candidate if candidate in keys else None
+        return by_axis.get(name)
+
+    return FrameColumns(role_keys=keys, columns={name: bound(name) for name in compiled})
 
 
 def columns_on_axes(
@@ -156,21 +171,23 @@ class _Form(Enum):
 
     NAMES = auto()  # a list of column names
     KEYS = auto()  # an object keyed by column name
+    ENTITIES = auto()  # an object keyed by column name, each value an entity ref
     VALUES = auto()  # an object whose values are column names
     PREDICATES = auto()  # a list of predicate objects, each naming its `column`
 
 
 @dataclass(frozen=True, slots=True)
 class _ColumnSite:
-    """One argument naming role columns, and the frame parameters whose columns it names.
+    """One argument naming role columns, and the frame parameter whose columns it names.
 
-    A join key names a column on both sides, so it lists both frames and must
-    bind to one spelling on each.
+    A two-sided verb names each side's columns in an argument, or a part of
+    one, of its own: a join's `join_keys` and `right_keys`' keys on the left
+    frame, and `right_keys`' values on the right.
     """
 
     parameter: str
     form: _Form
-    frames: tuple[str, ...]
+    frame: str
 
 
 def _analysis(name: str) -> ToolId:
@@ -181,28 +198,30 @@ def _analysis(name: str) -> ToolId:
 # entity binding, the numerator's key columns, and `denominator_by`, whose keys
 # are the numerator's columns and whose values are the denominator's.
 _DIVIDING_SITES = (
-    _ColumnSite("numerator_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_entity", _Form.KEYS, ("denominator_frame_ref",)),
-    _ColumnSite("numerator_by", _Form.NAMES, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_by", _Form.KEYS, (FRAME_PARAMETER,)),
-    _ColumnSite("denominator_by", _Form.VALUES, ("denominator_frame_ref",)),
+    _ColumnSite("numerator_entity", _Form.ENTITIES, FRAME_PARAMETER),
+    _ColumnSite("denominator_entity", _Form.ENTITIES, "denominator_frame_ref"),
+    _ColumnSite("numerator_by", _Form.NAMES, FRAME_PARAMETER),
+    _ColumnSite("denominator_by", _Form.KEYS, FRAME_PARAMETER),
+    _ColumnSite("denominator_by", _Form.VALUES, "denominator_frame_ref"),
 )
 
 _COLUMN_SITES: Mapping[ToolId, tuple[_ColumnSite, ...]] = {
-    _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("rank"): (_ColumnSite("rank_by", _Form.NAMES, (FRAME_PARAMETER,)),),
-    _analysis("filter"): (_ColumnSite("predicates", _Form.PREDICATES, (FRAME_PARAMETER,)),),
+    _analysis("aggregate"): (_ColumnSite("group_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("growth"): (_ColumnSite("entity_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("rank"): (_ColumnSite("rank_by", _Form.NAMES, FRAME_PARAMETER),),
+    _analysis("filter"): (_ColumnSite("predicates", _Form.PREDICATES, FRAME_PARAMETER),),
     _analysis("join"): (
-        _ColumnSite("join_keys", _Form.NAMES, (FRAME_PARAMETER, "right_frame_ref")),
+        _ColumnSite("join_keys", _Form.NAMES, FRAME_PARAMETER),
+        _ColumnSite("right_keys", _Form.KEYS, FRAME_PARAMETER),
+        _ColumnSite("right_keys", _Form.VALUES, "right_frame_ref"),
     ),
     _analysis("compare"): (
-        _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
+        _ColumnSite("left_entity", _Form.ENTITIES, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.ENTITIES, "right_frame_ref"),
     ),
     _analysis("sum_of"): (
-        _ColumnSite("left_entity", _Form.KEYS, (FRAME_PARAMETER,)),
-        _ColumnSite("right_entity", _Form.KEYS, ("right_frame_ref",)),
+        _ColumnSite("left_entity", _Form.ENTITIES, FRAME_PARAMETER),
+        _ColumnSite("right_entity", _Form.ENTITIES, "right_frame_ref"),
     ),
     _analysis("share_of"): _DIVIDING_SITES,
     _analysis("quotient_of"): _DIVIDING_SITES,
@@ -237,19 +256,15 @@ def bound_arguments(
 
     Raises:
         UnboundColumnError: If an argument names a role its frame carries no
-            column for, or a join key the two frames spell differently; or if
-            the step is rolling and `roots` is left out.
+            column for, or if the step is rolling and `roots` is left out.
     """
     rewritten = dict(arguments)
     for site in _COLUMN_SITES.get(tool, ()):
         value = rewritten.get(site.parameter)
         if value is None:
             continue
-        sides = tuple(
-            frames[parameter] if parameter in frames else frames.get(FRAME_PARAMETER)
-            for parameter in site.frames
-        )
-        rewritten[site.parameter] = _rewrite(value, site.form, partial(_spelling, sides=sides))
+        side = frames[site.frame] if site.frame in frames else frames.get(FRAME_PARAMETER)
+        rewritten[site.parameter] = _rewrite(value, site.form, partial(_spelling, sides=(side,)))
     population = rolling_population(rewritten)
     if population is not None:
         if roots is None:
@@ -266,6 +281,49 @@ def bound_arguments(
     return rewritten
 
 
+@dataclass(frozen=True, slots=True)
+class EntityNarrowing:
+    """A step's narrowing of the frame it reads through `frame` to the rows of
+    named entities: those whose role column `column` holds one of `refs`."""
+
+    frame: str
+    column: str
+    refs: frozenset[str]
+
+
+def entity_narrowings(tool: ToolId, arguments: Mapping[str, JsonValue]) -> list[EntityNarrowing]:
+    """Each narrowing to named entities that `arguments`, as compiled, make:
+    a side's entity binding, and a filter's `category_match` predicate.
+
+    Columns are spelled the way the approved source spells its roles. A
+    `category_match` on a column no entity sits on (`unit`, a type
+    column) is listed too, and its values match no entity's ref.
+    """
+    narrowings: list[EntityNarrowing] = []
+    for site in _COLUMN_SITES.get(tool, ()):
+        value = arguments.get(site.parameter)
+        if site.form is _Form.ENTITIES and isinstance(value, dict):
+            narrowings.extend(
+                EntityNarrowing(frame=site.frame, column=column, refs=frozenset({ref}))
+                for column, ref in value.items()
+                if isinstance(ref, str)
+            )
+        elif site.form is _Form.PREDICATES and isinstance(value, list):
+            narrowings.extend(
+                EntityNarrowing(
+                    frame=site.frame,
+                    column=column,
+                    refs=frozenset(ref for ref in refs if isinstance(ref, str)),
+                )
+                for item in value
+                if isinstance(item, dict)
+                and item.get("kind") == "category_match"
+                and isinstance(column := item.get("column"), str)
+                and isinstance(refs := item.get("values"), list)
+            )
+    return narrowings
+
+
 def rolling_population(arguments: Mapping[str, JsonValue]) -> list[JsonValue] | None:
     """The population a step's `arguments` carry, or `None` when they carry none."""
     rolling = arguments.get(ROLLING_PARAMETER)
@@ -280,9 +338,10 @@ def bound_populations(
 
     An entry names columns of the retrievals of its own dataset, so it is read
     against those frames, whichever frame the step carrying it is bound to.
-    The result is in the canonical spelling and order
-    (`common.rolling.canonical_populations`), which depend on the column
-    names.
+    A pairing's sides are bound the same way, and each of its keys against
+    the frames that key is read from (`_key_frames`). The result is in the
+    canonical spelling and order (`common.rolling.canonical_populations`),
+    which depend on the column names.
 
     Args:
         populations: The compiled `rolling.population` of a step.
@@ -294,33 +353,98 @@ def bound_populations(
     Raises:
         UnboundColumnError: If an entry names a dataset no retrieval fetched,
             a role a retrieved frame carries no column for, a role two
-            retrievals of one dataset spell differently, or two roles one
-            frame column carries.
+            retrievals of one dataset spell differently, two roles one
+            frame column carries, or a key the frames it is read from spell
+            differently.
     """
-    bound: list[dict[str, Any]] = []
-    for population in populations:
-        assert isinstance(population, dict)
-        spec_id = population["spec_id"]
-        sides = roots.get(spec_id) if isinstance(spec_id, str) else None
-        if not sides:
-            raise UnboundColumnError(
-                f"a population names {spec_id!r}, which none of the retrievals read fetched"
-            )
-        entry: dict[str, Any] = dict(population)
-        for member in _POPULATION_COLUMN_MEMBERS:
-            by_column = population.get(member)
-            if not isinstance(by_column, dict):
-                continue
-            respelled = {_spelling(name, sides=sides): kept for name, kept in by_column.items()}
-            if len(respelled) < len(by_column):
-                raise UnboundColumnError(
-                    f"the population of {spec_id} names {sorted(by_column)!r} in its {member}, "
-                    f"which its frame carries as {sorted(respelled)!r}; one column cannot "
-                    "stand for two roles"
+    return list(
+        canonical_populations(_bound(population, roots=roots) for population in populations)
+    )
+
+
+def _bound(
+    population: JsonValue, *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> dict[str, Any]:
+    """One entry of `bound_populations`."""
+    assert isinstance(population, dict)
+    if _PAIR in population:
+        left, right = population[_PAIR]
+        assert isinstance(left, list) and isinstance(right, list)
+        keys = population["keys"]
+        assert isinstance(keys, dict)
+        return {
+            _PAIR: [
+                [_bound(side, roots=roots) for side in left],
+                [_bound(side, roots=roots) for side in right],
+            ],
+            "keys": {
+                _spelling(name, sides=_key_frames(name, left, roots=roots)): _spelling(
+                    str(paired), sides=_key_frames(str(paired), right, roots=roots)
                 )
-            entry[member] = respelled
-        bound.append(entry)
-    return list(canonical_populations(bound))
+                for name, paired in keys.items()
+            },
+        }
+    entry: dict[str, Any] = dict(population)
+    sides = _frames_of(population, roots=roots)
+    spec_id = population["spec_id"]
+    for member in _POPULATION_COLUMN_MEMBERS:
+        by_column = population.get(member)
+        if not isinstance(by_column, dict):
+            continue
+        respelled = {_spelling(name, sides=sides): kept for name, kept in by_column.items()}
+        if len(respelled) < len(by_column):
+            raise UnboundColumnError(
+                f"the population of {spec_id} names {sorted(by_column)!r} in its {member}, "
+                f"which its frame carries as {sorted(respelled)!r}; one column cannot "
+                "stand for two roles"
+            )
+        entry[member] = respelled
+    strict_levels = population.get("strict_levels")
+    if isinstance(strict_levels, list):
+        entry["strict_levels"] = [_spelling(name, sides=sides) for name in strict_levels]
+    return entry
+
+
+def _frames_of(
+    population: Mapping[str, JsonValue], *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> Sequence[FrameColumns | None]:
+    """The retrieved frames of the dataset a flat `population` names."""
+    spec_id = population["spec_id"]
+    sides = roots.get(spec_id) if isinstance(spec_id, str) else None
+    if not sides:
+        raise UnboundColumnError(
+            f"a population names {spec_id!r}, which none of the retrievals read fetched"
+        )
+    return sides
+
+
+def _key_frames(
+    name: str, side: Sequence[JsonValue], *, roots: Mapping[str, Sequence[FrameColumns | None]]
+) -> list[FrameColumns | None]:
+    """The retrieved frames a pairing's key `name` is read from on one `side`,
+    as `analysis_mcp.rolling_tool` reads it: the frames of each flat population
+    on the side, and on a pairing nested there, the frames of its left side,
+    and of its right side too unless `name` is one of its keys, which its
+    right side holds under the column the nested pairing maps it to. Of a
+    nested pairing's frames, those that carry `name` are read, or all of them
+    when none does, so the spelling of a role only one inner side has is that
+    side's."""
+    frames: list[FrameColumns | None] = []
+    for population in side:
+        assert isinstance(population, dict)
+        if _PAIR not in population:
+            frames.extend(_frames_of(population, roots=roots))
+            continue
+        left, right = population[_PAIR]
+        assert isinstance(left, list) and isinstance(right, list)
+        keys = population["keys"]
+        assert isinstance(keys, dict)
+        inner = _key_frames(name, left, roots=roots)
+        if name not in keys:
+            inner += _key_frames(name, right, roots=roots)
+        carrying = [frame for frame in inner if frame is None or frame.columns.get(name)]
+        frames.extend(carrying or inner)
+    return frames
 
 
 def bound_role_keys(
@@ -337,7 +461,8 @@ def bound_role_keys(
     Every other verb's output role columns are the ones its arguments name,
     which the compiler predicted as `expected` in its own spelling; each is
     spelled the way `frame` spells it. A verb keeps each of those roles'
-    `{role}_type` and `{role}_party_kind` columns that its input carries
+    enrichment columns (`common.place_type.enrichment_columns`: its type, and a
+    party's kind, class and whole columns) that its input carries
     (`analysis_mcp.engine.common.frame_keeping_role_types`), so the keys
     take them too when `input_role_keys` holds them. With neither known,
     `expected` stands as compiled.
@@ -390,7 +515,7 @@ def _one_unless_grouped(arguments: Mapping[str, JsonValue], input_count: int | N
 # `analysis_mcp.engine` computes it:
 #
 # - `get_data` reads no input. Asked to sum a family (`stat_vars="sum"`),
-#   dfo-apis collapses every member into one series under the family's own
+#   apis collapses every member into one series under the family's own
 #   ref; otherwise the frame holds what the definition binds, unbounded here.
 # - `growth` and `rank` refuse an input holding several StatVars
 #   (`require_single_stat_var`) and stamp the one they read on every row.
@@ -465,7 +590,7 @@ def _rewrite(value: JsonValue, form: _Form, column: Callable[[str], str]) -> Jso
     """
     if form is _Form.NAMES and isinstance(value, list):
         return [column(item) if isinstance(item, str) else item for item in value]
-    if form is _Form.KEYS and isinstance(value, dict):
+    if form in (_Form.KEYS, _Form.ENTITIES) and isinstance(value, dict):
         return {column(key): item for key, item in value.items()}
     if form is _Form.VALUES and isinstance(value, dict):
         return {key: column(item) if isinstance(item, str) else item for key, item in value.items()}

@@ -82,6 +82,7 @@
     "sum_of",
     "quotient_of"
   ],
+  "period_reduction": "none",
   "reference_payload": {
     "question": "How much ODA per person did Tanzania receive from Germany in each year from 2015 to 2021, counting both bilateral and imputed multilateral aid?",
     "answer_mode": "computed",

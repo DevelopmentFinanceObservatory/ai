@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum, StrEnum
 from typing import Any, Literal, NamedTuple
 
-from common.place_type import FLOW_ROLE_COLUMNS, PLACE_ROLE, type_column
+from common.place_type import FLOW_ROLE_COLUMNS, type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
@@ -50,8 +50,17 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
-from planner.parties import across_party
-from planner.plan import DatasetRequirement, Entity, Plan, Unit, keeps_one_level
+from planner.plan import (
+    DatasetRequirement,
+    Entity,
+    Plan,
+    Unit,
+    entities_named,
+    keeps_one_level,
+    split_of,
+    stated_names,
+    unknown_names,
+)
 from planner.proof import mismatches
 from planner.records import (
     DenominatorScope,
@@ -67,7 +76,18 @@ from planner.records import (
     StrictModel,
     ValueThreshold,
 )
-from planner.shapes import PLACE_PHRASE, ValueKind, place_role, role_named, roles_named
+from planner.shapes import (
+    PLACE_PHRASE,
+    ValueKind,
+    join_key_pairs,
+    level_roles,
+    open_on_whole_side,
+    open_whole_side_reason,
+    pooling_remedy,
+    role_named,
+    roles_named,
+    window_outside,
+)
 from planner.workflow import (
     ArtifactKind,
     Binding,
@@ -83,6 +103,7 @@ from pydantic import JsonValue, ValidationError, model_validator
 
 from compiler.arguments import (
     literal_argument_errors,
+    op_spec_errors,
     undeclared_parameters,
     unusable_schema_reason,
 )
@@ -101,8 +122,6 @@ from compiler.evidence import (
     evidence_from_source,
     named_members,
     named_refs,
-    open_axes_for,
-    opens_place_axis,
     read_source_unit,
     read_unit_dcid,
 )
@@ -119,11 +138,15 @@ from compiler.shapes import (
     BREAKDOWN_CODE_SYSTEMS,
     ResolvedRole,
     ResolvedShape,
+    breakdown_level,
+    operation_inputs,
+    rolls,
     shapes_for,
     unsummable_axes,
 )
 from compiler.sources import (
     FamilyOverlap,
+    bound_codes,
     entity_scopes_disjoint,
     family_overlap,
     pinned_stat_var,
@@ -144,7 +167,6 @@ class CompileIssueCode(StrEnum):
     DANGLING_INPUT = "dangling_input"
     INPUT_IS_TERMINAL = "input_is_terminal"
     INPUT_SHAPE_UNSUPPORTED = "input_shape_unsupported"
-    LEVEL_FILTER_ON_FLOW_AXIS = "level_filter_on_flow_axis"
     RANK_AXIS_REQUIRED = "rank_axis_required"
     SHARE_AXIS_REQUIRED = "share_axis_required"
     SHARE_KEY_UNKNOWN = "share_key_unknown"
@@ -159,10 +181,13 @@ class CompileIssueCode(StrEnum):
     SOURCE_PIN_VIOLATED = "source_pin_violated"
     SOURCE_UNUSABLE = "source_unusable"
     SOURCE_WIDER_THAN_REQUIREMENT = "source_wider_than_requirement"
-    REQUIREMENT_UNMEETABLE = "requirement_unmeetable"
     WINDOW_OUTSIDE_PERIOD = "window_outside_period"
     ROLLING_NEEDS_OPEN_PERIOD = "rolling_needs_open_period"
     ROLLING_POPULATION_UNUSABLE = "rolling_population_unusable"
+    # The newest year the data holds for a group of rolling steps is before the
+    # one the plan's rolling years state, and the plan stated from it is
+    # refused (`translator.tool`, which reads the newest year before approval).
+    ROLLING_ANCHOR_BEHIND = "rolling_anchor_behind"
     ENTITY_REQUIRED = "entity_required"
     UNKNOWN_ENTITY = "unknown_entity"
     ENTITY_AMBIGUOUS = "entity_ambiguous"
@@ -180,7 +205,6 @@ class CompileIssueCode(StrEnum):
     FRAME_PRICE_BASES_DIFFER = "frame_price_bases_differ"
     FRAME_UNITS_IRRECONCILABLE = "frame_units_irreconcilable"
     PERIODS_DISJOINT = "periods_disjoint"
-    JOIN_NO_COMMON_KEY_COLUMNS = "join_no_common_key_columns"
     NO_CAPABILITY = "no_capability"
     AMBIGUOUS_CAPABILITY = "ambiguous_capability"
     UNKNOWN_TOOL = "unknown_tool"
@@ -335,6 +359,7 @@ class _Build:
         self.discovered = discovered
         self.capabilities = capabilities
         self.requirements = {r.id: r for r in plan.evidence_requirements}
+        self.whole_history = split_of(plan).whole_history
         self.issues: list[CompileIssue] = []
         self.warnings: list[EvidenceIssue] = []
         self.operations: dict[str, Operation] = {}
@@ -351,9 +376,7 @@ class _Build:
         self._check_requirements_satisfied()
         self._check_graph()
         self._check_sources()
-        self._check_requirements_meetable()
         self._build_shapes()
-        self._check_level_filters()
         self._check_operations()
         self._check_source_width()
         self._check_capabilities()
@@ -471,7 +494,7 @@ class _Build:
 
     def _check_graph(self) -> None:
         for operation in self.operations.values():
-            for input_id in _inputs_of(operation):
+            for input_id in operation_inputs(operation):
                 if input_id not in self.operations:
                     self._issue(
                         CompileIssueCode.DANGLING_INPUT,
@@ -578,7 +601,7 @@ class _Build:
     def _check_summable(
         self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
     ) -> None:
-        """Report a family read summed over an axis dfo-apis may not sum over.
+        """Report a family read summed over an axis apis may not sum over.
 
         `stat_var_reading` reads a family summed by the rule only when every
         open axis is summable, but the plan may ask for `sum` over any family;
@@ -602,22 +625,38 @@ class _Build:
     def _check_breakdown(
         self, operation: RetrieveOperation, requirement: DatasetRequirement, source: SelectedSource
     ) -> None:
-        """Report a breakdown by a code system the source's family does not vary along.
+        """Report a breakdown by a code system the source's family does not vary along,
+        or one whose level the named codes' paths do not settle.
 
         `get_data` sums the family within each code of the breakdown's code
         system, so a source whose members state no value on it has no codes
-        to break its total down by.
+        to break its total down by. The level read is set by the codes the
+        source names (`compiler.shapes.breakdown_level`), so a named code
+        the graph holds no path to leaves no level to retrieve at. A read
+        of the hierarchy that failed never reaches compile:
+        `propose_operations` answers it `surface_unavailable`.
         """
         if requirement.breakdown is None:
             return
         code_system = BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension]
-        if any(axis.property == code_system for axis in source.open_axes):
+        if not any(axis.property == code_system for axis in source.open_axes):
+            detail = (
+                f"its StatVars do not vary by {requirement.breakdown.dimension.value} "
+                f"({code_system}), so it has no breakdown by it"
+            )
+        elif breakdown_level(requirement.breakdown, source) is None:
+            unread = [
+                code for code in bound_codes(source, code_system) if not source.code_paths.get(code)
+            ]
+            detail = (
+                f"the {code_system} hierarchy holds no path to {', '.join(unread)}, "
+                "so no level of its breakdown is known"
+            )
+        else:
             return
         self._issue(
             CompileIssueCode.SOURCE_UNUSABLE,
-            f"source {source.spec_id} cannot serve requirement {requirement.id!r}: its "
-            f"StatVars do not vary by {requirement.breakdown.dimension.value} "
-            f"({code_system}), so it has no breakdown by it",
+            f"source {source.spec_id} cannot serve requirement {requirement.id!r}: {detail}",
             operation_id=operation.id,
             requirement_id=requirement.id,
         )
@@ -637,67 +676,11 @@ class _Build:
             requirements=self.requirements,
             sources=self.sources,
             order=self.order,
+            whole_history=self.whole_history,
         )
         for reason in reasons:
             operation_id, _, detail = reason.partition(": ")
             self._issue(CompileIssueCode.INPUT_SHAPE_UNSUPPORTED, detail, operation_id=operation_id)
-
-    def _check_level_filters(self) -> None:
-        """Report `LEVEL_FILTER_ON_FLOW_AXIS` for a place-level filter whose places sit on a flow axis.
-
-        A requirement whose `across` names the place may keep one level with a
-        `PlaceLevel` filter, which reads `observationAbout_type`. Only a
-        source that leaves `observationAbout` open over several places mixes
-        levels (`compiler.evidence.opens_place_axis`). Where the place word
-        covers a flow axis instead (`compiler.evidence.open_axes_for`), as
-        IDS holds its debtors on `destination`, the axis holds parties, and a
-        flow retrieval serves them without their group totals
-        (`_retrieve_arguments`), so the filter has no level to keep and the
-        planner drops it.
-        """
-        for operation in self.operations.values():
-            if not isinstance(operation, FilterOperation) or not keeps_one_level(
-                operation.predicates
-            ):
-                continue
-            retrieve = self.operations.get(self._through_filters(operation.input))
-            source = self.sources.get(retrieve.id) if retrieve is not None else None
-            requirement = (
-                self.requirements.get(retrieve.requirement_id) if retrieve is not None else None
-            )
-            if (
-                source is None
-                or not isinstance(requirement, DatasetRequirement)
-                or opens_place_axis(source.open_entity_axes)
-            ):
-                continue
-            axes = open_axes_for(requirement.across, source.open_entity_axes)
-            if isinstance(axes, str):
-                continue
-            for word, axis in zip(requirement.across, axes, strict=True):
-                if across_party(word) != "place" or axis.column == PLACE_ROLE:
-                    continue
-                self._issue(
-                    CompileIssueCode.LEVEL_FILTER_ON_FLOW_AXIS,
-                    f"source {source.spec_id} holds every {word!r} on its flow axis "
-                    f"{axis.column!r}, whose parties have no place level to keep, and the "
-                    "retrieval already leaves the parties' group totals out; drop the "
-                    "place_level predicate",
-                    operation_id=operation.id,
-                    requirement_id=requirement.id,
-                )
-
-    def _check_requirements_meetable(self) -> None:
-        for requirement in self.requirements.values():
-            if not isinstance(requirement, DatasetRequirement):
-                continue
-            if requirement.unit is not None and requirement.unit.prices == "constant":
-                self._issue(
-                    CompileIssueCode.REQUIREMENT_UNMEETABLE,
-                    f"requirement {requirement.id!r} asks for constant {requirement.unit.base_year} "
-                    f"prices, and no operation restates a series in another year's prices",
-                    requirement_id=requirement.id,
-                )
 
     def _check_operations(self) -> None:
         for operation in self.operations.values():
@@ -733,7 +716,8 @@ class _Build:
                 self._check_key_axes(operation)
                 self._check_quotient_parts(operation)
             elif isinstance(operation, JoinOperation):
-                self._check_join(operation)
+                self._check_join_keys_overlap(operation)
+                self._check_join_keys_unique(operation)
             else:
                 self._check_filter(operation)
             self._check_rolling_reads_open_periods(operation)
@@ -749,7 +733,7 @@ class _Build:
         year, as Search may answer "since 2015" with one. A window of kind
         `all`, or a range with no end year, reaches every later year.
         """
-        if not _rolls(operation):
+        if not rolls(operation):
             return
         for requirement_id in sorted(self._root_requirement_ids(operation.id)):
             requirement = self.requirements.get(requirement_id)
@@ -771,16 +755,22 @@ class _Build:
             )
 
     def _check_growth(self, operation: GrowthOperation) -> None:
+        """Report `WINDOW_OUTSIDE_PERIOD` for a window reaching past the years its input holds.
+
+        The input's shape holds them. A retrieval's years start at its
+        dataset's first year on record for a whole-history read, as the plan's
+        shape rule reads it (`planner.shapes.window_outside`).
+        """
         requirement = self._requirement_upstream(operation.input)
-        if requirement is None:
+        upstream = self.shapes.get(operation.input)
+        if requirement is None or upstream is None:
             return
         window = Period(start=operation.window_start, end=operation.window_end)
-        if not requirement.period.covers(window):
+        outside = window_outside(upstream.shape, window)
+        if outside is not None:
             self._issue(
                 CompileIssueCode.WINDOW_OUTSIDE_PERIOD,
-                f"operation {operation.id!r} takes growth over {window.start}-{window.end}, "
-                f"outside requirement {requirement.id!r}'s {requirement.period.start}-"
-                f"{requirement.period.end}",
+                f"operation {operation.id!r}'s {outside}",
                 operation_id=operation.id,
                 requirement_id=requirement.id,
             )
@@ -977,15 +967,100 @@ class _Build:
         the entity the side itself names.
         """
         role = self._key_column(side, axis)
-        source = self._role_source(role) if role is not None else None
-        if role is None or role.open or source is None:
+        return {} if role is None else self._column_members(side.input, role, side=side)
+
+    def _column_members(
+        self, op_id: str, role: ResolvedRole, *, side: Side | None = None
+    ) -> dict[str, str]:
+        """The label of each entity the frame at `op_id` holds under `role`'s column, by ref.
+
+        Empty when the column is open or its source is missing. The members
+        are those the column's source resolves, narrowed by any upstream
+        filter (`_retained_labels`) and by the entity `side`, when given,
+        names.
+        """
+        source = self._role_source(role)
+        if role.open or source is None:
             return {}
-        retained = _narrowed_by_side(side, role, source, self._retained_labels(side.input, role))
+        retained = self._retained_labels(op_id, role)
+        if side is not None:
+            retained = _narrowed_by_side(side, role, source, retained)
         return {
             entity.ref: entity.label
             for entity in source.entities
             if entity.role == role.column and entity.label.casefold() in retained
         }
+
+    def _check_join_keys_overlap(self, operation: JoinOperation) -> None:
+        """Report `KEYS_DISJOINT` when a join key's two columns hold no entity in common.
+
+        analysis-mcp matches a key pair by value (`planner.shapes.join_key_pairs`),
+        so WHO's Kenya on `observationAbout` against CRS's Uganda on
+        `destination` matches no row. Each side's members are the refs its
+        source resolves under the key column that still reach the join
+        (`_column_members`). An open column, or one whose members cannot be
+        read, is left to analysis-mcp.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
+        if left is None or right is None:
+            return
+        for left_role, right_role in join_key_pairs(left.columns, right.columns):
+            if left_role.breakdown:
+                continue
+            held = self._column_members(operation.left, left_role)
+            other = self._column_members(operation.right, right_role)
+            if not held or not other or held.keys() & other.keys():
+                continue
+            self._issue(
+                CompileIssueCode.KEYS_DISJOINT,
+                f"operation {operation.id!r} joins key by key, and its left side holds "
+                f"{sorted(held.values())!r} under {left_role.column!r} while its right side "
+                f"holds {sorted(other.values())!r} under {right_role.column!r}: no entity is on "
+                "both sides, so the join would match no row",
+                operation_id=operation.id,
+            )
+            return
+
+    def _check_join_keys_unique(self, operation: JoinOperation) -> None:
+        """Report `INPUT_SHAPE_UNSUPPORTED` when a side holds several entities on a column outside its keys.
+
+        analysis-mcp joins one row per key on each side, and refuses a key
+        that repeats (`role_ambiguous`). `planner.shapes.rejects` refuses a
+        breakdown or an open party outside the keys. It cannot refuse a named
+        role, since the plan does not count the entities it names. Here the
+        resolved members do (`_column_members`): Germany and France as
+        donors beside Kenya as recipient, joined on the recipient alone,
+        repeat each key twice.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
+        if left is None or right is None:
+            return
+        pairs = join_key_pairs(left.columns, right.columns)
+        if not pairs:
+            return
+        sides = (
+            (operation.left, left, [key for key, _ in pairs]),
+            (operation.right, right, [key for _, key in pairs]),
+        )
+        for op_id, resolved, keys in sides:
+            for role in resolved.columns:
+                if role.breakdown or role.open or any(role is key for key in keys):
+                    continue
+                members = self._column_members(op_id, role)
+                if len(members) < 2:
+                    continue
+                self._issue(
+                    CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
+                    f"operation {operation.id!r} joins one row per key on each side, and "
+                    f"{op_id!r} holds {sorted(members.values())!r} under {role.column!r} beside "
+                    "its keys, so each key repeats once per member; keep one of them, with a "
+                    "`filter` or in its requirement's `entities`, or name the same entities "
+                    "under that role on the other side's requirement so the join keys on it too",
+                    operation_id=operation.id,
+                )
+                return
 
     def _check_needs_axis(self, operation: ShareOfOperation | QuotientOfOperation) -> None:
         """Report an un-keyed numerator that still carries several members.
@@ -1198,21 +1273,10 @@ class _Build:
         behind = self._named_behind(input_id)
         if behind is None:
             return False
-        unknown = [
-            name
-            for name in names
-            if not any(_entity_candidates(requirement, name, role) for _, requirement in behind)
-        ]
+        unknown = unknown_names(names, role, [requirement for _, requirement in behind])
         if not unknown:
             return True
-        stated = sorted(
-            {
-                entity.name
-                for _, requirement in behind
-                for entity in requirement.entities
-                if _stated_under(entity, role)
-            }
-        )
+        stated = stated_names([requirement for _, requirement in behind], role)
         under = f" under role {role!r}" if role is not None else ""
         self._issue(
             CompileIssueCode.UNKNOWN_ENTITY,
@@ -1231,21 +1295,6 @@ class _Build:
             return None
         open_entity_axes = source.open_entity_axes or ()
         return next((axis for axis in open_entity_axes if axis.column == role.column), None)
-
-    def _check_join(self, operation: JoinOperation) -> None:
-        left = self._columns_of(operation.left)
-        right = self._columns_of(operation.right)
-        if left is None or right is None:
-            return
-        left_columns = set(left)
-        right_columns = set(right)
-        if not (left_columns & right_columns):
-            self._issue(
-                CompileIssueCode.JOIN_NO_COMMON_KEY_COLUMNS,
-                f"operation {operation.id!r} joins sources that share no role column: "
-                f"{sorted(left_columns)!r} and {sorted(right_columns)!r}",
-                operation_id=operation.id,
-            )
 
     def _check_filter(self, operation: FilterOperation) -> None:
         for predicate in operation.predicates:
@@ -1274,15 +1323,30 @@ class _Build:
         `keyed` is the role phrase each side is keyed by (`_keyed_axes`),
         `None` for a side read whole. `any_units` is for a verb that pairs
         sides in any two units, which skips `_check_frame_units`.
+
+        Two sides over the same rows set a series against itself, unless
+        exactly one is keyed and its key holds other than one member
+        (`_key_members`, empty for an open column): the keyed side then
+        keeps each member apart and the other pools them. One side read both
+        ways is each member's share of their total
+        (`planner.plan.ShareOfRequirement.pools_its_own_axis`), whose pooled
+        reading sums exactly the members the keyed reading keeps, so that
+        side is checked once, as the keyed side.
         """
-        requirements = [
-            self._check_side(op_id, side, keyed=axis)
-            for side, axis in zip((left, right), keyed, strict=True)
-        ]
+        left_req = self._check_side(op_id, left, keyed=keyed[0])
+        right_req = left_req if left == right else self._check_side(op_id, right, keyed=keyed[1])
         left_identity, right_identity = (self._side_identity(side) for side in (left, right))
-        if left_identity == right_identity:
-            frame, entity = left_identity
-            about = f"{entity!r} of {frame!r}" if entity else f"the whole of {frame!r}"
+        keyed_sides = [
+            (side, axis)
+            for side, axis in zip((left, right), keyed, strict=True)
+            if axis is not None
+        ]
+        pools_apart = len(keyed_sides) == 1 and len(self._key_members(*keyed_sides[0])) != 1
+        if left_identity == right_identity and not pools_apart:
+            frame, by_role = left_identity
+            names = sorted({name for _, kept in by_role for name in kept})
+            kept = repr(names[0]) if len(names) == 1 else repr(names)
+            about = f"{kept} of {frame!r}" if names else f"the whole of {frame!r}"
             self._issue(
                 CompileIssueCode.DEGENERATE_SIDES,
                 f"operation {op_id!r} sets one side against itself: both sides are {about}",
@@ -1292,7 +1356,6 @@ class _Build:
         if left.input == right.input:
             # One requirement behind both sides: its period overlaps itself.
             return
-        left_req, right_req = requirements
         if (
             left_req is not None
             and right_req is not None
@@ -1328,17 +1391,20 @@ class _Build:
         basis (`_denoted_unit`) and only the form differs, a ref against a
         request: every side whose source binds no unit is named (both, when
         both are refs), with what to change so it is retrieved by request too.
-        dfo-apis writes a natively satisfied request as the request object and
-        an unbound definition as its ref (ONEcampaign/dfo-apis#1179).
+        apis writes a natively satisfied request as the request object and
+        an unbound definition as its ref.
 
-        No requirement may ask for constant prices (`_check_requirements_meetable`),
-        so the one unit two sides can both be stated in is a current-price
-        one. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins its
-        source and that source cannot serve current prices, as `check_evidence`
-        reads its unit: no requirement change pairs the two, and the issue
-        names the pinned side's requirement. `FRAME_PRICE_BASES_DIFFER` when
-        either side states constant prices otherwise, whose repair is current
-        prices on both sides. `FRAME_UNITS_DIFFER` for any other pair.
+        A requirement may ask for current prices or for constant prices of
+        one base year, and a pinned side is always served in its source's own
+        unit. `FRAME_UNITS_IRRECONCILABLE` when a side's requirement pins a
+        source in constant prices and no requirement change states the other
+        side in that unit, because the pinned unit states no base year by
+        request or unit id or the other side is pinned too
+        (`_report_irreconcilable_units`); the issue names the pinned side's
+        requirement. `FRAME_PRICE_BASES_DIFFER` when either side states
+        constant prices otherwise, whose repair is one unit on both sides,
+        in current prices or in constant prices of one base year.
+        `FRAME_UNITS_DIFFER` for any other pair.
 
         A `share_of` reports `SHARE_UNITS_DIFFER` in place of
         `FRAME_UNIT_UNBOUND` and `FRAME_UNITS_DIFFER`: `quotient_of` divides
@@ -1551,34 +1617,42 @@ class _Build:
         )
 
     def _report_irreconcilable_units(self, op_id: str, left: _SideUnit, right: _SideUnit) -> bool:
-        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side whose source cannot serve current prices.
+        """Report `FRAME_UNITS_IRRECONCILABLE` for a pinned side in constant prices no other side can match.
 
-        A current-price unit is the one unit two sides can both be stated
-        in, and a pinned requirement is always served by its own source.
-        Each pinned side's source unit is read as `check_evidence` reads it
-        (`read_source_unit`). A source unit that reads as constant prices
-        cannot be stated at current prices in any currency, so no
-        requirement change pairs the two. A pinned side bound to a unit by
-        request is skipped, because its frame is converted on fetch and its
-        own reading already states the basis it serves. Returns whether it
-        reported.
+        A pinned requirement is always served in its source's own unit: the
+        request object when its definition binds one by request, else its
+        unit ref. A side in constant prices (`_SideUnit.reading`) cannot be
+        restated in current prices, so the other side has to be retrieved in
+        that same unit. A requirement may ask for constant prices only of a
+        base year the source's unit id or request states (`check_evidence`),
+        which `_SideUnit.denoted` reads. So the pair is irreconcilable when
+        the pinned side denotes no such unit, or when the other side is
+        pinned too and keeps a unit of its own. Returns whether it reported.
         """
         for pinned, other in ((left, right), (right, left)):
             requirement = pinned.requirement
             if (
                 requirement is None
                 or requirement.source_spec_id is None
-                or isinstance(pinned.unit, dict)
-                or read_source_unit(pinned.source).prices != "constant"
+                or pinned.reading.prices != "constant"
             ):
+                continue
+            other_pin = other.requirement
+            if other_pin is not None and other_pin.source_spec_id is not None:
+                why = f"requirement {other_pin.id!r} pins its source too"
+            elif pinned.denoted is None:
+                why = (
+                    "its unit states no base year by unit id or by request, so no "
+                    "requirement can ask for those prices"
+                )
+            else:
                 continue
             self._issue(
                 CompileIssueCode.FRAME_UNITS_IRRECONCILABLE,
                 f"operation {op_id!r} pairs requirement {requirement.id!r}, whose pinned source "
                 f"{pinned.source.spec_id} serves {pinned.words()}, with a side in "
-                f"{other.words()}. No operation restates a series in other prices and no "
-                "requirement may ask for constant prices, so the two sides can never be "
-                "stated in one unit",
+                f"{other.words()}. No operation restates a series in other prices and "
+                f"{why}, so the two sides can never be stated in one unit",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )
@@ -1697,7 +1771,8 @@ class _Build:
         the rule on that result's key column. One surviving column makes the
         side ambiguous, checked in this order: a column on which several of
         the entities its requirement names still reach the side, an open
-        column, whose members nobody named, or a column on which several of
+        column, whose members nobody named (`planner.shapes.open_on_whole_side`,
+        which the plan refuses on too), or a column on which several of
         the labels its source resolves still reach it.
         """
         resolved = self.shapes.get(side.input)
@@ -1726,29 +1801,35 @@ class _Build:
             for column, (source, requirement), kept in held
             if len(column_labels := _labels_on_column(source, column.column, kept)) > 1
         ]
-        open_column = next(
-            ((column, requirement) for column, (_, requirement) in columns if column.open), None
+        upstreams = dict(columns)
+        # `columns` already leaves out the key and the breakdown.
+        open_column = open_on_whole_side(list(upstreams), keyed=None)
+        # Only an un-keyed share or quotient takes one figure on each side,
+        # and `axis` would key its numerator.
+        reader = self.operations.get(op_id)
+        one_figure = (
+            isinstance(reader, ShareOfOperation | QuotientOfOperation) and reader.axis is None
         )
+        keyable = one_figure and side == reader.numerator
+        pool = pooling_remedy(one_figure=one_figure, each_side=True)
         if pooled:
             names = [name for _, column_names in pooled for name in column_names]
             self._issue(
                 CompileIssueCode.ENTITY_REQUIRED,
                 f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
                 f"requirement names several entities on one side of the flow {names!r}; "
-                "say which",
+                f"say which, or {pool}",
                 operation_id=op_id,
                 requirement_id=pooled[0][0].id,
             )
         elif open_column is not None:
             # A side can name only an entity its requirement names, so it has no
             # way to say which open members it reads.
-            column, requirement = open_column
+            _, requirement = upstreams[open_column]
             self._issue(
                 CompileIssueCode.ENTITY_REQUIRED,
-                f"operation {op_id!r} takes a whole side from {side.input!r}, whose "
-                f"requirement covers every {column.role!r} and names none of them, "
-                "so the side cannot say which it reads; name them in the requirement's "
-                "`entities`, or collapse them with an aggregate grouped by period first",
+                f"operation {op_id!r} takes a whole side from {side.input!r}, "
+                f"{open_whole_side_reason(open_column, one_figure=one_figure, keyable=keyable)}",
                 operation_id=op_id,
                 requirement_id=requirement.id,
             )
@@ -1775,7 +1856,7 @@ class _Build:
         first resolved it to wherever the frame travels -- narrowed once a
         filter has kept only named entities on it -- so a reader only has to
         read its own immediate input's shape, with no walk of its own. Two
-        readers report: a period-only aggregate, or a whole side of a
+        readers report: an aggregate grouped by no entity, or a whole side of a
         two-sided operation (`_pooled_sides`), folds a surplus role into a
         figure presented as the asked entity's; a `named` rank claims to
         rank exactly the entities a filter narrowed its axis to, so a
@@ -2033,7 +2114,7 @@ class _Build:
         columns = {entity.role for entity in source.entities}
         columns.update(self._columns_of(operation.id) or ())
         if self._read_by_level_filter(operation.id):
-            columns.add(type_column(PLACE_ROLE))
+            columns.update(type_column(column) for column in self._columns_of(operation.id) or ())
         named: dict[str, tuple[str, ...]] = {}
         if isinstance(requirement, DatasetRequirement):
             for entity in requirement.entities:
@@ -2076,19 +2157,21 @@ class _Build:
     def _retrieve_arguments(self, operation: RetrieveOperation) -> Arguments | None:
         """Write `spec_id` and `stat_vars` for a family.
 
-        `stat_vars` is the source's `stat_var_reading`: `sum` asks dfo-apis
+        `stat_vars` is the source's `stat_var_reading`: `sum` asks apis
         to sum the family's members into one series, `separate` keeps one
         per member. It sits outside the definition's identity, so it
         re-mints nothing.
 
-        `breakdown` is the requirement's, as its code system and level: dfo-apis
-        sums the family within each code rolled up to that level, so the frame
-        carries one series per code under the family's own ref.
+        `breakdown` is the requirement's code system at the level
+        `compiler.shapes.breakdown_level` sets from the codes the source
+        names: apis sums the family within each code rolled up to that level,
+        so the frame carries one series per code under the family's own ref.
 
         `place_types` is written for a retrieval a place-level filter reads
-        (`_read_by_level_filter`): it adds the `observationAbout_type`
-        column that filter keeps one level by. Rendering only, so it
-        re-mints nothing either.
+        (`_read_by_level_filter`): it adds the type column for the role that
+        filter keeps at one level. A flow rendering includes both parties'
+        type columns and their kinds. Rendering only, so it re-mints nothing
+        either.
 
         `without_party_totals` is written for every flow retrieval (a source
         with a flow role column among its stated or open entity axes). A flow
@@ -2114,9 +2197,11 @@ class _Build:
             args["stat_vars"] = source.stat_var_reading.value
         requirement = self.requirements.get(operation.requirement_id)
         if isinstance(requirement, DatasetRequirement) and requirement.breakdown is not None:
+            # `_check_breakdown` refuses a source whose level is unknown.
+            level = breakdown_level(requirement.breakdown, source)
             args["breakdown"] = {
                 "code_system": BREAKDOWN_CODE_SYSTEMS[requirement.breakdown.dimension],
-                "level": requirement.breakdown.level,
+                "level": requirement.breakdown.level if level is None else level,
             }
         if self._read_by_level_filter(operation.id):
             args["place_types"] = True
@@ -2351,13 +2436,28 @@ class _Build:
         return args, {"frame_ref": _frame_from(operation.input)}
 
     def _join_arguments(self, operation: JoinOperation) -> Arguments | None:
-        left = self._columns_of(operation.left)
-        right = self._columns_of(operation.right)
+        """Write every key explicitly, as `join_keys` in the left frame's names and `right_keys` mapping each to the right's.
+
+        One key per `planner.shapes.join_key_pairs` pair of the two sides'
+        resolved roles, the rule `compiler.shapes` refuses a join with none
+        on. Written for a same-name key too, so analysis-mcp matches exactly
+        the pairs that rule checked.
+        """
+        left = self.shapes.get(operation.left)
+        right = self.shapes.get(operation.right)
         if left is None or right is None:
             return None
-        right_columns = set(right)
-        join_keys = [column for column in left if column in right_columns]
-        args: dict[str, JsonValue] = {"join_keys": join_keys}
+        columns = [
+            (left_role.column, right_role.column)
+            for left_role, right_role in join_key_pairs(left.columns, right.columns)
+        ]
+        if not columns:
+            # Already reported: `INPUT_SHAPE_UNSUPPORTED` from the same rule.
+            return None
+        args: dict[str, JsonValue] = {
+            "join_keys": [left for left, _ in columns],
+            "right_keys": dict(columns),
+        }
         bindings = {
             "frame_ref": _frame_from(operation.left),
             "right_frame_ref": _frame_from(operation.right),
@@ -2387,11 +2487,15 @@ class _Build:
                     threshold[ROLLING_PARAMETER] = rolling_ref(predicate.rolling)
                 predicates.append(threshold)
             elif isinstance(predicate, PlaceLevel):
+                column = self._place_level_column(operation, predicate)
+                if column is None:
+                    return None
                 predicates.append(
                     {
                         "kind": "place_level",
-                        "column": type_column(PLACE_ROLE),
+                        "column": type_column(column),
                         "level": predicate.level.value,
+                        **({"strict": True} if predicate.strict else {}),
                     }
                 )
             else:
@@ -2400,10 +2504,27 @@ class _Build:
                     return None
                 predicates.append(written)
         args: dict[str, JsonValue] = {"predicates": predicates}
-        if _rolls(operation):
+        if rolls(operation):
             # The population every rolling step carries is written in `_build_steps`.
             args[ROLLING_PARAMETER] = {}
         return args, {"frame_ref": _frame_from(operation.input)}
+
+    def _place_level_column(self, operation: FilterOperation, predicate: PlaceLevel) -> str | None:
+        """The input role whose type column a place-level predicate reads (`level_roles`)."""
+        resolved = self.shapes.get(operation.input)
+        if resolved is None:
+            return None
+        candidates = level_roles(predicate, resolved.columns)
+        if len(candidates) != 1:
+            named = predicate.role or "an omitted role"
+            self._issue(
+                CompileIssueCode.INPUT_SHAPE_UNSUPPORTED,
+                f"operation {operation.id!r} has a place_level filter for {named!r}, which "
+                f"resolves to {len(candidates)} role columns; state one role",
+                operation_id=operation.id,
+            )
+            return None
+        return candidates[0].column
 
     def _entity_in_argument(
         self, operation: FilterOperation, predicate: EntityIn
@@ -2498,7 +2619,7 @@ class _Build:
         (`compiler.evidence.named_members`). `None` when `requirement`
         states no such entity, under `role` when one is given.
         """
-        candidates = _entity_candidates(requirement, name, role)
+        candidates = entities_named(requirement, name, role)
         if not candidates:
             return None
         if len(candidates) > 1:
@@ -2546,16 +2667,33 @@ class _Build:
         args: Mapping[str, JsonValue],
         bindings: Mapping[str, Binding],
     ) -> None:
-        for name in undeclared_parameters(bindings, schema.parameters):
+        """Report `BAD_ARGS` for arguments the tool refuses.
+
+        The arguments are checked against the tool's JSON Schema first and,
+        once they fit it, for an analysis-mcp verb, against the verb's own
+        op-spec checks (`compiler.arguments.op_spec_errors`). Two entity
+        filters naming one entity, one under its role and one under none,
+        both write the same `category_match`, which analysis-mcp refuses as
+        a predicate stated twice.
+        """
+        undeclared = undeclared_parameters(bindings, schema.parameters)
+        for name in undeclared:
             self._issue(
                 CompileIssueCode.BAD_ARGS,
                 f"{capability.tool.name!r} takes no argument named {name!r}",
                 operation_id=operation.id,
                 tool=capability.tool,
             )
-        for message in literal_argument_errors(
-            arguments=args, schema=schema.parameters, bound=bindings
-        ):
+        messages = literal_argument_errors(arguments=args, schema=schema.parameters, bound=bindings)
+        if not (undeclared or messages) and capability.tool.server == "analysis-mcp":
+            messages = [
+                f"operation {operation.id!r} writes arguments {capability.tool.name!r} refuses: "
+                f"{message}"
+                for message in op_spec_errors(
+                    tool=capability.tool.name, arguments=args, bound=bindings
+                )
+            ]
+        for message in messages:
             self._issue(
                 CompileIssueCode.BAD_ARGS, message, operation_id=operation.id, tool=capability.tool
             )
@@ -2646,14 +2784,17 @@ class _Build:
         resolved = self.shapes.get(op_id)
         return None if resolved is None else [role.column for role in resolved.columns]
 
-    def _side_identity(self, side: Side) -> tuple[str, str | None]:
-        """What a side is really of: the retrieval its chain rests on, and its effective entity.
+    def _side_identity(self, side: Side) -> tuple[str, SideNames]:
+        """What a side is really of: the retrieval its chain rests on, and the names it keeps per column.
 
         Two sides with the same identity set a series against itself however
         their inputs are named -- `retrieve_a` against `filter(retrieve_a)`.
-        The effective entity is the side's own, or the requirement's when it
-        names exactly one; a chain resting on no single retrieval identifies
-        by its input alone.
+        Each column the requirement's entities resolve on starts with their
+        names, and every `EntityIn` on the side's single-input chain, then
+        the side's own entity, narrows the columns its names resolve on
+        (`_kept_names`). So two filters of one retrieval keeping Kenya and
+        Uganda are two series, as are France to Kenya and Germany to Uganda.
+        A chain resting on no single retrieval identifies by its input alone.
         """
         requirement_id = self._root_requirement_id(side.input)
         retrieve_id = (
@@ -2661,15 +2802,51 @@ class _Build:
             if requirement_id is not None
             else None
         )
-        if retrieve_id is None:
-            return side.input, side.entity
-        entity = side.entity
-        requirement = self.requirements.get(requirement_id)
-        if entity is None and isinstance(requirement, DatasetRequirement):
-            names = {one.name for one in requirement.entities}
-            if len(names) == 1:
-                (entity,) = names
-        return retrieve_id, entity
+        requirement = self.requirements.get(requirement_id) if requirement_id else None
+        if retrieve_id is None or not isinstance(requirement, DatasetRequirement):
+            return side.input, (("", (side.entity,)),) if side.entity is not None else ()
+        return retrieve_id, self._kept_names(side, requirement, self.sources.get(retrieve_id))
+
+    def _kept_names(
+        self, side: Side, requirement: DatasetRequirement, source: SelectedSource | None
+    ) -> SideNames:
+        """The entity names `side` keeps of `requirement`, per column, sorted by column.
+
+        Walks from the side's input back through filters, aggregates,
+        growths and ranks to the retrieval. Each `EntityIn`, and the side's
+        own entity last, narrows only the columns its names resolve on
+        (`_entity_columns`): France as donor narrows the donors and leaves
+        the recipients, and Kenya as `country` narrows the column Ghana as
+        `economy` sits on too. A name the requirement does not state
+        narrows nothing; `unknown_entity` reports it.
+        """
+        kept: dict[str, set[str]] = {}
+        for entity in requirement.entities:
+            for column in _entity_columns(entity, source):
+                kept.setdefault(column, set()).add(entity.name)
+        narrowings: list[tuple[Sequence[str], str | None]] = []
+        operation = self.operations.get(side.input)
+        while isinstance(
+            operation, FilterOperation | AggregateOperation | GrowthOperation | RankOperation
+        ):
+            if isinstance(operation, FilterOperation):
+                narrowings += [
+                    (predicate.names, predicate.role)
+                    for predicate in operation.predicates
+                    if isinstance(predicate, EntityIn)
+                ]
+            operation = self.operations.get(operation.input)
+        if side.entity is not None:
+            narrowings.append(((side.entity,), None))
+        for names, role in narrowings:
+            by_column: dict[str, set[str]] = {}
+            for name in names:
+                for entity in entities_named(requirement, name, role):
+                    for column in _entity_columns(entity, source):
+                        by_column.setdefault(column, set()).add(name)
+            for column, named in by_column.items():
+                kept[column] &= named
+        return tuple(sorted((column, tuple(sorted(names))) for column, names in kept.items()))
 
     def _topological_order(self) -> list[str]:
         """Order operations so every input precedes its reader, reporting any cycle once.
@@ -2692,7 +2869,7 @@ class _Build:
                 )
                 return
             state[op_id] = 1
-            inputs = [i for i in _inputs_of(self.operations[op_id]) if i in self.operations]
+            inputs = [i for i in operation_inputs(self.operations[op_id]) if i in self.operations]
             for input_id in sorted(inputs, key=lambda i: _canonical_key(self.operations[i])):
                 visit(input_id, [*path, op_id])
             state[op_id] = 2
@@ -2710,43 +2887,10 @@ class _Build:
             if op_id in reachable:
                 continue
             reachable.add(op_id)
-            pending.extend(i for i in _inputs_of(self.operations[op_id]) if i in self.operations)
+            pending.extend(
+                i for i in operation_inputs(self.operations[op_id]) if i in self.operations
+            )
         return reachable
-
-
-def _entity_candidates(
-    requirement: DatasetRequirement, name: str, role: str | None
-) -> list[Entity]:
-    """The entities of `requirement` called `name`, under `role` when one is given (`_stated_under`)."""
-    return [
-        entity
-        for entity in requirement.entities
-        if entity.name == name and _stated_under(entity, role)
-    ]
-
-
-def _rolls(operation: Operation) -> bool:
-    """Whether a period `operation` states follows the newest data."""
-    if isinstance(operation, GrowthOperation | RankOperation):
-        return operation.rolling is not None
-    if isinstance(operation, FilterOperation):
-        return any(
-            isinstance(predicate, PeriodThreshold) and predicate.rolling is not None
-            for predicate in operation.predicates
-        )
-    return False
-
-
-def _stated_under(entity: Entity, role: str | None) -> bool:
-    """Whether the phrase `role` names the dimension `entity` sits on; any does when `role` is `None`.
-
-    The rule is `planner.shapes.roles_named`'s: a phrase names the role it
-    equals, and a place word names the place dimension, whose entities
-    state no role or a place phrase.
-    """
-    if role is None or entity.role == role:
-        return True
-    return across_party(role) == "place" and place_role(entity.role)
 
 
 def _axis_phrases(columns: Sequence[ResolvedRole]) -> list[str]:
@@ -2772,16 +2916,20 @@ def _part_words(part: JsonValue | _StatVarPart) -> str:
     return f"unit {part!r}"
 
 
-def _inputs_of(operation: Operation) -> tuple[str, ...]:
-    if isinstance(operation, RetrieveOperation):
-        return ()
-    if isinstance(operation, CompareOperation | SumOfOperation):
-        return (operation.left.input, operation.right.input)
-    if isinstance(operation, ShareOfOperation | QuotientOfOperation):
-        return (operation.numerator.input, operation.denominator.input)
-    if isinstance(operation, JoinOperation):
-        return (operation.left, operation.right)
-    return (operation.input,)
+# The entity names a two-sided step's side keeps, per column the
+# requirement's entities resolve on, sorted by column (`_Build._kept_names`).
+type SideNames = tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def _entity_columns(entity: Entity, source: SelectedSource | None) -> tuple[str, ...]:
+    """The columns `entity` resolves on in `source`, as `compiler.shapes` reads a requirement's columns.
+
+    A name resolving on nothing, or a source not yet selected, keeps its
+    role phrase, so it narrows only names stated under that phrase; the
+    compile reports it apart (`entity_unresolved`, `source_unusable`).
+    """
+    columns = sorted({member.role for member in named_members(entity, source)}) if source else []
+    return tuple(columns) or (f"role:{entity.role or ''}",)
 
 
 def _keyed_axes(
@@ -2838,7 +2986,7 @@ def _denoted_unit(source: SelectedSource, unit: JsonValue) -> Unit | None:
     structure (`compiler.evidence.read_unit_dcid`), and its price basis
     either the same way or, for a bare currency such as `CurrencyUSD`,
     through the StatVar shape's `measurement_qualifier`: `Nominal` is
-    current prices, which is how dfo-apis decides a request for current
+    current prices, which is how apis decides a request for current
     prices is natively satisfied.
     """
     if isinstance(unit, dict):
@@ -3010,7 +3158,7 @@ def _surplus_labels(requirement: DatasetRequirement, source: SelectedSource) -> 
 def _pooled_sides(operation: Operation) -> tuple[tuple[str, str | None], ...]:
     """Each input `operation` folds into one figure, with the role phrase it keys that input by.
 
-    A period-only aggregate pools its one input, and a two-sided operation
+    An aggregate grouped by no entity pools its one input, and a two-sided operation
     whichever of its sides takes no `entity`. A side of a dividing verb keyed
     by an axis (`_keyed_axes`) keeps one row per member of that column and
     pools the rest, so its phrase rides along; `None` pools every column.

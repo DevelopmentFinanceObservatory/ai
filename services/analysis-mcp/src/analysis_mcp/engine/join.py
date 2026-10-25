@@ -20,8 +20,12 @@ The join key is always `time_period` plus a set of role columns: either
 set -- `stat_var`/`time_period` may not be named explicitly, since the
 former would defeat the point of joining across two StatVars and the latter
 is already matched implicitly), or, left empty, every role column both
-frames declare in common, auto-detected. A key value repeated within one
-side is ambiguous -- there is no single row to join for that key -- and
+frames declare in common, auto-detected. `right_keys` names the right
+frame's own column for each `join_keys` column, so two columns under
+different names (a WHO series on `observationAbout`, a CRS series on
+`destination`) pair by value; the output's key column takes the left side's
+name. Auto-detection pairs same-name columns only. A key value repeated
+within one side is ambiguous -- there is no single row to join for that key -- and
 refuses (`JoinAmbiguousKeyError`) rather than silently picking one or
 summing (unlike `share_of`, a join's own per-side value is never reduced).
 
@@ -59,7 +63,7 @@ from dfo_frame_grammar.grammar import (
     UnitCell,
 )
 
-from analysis_mcp.engine.columnar import keys_unique, repeated
+from analysis_mcp.engine.columnar import group_rows, keys_unique, repeated
 from analysis_mcp.engine.common import (
     Exclusions,
     FacetSelection,
@@ -92,14 +96,29 @@ _RIGHT_ROW = "right_row"
 
 
 class JoinUnknownKeyError(Exception):
-    """One or more `join_keys` entries name a column at least one frame has
-    no grain for -- absent from that frame's own columns, or one of the
-    disallowed reduction/reserved/implicit-match columns."""
+    """One or more `join_keys` (or `right_keys`) entries name a column the
+    frame they key has no grain for -- absent from that frame's own columns,
+    or one of the disallowed reduction/reserved/implicit-match columns.
+    `parameter` is the parameter at fault and `available` the columns it
+    may name."""
 
-    def __init__(self, columns: Sequence[str], *, available: Sequence[str]) -> None:
+    def __init__(
+        self, columns: Sequence[str], *, available: Sequence[str], parameter: str = "join_keys"
+    ) -> None:
         self.columns = tuple(columns)
         self.available = tuple(available)
-        super().__init__(f"join_keys names unknown/disallowed column(s): {self.columns!r}")
+        self.parameter = parameter
+        super().__init__(f"{parameter} names unknown/disallowed column(s): {self.columns!r}")
+
+
+class JoinRightKeysPartialError(Exception):
+    """`right_keys` is non-empty but names no right column for the
+    `join_keys` columns in `columns`, which therefore pair with nothing.
+    `JoinOpSpec` refuses this first."""
+
+    def __init__(self, *, columns: Sequence[str]) -> None:
+        self.columns = tuple(columns)
+        super().__init__(f"right_keys leaves out join_keys column(s): {self.columns!r}")
 
 
 class JoinAmbiguousKeyError(Exception):
@@ -231,7 +250,14 @@ class JoinResult:
     """Everything `join_tool.py` needs to mint identity, write the store,
     and render the digest -- the frame is here for the store write and
     replay; the digest itself renders from `matched_keys`, never
-    `frame.rows`."""
+    `frame.rows`.
+
+    `left_dropped_key_count` and `right_dropped_key_count` count each
+    side's (role columns, `time_period`) keys that matched nothing.
+    `left_unmatched_entity_count` and `right_unmatched_entity_count` count
+    each side's role-column values that matched in no period, the entities
+    the output holds no row for; 0 for a join on `time_period` alone.
+    """
 
     frame: Frame
     left_resolved_unit: UnitCell | None
@@ -240,18 +266,27 @@ class JoinResult:
     right_facet_selections: tuple[FacetSelection, ...]
     warnings: tuple[str, ...]
     join_keys: tuple[str, ...]
+    right_key_columns: tuple[str, ...]
     matched_keys: MatchedKeys
     left_dropped_key_count: int
     right_dropped_key_count: int
+    left_unmatched_entity_count: int
+    right_unmatched_entity_count: int
     exclusions: Exclusions = field(default_factory=Exclusions)
 
 
 def _resolve_join_keys(
-    left_frame: Frame, right_frame: Frame, *, join_keys: Sequence[str]
-) -> tuple[str, ...]:
-    """The role columns to join on, beyond `time_period` -- `join_keys`
-    validated against both frames if given, or every role column both
-    frames declare in common if not.
+    left_frame: Frame,
+    right_frame: Frame,
+    *,
+    join_keys: Sequence[str],
+    right_keys: Mapping[str, str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The role columns to join on, beyond `time_period`, as the left
+    side's columns and the right side's column for each. These are
+    `join_keys` (paired through `right_keys` when it is set, under the same
+    name when not) validated against both frames if given, or every role
+    column both frames declare in common if not.
 
     Auto-detection (`join_keys` empty) refuses (`JoinNoCommonKeyColumnsError`)
     when the intersection it would return is empty *and both* sides
@@ -259,20 +294,31 @@ def _resolve_join_keys(
     docstring for why an empty intersection is only sometimes the
     legitimate "at least one side has no role column at all" case.
     """
-    left_role_columns = set(role_columns(left_frame))
-    right_role_columns = set(role_columns(right_frame))
+    left_role_columns = set(role_columns(left_frame)) - _DISALLOWED_JOIN_KEY_COLUMNS
+    right_role_columns = set(role_columns(right_frame)) - _DISALLOWED_JOIN_KEY_COLUMNS
+    if right_keys:
+        missing = sorted(set(join_keys) - set(right_keys))
+        if missing:
+            raise JoinRightKeysPartialError(columns=missing)
+        right = tuple(right_keys[column] for column in join_keys)
+        for parameter, columns, held in (
+            ("join_keys", join_keys, left_role_columns),
+            ("right_keys", right, right_role_columns),
+        ):
+            invalid = [column for column in columns if column not in held]
+            if invalid:
+                raise JoinUnknownKeyError(invalid, available=sorted(held), parameter=parameter)
+        return tuple(join_keys), right
     if join_keys:
         invalid = [
             column
             for column in join_keys
-            if column in _DISALLOWED_JOIN_KEY_COLUMNS
-            or column not in left_role_columns
-            or column not in right_role_columns
+            if column not in left_role_columns or column not in right_role_columns
         ]
         if invalid:
             available = sorted(left_role_columns & right_role_columns)
             raise JoinUnknownKeyError(invalid, available=available)
-        return tuple(join_keys)
+        return tuple(join_keys), tuple(join_keys)
     common = left_role_columns & right_role_columns
     # `and`, not `or`: refuse only the symmetric case (both sides declare
     # their own role columns, but share no name -- donor vs recipient,
@@ -284,7 +330,7 @@ def _resolve_join_keys(
         raise JoinNoCommonKeyColumnsError(
             left_columns=sorted(left_role_columns), right_columns=sorted(right_role_columns)
         )
-    return tuple(sorted(common))
+    return tuple(sorted(common)), tuple(sorted(common))
 
 
 def _keyed_table(
@@ -339,12 +385,16 @@ def run_join(
     right_frame: Frame,
     *,
     join_keys: Sequence[str] = (),
+    right_keys: Mapping[str, str] | None = None,
     left_pinned_unit: UnitCell | None = None,
     right_pinned_unit: UnitCell | None = None,
     max_output_rows: int | None = None,
 ) -> JoinResult:
     """Inner-join `left_frame` and `right_frame` on their shared role
-    columns (or `join_keys`, if given) plus `time_period`. See the module
+    columns (or `join_keys`, if given, each paired with its `right_keys`
+    column when that is set) plus `time_period`. A non-empty `right_keys`
+    that leaves a `join_keys` column out raises `JoinRightKeysPartialError`,
+    which `JoinOpSpec` refuses first. See the module
     docstring for the long-format output shape and the key-resolution
     rules; see each raised exception's own docstring for its refusal
     condition. `max_output_rows`, when given, bounds the output frame's row
@@ -352,14 +402,17 @@ def run_join(
     """
     left_stat_var = require_single_stat_var(left_frame)
     right_stat_var = require_single_stat_var(right_frame)
-    key_columns = _resolve_join_keys(left_frame, right_frame, join_keys=join_keys)
+    key_columns, right_key_columns = _resolve_join_keys(
+        left_frame, right_frame, join_keys=join_keys, right_keys=right_keys or {}
+    )
     key = [*key_columns, TIME_PERIOD_COLUMN]
+    right_key = [*right_key_columns, TIME_PERIOD_COLUMN]
 
     left_table, left_unit, left_facets, left_exclusions = _keyed_table(
         left_frame, side="left", key_columns=key_columns, pinned_unit=left_pinned_unit
     )
     right_table, right_unit, right_facets, right_exclusions = _keyed_table(
-        right_frame, side="right", key_columns=key_columns, pinned_unit=right_pinned_unit
+        right_frame, side="right", key_columns=right_key_columns, pinned_unit=right_pinned_unit
     )
 
     # Every key is unique on its side, so the key columns order the matches
@@ -367,7 +420,7 @@ def run_join(
     # order Python's `str` comparison uses.
     match_key = _match_key_names(len(key))
     matched = _match_table(left_table, key, row=_LEFT_ROW).join(
-        _match_table(right_table, key, row=_RIGHT_ROW), keys=match_key, join_type="inner"
+        _match_table(right_table, right_key, row=_RIGHT_ROW), keys=match_key, join_type="inner"
     )
     count = matched.num_rows
     if max_output_rows is not None and 2 * count > max_output_rows:
@@ -382,6 +435,16 @@ def run_join(
 
     left_dropped = _unmatched(left_table, left_rows)
     right_dropped = _unmatched(right_table, right_rows)
+    # Every matched entity is one value on both sides, so each side's
+    # entities less the matched ones are those that matched in no period.
+    if key_columns:
+        matched_entities = group_rows(matched, match_key[: len(key_columns)]).count
+        left_unmatched_entities = group_rows(left_table, key_columns).count - matched_entities
+        right_unmatched_entities = (
+            group_rows(right_table, right_key_columns).count - matched_entities
+        )
+    else:
+        left_unmatched_entities = right_unmatched_entities = 0
     exclusions = combine_exclusions(left_exclusions, right_exclusions)
     exclusions = record_exclusion(
         exclusions, frame=left_frame, reason="unmatched_key", dropped=left_dropped, side="left"
@@ -454,6 +517,7 @@ def run_join(
         right_facet_selections=right_facets,
         warnings=tuple(warnings),
         join_keys=key_columns,
+        right_key_columns=right_key_columns,
         matched_keys=MatchedKeys(
             role_cells={column: key_cells[column] for column in key_columns},
             time_periods=key_cells[TIME_PERIOD_COLUMN],
@@ -462,5 +526,7 @@ def run_join(
         ),
         left_dropped_key_count=left_dropped.num_rows,
         right_dropped_key_count=right_dropped.num_rows,
+        left_unmatched_entity_count=left_unmatched_entities,
+        right_unmatched_entity_count=right_unmatched_entities,
         exclusions=exclusions,
     )

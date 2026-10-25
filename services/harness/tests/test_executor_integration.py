@@ -39,7 +39,7 @@ from compiler.surface import (
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.definition_store import canonicalize, spec_id_for
-from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, frame_ref_for
+from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS, KIND_COLUMNS, frame_ref_for
 from data_mcp.manifest import SeriesStatisticsModel
 from data_mcp.series_statistics import series_statistics_table
 from executor.completion import ResultPublisher
@@ -76,6 +76,7 @@ from planner.plan import (
     DecisionFixes,
     Entity,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     Plan,
     PlanStatus,
@@ -128,7 +129,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 async def publisher() -> AsyncIterator[ResultPublisher]:
     """The completion gate's publisher as the deployed app has it,
     `McpExecutor.publish_result`, publishing each derived frame with the recipe
-    the store's traces build to a fake dfo-apis."""
+    the store's traces build to a fake apis."""
     assembler = FakeApis().assembler()
     yield McpExecutor(settings=Settings(), publish_frame=assembler.publish_frame).publish_result
     await assembler.aclose()
@@ -1230,7 +1231,11 @@ def _rolling_mint_response(last_years: Mapping[str, int]) -> dict[str, Any]:
 
 
 def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str, Any]) -> Plan:
-    """`retrieve -> filter(the last five years) -> growth(over them)`, both planned against 2024."""
+    """`retrieve -> filter(the last five years) -> growth(over them)`, both planned against 2023.
+
+    The dataset runs 2015 to 2024 and two of its six donors report 2024, so the
+    newest year at least half of them hold, and the plan's, is 2023.
+    """
     source = SelectedSource(
         spec_id=ROLLING_SPEC,
         sentence="ODA disbursed by six DAC donors, 2015 to 2024",
@@ -1243,10 +1248,10 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
         coverage_window=Period(start=2015, end=2024),
         identity=TOP_DONOR_IDENTITY,
     )
-    since = (PeriodThreshold(op="gte", year=2019, rolling=RelativePeriod(offset=-5)),)
+    since = (PeriodThreshold(op="gte", year=2018, rolling=RelativePeriod(offset=-5)),)
     window: dict[str, Any] = {
-        "window_start": 2019,
-        "window_end": 2024,
+        "window_start": 2018,
+        "window_end": 2023,
         "rolling": RollingWindow(
             window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
         ),
@@ -1273,6 +1278,7 @@ def _rolling_approved_plan(decision: Callable[..., Decision], schemas: dict[str,
                 id="recent_growth", decision_ids=["measure"], input_id="recent_years", **window
             ),
         ],
+        first_years=[FirstYear(requirement_id="oda_disbursed", year=2015)],
         status=PlanStatus.DRAFT,
     )
     translation = Translation(
@@ -1384,7 +1390,7 @@ def run_rolling_plan(
 async def test_a_rolling_plan_runs_from_the_newest_year_half_of_the_series_hold(
     run_rolling_plan: Callable[..., Any],
 ) -> None:
-    """The plan states 2019 to 2024. The run takes the newest year at least half
+    """The plan states 2018 to 2023. The run takes the newest year at least half
     of the retrieved series hold, writes the filter's and the growth's years
     from it, and analysis-mcp accepts both calls against the stored resolution,
     which the final frame's recipe then names."""
@@ -1549,7 +1555,7 @@ async def studio(
     Two of six donors report 2024, so the run's newest year is 2023. The executor
     is the deployed `McpExecutor` with `_Platform` for its clients, and its
     `card_replay` runs `replay_recipe` over the mounted analysis-mcp and
-    data-mcp's own mint, publishing to a fake dfo-apis.
+    data-mcp's own mint, publishing to a fake apis.
     """
     last_years = _rolling_last_years(reporting_2024=2)
 
@@ -1862,7 +1868,7 @@ async def test_a_surface_reading_the_mounted_services_without_the_token_is_refus
 
 
 # "Top 2 by GDP" with no place named: the mint covers every place with data, at every
-# level, and carries each place's types when asked (dfo-apis `materialise.enrichment`).
+# level, and carries each place's types when asked (apis `materialise.enrichment`).
 GDP_IDENTITY: dict[str, Any] = {
     "identity_version": "spec1",
     "shape": {"id": "Amount_EconomicActivity_GrossDomesticProduction_Nominal", "kind": "stat_var"},
@@ -1870,7 +1876,7 @@ GDP_IDENTITY: dict[str, Any] = {
     "requested_window": {"kind": "all"},
     "slots": [],
 }
-# The id dfo-apis' registry holds the identity under: `get_data` reads an identity the
+# The id apis' registry holds the identity under: `get_data` reads an identity the
 # definition store lacks from the registry and keeps it only when it hashes to its id.
 GDP_SPEC = spec_id_for(canonicalize(GDP_IDENTITY))
 GDP_BY_PLACE: dict[str, tuple[str, float]] = {
@@ -1886,7 +1892,7 @@ GDP_BY_PLACE: dict[str, tuple[str, float]] = {
 
 
 def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
-    """GDP in 2023 at every place, in the column order dfo-apis renders `options.columns`,
+    """GDP in 2023 at every place, in the column order apis renders `options.columns`,
     with each place's types when `place_types`."""
     places = list(GDP_BY_PLACE)
     table = pa.table(
@@ -1910,7 +1916,7 @@ def _gdp_parquet_bytes(*, place_types: bool = True) -> bytes:
     return buf.getvalue()
 
 
-# When dfo-apis stored each GDP rendering, by whether it carries place types.
+# When apis stored each GDP rendering, by whether it carries place types.
 _GDP_CREATED_AT = {False: "2026-10-01T00:00:00+00:00", True: "2026-10-02T00:00:00+00:00"}
 
 
@@ -1920,7 +1926,7 @@ GDP_CONTENT_VERSION = version_of(_gdp_parquet_bytes(place_types=False))
 
 
 def _gdp_mint_response(*, place_types: bool = True) -> dict[str, Any]:
-    """dfo-apis' manifest for GDP. Both renderings come back under one
+    """apis' manifest for GDP. Both renderings come back under one
     `content_version`, each with its own artifact and the request's options as its
     `rendering`."""
     parquet = _gdp_parquet_bytes(place_types=place_types)
@@ -2035,7 +2041,7 @@ async def test_a_place_less_rank_keeps_the_countries_before_ranking_them(
     _stats_registry: _StatsRegistry,
     publisher: ResultPublisher,
 ) -> None:
-    """The retrieval asks dfo-apis for each place's types, the filter keeps the
+    """The retrieval asks apis for each place's types, the filter keeps the
     places typed Country, and the top two are the two largest countries: Earth
     and the World Bank's high-income group, both larger, are left out."""
 
@@ -2095,7 +2101,7 @@ def _serve_gdp_in_both_renderings(
 ) -> list[tuple[str, bool]]:
     """Answer GDP's mint with the type column when `options.columns` asks for it, and
     without otherwise, under one `content_version`. Each manifest lists both renderings,
-    the one not requested first, as dfo-apis lists every rendering stored under a pair.
+    the one not requested first, as apis lists every rendering stored under a pair.
     Returns the frame fetches as `(content_version, typed)`, in order: the plain read
     fetches the version's canonical frame, and the typed read its rendering."""
     renderings = {
@@ -2148,7 +2154,7 @@ async def test_a_level_filtered_rank_after_a_plain_read_of_the_same_mint_keeps_t
     _stats_registry: _StatsRegistry,
 ) -> None:
     """A plain read of GDP is stored first. The rank's retrieval asks for place types,
-    and dfo-apis answers under the same `{spec_id, content_version}`; the typed frame is
+    and apis answers under the same `{spec_id, content_version}`; the typed frame is
     a frame of its own, so the level filter finds its type column."""
     fetched = _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
@@ -2191,7 +2197,7 @@ async def test_a_plain_total_after_a_level_filtered_rank_of_the_same_mint_reads_
 
         plain = await surface.call_tool(tool=_GET_DATA, arguments={"spec_id": GDP_SPEC})
         assert not plain.is_error, plain.text
-        plain_content = plain.structured_content or {}
+        plain_content: dict[str, Any] = plain.structured_content or {}
         total = await surface.call_tool(
             tool=ToolId(server="analysis-mcp", name="aggregate"),
             arguments={
@@ -2215,7 +2221,7 @@ async def test_a_reads_freshness_date_is_its_own_renderings_beside_a_sibling(
     typed: bool,
 ) -> None:
     """The harness dates a retrieval by its manifest's data artifact
-    (`harness.provenance.data_artifact`). dfo-apis lists the other rendering first
+    (`harness.provenance.data_artifact`). apis lists the other rendering first
     with its own `created_at`, and get_data's manifest keeps only the requested one."""
     _serve_gdp_in_both_renderings(monkeypatch, _stats_registry)
     app = create_app(settings=Settings(mcp_api_token="test-token"))
@@ -2244,7 +2250,7 @@ def _gdp_surface(app: Any, mounted_mcp_transport: Callable[..., Any]) -> McpSurf
     )
 
 
-# --- a flow retrieval that ends a plan, served by dfo-apis without its group totals ---
+# --- a flow retrieval that ends a plan, served by apis without its group totals ---
 
 # "Aid to Kenya from every donor": the definition binds Kenya and leaves the donors open.
 KENYA_DONORS_IDENTITY: dict[str, Any] = {
@@ -2257,7 +2263,7 @@ KENYA_DONORS_IDENTITY: dict[str, Any] = {
     "slots": [],
 }
 KENYA_DONORS_SPEC = spec_id_for(canonicalize(KENYA_DONORS_IDENTITY))
-# Each donor's 2023 aid to Kenya and the kind dfo-apis' code index declares for it. The
+# Each donor's 2023 aid to Kenya and the kind apis' code index declares for it. The
 # DAC total and the G7 hold the two countries' figures again.
 KENYA_DONORS: dict[str, tuple[str, float]] = {
     "country/DEU": ("party", 20.0),
@@ -2266,7 +2272,7 @@ KENYA_DONORS: dict[str, tuple[str, float]] = {
     "GroupOfSeven": ("total", 50.0),
 }
 KENYA_DONOR_TOTALS = sorted(ref for ref, (kind, _) in KENYA_DONORS.items() if kind == "total")
-# dfo-apis' base version of the frame, and the version its cut of the group totals mints.
+# apis' base version of the frame, and the version its cut of the group totals mints.
 KENYA_DONORS_BASE = "cv_" + "b" * 32
 KENYA_DONORS_CUT = "cv_" + "c" * 32
 
@@ -2278,7 +2284,7 @@ def _kenya_donors(*, cut: bool) -> dict[str, tuple[str, float]]:
 
 
 def _kenya_donors_parquet_bytes(*, cut: bool) -> bytes:
-    """The frame dfo-apis renders with the party kinds, of the base or the cut version."""
+    """The frame apis renders with the party kinds, of the base or the cut version."""
     donors = _kenya_donors(cut=cut)
     count = len(donors)
     table = pa.table(
@@ -2299,7 +2305,7 @@ def _kenya_donors_parquet_bytes(*, cut: bool) -> bytes:
 
 
 def _kenya_donors_mint_response(*, cut: bool, options: Mapping[str, Any]) -> dict[str, Any]:
-    """dfo-apis' answer to a mint with `options`: the base version, or the version of the
+    """apis' answer to a mint with `options`: the base version, or the version of the
     frame cut of the donors' group totals, whose coverage, statistics and trace are its
     own."""
     donors = _kenya_donors(cut=cut)
@@ -2407,9 +2413,9 @@ def _kenya_donors_approved_plan(decision: Callable[..., Decision], schemas: dict
 
 
 class _ServedFramePlatform:
-    """The presentation tools `McpExecutor` calls, reading each frame as dfo-apis serves it:
+    """The presentation tools `McpExecutor` calls, reading each frame as apis serves it:
     by its pair, from `served` (a `content_version` to the donors its frame holds), as
-    presentation-mcp reads a retrieval's frame from dfo-apis. Records the pair of every
+    presentation-mcp reads a retrieval's frame from apis. Records the pair of every
     `describe_frame` and every created component."""
 
     def __init__(self, served: Mapping[str, Sequence[str]]) -> None:
@@ -2462,7 +2468,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     publisher: ResultPublisher,
 ) -> None:
     """The compiled retrieval asks get_data for the frame without party totals, which
-    data-mcp asks dfo-apis for. dfo-apis answers with the version of the cut frame, so the
+    data-mcp asks apis for. apis answers with the version of the cut frame, so the
     frame the answer is described and charted by is that version's pair, holding the two
     countries alone, and the digest names the totals left out."""
     minted: list[dict[str, Any]] = []
@@ -2557,7 +2563,7 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
     cut = FrameRef(spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT)
     assert answer.presented == cut
     assert answer.store == frame_ref_for(
-        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=("party_kind",)
+        spec_id=KENYA_DONORS_SPEC, content_version=KENYA_DONORS_CUT, columns=KIND_COLUMNS
     )
     # The frame the answer is described and drawn by is the cut version's.
     assert platform.described == [cut.model_dump()]
@@ -2569,13 +2575,277 @@ async def test_a_retrieval_that_ends_a_plan_is_described_and_drawn_on_dfo_apis_c
         "country/DEU",
         "country/FRA",
     ]
-    # The digest the agent reads names the totals dfo-apis left out.
+    # The digest the agent reads names the totals apis left out.
     (step,) = outcome.steps
     assert (
         "Left out of the frame: 2 group totals on financingProvider (DACTotal, GroupOfSeven)"
         in step.digest
     )
-    # data-mcp asked dfo-apis for the cut, with the kinds.
+    # data-mcp asked apis for the cut, with the kinds.
     (options,) = minted
     assert options["without_party_totals"] is True
-    assert options["columns"] == ["party_kind"]
+    assert options["columns"] == list(KIND_COLUMNS)
+
+
+# --- an outside client's path to the OECD's all-donors figures ---
+
+# Official Donors, Total ("DACOfficialDonors") and Private Donors, Total ("DACPrivateDonors") are
+# DAC2a rows that each hold a whole population of donors: Ethiopia, 2021.
+OFFICIAL_DONORS_2021 = 4_267_588_068.0
+PRIVATE_DONORS_2021 = 310_811_932.0
+WHOLE_TOTALS: dict[str, float] = {
+    "DACOfficialDonors": OFFICIAL_DONORS_2021,
+    "DACPrivateDonors": PRIVATE_DONORS_2021,
+}
+OFFICIAL_ONLY_IDENTITY: dict[str, Any] = {
+    "identity_version": "spec1",
+    "shape": {"id": "Oda", "kind": "stat_var"},
+    "entities": {"origin": ["DACOfficialDonors"], "destination": ["country/ETH"]},
+    "facets": {"unit": {"ref": "USD", "state": "value"}},
+    "requested_window": {"kind": "all"},
+    "slots": [],
+}
+BOTH_TOTALS_IDENTITY: dict[str, Any] = {
+    **OFFICIAL_ONLY_IDENTITY,
+    "entities": {
+        "origin": ["DACOfficialDonors", "DACPrivateDonors"],
+        "destination": ["country/ETH"],
+    },
+}
+OFFICIAL_ONLY_SPEC = spec_id_for(canonicalize(OFFICIAL_ONLY_IDENTITY))
+BOTH_TOTALS_SPEC = spec_id_for(canonicalize(BOTH_TOTALS_IDENTITY))
+_WHOLE_TOTAL_CLASSES = {"DACOfficialDonors": "official", "DACPrivateDonors": "private"}
+_WHOLE_TOTAL_IDENTITIES = {
+    OFFICIAL_ONLY_SPEC: (OFFICIAL_ONLY_IDENTITY, ["DACOfficialDonors"]),
+    BOTH_TOTALS_SPEC: (BOTH_TOTALS_IDENTITY, ["DACOfficialDonors", "DACPrivateDonors"]),
+}
+
+
+def _whole_totals_parquet_bytes(donors: Sequence[str], *, kinds: bool) -> bytes:
+    """Each of `donors`' 2021 aid to Ethiopia as apis renders it, with the party kind,
+    class and whole cells when `kinds`: each donor a total marked whole, of its own class."""
+    count = len(donors)
+    columns: dict[str, Any] = {
+        "stat_var": pa.array(["dcid:Oda"] * count, type=pa.string()),
+        "financingProvider": pa.array(list(donors), type=pa.string()),
+        "financingRecipient": pa.array(["country/ETH"] * count, type=pa.string()),
+        "time_period": pa.array(["2021"] * count, type=pa.string()),
+        "value": pa.array([WHOLE_TOTALS[donor] for donor in donors], type=pa.float64()),
+        "unit": pa.array(["USD"] * count, type=pa.string()),
+    }
+    if kinds:
+        columns["financingProvider_party_kind"] = pa.array(["total"] * count)
+        columns["financingProvider_party_class"] = pa.array(
+            [_WHOLE_TOTAL_CLASSES[donor] for donor in donors]
+        )
+        columns["financingProvider_party_whole"] = pa.array(["true"] * count)
+        columns["financingRecipient_party_kind"] = pa.array(["party"] * count)
+        columns["financingRecipient_party_class"] = pa.array(["official"] * count)
+        columns["financingRecipient_party_whole"] = pa.array(["false"] * count)
+    buf = io.BytesIO()
+    pq.write_table(pa.table(columns), buf)
+    return buf.getvalue()
+
+
+_WHOLE_TOTALS_STAMP = "ens_" + "1" * 16
+
+
+def _whole_totals_mint_response(spec_id: str, *, kinds: bool) -> dict[str, Any]:
+    """apis' manifest for `spec_id`: one `content_version` for both renderings, the
+    request's options as the artifact's `rendering`, and on the kind file the stamp of
+    the code index its kind cells come from."""
+    identity, donors = _WHOLE_TOTAL_IDENTITIES[spec_id]
+    parquet = _whole_totals_parquet_bytes(donors, kinds=kinds)
+    rendering: dict[str, Any] = {"bundle": False, "format": "parquet", "layout": "frame"}
+    if kinds:
+        rendering["columns"] = list(KIND_COLUMNS)
+    return {
+        "schema_version": 1,
+        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
+        "content_version": version_of(_whole_totals_parquet_bytes(donors, kinds=False)),
+        "coverage": {
+            "rows": len(donors),
+            "dimensions": [
+                {"label": "financingProvider", "count": len(donors), "axis": "origin"},
+                {"label": "financingRecipient", "count": 1, "axis": "destination"},
+                {"label": "years", "count": 1},
+            ],
+        },
+        "citation": {"text": "OECD DAC2a", "sources": []},
+        "trace": {"graph_revision": "g1", "facets": []},
+        "warnings": [],
+        "artifacts": [
+            {
+                "artifact_digest": f"sha256:{hashlib.sha256(parquet).hexdigest()}",
+                "rendering": rendering,
+                "bytes": len(parquet),
+                "media_type": "application/vnd.apache.parquet",
+                "created_at": "2026-10-01T00:00:00+00:00",
+                "tier": "working",
+                "url": "/links/should-not-be-fetched",
+                **({"enrichment_stamp": _WHOLE_TOTALS_STAMP} if kinds else {}),
+            }
+        ],
+        "statistics": [
+            {
+                "stat_var": "dcid:Oda",
+                "entities": [
+                    {"role": "financingProvider", "ref": donor},
+                    {"role": "financingRecipient", "ref": "country/ETH"},
+                ],
+                "facet": {"unit": "USD"},
+                "observations": 1,
+                "first": {"value": WHOLE_TOTALS[donor], "period": "2021"},
+                "latest": {"value": WHOLE_TOTALS[donor], "period": "2021"},
+                "minimum": {"value": WHOLE_TOTALS[donor], "period": "2021"},
+                "maximum": {"value": WHOLE_TOTALS[donor], "period": "2021"},
+            }
+            for donor in donors
+        ],
+    }
+
+
+def _serve_whole_totals(
+    monkeypatch: pytest.MonkeyPatch, stats_registry: _StatsRegistry
+) -> list[dict[str, Any]]:
+    """Answer the whole-total specs' mints with the kind columns when `options.columns`
+    asks for them, as apis does. Returns the options of every mint."""
+    renderings = {
+        (spec_id, kinds): _register_statistics(
+            stats_registry, _whole_totals_mint_response(spec_id, kinds=kinds)
+        )
+        for spec_id in _WHOLE_TOTAL_IDENTITIES
+        for kinds in (False, True)
+    }
+    fetchable = {
+        f"sha256:{hashlib.sha256(data).hexdigest()}": data
+        for spec_id, (_identity, donors) in _WHOLE_TOTAL_IDENTITIES.items()
+        for data in (_whole_totals_parquet_bytes(donors, kinds=True),)
+    }
+    minted: list[dict[str, Any]] = []
+
+    async def fake_fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        return fetchable[artifact_digest]
+
+    def mint_handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            body = json.loads(request.content)
+            minted.append(body["options"])
+            spec_id = body["input"]["spec_id"]
+            columns = body["options"].get("columns")
+            answer = renderings[spec_id, columns is not None]
+            if columns is not None:
+                # apis records the columns the mint asked for as the artifact's rendering.
+                answer = {
+                    **answer,
+                    "artifacts": [
+                        {**artifact, "rendering": {**artifact["rendering"], "columns": columns}}
+                        if "columns" in artifact.get("rendering", {})
+                        else artifact
+                        for artifact in answer["artifacts"]
+                    ],
+                }
+            return httpx2.Response(200, json=answer)
+        if request.url.path.endswith("/options"):
+            # The spec is not in the definition store, so `get_data` reads its identity here.
+            spec_id = request.url.path.split("/")[-2]
+            return httpx2.Response(200, json=renderings[spec_id, False])
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    serve_canonical_frames(monkeypatch, fake_fetch)
+    client_holder.set_client(data_mcp_client(mint_handler))
+    return minted
+
+
+def _flow_surface(app: Any, mounted_mcp_transport: Callable[..., Any]) -> McpSurface:
+    return _gdp_surface(app, mounted_mcp_transport)
+
+
+async def test_get_data_with_default_flags_on_a_spec_binding_the_official_total_returns_one_row(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    _stats_registry: _StatsRegistry,
+) -> None:
+    """The OECD's figure for every official donor, read by an outside model that sets no
+    flag, is the one row it sums."""
+    minted = _serve_whole_totals(monkeypatch, _stats_registry)
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+
+    async with running_lifespan(app):
+        surface = _flow_surface(app, mounted_mcp_transport)
+        read = await surface.call_tool(tool=_GET_DATA, arguments={"spec_id": OFFICIAL_ONLY_SPEC})
+        assert not read.is_error, read.text
+        held = await get_frame_store().get(
+            FrameRef.model_validate((read.structured_content or {})["frame_ref"])
+        )
+
+    assert held is not None
+    assert "columns" not in minted[0]
+    table = held[0].table
+    assert table.column("financingProvider").to_pylist() == ["DACOfficialDonors"]
+    assert table.column("value").to_pylist() == [OFFICIAL_DONORS_2021]
+
+
+async def test_an_outside_client_sums_a_pair_of_whole_totals_after_asking_for_place_types(
+    monkeypatch: pytest.MonkeyPatch,
+    running_lifespan: Callable[..., Any],
+    mounted_mcp_transport: Callable[..., Any],
+    _stats_registry: _StatsRegistry,
+) -> None:
+    """`search` for "all donors including private" returns one spec binding both totals.
+    `get_data` with default flags gives two rows, and no kind column says they are
+    whole totals, so `aggregate` refuses `place_levels_mixed`. After a retry with
+    `place_types`, both are totals whose whole cells are `true`, and the sum is both
+    populations."""
+    minted = _serve_whole_totals(monkeypatch, _stats_registry)
+    app = create_app(settings=Settings(mcp_api_token="test-token"))
+
+    async def total(surface: McpSurface, frame_ref: dict[str, Any]) -> Any:
+        return await surface.call_tool(
+            tool=ToolId(server="analysis-mcp", name="aggregate"),
+            arguments={
+                "frame_ref": frame_ref,
+                "aggregation": "sum",
+                "group_by": ["time_period"],
+            },
+        )
+
+    async with running_lifespan(app):
+        surface = _flow_surface(app, mounted_mcp_transport)
+        plain = await surface.call_tool(tool=_GET_DATA, arguments={"spec_id": BOTH_TOTALS_SPEC})
+        assert not plain.is_error, plain.text
+        plain_content: dict[str, Any] = plain.structured_content or {}
+        plain_held = await get_frame_store().get(
+            FrameRef.model_validate(plain_content["frame_ref"])
+        )
+        refused = await total(surface, plain_content["frame_ref"])
+        typed = await surface.call_tool(
+            tool=_GET_DATA, arguments={"spec_id": BOTH_TOTALS_SPEC, "place_types": True}
+        )
+        assert not typed.is_error, typed.text
+        typed_content: dict[str, Any] = typed.structured_content or {}
+        summed = await total(surface, typed_content["frame_ref"])
+        assert not summed.is_error, summed.text
+        sum_pair = summed.structured_content or {}
+        summed_held = await get_frame_store().get(
+            FrameRef(spec_id=sum_pair["spec_id"], content_version=sum_pair["content_version"])
+        )
+
+    assert plain_held is not None
+    assert plain_held[0].table.column("value").to_pylist() == list(WHOLE_TOTALS.values())
+    assert sum(plain_held[0].table.column("value").to_pylist()) == pytest.approx(4_578_400_000.0)
+    assert refused.is_error
+    assert (refused.structured_content or {})["code"] == "place_levels_mixed"
+    flow_columns = ("financingProvider_type", "financingRecipient_type", *KIND_COLUMNS)
+    assert [options.get("columns") for options in minted] == [None, list(flow_columns)]
+    # The frame holding the kinds is named apart from the plain one, under its file's stamp.
+    assert typed_content["frame_ref"] != plain_content["frame_ref"]
+    assert typed_content["frame_ref"] == frame_ref_for(
+        spec_id=BOTH_TOTALS_SPEC,
+        content_version=typed_content["content_version"],
+        columns=flow_columns,
+        enrichment_stamp=_WHOLE_TOTALS_STAMP,
+    ).model_dump(mode="json")
+    assert summed_held is not None
+    assert summed_held[0].table.column("value").to_pylist() == pytest.approx([4_578_400_000.0])

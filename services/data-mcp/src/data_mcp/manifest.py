@@ -1,12 +1,12 @@
 """This service's own manifest model, stripped of every artifact download link.
 
-`get_data` mints a manifest from dfo-apis' mint route
+`get_data` mints a manifest from apis' mint route
 (`datasets_api.manifest_models.Manifest`). That manifest's `artifacts`
 entries carry `url`: a stable, root-relative download link that redirects to
 the underlying bytes. A model gets the link through the artifact resource
 (`artifact_resource.py`) when it needs one, so this module re-validates the
 raw mint payload against a model this service owns rather than reusing
-dfo-apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
+apis'. Reuse isn't an option regardless: upstream's `ArtifactEntryModel`
 requires `url` with no default and sets `extra="forbid"`, so there is no way
 to express "the same shape minus the URL" as a subset of it.
 
@@ -48,7 +48,7 @@ def artifact_resource_uri(*, subject_id: str, content_version: str, artifact_dig
 
 
 # Applied to every model in this tree instead of the house `extra="forbid"`
-# (see `search_tool.py`). `forbid` would mean any new field dfo-apis adds to
+# (see `search_tool.py`). `forbid` would mean any new field apis adds to
 # the manifest (`series_count`, for instance) breaks every retrieval until
 # this module catches up. `allow` would
 # forward a field this service has never reviewed straight to the model,
@@ -60,7 +60,7 @@ _UNSEEN_FIELDS_ARE_DROPPED = ConfigDict(extra="ignore")
 
 
 class RoleNoun(BaseModel):
-    """What dfo-apis calls the members of a role, for the frame's kind of
+    """What apis calls the members of a role, for the frame's kind of
     flow: a provider and providers of aid, a creditor and creditors of debt."""
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -73,13 +73,13 @@ class CoverageDimension(BaseModel):
 
     `axis` is the flow axis (`origin`, `destination`) the role column's
     declared property sits on. It is absent for `years`, for a role no flow
-    axis covers (`observationAbout`), and from a dfo-apis that predates the
+    axis covers (`observationAbout`), and from an apis service that predates the
     field. A plain string, so an axis this service has not seen still
     parses.
 
-    `noun` is what dfo-apis calls the role's members
+    `noun` is what apis calls the role's members
     (`common.period_note` counts them by it). It is absent for `years`, for a
-    role dfo-apis words no noun for, and from a dfo-apis that predates the
+    role apis words no noun for, and from an apis service that predates the
     field; a noun of any other shape reads as absent, so it fails no
     retrieval.
     """
@@ -117,8 +117,8 @@ class CoverageModel(BaseModel):
     """What a mint served: its rows, counted dimensions and window.
 
     `recent_years` holds three calendar years, newest first, `elected_year`
-    the year dfo-apis' election chooses among them, and `fullest_year` the
-    fullest of the last ten. dfo-apis sends each only for a frame of one
+    the year apis' election chooses among them, and `fullest_year` the
+    fullest of the last ten. apis sends each only for a frame of one
     year, and `fullest_year` only when it judges the served year thin beside
     it. An absent one stays out of a dump, so a manifest without them
     serialises as it arrived.
@@ -147,12 +147,47 @@ class CitationModel(BaseModel):
     sources: list[CitationSource]
 
 
+class CountedRefsModel(BaseModel):
+    """The things of one kind a warning counts: how many, and the `dcid:` refs of the
+    first few (apis' `CountedRefsModel`). The warning's message states the count and
+    names none."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    count: int
+    refs: list[str]
+
+
+class EntityYearsModel(BaseModel):
+    """One entity a conversion left rows out of, and the years of those rows as runs,
+    `1990-2001` or `2004` (apis' `EntityYearsModel`)."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    ref: str
+    years: list[str]
+
+
+class CountedEntityYearsModel(BaseModel):
+    """The entities a conversion left rows out of: how many, and the first few, each with
+    its years (apis' `CountedEntityYearsModel`)."""
+
+    model_config = _UNSEEN_FIELDS_ARE_DROPPED
+    count: int
+    entities: list[EntityYearsModel]
+
+
 class WarningModel(BaseModel):
     """One manifest warning.
 
     `contributing_member_count` and `stat_var_label` are set on a `stat_vars_summed`
-    warning only: the number of StatVars with rows that dfo-apis added into the family
-    total, and the label dfo-apis' presentation door gives the family ref.
+    warning only: the number of StatVars with rows that apis added into the family
+    total, and the label apis' presentation door gives the family ref.
+
+    A `coverage_below_scope` warning can carry `member_count`, the series a group
+    requested, `off_cadence_members` and `out_of_window_members`, the group members the
+    figures leave out, and `unserved_entities`, the bound entities that served nothing.
+    `omitted_entities` is set on `currency_unmapped_omitted` and `omitted_entity_years`
+    on `deflator_missing_omitted`. Each stays out of a dump when absent, so a warning
+    without them serialises as it arrived.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -161,6 +196,12 @@ class WarningModel(BaseModel):
     message: str
     contributing_member_count: int | None = None
     stat_var_label: str | None = None
+    member_count: int | None = Field(default=None, exclude_if=_is_none)
+    off_cadence_members: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    out_of_window_members: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    unserved_entities: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    omitted_entities: CountedRefsModel | None = Field(default=None, exclude_if=_is_none)
+    omitted_entity_years: CountedEntityYearsModel | None = Field(default=None, exclude_if=_is_none)
 
 
 class StatPointModel(BaseModel):
@@ -207,6 +248,17 @@ class ArtifactEntry(BaseModel):
     pull the link at fetch time. `Manifest._attach_artifact_resource_uris` derives and
     overwrites it after validation, so the default here only has to satisfy
     an already-stripped document that predates the field.
+
+    `enrichment_stamp` is the digest of the code-index facts behind the file's
+    `{role}_party_kind`, `{role}_party_class` and `{role}_party_whole` cells (apis'
+    `CodeIndex.enrichment_digest`). apis sends
+    it exactly when the file holds party-kind cells read under the code index serving
+    the call. A file with no party-kind cell carries none, and so does a listed file
+    rendered under an earlier digest with no current twin (a pinned file, an older
+    layout), whose kinds may be out of date. `data_mcp.frame_materialisation.
+    frame_ref_for` salts the name of a frame read from the file with it, so a change
+    to a party's kind names a new frame, and a frame read from a file without one is
+    named unsalted. It stays out of a dump when absent.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -217,6 +269,7 @@ class ArtifactEntry(BaseModel):
     created_at: str
     tier: str
     resource_uri: str | None = None
+    enrichment_stamp: str | None = Field(default=None, exclude_if=_is_none)
 
 
 class DefinitionModel(BaseModel):
@@ -227,24 +280,29 @@ class DefinitionModel(BaseModel):
 
 
 class PartyTotalsLeftOut(BaseModel):
-    """One party role whose group totals dfo-apis left out of a frame minted with
-    `options.without_party_totals`, and the refs of those totals in ref order: one entry
-    of the manifest's `trace.party_totals_left_out` (`party_totals_left_out`)."""
+    """The group totals apis left out of one party role of a frame minted with
+    `options.without_party_totals`, in ref order, within one provenance: one entry of the
+    manifest's `trace.party_totals_left_out` (`party_totals_left_out`). `provenance` is the
+    dcid of the dataset whose rows lost them, and `None` for the rows that carry no
+    provenance. An entry with no `provenance` key comes from a trace recorded before apis
+    keyed the cut on the dataset, whose cut covered every dataset; `model_fields_set` tells
+    that entry from a null one."""
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
     role: str
+    provenance: str | None = None
     entities: list[str]
 
 
-# The trace member dfo-apis lists a cut frame's left-out totals under, present only when
+# The trace member apis lists a cut frame's left-out totals under, present only when
 # the cut left some out (`datasets_api.party_totals.TRACE_KEY`).
 PARTY_TOTALS_LEFT_OUT_KEY = "party_totals_left_out"
 _PARTY_TOTALS_LEFT_OUT = TypeAdapter(list[PartyTotalsLeftOut])
 
 
 def party_totals_left_out(trace: Mapping[str, object]) -> list[PartyTotalsLeftOut]:
-    """The group totals a manifest's `trace` says dfo-apis left out of its frame, one entry
-    per party role in role order, and none for a frame that left none out.
+    """The group totals a manifest's `trace` says apis left out of its frame, one entry
+    per party role and provenance in role order, and none for a frame that left none out.
 
     Raises:
         pydantic.ValidationError: When the trace lists them in another shape.
@@ -269,6 +327,9 @@ class Manifest(BaseModel):
     inline `statistics` array upstream once sent; this model does not
     declare that field, so `extra="ignore"` (`_UNSEEN_FIELDS_ARE_DROPPED`)
     silently drops it before a reader ever sees it.
+
+    The stamp of the kind cells sits on each artifact (`ArtifactEntry.enrichment_stamp`),
+    since one manifest may list files rendered under different code indexes.
     """
 
     model_config = _UNSEEN_FIELDS_ARE_DROPPED
@@ -330,7 +391,7 @@ def strip_manifest(payload: Mapping[str, Any]) -> Manifest:
     """Validate a raw mint-route response into a URL-free `Manifest`.
 
     Args:
-        payload: The mint route's parsed JSON body, exactly as dfo-apis
+        payload: The mint route's parsed JSON body, exactly as apis
             served it.
 
     Returns:

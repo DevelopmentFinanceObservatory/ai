@@ -45,6 +45,7 @@
     "distinction": "comparison, not quotient_of: by how many dollars one exceeds the other is a difference, not a ratio"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "By how many US dollars did Ghana's GDP exceed its external debt stock in each year from 2015 to 2022?",
     "answer_mode": "computed",
@@ -64,7 +65,10 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_cc34c1cb567ce34e1e378b144378f9a2"
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
       },
       {
         "kind": "dataset",
@@ -79,7 +83,10 @@
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_9c495a2de1bbf6789e34b6100781e71d"
+        "unit": {
+          "currency": "USD",
+          "prices": "current"
+        }
       },
       {
         "kind": "comparison",

@@ -22,12 +22,20 @@ from compiler.evidence import (
     open_axes_for,
     opens_place_axis,
     resolve_entity,
+    unlabelled_series_refs,
+    with_series_labels,
 )
 from compiler.sources import member_digest, source_from_spec_block, stat_var_reading
 from data_mcp.manifest import Manifest, SeriesStatisticsModel
 from data_mcp.series_statistics import SERIES_STATISTICS_ARROW_SCHEMA, series_statistics_table
-from planner.plan import Coverage, DatasetRequirement, Entity, Unit
-from planner.records import EvidenceIssue, Period, ResolvedSourceMention, StatVarReading
+from planner.plan import Coverage, DatasetRequirement, Entity, Unit, open_window
+from planner.records import (
+    EvidenceIssue,
+    Period,
+    ResolvedSourceMention,
+    SeriesEntity,
+    StatVarReading,
+)
 from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 
 RequirementFactory = Callable[..., DatasetRequirement]
@@ -659,7 +667,13 @@ def test_a_constant_price_requirement_is_met_by_the_same_base_year(
 ) -> None:
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
-    assert _basis_codes(constant, source(unit_label="constant 2015 US dollars")) == []
+    assert (
+        _basis_codes(
+            constant,
+            source(unit_ref="ConstantUSD_2015", unit_label="constant 2015 US dollars"),
+        )
+        == []
+    )
 
 
 def test_a_constant_price_requirement_fails_on_another_base_year(
@@ -675,13 +689,15 @@ def test_a_constant_price_requirement_fails_on_another_base_year(
     assert (issue.found, issue.required) == (2010, 2015)
 
 
-def test_a_constant_price_requirement_is_unverified_without_a_base_year(
+def test_a_constant_price_requirement_is_refused_without_a_base_year(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
+    # An answer over a source of unknown base year would claim a year it
+    # does not have.
     constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2015))
 
     assert _basis_codes(constant, source(unit_label="real US dollars")) == [
-        ("unit_price_basis_unverified", "warning")
+        ("unit_price_basis_unverified", "error")
     ]
 
 
@@ -1102,11 +1118,79 @@ def test_a_retrieval_matching_the_approved_source_meets_the_requirement(
 
     assert errors(issues) == []
     # The unit names its currency but no price basis, which the surface does
-    # not carry yet (dfo-ai#193), so the basis rides along as a note.
+    # not carry yet, so the basis rides along as a note.
     assert [issue.code for issue in issues] == [
         EvidenceIssueCode.UNIT_MATCHES,
         EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
     ]
+
+
+@pytest.mark.parametrize(
+    ("unit_ref", "unit_label", "request_unit", "refused_by"),
+    [
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-prices-of-an-unstated-base-year",
+        ),
+        pytest.param(
+            "undata/UNIT_MEASURE-CR_USD_K",
+            "United States dollars at constant 2024 prices",
+            None,
+            EvidenceIssueCode.UNIT_PRICE_BASIS_UNVERIFIED,
+            id="constant-2024-prices-stated-only-in-the-label",
+        ),
+        pytest.param(
+            "ConstantUSD_2024",
+            "Constant 2024 US dollars",
+            None,
+            None,
+            id="unit-id-in-constant-2024",
+        ),
+        pytest.param(
+            "CurrencyUSD",
+            "US Dollar",
+            {"currency": "USD", "prices": "constant", "base_year": 2024},
+            None,
+            id="bound-by-request-to-constant-2024",
+        ),
+    ],
+)
+def test_discovery_and_the_manifest_read_a_price_basis_alike(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    unit_ref: str,
+    unit_label: str,
+    request_unit: dict[str, object] | None,
+    refused_by: EvidenceIssueCode | None,
+) -> None:
+    # A retrieved series states its unit as dfo-apis writes it, a request
+    # object or a ref with no label, so a plan accepted at approval is
+    # accepted once retrieved, and one refused at run time never compiles.
+    constant = requirement(unit=Unit(currency="USD", prices="constant", base_year=2024))
+    identity: dict[str, Any] = {"stat_var": "DebtServicePaid"}
+    if request_unit is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": request_unit}}
+    discovered = source(unit_ref=unit_ref, unit_label=unit_label, identity=identity)
+    retrieved = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", facet={"unit": request_unit or unit_ref})
+        ),
+    )
+
+    def refusals(evidence: RetrievalEvidence) -> list[EvidenceIssueCode]:
+        return [
+            issue.code
+            for issue in errors(check_evidence(constant, evidence))
+            if issue.code.value.startswith("unit")
+        ]
+
+    at_approval = refusals(evidence_from_source(discovered))
+    assert at_approval == refusals(retrieved)
+    assert at_approval == ([refused_by] if refused_by is not None else [])
 
 
 def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(
@@ -1119,6 +1203,95 @@ def test_an_entity_is_found_through_the_ref_the_approved_source_resolved(
     )
 
     assert [i.code for i in errors(without)] == [EvidenceIssueCode.ENTITY_MISSING]
+
+
+_DEBTORS = (("Kenya", "debtor"), ("Ghana", "debtor"))
+# The `wide_source` fixture's two debtors, and a creditor beside them.
+_WIDE = (
+    ResolvedEntity(role="destination", ref="country/KEN", label="Kenya"),
+    ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
+)
+_GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
+
+
+@pytest.mark.parametrize(
+    ("named", "on_missing", "approved_entities", "held", "severity"),
+    [
+        # Ghana's series stopped before the period: Kenya stands for the
+        # debtors named, so the run answers for Kenya and leaves Ghana out.
+        pytest.param(_DEBTORS, "report_gaps", "wide", "KEN", Severity.WARNING, id="left-out"),
+        # Kenya and Ghana sit on one column of the approved source, whatever
+        # the phrases: "recipient" and "debtor" place on one flow side, and
+        # "country" and "economy" on none.
+        pytest.param(
+            (("Kenya", "recipient"), ("Ghana", "debtor")),
+            "report_gaps",
+            "wide",
+            "KEN",
+            Severity.WARNING,
+            id="same-side",
+        ),
+        pytest.param(
+            (("Kenya", "country"), ("Ghana", "economy")),
+            "report_gaps",
+            "wide",
+            "KEN",
+            Severity.WARNING,
+            id="unplaced-phrases-one-column",
+        ),
+        pytest.param(_DEBTORS, "fail", "wide", "KEN", Severity.ERROR, id="fails-on-gaps"),
+        # No debtor left to answer for.
+        pytest.param(
+            (("Ghana", "debtor"),), "report_gaps", "wide", "KEN", Severity.ERROR, id="none-left"
+        ),
+        # Germany remains, on another column.
+        pytest.param(
+            (("Germany", "creditor"), ("Ghana", "debtor")),
+            "report_gaps",
+            "with-germany",
+            "DEU",
+            Severity.ERROR,
+            id="other-column",
+        ),
+        # A name the approved source never resolved is no gap in the data.
+        pytest.param(_DEBTORS, "report_gaps", "kenya", "KEN", Severity.ERROR, id="unresolved"),
+        pytest.param(_DEBTORS, "report_gaps", None, "KEN", Severity.ERROR, id="unapproved"),
+    ],
+)
+def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_one_remains(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    wide_source: SourceFactory,
+    named: tuple[tuple[str, str], ...],
+    on_missing: str,
+    approved_entities: str | None,
+    held: str,
+    severity: Severity,
+) -> None:
+    approved = {
+        "wide": wide_source(),
+        "with-germany": wide_source(entities=(*_WIDE, _GERMANY)),
+        "kenya": source(),
+    }.get(approved_entities or "")
+    issues = check_evidence(
+        requirement(
+            entities=[Entity(name=name, role=role) for name, role in named],
+            coverage=Coverage(on_missing=on_missing),
+        ),
+        evidence_from_manifest(
+            _manifest(),
+            series_stats=_series_stats(
+                _stat("DebtServicePaid", entities=[{"role": "recipient", "ref": f"country/{held}"}])
+            ),
+        ),
+        approved=approved,
+    )
+
+    assert [
+        issue.severity
+        for issue in issues
+        if issue.code is EvidenceIssueCode.ENTITY_MISSING and issue.required == "Ghana"
+    ] == [severity]
 
 
 def test_an_identity_other_than_the_approved_one_is_drift(
@@ -1220,11 +1393,12 @@ _PER_SERIES_CODES = {
     [
         # Ten reported years and two estimated ones span 2015-2026 as one series.
         pytest.param(10, _CONTINUED, [], id="continued-series-is-whole"),
-        # Its observations are summed across both rows: 8 + 2 across 12 years.
+        # Its observations are summed across both rows: 8 + 2 across 12 years,
+        # and its largest value is the estimates' 2.2.
         pytest.param(
             8,
             _CONTINUED,
-            [(EvidenceIssueCode.COVERAGE_GAPS, 10, 12)],
+            [(EvidenceIssueCode.COVERAGE_GAPS, 10, 12, 2.2)],
             id="continued-series-gaps-count-both-rows",
         ),
         # Without a continuation the estimates row is a series of its own, short
@@ -1237,6 +1411,7 @@ _PER_SERIES_CODES = {
                     EvidenceIssueCode.WINDOW_SHORT,
                     {"start": 2025, "end": 2026},
                     {"start": 2015, "end": 2024},
+                    2.2,
                 )
             ],
             id="uncontinued-estimates-are-their-own-series",
@@ -1248,7 +1423,7 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
     source: SourceFactory,
     reported_observations: int,
     continuations: dict[str, object],
-    found: list[tuple[EvidenceIssueCode, object, object]],
+    found: list[tuple[EvidenceIssueCode, object, object, float]],
 ) -> None:
     """A frame Datasets continued with its source's estimates (the Zambia IMF case) holds
     one series as a row per `measurementMethod`; the manifest counts it once."""
@@ -1264,10 +1439,220 @@ def test_a_series_and_the_estimates_continuing_it_are_held_to_the_period_as_one(
     issues = check_evidence(requirement(), evidence, approved=source())
 
     assert [
-        (issue.code, issue.found, issue.required)
+        (issue.code, issue.found, issue.required, issue.magnitude)
         for issue in issues
         if issue.code in _PER_SERIES_CODES
     ] == found
+
+
+@pytest.mark.parametrize(
+    ("approved", "kenya"),
+    [
+        pytest.param(True, "Kenya", id="labelled-by-the-approved-source"),
+        pytest.param(False, None, id="unlabelled-with-no-approved-source"),
+    ],
+)
+def test_a_short_series_finding_names_its_entities(
+    requirement: RequirementFactory, source: SourceFactory, approved: bool, kenya: str | None
+) -> None:
+    """A series ending in 2021 with a year missing is short of 2015-2024 on
+    both counts; each finding carries its entities, with the label the
+    approved source gives a ref and none where it labels none."""
+    named = (
+        SeriesEntity(role="recipient", ref="country/KEN", label=kenya),
+        SeriesEntity(role="donor", ref="donor/X"),
+    )
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                entities=[
+                    {"role": "recipient", "ref": "country/KEN"},
+                    {"role": "donor", "ref": "donor/X"},
+                ],
+                observations=6,
+                latest={"value": 2.0, "period": "2021"},
+            )
+        ),
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=source() if approved else None)
+
+    assert [
+        (issue.code, issue.entities)
+        for issue in issues
+        if issue.code in {EvidenceIssueCode.WINDOW_SHORT, EvidenceIssueCode.COVERAGE_GAPS}
+    ] == [(EvidenceIssueCode.WINDOW_SHORT, named), (EvidenceIssueCode.COVERAGE_GAPS, named)]
+
+
+def _short_of(*refs: str, size: float | None, labelled: str | None = None) -> EvidenceIssue:
+    """A `window_short` finding on the series of `refs`, of largest absolute value `size`,
+    the ref `labelled` labelled by itself and the rest unlabelled."""
+    return EvidenceIssue(
+        code=EvidenceIssueCode.WINDOW_SHORT,
+        severity=Severity.WARNING,
+        requirement_id="debt",
+        detail="",
+        stat_var="Aid",
+        entities=tuple(
+            SeriesEntity(role="donor", ref=ref, label=ref if ref == labelled else None)
+            for ref in refs
+        ),
+        magnitude=size,
+    )
+
+
+@pytest.mark.parametrize(
+    ("limit", "refs"),
+    [
+        # Largest first, a size stated before none, ties by ref; a labelled ref
+        # and one repeated are asked once or not at all.
+        pytest.param(10, ["donor/C", "donor/A", "donor/B", "donor/D"], id="largest-first"),
+        pytest.param(2, ["donor/C", "donor/A"], id="bounded"),
+    ],
+)
+def test_the_refs_a_short_series_lookup_names_are_the_largest_series_unlabelled_ones(
+    limit: int, refs: list[str]
+) -> None:
+    findings = [
+        _short_of("donor/D", size=None),
+        _short_of("donor/B", size=5.0),
+        _short_of("donor/A", "donor/K", size=5.0, labelled="donor/K"),
+        _short_of("donor/C", "donor/A", size=9.0),
+        EvidenceIssue(
+            code=EvidenceIssueCode.UNIT_UNVERIFIED,
+            severity=Severity.WARNING,
+            requirement_id="debt",
+            detail="",
+        ),
+    ]
+
+    assert unlabelled_series_refs(findings, limit=limit) == refs
+
+
+def test_a_short_series_lookup_labels_only_the_entities_it_named() -> None:
+    finding = _short_of("donor/A", "donor/B", "donor/K", size=1.0, labelled="donor/K")
+
+    (labelled,) = with_series_labels([finding], {"donor/A": "Austria", "donor/K": "Kenya"})
+
+    assert [entity.label for entity in labelled.entities] == ["Austria", None, "donor/K"]
+
+
+def test_a_series_negative_throughout_ranks_by_how_far_below_zero_it_reaches(
+    requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """Two donors' series to Kenya end in 2021: one of net repayments, -50 at
+    its lowest, and one of grants, 1 at its peak. The repayments are the
+    larger series, so their donor is asked for first."""
+
+    def ending_2021(donor: str, low: float, high: float) -> dict[str, object]:
+        return _stat(
+            "DebtServicePaid",
+            entities=[
+                {"role": "recipient", "ref": "country/KEN"},
+                {"role": "donor", "ref": donor},
+            ],
+            observations=7,
+            first={"value": high, "period": "2015"},
+            latest={"value": low, "period": "2021"},
+            minimum={"value": low, "period": "2021"},
+            maximum={"value": high, "period": "2015"},
+        )
+
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            ending_2021("donor/GRANTS", 0.5, 1.0), ending_2021("donor/REPAYS", -50.0, -10.0)
+        ),
+    )
+
+    issues = check_evidence(requirement(), evidence, approved=source())
+
+    assert {issue.magnitude for issue in issues if issue.entities} == {1.0, 50.0}
+    assert unlabelled_series_refs(issues, limit=10) == ["donor/REPAYS", "donor/GRANTS"]
+
+
+@pytest.mark.parametrize(
+    ("end_open", "on_missing", "found"),
+    [
+        # Kenya's series covers the 2015-2024 asked for, but Ghana's runs to
+        # 2025, the newest year retrieved: Kenya's is short of that, and
+        # meets the requirement however it treats gaps.
+        pytest.param(True, "report_gaps", [("country/KEN", Severity.WARNING)], id="open"),
+        pytest.param(True, "fail", [("country/KEN", Severity.WARNING)], id="open-failing-on-gaps"),
+        pytest.param(False, "report_gaps", [], id="closed"),
+    ],
+)
+def test_an_open_period_holds_each_series_to_the_newest_year_retrieved(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    end_open: bool,
+    on_missing: str,
+    found: list[tuple[str, Severity]],
+) -> None:
+    evidence = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid"),
+            _stat(
+                "DebtServicePaid",
+                entities=[{"role": "recipient", "ref": "country/GHA"}],
+                observations=11,
+                latest={"value": 2.0, "period": "2025"},
+            ),
+        ),
+    )
+    asked = requirement(period_end_open=end_open, coverage=Coverage(on_missing=on_missing))
+
+    issues = check_evidence(asked, evidence, approved=source())
+
+    short = [issue for issue in issues if issue.code is EvidenceIssueCode.WINDOW_SHORT]
+    assert [(issue.entities[0].ref, issue.severity) for issue in short] == found
+    assert all(issue.required == {"start": 2015, "end": 2025} for issue in short)
+
+
+@pytest.mark.parametrize(
+    ("start_year", "asked"),
+    [
+        pytest.param(
+            1990,
+            "the requirement asks for 2015-2024, and its retrieval requests every year from 1990",
+            id="read-from-the-first-year",
+        ),
+        pytest.param(2015, "the requirement asks for 2015-2024", id="read-from-the-stated-start"),
+    ],
+)
+def test_a_short_series_states_the_years_its_retrieval_requested(
+    requirement: RequirementFactory, start_year: int, asked: str
+) -> None:
+    """A read of a dataset from its first year on record is held to the stated
+    period, and its gap says what it requested as well."""
+    manifest = _manifest()
+    identity = {"stat_var": "DebtServicePaid", "requested_window": open_window(start_year)}
+    manifest = manifest.model_copy(
+        update={"definition": manifest.definition.model_copy(update={"identity": identity})}
+    )
+    evidence = evidence_from_manifest(
+        manifest,
+        series_stats=_series_stats(
+            _stat(
+                "DebtServicePaid",
+                observations=34,
+                first={"value": 1.0, "period": "1990"},
+                latest={"value": 2.0, "period": "2023"},
+            )
+        ),
+    )
+
+    (gap,) = [
+        issue
+        for issue in check_evidence(requirement(), evidence)
+        if issue.code is EvidenceIssueCode.WINDOW_SHORT
+    ]
+
+    assert gap.detail == (f"series DebtServicePaid for ['country/KEN'] covers 1990-2023, {asked}")
+    assert gap.required == {"start": 2015, "end": 2024}
 
 
 @pytest.mark.parametrize("series_stats", [None, _series_stats()], ids=["none", "empty"])
@@ -1410,7 +1795,7 @@ _BASIS_UNSTATED = ("unit_price_basis_unverified", "warning")
 @pytest.mark.parametrize(
     ("unit", "expected"),
     [
-        # Data Commons unit dcids, as dfo-apis serves the CRS and ONE facets.
+        # Data Commons unit dcids, as apis serves the CRS and ONE facets.
         ("CurrencyUSD", [_MATCHES, _BASIS_UNSTATED]),
         ("dcid:USDollar", [_MATCHES, _BASIS_UNSTATED]),
         ("CurrencyEUR", [("unit_mismatch", "error"), _BASIS_UNSTATED]),
@@ -1558,8 +1943,10 @@ def test_a_place_noun_beside_a_party_word_answers_no_axis_and_names_the_whole_pa
     for axes in ((DONORS,), (RECIPIENTS,), (COUNTRIES,), (), (RECIPIENTS, DONORS)):
         assert open_axes_for((across,), axes) == (
             f"{across!r} narrows a party to its countries, and a source's open axis holds every "
-            f"{party_word}, agencies included; state `across` as {stated_as!r} to cover them "
-            "all, or name the countries in `entities`"
+            f"{party_word}, agencies included; state `across` as {stated_as!r} to open that "
+            "whole side, then add a direct `{kind:place_level, role:<party>, level:Country, "
+            "strict:true}` filter bound to that role and redirect the calculation through that "
+            "filter, or name the countries in `entities`"
         )
 
 
@@ -1867,7 +2254,7 @@ def test_a_place_axis_holding_one_place_needs_no_across(
     )
 
 
-# dfo-apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
+# apis `search/engine/role_text.py`, `_ROLE_TEXT_TO_AXIS`: every word
 # `search` places on a flow axis, and the axis it places it on.
 _SEARCH_ROLE_TEXT_TO_AXIS = {
     "from": "origin",
@@ -2023,7 +2410,7 @@ def _donor_stats(*entities: dict[str, str]) -> pa.Table:
     return _series_stats(_stat("DebtServicePaid", entities=list(entities)))
 
 
-# dfo-apis's mint for education aid to Kenya from every donor: the manifest as
+# The apis service's mint for education aid to Kenya from every donor: the manifest as
 # served and the first rows of its series statistics. The series name each
 # entity's role by declared property (`financingProvider`), where Search names
 # the open donor side `origin`, and the manifest's coverage dimensions state
@@ -2053,7 +2440,7 @@ def _kenya_from(*donors: str) -> pa.Table:
 
 def _recorded_donor_retrieval(*, axes: bool = True) -> RetrievalEvidence:
     """The recorded mint read as evidence; `axes=False` drops each dimension's `axis`,
-    as a dfo-apis that predates the field serves it."""
+    as an apis service that predates the field serves it."""
     manifest = dict(_RECORDED_DONOR_MINT["manifest"])
     if not axes:
         coverage = manifest["coverage"]
@@ -2242,7 +2629,7 @@ def _kenya_from_every_donor(requirement: RequirementFactory) -> DatasetRequireme
 def test_a_summed_retrieval_keeping_its_donors_covers_the_population(
     requirement: RequirementFactory,
 ) -> None:
-    # dfo-apis sums the family and keeps every entity role column, so the
+    # apis sums the family and keeps every entity role column, so the
     # summed frame carries one series per donor under `financingProvider`.
     approved, manifest = _summed_donor_family()
     donors = ("country/FRA", "country/DEU", "country/USA", "country/JPN")
@@ -2723,7 +3110,7 @@ def test_a_retrieval_meets_a_named_set_when_it_holds_a_member_the_approved_sourc
 
 
 # A set Search bound as the one party its dataset publishes as the set's total
-# (dfo-apis `entity_groups[role].total`): the G7 as donor, a resolver group with
+# (apis `entity_groups[role].total`): the G7 as donor, a resolver group with
 # no graph node, and Africa as recipient.
 _TOTAL_GROUPS = (
     ResolvedGroup(role="origin", label="G7", total="GroupOfSeven"),
@@ -2784,6 +3171,28 @@ def test_a_retrieval_of_a_set_bound_as_its_total_holds_the_total_party(
         requirement(entities=[Entity(name="G7", role="donor", members=members)]),
         _g7_retrieval("GroupOfSeven"),
         approved=_total_source(source),
+    )
+
+    assert _entity_codes(issues) == codes
+
+
+@pytest.mark.parametrize(("members", "codes"), [(False, []), (True, ["group_read_as_total"])])
+def test_a_union_of_whole_totals_meets_a_bare_name_and_refuses_members(
+    requirement: RequirementFactory, source: SourceFactory, members: bool, codes: list[str]
+) -> None:
+    label = "all donors including private"
+    union = source(
+        entities=(
+            ResolvedEntity(role="origin", ref="DACOfficialDonors", label="Official Donors, Total"),
+            ResolvedEntity(role="origin", ref="DACPrivateDonors", label="Private Donors, Total"),
+        ),
+        groups=(ResolvedGroup(role="origin", label=label, whole_of=("official", "private")),),
+        identity=None,
+    )
+
+    issues = check_evidence(
+        requirement(entities=[Entity(name=label, role="donor", members=members)]),
+        evidence_from_source(union),
     )
 
     assert _entity_codes(issues) == codes

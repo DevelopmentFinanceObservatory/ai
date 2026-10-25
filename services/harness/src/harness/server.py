@@ -58,6 +58,7 @@ from harness.settings import (
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import (
     StudioStore,
+    make_canvas_cards,
     make_canvas_series,
     make_recall_part,
     make_remove_cards,
@@ -450,6 +451,7 @@ def create_app(
                 definition_surface=tool_surface,
                 recall_part=make_recall_part(store),
                 canvas_series=make_canvas_series(store),
+                canvas_cards=make_canvas_cards(store),
                 remove_cards=make_remove_cards(store),
             ),
         )

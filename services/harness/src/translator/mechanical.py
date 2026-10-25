@@ -603,7 +603,9 @@ def _uncompiled(
 ) -> dict[str, object]:
     """Refer a `propose_operations` answer that is not a compile failure.
 
-    A tool surface that could not be listed is transient. Anything else --
+    A tool surface that could not be listed is transient. A read of the
+    newest year that stopped where the run would closes on the referral its
+    `action` names. Anything else --
     a translation `build_translation` built in a shape `propose_operations`
     refuses, or a plan that stopped being a translatable draft mid-run -- is
     a fault in this loop.
@@ -615,6 +617,9 @@ def _uncompiled(
             kind=ReferralKind.SURFACE_UNAVAILABLE,
             reason=message or "the tool surface could not be listed",
         )
+    action = _action_of(result)
+    if result.get("code") == ProblemCode.RUN_WOULD_STOP.value and action is not None:
+        return core.return_to_planner(tool_context=tool_context, **(action.arguments or {}))
     return _internal_failure(
         core, tool_context, f"propose_operations answered {result.get('code')}: {message}"
     )

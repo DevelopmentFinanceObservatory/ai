@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -96,6 +97,7 @@ from harness.studio_state import (
     ConversationState,
     StudioStore,
     _PendingInterrupt,
+    _PendingQuestion,
     _wire_id,
 )
 from harness.studio_state import (
@@ -110,6 +112,7 @@ from harness.wire import (
     Done,
     ElicitationInput,
     ElicitationOption,
+    ElicitationQuestion,
     ElicitationRequest,
     ErrorCode,
     ErrorFrame,
@@ -188,6 +191,7 @@ _TOOL_LABELS = {
     "join": "Joining data",
     "resolve_anchor": "Finding the latest year",
     "describe_frame": "Checking data",
+    "describe_component": "Reading a card",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
 }
@@ -936,12 +940,58 @@ def _refused_detail(record: _ExecutorRecord) -> str:
     return failure_detail(refusal if isinstance(refusal, Mapping) else {})
 
 
-def _answer_failure(answer: Mapping[str, Any]) -> str:
-    """The line of an agent tool's failed answer. A tool states its `code`
+def _answer_refusal(answer: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The refusal of an agent tool's failed answer. A tool states its `code`
     and `retry_mode` beside its `error` or `refusal` prose, or inside a
     `refusal` that is a refusal body."""
     refusal = answer.get("refusal")
-    return failure_detail(refusal if isinstance(refusal, Mapping) else answer)
+    return refusal if isinstance(refusal, Mapping) else answer
+
+
+def _answer_failure(answer: Mapping[str, Any]) -> str:
+    """The line of an agent tool's failed answer."""
+    return failure_detail(_answer_refusal(answer))
+
+
+def _asks_correction(answer: Mapping[str, Any]) -> bool:
+    """Whether a failed answer's refusal asks the model to correct its call."""
+    return _answer_refusal(answer).get("retry_mode") == RetryMode.CORRECT_AND_RETRY
+
+
+type _ChartKey = tuple[str, str]
+
+
+def _chart_key(chart: Mapping[Any, Any]) -> _ChartKey:
+    """What makes a chart asked of `make_charts` the same chart asked again:
+    its frame and its type. A corrected chart keeps both and changes its title
+    or select."""
+    return (str(chart.get("frame")), str(chart.get("type")))
+
+
+def _listed_charts(args: Mapping[str, Any]) -> frozenset[_ChartKey]:
+    """The `_chart_key` of each chart a `make_charts` call asked for."""
+    asked = args.get("charts")
+    charts = asked if isinstance(asked, list) else []
+    return frozenset(_chart_key(chart) for chart in charts if isinstance(chart, Mapping))
+
+
+def _charts_to_correct(args: Mapping[str, Any], answer: Mapping[str, Any]) -> frozenset[_ChartKey]:
+    """The `_chart_key` of each chart a failed `make_charts` call refused, when
+    every refusal asks the model to correct the chart and no chart was left
+    past the per-call limit; empty otherwise. `make_charts` answers one entry
+    a chart, in the order asked."""
+    asked, charts = args.get("charts"), answer.get("charts")
+    if not isinstance(asked, list) or not isinstance(charts, list) or answer.get("not_drawn"):
+        return frozenset()
+    refused: set[_ChartKey] = set()
+    for chart, entry in zip(asked, charts, strict=False):
+        if not isinstance(entry, Mapping) or "error" not in entry:
+            continue
+        asks = entry.get("retry_mode") == RetryMode.CORRECT_AND_RETRY
+        if not isinstance(chart, Mapping) or not asks:
+            return frozenset()
+        refused.add(_chart_key(chart))
+    return frozenset(refused)
 
 
 def _step_label(tool: str, plan_label: str | None = None) -> str:
@@ -994,6 +1044,39 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     return PlannerPlan.model_validate(fields)
 
 
+def _planner_question(args: dict[str, Any]) -> ElicitationQuestion:
+    """The planner's ask as the frame's one question, `q1`. Its
+    `adk_request_input` call args are the question directly: `message`,
+    `candidates`, `options`, `recommended_spec_id` and `rationale`.
+    `options` are fixed choices that are no source, such as whether to add
+    two datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
+    only a pick of one, so they take no free text."""
+    candidates = args.get("candidates") or []
+    fixed = args.get("options") or []
+    recommended_spec_id = args.get("recommended_spec_id")
+    options = [
+        ElicitationOption(
+            id=str(candidate.get("spec_id", "")),
+            label=str(candidate.get("label", candidate.get("spec_id", ""))),
+            recommended=bool(recommended_spec_id)
+            and str(candidate.get("spec_id", "")) == recommended_spec_id,
+        )
+        for candidate in candidates
+    ] + [ElicitationOption(id=str(option["id"]), label=str(option["label"])) for option in fixed]
+    return ElicitationQuestion(
+        id="q1",
+        question=str(args.get("message", "Which reading did you mean?")),
+        input=ElicitationInput.SINGLE_SELECT,
+        options=options,
+        allow_free_text=not fixed,
+        rationale=(
+            str(args["rationale"])
+            if args.get("rationale") and any(option.recommended for option in options)
+            else None
+        ),
+    )
+
+
 class _Translator:
     """One turn segment's ADK-event-to-wire-frame translation.
 
@@ -1024,7 +1107,9 @@ class _Translator:
       moment the model makes it, completed when the tool returns. A
       hand-off to the planner and a skill read show only when they fail:
       the planner's own lines follow a hand-off, and a skill read is
-      background, not progress;
+      background, not progress. A refusal of one that asks the model to
+      correct the call is held until the segment ends, and shows then
+      only if no later call of the tool completed;
     - answer text, as `message.delta` chunks, the last model call's text
       being the turn's `message.complete`: text before a tool call is
       interim, and text after a hand-off to the user or the planner would
@@ -1033,7 +1118,14 @@ class _Translator:
       running step until the next thing happens; a plan hand-back shows a
       failed step and then "Reading why no plan was made" when the planner
       made no plan, and "Reading the plan's results" when the plan ran,
-      opened at the execute node's result so it covers `plan_done` too.
+      opened at the execute node's result so it covers `plan_done` too;
+    - a `complete` frame on a failed step's own wire id once a later try of
+      the same step succeeds (`_retry_key`): the same tool with the same
+      arguments, a later hand-off the planner takes for a failed hand-off,
+      and a plan made, ready for approval, for either plan failure. A
+      refusal whose `retry_mode` is `correct_and_retry` asks the model to
+      change the call, so any later call of the tool that completes settles
+      that step whatever its arguments; one that fails leaves it waiting.
     """
 
     def __init__(
@@ -1057,8 +1149,29 @@ class _Translator:
         # Each open call's wire step id, label, arguments and monotonic
         # start, by call id.
         self._open_calls: dict[str, tuple[str, str, dict[str, Any], float]] = {}
-        # Calls that show only if they fail, by call id: the tool's name.
-        self._quiet_calls: dict[str, str] = {}
+        # Calls that show only if they fail, by call id: the tool's name and
+        # arguments.
+        self._quiet_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        # The failed steps a later try can still recover, by `_retry_key`:
+        # each one's wire step id, label and tool.
+        self._failed: dict[tuple[str, str], list[_FailedStep]] = {}
+        # Failed steps whose refusal asked for a corrected call, by tool, each
+        # with the number of calls made before it: a later call of the tool
+        # that completes corrects them.
+        self._uncorrected: dict[str, list[tuple[int, _FailedStep]]] = {}
+        # Failed `make_charts` steps whose refused charts each asked for a
+        # corrected chart, each with the number of calls made before it and
+        # the `_chart_key` of those charts: a later call that completes and
+        # asks for every one of them again corrects it.
+        self._unredrawn: list[tuple[int, frozenset[_ChartKey], _FailedStep]] = []
+        # Quiet calls refused as ones to correct, by tool, each with the
+        # number of calls made before it and its failure sentence: shown at
+        # the segment's end unless a later call of the tool completes.
+        self._held: dict[str, list[tuple[int, str]]] = {}
+        # The number of agent tool calls made so far, and each open call's
+        # place among them, by call id.
+        self._calls = 0
+        self._call_order: dict[str, int] = {}
         # The kind of hand-off ("plan", "ask") the agent's tools recorded.
         self._handed_off: str | None = None
         # The highest composition revision this stream has sent.
@@ -1083,6 +1196,8 @@ class _Translator:
         if interrupt is not None:
             adk_id, args = interrupt
             frames.extend(self._close_status())
+            if adk_id == APPROVE_INTERRUPT:
+                frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._interrupt_frames(adk_id, args))
             return frames
         if event.author == PLANNER_AGENT_NAME and not event.partial:
@@ -1104,6 +1219,7 @@ class _Translator:
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
+            frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":
             frames.extend(self._close_status())
@@ -1298,16 +1414,29 @@ class _Translator:
                 )
             )
             if isinstance(component, dict):
-                frames.extend(self._component_frames(component, step_id=step_id, land=record.land))
+                frames.extend(
+                    self._component_frames(
+                        component,
+                        step_id=step_id,
+                        land=record.land,
+                        intent=record.args.get("intent"),
+                    )
+                )
         return frames
 
     def _component_frames(
-        self, component: dict[str, Any], *, step_id: str, land: bool
+        self,
+        component: dict[str, Any],
+        *,
+        step_id: str,
+        land: bool,
+        intent: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Validate `component` against the `component.created` wire
         contract, then, only for a component stamped `land=True`
         (`_RecordingExecutor.land_component`, called by `make_charts` right
         after the write returned), land it: append its block to the canvas
+        and keep the `intent` it was written from with it
         (`harness.studio_state.land_component`). A component that fails
         validation here never lands and produces no frame at all. For an
         unstamped record (`land=False`) this is the expected outcome:
@@ -1342,7 +1471,7 @@ class _Translator:
             return []
         if not land:
             return [created]
-        if state_land_component(self._conversation, component) != "created":
+        if state_land_component(self._conversation, component, intent=intent) != "created":
             return [created]
         # Read with no await since the landing, so this is the manifest it wrote.
         return [created, *self._composition_update()]
@@ -1552,48 +1681,54 @@ class _Translator:
                 step_labels=step_labels,
             )
             return frames
-        # The workflow's own `ask` node raises a `RequestInput` whose
-        # `payload` carries `candidates`. The planner's `adk_request_input`
-        # tool call (`planner.agent`'s `ask_user`) has no `payload` wrapper:
-        # `candidates`, `options`, `recommended_spec_id` and `rationale` are
-        # its own call args directly. Either shape lands here. `options` are
-        # fixed choices that are no source, such as whether to add two
-        # datasets (`planner.agent.COMBINATION_OPTIONS`); the planner reads
-        # only a pick of one, so they take no free text.
-        candidates = payload.get("candidates") or args.get("candidates") or []
-        fixed = args.get("options") or []
-        recommended_spec_id = args.get("recommended_spec_id")
-        options = [
-            ElicitationOption(
-                id=str(candidate.get("spec_id", "")),
-                label=str(candidate.get("label", candidate.get("spec_id", ""))),
-                recommended=bool(recommended_spec_id)
-                and str(candidate.get("spec_id", "")) == recommended_spec_id,
-            )
-            for candidate in candidates
-        ] + [
-            ElicitationOption(id=str(option["id"]), label=str(option["label"])) for option in fixed
-        ]
-        question = str(args.get("message", "Which reading did you mean?"))
+        # The workflow's own `ask` node raises a `RequestInput` whose `payload`
+        # carries one to three `questions`, each with its `candidates`. A
+        # lone question is dismissed with the whole pause. Each of several
+        # may be left to the agent instead. The planner's `adk_request_input`
+        # call asks one question (`_planner_question`).
+        asked = payload.get("questions")
+        if asked:
+            several = len(asked) > 1
+            questions = [
+                ElicitationQuestion(
+                    id=str(question["id"]),
+                    question=str(question["question"]),
+                    input=ElicitationInput.SINGLE_SELECT,
+                    options=[
+                        ElicitationOption(
+                            id=str(candidate["spec_id"]), label=str(candidate["label"])
+                        )
+                        for candidate in question["candidates"]
+                    ],
+                    allow_free_text=True,
+                    skippable=several,
+                )
+                for question in asked
+            ]
+            skippable = not several
+        else:
+            questions = [_planner_question(args)]
+            skippable = True
         frame = ElicitationRequest(
             event="elicitation.request",
             seq=conversation.next_seq(),
             interrupt_id=wire_id,
-            question=question,
-            input=ElicitationInput.SINGLE_SELECT,
-            options=options,
-            allow_free_text=not fixed,
-            skippable=True,
-            rationale=(
-                str(args["rationale"])
-                if args.get("rationale") and any(option.recommended for option in options)
-                else None
-            ),
+            questions=questions,
+            skippable=skippable,
         )
         conversation.pending[wire_id] = _PendingInterrupt(
             adk_id=adk_id,
             kind="elicitation",
-            option_ids=frozenset(option.id for option in options),
+            questions=tuple(
+                _PendingQuestion(
+                    id=question.id,
+                    question=question.question,
+                    options={option.id: option.label for option in question.options or ()},
+                    skippable=question.skippable,
+                )
+                for question in questions
+            ),
+            skippable=skippable,
         )
         return [frame]
 
@@ -1612,10 +1747,55 @@ class _Translator:
             **extra,
         )
 
+    def _failed_step(
+        self, key: tuple[str, str], frame: ActivityStep, *, correctable: bool = False
+    ) -> ActivityStep:
+        """`frame`, a failed step, kept under `key` for a later try to
+        recover, or under its tool for any later call of it when its refusal
+        asked the model to correct the call (`correctable`)."""
+        step = (frame.step_id, frame.label, frame.tool)
+        if correctable and frame.tool:
+            self._uncorrected.setdefault(frame.tool, []).append((self._calls, step))
+        else:
+            self._failed.setdefault(key, []).append(step)
+        return frame
+
+    def _corrected(self, tool: str, order: int) -> list[_FailedStep]:
+        """The shown steps awaiting correction under `tool` that a completed
+        call, the `order`th made, corrects (`_take_corrected`), and the held
+        refusals it corrects dropped."""
+        _take_corrected(self._held, tool, order)
+        return _take_corrected(self._uncorrected, tool, order)
+
+    def _redrawn(self, args: Mapping[str, Any], order: int) -> list[_FailedStep]:
+        """The failed `make_charts` steps that a completed call of it, the
+        `order`th made with `args`, corrects: those refused before it was made
+        whose refused charts it asks for again, every one."""
+        listed = _listed_charts(args)
+        corrected = [
+            step for before, keys, step in self._unredrawn if before < order and keys <= listed
+        ]
+        self._unredrawn = [entry for entry in self._unredrawn if entry[2] not in corrected]
+        return corrected
+
+    def _recover(
+        self, *keys: tuple[str, str], corrected: Sequence[_FailedStep] = ()
+    ) -> list[ActivityStep]:
+        """A `complete` frame on each failed step kept under `keys`, and on
+        each in `corrected`, which a later try just made good. Studio keeps a
+        step's latest status, so the failed line settles instead of standing
+        beside the answer."""
+        steps = [*corrected, *(step for key in keys for step in self._failed.pop(key, []))]
+        return [
+            self._step(step_id, label, StepStatus.COMPLETE, tool=tool, detail=_RECOVERED)
+            for step_id, label, tool in steps
+        ]
+
     def _unshown(self, record: _ExecutorRecord) -> bool:
         """A successful call no plan step made, to a tool whose work an
         agent tool call's own line already stands for: the data a fetch
-        retrieved and checked, or a skill it read. Failures always show."""
+        retrieved and checked, a skill it read, or a card `make_charts` read
+        back. Failures always show."""
         return (
             record.step_id is None
             and record.tool in _UNSHOWN_RECORDED_TOOLS
@@ -1640,7 +1820,11 @@ class _Translator:
                 failure = (event.custom_metadata or {}).get(ORCHESTRATOR_STATUS_FAILURE_KEY)
                 code = failure.get("code") if isinstance(failure, Mapping) else None
                 detail = failure_detail({"code": code})
-                frames.append(self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail))
+                frames.append(
+                    self._failed_step(
+                        _PLAN_MADE, self._step(None, _PLAN_FAILED, StepStatus.FAILED, detail=detail)
+                    )
+                )
                 # The agent reads the planner's answer under its own line.
                 frames.extend(self._open_status(status))
             else:
@@ -1692,8 +1876,10 @@ class _Translator:
         for call in event.get_function_calls():
             name = call.name or ""
             args = call.args or {}
+            self._calls += 1
+            self._call_order[call.id or ""] = self._calls
             if name in _QUIET_CALLS:
-                self._quiet_calls[call.id or ""] = name
+                self._quiet_calls[call.id or ""] = (name, args)
                 continue
             measure = self._measure(args.get("spec_id")) if name == "fetch" else None
             label = _tool_call_label(name, args, measure)
@@ -1720,18 +1906,28 @@ class _Translator:
             # A failure's reason is written for the model, so its line
             # shows the sentence for its code.
             failed = "error" in answer or "refusal" in answer
+            order = self._call_order.pop(response.id or "", 0)
             quiet = self._quiet_calls.pop(response.id or "", None)
             if quiet is not None:
-                if failed:
+                name, args = quiet
+                if failed and _asks_correction(answer):
+                    self._held.setdefault(name, []).append((self._calls, _answer_failure(answer)))
+                elif failed:
                     frames.append(
-                        self._step(
-                            None,
-                            _tool_call_label(quiet, {}),
-                            StepStatus.FAILED,
-                            tool=quiet,
-                            detail=_answer_failure(answer),
+                        self._failed_step(
+                            _retry_key(name, args),
+                            self._step(
+                                None,
+                                _tool_call_label(name, {}),
+                                StepStatus.FAILED,
+                                tool=name,
+                                detail=_answer_failure(answer),
+                            ),
                         )
                     )
+                else:
+                    corrected = self._corrected(name, order)
+                    frames.extend(self._recover(_retry_key(name, args), corrected=corrected))
                 continue
             opened = self._open_calls.get(response.id or "")
             if opened is None:
@@ -1748,9 +1944,22 @@ class _Translator:
                 if status is StepStatus.PENDING
                 else {}
             )
-            frames.append(
-                self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
-            )
+            frame = self._step(step_id, label, status, tool=response.name, detail=detail, **timed)
+            key = _retry_key(response.name or "", args)
+            charted = response.name == "make_charts"
+            to_correct = _charts_to_correct(args, answer) if charted else frozenset()
+            if status is StepStatus.FAILED and to_correct:
+                self._unredrawn.append((self._calls, to_correct, (step_id, label, response.name)))
+                frames.append(frame)
+            elif status is StepStatus.FAILED:
+                frames.append(self._failed_step(key, frame, correctable=_asks_correction(answer)))
+            else:
+                frames.append(frame)
+                if status is StepStatus.COMPLETE:
+                    corrected = self._corrected(response.name or "", order)
+                    if charted:
+                        corrected += self._redrawn(args, order)
+                    frames.extend(self._recover(key, corrected=corrected))
             if response.name in _READING_STAGES:
                 read.append((response.name or "", args, answer, failed))
         if not event.get_function_responses():
@@ -1885,6 +2094,15 @@ class _Translator:
         `message.delta` so the deltas still add up to the `message.complete`
         text."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
+        # A held refusal no later call corrected is a failed step after all.
+        frames.extend(
+            self._step(
+                None, _tool_call_label(tool, {}), StepStatus.FAILED, tool=tool, detail=detail
+            )
+            for tool, held in self._held.items()
+            for _, detail in held
+        )
+        self._held.clear()
         if self.paused:
             return frames
         if self._final_text:
@@ -1927,6 +2145,35 @@ class _Translator:
 # could not be calculated.
 _PLAN_FAILED = "No plan could be made"
 
+# The `detail` of a failed step a later try of the same step made good.
+_RECOVERED = "This worked on a later try."
+# The key of a plan hand-back with no plan, which a later plan made recovers.
+_PLAN_MADE = ("plan", "made")
+
+
+# A failed step a later try can recover: its wire step id, label and tool.
+type _FailedStep = tuple[str, str, str | None]
+
+
+def _take_corrected[T](queue: dict[str, list[tuple[int, T]]], tool: str, order: int) -> list[T]:
+    """The entries `queue` holds under `tool` that a completed call, the
+    `order`th made, corrects, taken out of it: those refused before it was
+    made. A call made beside a refused one, in the same batch, corrects
+    nothing."""
+    queued = queue.pop(tool, [])
+    if kept := [entry for entry in queued if entry[0] >= order]:
+        queue[tool] = kept
+    return [entry for before, entry in queued if before < order]
+
+
+def _retry_key(name: str, args: Mapping[str, Any]) -> tuple[str, str]:
+    """What makes a later call the same step tried again: the same tool with
+    the same arguments. A plan hand-off is keyed by its tool alone, since a
+    turn plans one question and the agent rewords its brief on a retry."""
+    if name == "plan":
+        return (name, "")
+    return (name, json.dumps(args, sort_keys=True, default=str))
+
 
 # Agent tools whose calls show only when they fail.
 _QUIET_CALLS = frozenset({"plan", "get_skill", "get_skill_file"})
@@ -1944,9 +2191,11 @@ _READING_CANVAS = "Going over your canvas"
 _READING_ABOUT_DFO = "Going over the notes on DFO"
 _WORKING_OUT_NEXT_STEP = "Working out the next step"
 # Recorded calls an agent tool makes on its own behalf (`fetch` retrieves
-# and checks its data, a skill read goes through the surface), shown only
-# when they fail.
-_UNSHOWN_RECORDED_TOOLS = frozenset({"get_data", "describe_frame", "get_skill", "get_skill_file"})
+# and checks its data, a skill read goes through the surface, `make_charts`
+# reads back a card on the canvas), shown only when they fail.
+_UNSHOWN_RECORDED_TOOLS = frozenset(
+    {"get_data", "describe_frame", "describe_component", "get_skill", "get_skill_file"}
+)
 
 _ORCHESTRATOR_TOOL_LABELS = {
     "search": "Searching for data",
@@ -2047,15 +2296,15 @@ def _explain_detail(answer: dict[str, Any]) -> str | None:
 
 
 def _cut_sentence(cut: Mapping[str, Any]) -> str:
-    """What a cut card draws and leaves out, from the counts its result
+    """What a cut card draws and omits, from the counts its result
     states in `holds.cut` (`harness.reply_figures.card_holds`): how many
     members it draws of how many with a value at its period, then how many
-    were left out as group totals or members of another level and how many
+    were left out as totals, unallocated amounts or other levels and how many
     for having no value there, each named only when it is more than none."""
     left_out = [
         f"{count:,} {what}"
         for count, what in (
-            (cut.get("other_kinds"), "group totals or members of another level"),
+            (cut.get("other_kinds"), "totals, unallocated amounts or other levels"),
             (cut.get("unvalued"), "with no value"),
         )
         if count
@@ -2064,7 +2313,7 @@ def _cut_sentence(cut: Mapping[str, Any]) -> str:
         f"The chart shows the {cut['drawn']:,} largest of {cut['with_a_value']:,} "
         f"with a value in {cut['period']}"
     )
-    return f"{drawn} and leaves out {' and '.join(left_out)}." if left_out else f"{drawn}."
+    return f"{drawn} and omits {' and '.join(left_out)}." if left_out else f"{drawn}."
 
 
 def _charts_outcome(args: dict[str, Any], answer: dict[str, Any]) -> tuple[StepStatus, str | None]:

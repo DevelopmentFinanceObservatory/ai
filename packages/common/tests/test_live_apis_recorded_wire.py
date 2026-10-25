@@ -1,11 +1,11 @@
-"""`common.live_apis` against requests and answers recorded from dfo-apis.
+"""`common.live_apis` against requests and answers recorded from apis.
 
-`fixtures/dfo_apis_live_refresh_wire_pairs.json` is dfo-apis' own recording of
+`fixtures/dfo_apis_live_refresh_wire_pairs.json` is apis' own recording of
 its live-refresh routes (`tests/live_refresh/wire_pairs.py` there). Each test
 sends the client's call for one recorded pair into a transport that answers the
 recorded response, and compares the request the client built with the recorded
 one field by field: method, path, query, JSON body, and headers. A route or
-answer that changes in dfo-apis fails here once the fixture is copied again.
+answer that changes in apis fails here once the fixture is copied again.
 """
 
 from __future__ import annotations
@@ -118,6 +118,7 @@ def _versions(response: dict[str, Any]) -> object:
             version["base_content_version"],
             version["rendering"],
             version["groupby"],
+            enrichment_stamp=version.get("enrichment_stamp"),
         )
         for version in response["body"]["versions"]
     )

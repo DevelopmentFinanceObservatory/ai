@@ -1,19 +1,25 @@
-"""One async client for the dfo-apis routes live Studio shares use.
+"""One async client for the apis routes live Studio shares use.
 
 Three consumers share it: the harness refresh endpoint and replayer, the recipe
-backfill job, and the recovery routine for root frames. Each call is one dfo-apis
+backfill job, and the recovery routine for root frames. Each call is one apis
 route and returns a small typed result or raises `LiveApisError`.
 
-Two credentials, sent in dfo-apis' principal header (`PRINCIPAL_HEADER`):
+Two credentials, sent in apis' principal header (`PRINCIPAL_HEADER`):
 
 - `datasets_principal` (`DATASETS_FIRST_PARTY_PRINCIPAL`, the publish door's own)
-  on the recipe routes: `put_recipe`, `read_recipe`, `find_replay`, `list_versions`.
+  on the recipe routes: `put_recipe`, `read_recipe`, `find_replay`.
 - `live_refresh_principal` (`LIVE_REFRESH_PRINCIPAL`) on `refresh_frame`,
   `render` and `stream_render_data`.
 
-`read_component` needs neither. A call whose principal is unset or blank raises
-`LiveApisNotConfigured` before any request is made. Neither value appears in an
-exception message, an attribute or a `repr`.
+`read_component` and `list_versions` need neither. A call whose principal is
+unset or blank raises `LiveApisNotConfigured` before any request is made. Neither
+value appears in an exception message, an attribute or a `repr`.
+
+Every call also carries the headers of the `auth` hook, once per call: the Cloud
+Run ID token from `common.apis_auth.apis_auth_provider`, which Cloud Run IAM in
+front of dfo-apis checks. A hook that raises `ApisAuthError` fails the call
+with `LiveApisTransportError` before any request is made, as an unreachable
+dfo-apis does.
 
 Every wire path and body is built in this module, in the `_*_PATH` constants and
 the method that uses each. A refusal is an RFC 9457 problem body; `LiveApisError`
@@ -38,7 +44,9 @@ from urllib.parse import quote
 
 import httpx2
 
-# dfo-apis' principal header (`principal_header`, default `x-dfo-principal`).
+from common.apis_auth import ApisAuthError, AuthProvider
+
+# apis' principal header (`principal_header`, default `x-dfo-principal`).
 PRINCIPAL_HEADER = "x-dfo-principal"
 
 _RECIPE_PATH = "/api/datasets/frames/{spec_id}/{content_version}/recipe"
@@ -49,16 +57,21 @@ _COMPONENT_PATH = "/api/presentation/components/{component_id}"
 _RENDER_PATH = "/api/presentation/components/{component_id}/revisions/{revision}/render"
 _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 
-# Codes dfo-apis registers that a caller branches on.
+# Codes apis registers that a caller branches on.
 RECIPE_NOT_FOUND = "recipe_not_found"
 PUBLISH_CONFLICT = "publish_conflict"
 REFRESH_NOT_PERMITTED = "refresh_not_permitted"
+SPEC_NOT_FOUND = "spec_not_found"
 FRAME_NOT_REFRESHABLE = "frame_not_refreshable"
 RENDERING_NOT_RECORDED = "rendering_not_recorded"
 RENDER_TARGET_MISMATCH = "render_target_mismatch"
 
 # The one code this module mints itself, for a 2xx answer outside the contract.
 RESPONSE_INVALID = "response_invalid"
+
+# The most pages `list_versions` reads for one dataset: 100,000 versions at apis'
+# default page of 100. A walk past it is a server fault, refused as outside the contract.
+VERSIONS_MAX_PAGES = 1_000
 
 type RecipeBody = Mapping[str, Any]
 
@@ -68,11 +81,11 @@ class LiveApisNotConfigured(RuntimeError):  # noqa: N818 -- a configuration stat
 
 
 class LiveApisError(Exception):
-    """A dfo-apis call failed.
+    """An apis service call failed.
 
     `status` is the HTTP status and `code` the problem body's machine-readable
     code, `None` when the body is not a problem document. `constraint_id` names the
-    cause of a 409. `detail` is dfo-apis' own text.
+    cause of a 409. `detail` is apis' own text.
     """
 
     def __init__(
@@ -119,9 +132,9 @@ class RecipeWritten:
 
 
 # How a stored version was rendered: `plain` for a raw version, `groupby` for a
-# collapse whose `groupby` dfo-apis recorded, `without_party_totals` for a frame cut of
+# collapse whose `groupby` apis recorded, `without_party_totals` for a frame cut of
 # the group totals of its open party roles and not summed, `not_recorded` for a derived
-# version whose options dfo-apis recorded none of.
+# version whose options apis recorded none of.
 VersionRendering = Literal["plain", "groupby", "without_party_totals", "not_recorded"]
 
 
@@ -133,13 +146,18 @@ class DatasetVersion:
     made the collapse, set exactly when `rendering` is `groupby`.
     `without_party_totals` is true when the version's frame leaves out the group totals
     of its open party roles: on every `without_party_totals` rendering, and on a
-    `groupby` one that summed such a frame."""
+    `groupby` one that summed such a frame.
+
+    `enrichment_stamp` is the stamp a file of this version holding party-kind cells
+    carries: the answering code index's digest when the version's frame holds a party
+    role, and `None` when it holds none, or when apis lists no stamp on its versions."""
 
     content_version: str
     base_content_version: str | None
     rendering: VersionRendering
     groupby: Mapping[str, Any] | None
     without_party_totals: bool = False
+    enrichment_stamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +187,7 @@ type RefreshResult = Current | Moved | Pending
 
 @dataclass(frozen=True)
 class ComponentRead:
-    """A component revision as dfo-apis stores it. `frame_ref` is the stored
+    """A component revision as apis stores it. `frame_ref` is the stored
     intent's frame, `None` for a revision with no frame. `body` is the answer
     untouched."""
 
@@ -198,10 +216,10 @@ def _segment(value: str) -> str:
 
 
 def _problem(body: bytes) -> dict[str, Any] | None:
-    """The body as a dfo-apis problem document, else `None`.
+    """The body as an apis service problem document, else `None`.
 
     A document counts only with a bool `retryable`, which separates a
-    dfo-apis refusal from a proxy's own error body on the same status.
+    apis refusal from a proxy's own error body on the same status.
     """
     try:
         parsed = json.loads(body) if body else None
@@ -263,28 +281,59 @@ def _dataset_version(item: dict[str, Any]) -> DatasetVersion | None:
     """One entry of the versions answer, or `None` when it is outside the contract:
     no `content_version`, a `rendering` that is none of the four, a `groupby` present on
     anything but a `groupby` rendering, or a `without_party_totals` that is not a
-    boolean. dfo-apis leaves a false `without_party_totals` out, and a
-    `without_party_totals` rendering implies it."""
+    boolean. apis leaves a false `without_party_totals` out, and a
+    `without_party_totals` rendering implies it. apis also leaves out the
+    `enrichment_stamp` of a version that has none."""
     content_version = _text(item.get("content_version"))
     base_content_version = _text(item.get("base_content_version"))
     groupby = item.get("groupby")
     without_party_totals = item.get("without_party_totals", False)
+    stamp = _text(item.get("enrichment_stamp"))
     if content_version is None or not isinstance(without_party_totals, bool):
         return None
     match item.get("rendering"):
         case "groupby" if isinstance(groupby, dict):
             return DatasetVersion(
-                content_version, base_content_version, "groupby", groupby, without_party_totals
+                content_version,
+                base_content_version,
+                "groupby",
+                groupby,
+                without_party_totals,
+                enrichment_stamp=stamp,
             )
         case "without_party_totals" if groupby is None:
             return DatasetVersion(
-                content_version, base_content_version, "without_party_totals", None, True
+                content_version,
+                base_content_version,
+                "without_party_totals",
+                None,
+                True,
+                enrichment_stamp=stamp,
             )
-        case "plain" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "plain", None)
-        case "not_recorded" if groupby is None:
-            return DatasetVersion(content_version, base_content_version, "not_recorded", None)
+        case ("plain" | "not_recorded") as rendering if groupby is None:
+            return DatasetVersion(
+                content_version, base_content_version, rendering, None, enrichment_stamp=stamp
+            )
     return None
+
+
+def _versions_page(response: httpx2.Response) -> tuple[list[DatasetVersion], str | None]:
+    """One page of the versions answer and the cursor that continues it, `None` on
+    the complete page. A page that is not complete must list a version and name a
+    cursor."""
+    body = _json_object(response, "versions answer")
+    items, complete, cursor = body.get("versions"), body.get("complete"), body.get("next_cursor")
+    if not isinstance(items, list) or not isinstance(complete, bool):
+        raise _invalid(response, "versions answer")
+    if complete != (cursor is None) or (not complete and (_text(cursor) is None or not items)):
+        raise _invalid(response, "versions answer")
+    page: list[DatasetVersion] = []
+    for item in items:
+        version = _dataset_version(item) if isinstance(item, dict) else None
+        if version is None:
+            raise _invalid(response, "versions answer")
+        page.append(version)
+    return page, _text(cursor)
 
 
 def _required_frame(response: httpx2.Response, value: object, what: str) -> FramePair:
@@ -295,7 +344,7 @@ def _required_frame(response: httpx2.Response, value: object, what: str) -> Fram
 
 
 class LiveApisClient:
-    """Typed calls to the dfo-apis routes live Studio shares use.
+    """Typed calls to the apis routes live Studio shares use.
 
     Use as an async context manager, or call `aclose`.
     """
@@ -306,6 +355,7 @@ class LiveApisClient:
         base_url: str,
         datasets_principal: str | None = None,
         live_refresh_principal: str | None = None,
+        auth: AuthProvider | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         connect_timeout_s: float = 5.0,
         read_timeout_s: float = 50.0,
@@ -313,12 +363,13 @@ class LiveApisClient:
         backoff_base_s: float = 1.0,
         sleep: Callable[[float], Awaitable[None]] = _default_sleep,
     ) -> None:
-        """Build a client for the dfo-apis at `base_url` (`DFO_APIS_URL`).
+        """Build a client for the apis service at `base_url` (`DFO_APIS_URL`).
 
         Args:
-            base_url: Origin of dfo-apis.
+            base_url: Origin of apis.
             datasets_principal: `DATASETS_FIRST_PARTY_PRINCIPAL`, for the recipe routes.
             live_refresh_principal: `LIVE_REFRESH_PRINCIPAL`, for refresh and render.
+            auth: Async credential hook, called once per call. Adds nothing by default.
             transport: An `httpx2` transport, `httpx2.MockTransport` in tests.
             connect_timeout_s: Connection deadline of each attempt.
             read_timeout_s: Read deadline of each attempt.
@@ -328,6 +379,7 @@ class LiveApisClient:
         """
         self._datasets_principal = datasets_principal
         self._live_refresh_principal = live_refresh_principal
+        self._auth = auth
         self._max_attempts = max_attempts
         self._backoff_base_s = backoff_base_s
         self._sleep = sleep
@@ -355,7 +407,7 @@ class LiveApisClient:
         """Store `recipe` for a published `ops_` frame; idempotent.
 
         Raises:
-            LiveApisError: `snapshot_not_found` for a pair dfo-apis never stored;
+            LiveApisError: `snapshot_not_found` for a pair apis never stored;
                 `publish_conflict` (see `constraint_id`) for a different recipe or
                 a replay key another frame holds.
         """
@@ -405,24 +457,6 @@ class LiveApisClient:
             raise
         return _required_frame(response, _json_object(response, "replay answer"), "replay answer")
 
-    async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
-        """The dataset's stored versions, newest first."""
-        response = await self._send(
-            "GET",
-            _VERSIONS_PATH.format(spec_id=_segment(spec_id)),
-            headers=self._datasets_headers(),
-        )
-        versions = _json_object(response, "versions answer").get("versions")
-        if not isinstance(versions, list):
-            raise _invalid(response, "versions answer")
-        parsed: list[DatasetVersion] = []
-        for item in versions:
-            version = _dataset_version(item) if isinstance(item, dict) else None
-            if version is None:
-                raise _invalid(response, "versions answer")
-            parsed.append(version)
-        return tuple(parsed)
-
     # Refresh and render routes, called with the live-refresh principal.
 
     async def refresh_frame(self, *, spec_id: str, content_version: str) -> RefreshResult:
@@ -455,7 +489,7 @@ class LiveApisClient:
         raise _invalid(response, "refresh answer")
 
     async def render(self, *, component_id: str, revision: int, frame: FramePair) -> dict[str, Any]:
-        """The component revision drawn on `frame`, as dfo-apis answers it.
+        """The component revision drawn on `frame`, as apis answers it.
 
         Raises:
             LiveApisError: `render_target_mismatch` when `frame` is not an
@@ -482,14 +516,14 @@ class LiveApisClient:
     ) -> AsyncIterator[RenderDataStream]:
         """The revision's data export drawn on `frame`, as an open byte stream.
 
-        `format` and `bundle` go to dfo-apis when set, which validates them.
+        `format` and `bundle` go to apis when set, which validates them.
 
         Raises:
             LiveApisError: on a refusal, raised on entering the block.
             LiveApisTransportError: on a transport failure, including one that cuts
                 the body short.
         """
-        headers = self._live_headers()
+        headers = await self._with_auth(self._live_headers())
         params: dict[str, str] = frame.as_json()
         if format is not None:
             params["format"] = format
@@ -512,6 +546,38 @@ class LiveApisClient:
             raise LiveApisTransportError(detail=type(exc).__name__) from exc
 
     # No credential.
+
+    async def list_versions(self, *, spec_id: str) -> tuple[DatasetVersion, ...]:
+        """Every stored version of the dataset, newest first, each with its own
+        `enrichment_stamp`, read page by page.
+
+        A dataset id apis registers no dataset under (`spec_not_found` on the
+        first page) has no versions, so it returns `()`.
+
+        Raises:
+            LiveApisError: apis refused or failed a page, `spec_not_found` on a
+                later page included, or answered one outside the contract
+                (`response_invalid`): a page that is not complete and names no new
+                cursor, or a walk that would read past `VERSIONS_MAX_PAGES` pages.
+        """
+        path = _VERSIONS_PATH.format(spec_id=_segment(spec_id))
+        try:
+            response = await self._send("GET", path)
+        except LiveApisError as exc:
+            if exc.code == SPEC_NOT_FOUND:
+                return ()
+            raise
+        versions, cursor = _versions_page(response)
+        # `followed` holds one cursor per page read but the first.
+        followed: set[str] = set()
+        while cursor is not None:
+            if cursor in followed or len(followed) + 1 >= VERSIONS_MAX_PAGES:
+                raise _invalid(response, "versions answer")
+            followed.add(cursor)
+            response = await self._send("GET", path, params={"cursor": cursor})
+            page, cursor = _versions_page(response)
+            versions.extend(page)
+        return tuple(versions)
 
     async def read_component(
         self, *, component_id: str, revision: int | None = None
@@ -552,6 +618,7 @@ class LiveApisClient:
 
         Returns the 2xx response.
         """
+        headers = await self._with_auth(headers)
         attempt = 0
         while True:
             attempt += 1
@@ -563,12 +630,26 @@ class LiveApisClient:
                 raise error
             await self._sleep(random.uniform(0, self._backoff_base_s * 2 ** (attempt - 1)))
 
+    async def _with_auth(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        """`headers` plus the auth hook's, minted after the principal check has passed.
+
+        The auth hook's headers win over a header of the same name in `headers`.
+
+        Raises:
+            LiveApisTransportError: the hook could not mint a token.
+        """
+        try:
+            auth = await self._auth() if self._auth else {}
+        except ApisAuthError as exc:
+            raise LiveApisTransportError(detail=f"no dfo-apis ID token: {exc}") from exc
+        return {**(headers or {}), **auth}
+
     async def _attempt(
         self,
         method: str,
         path: str,
         *,
-        headers: Mapping[str, str] | None,
+        headers: Mapping[str, str],
         json: Any | None,
         params: Mapping[str, Any] | None,
     ) -> httpx2.Response | LiveApisError:

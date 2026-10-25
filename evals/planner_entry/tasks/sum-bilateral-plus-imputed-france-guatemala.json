@@ -78,7 +78,10 @@
   ],
   "brief": "Total bilateral and imputed multilateral aid from France to Guatemala between 2010 and the latest available year",
   "asks": [
-    "Total bilateral and imputed multilateral aid from France to Guatemala, 2010 to the latest year"
+    {
+      "text": "Total bilateral and imputed multilateral aid from France to Guatemala, 2010 to the latest year",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -95,6 +98,7 @@
     "distinction": "sum_of, not join: the user asks for one total of the two flows, not the two set side by side"
   },
   "unit_asked": false,
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "Total bilateral and imputed multilateral aid from France to Guatemala between 2010 and the latest available year",
     "answer_mode": "computed",

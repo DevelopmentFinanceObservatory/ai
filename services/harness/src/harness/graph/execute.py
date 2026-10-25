@@ -16,11 +16,9 @@ from collections.abc import (
 from dataclasses import dataclass
 from typing import Any, cast
 
-from compiler.evidence import errors
 from compiler.surface import ProgressReport, ToolSurface
 from executor.classify import (
     Disposition,
-    ToolFailure,
     candidates_of,
     classify_refusal,
 )
@@ -38,9 +36,11 @@ from executor.outcomes import (
     RediscoveryNeeded,
     RefusalKind,
     Refused,
+    failed_step,
 )
 from executor.run import (
     FetchSeriesStats,
+    LabelRefs,
     StepProgressCallback,
     execute_approved_plan,
 )
@@ -58,13 +58,12 @@ from harness.graph.answer import (
     presentable_steps,
     store_run_plan,
 )
-from harness.graph.plan_done import StepSummary
+from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     STEP_PROGRESS_KEY,
     readable_plan,
 )
-from harness.tool_contracts import HarnessCode
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +82,15 @@ def _replan_refusal(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -
         **_refusal_shape(outcome),
         "also_stopped": [_refusal_shape(sibling) for sibling in outcome.also_stopped],
     }
+
+
+def _planner_refusal(
+    outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused, *, plan: PlannerPlan
+) -> dict[str, Any]:
+    """`_replan_refusal` as the planner reads it, naming the step and
+    requirement the model wrote in place of each copy `plan`'s split added
+    (`plan_done.authored_report`)."""
+    return authored_report(_replan_refusal(outcome), plan)
 
 
 def _is_dead_end(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> bool:
@@ -313,108 +321,22 @@ def _kept_asks(
     return kept
 
 
-# What the orchestrator is told of a stop no tool refused and no evidence check
-# explains, by its kind. `Refused.detail` stays out of the hand-back: it can
-# quote an exception, the ledger's failure reason or literal spec ids, so it is
-# logged instead.
-STOP_MESSAGES: dict[RefusalKind, str] = {
-    RefusalKind.NOT_APPROVED: "the calculation was not approved",
-    RefusalKind.STALE_REVISION: "the calculation changed after it was approved",
-    RefusalKind.SURFACE_CHANGED: "a tool the calculation uses changed after it was approved",
-    RefusalKind.TRANSPORT_FAILED: "a data service could not be reached in time",
-    RefusalKind.BINDING_INVALID: "a step's input could not be passed on to the next step",
-    RefusalKind.STEP_REFUSED: "a tool refused the step",
-    RefusalKind.STEP_RESULT_UNUSABLE: "a step returned a result that could not be used",
-    RefusalKind.REQUIREMENT_UNMET: "the data retrieved does not meet what the calculation asked for",
-    RefusalKind.EMPTY_ANSWER: "the step's result holds no rows",
-    RefusalKind.SHAPE_MISMATCH: "a step's result does not have the shape the calculation expects",
-    RefusalKind.COLUMN_UNBOUND: "a step names a column its input does not have",
-    RefusalKind.ROLLING_WINDOW_OUTSIDE_DATASET: (
-        "the latest period asked for falls outside the dataset"
-    ),
-    RefusalKind.AUTHORISATION_EXPIRED: "the approval has expired, so the plan needs approving again",
-    RefusalKind.MANIFEST_OUTSIDE_AUTHORISATION: "the run read data the approval does not cover",
-    RefusalKind.AUTHORISATION_MISMATCH: "the approval names other work than the run",
-    RefusalKind.RUN_ABANDONED: "the run failed before it came to a result",
-}
-
-
 def _failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
-    """`execute`'s `failed_step`, once the replan budget is spent."""
-    if isinstance(outcome, MethodChoiceNeeded):
-        return {
-            "step_id": outcome.step_id,
-            "tool": outcome.tool.name,
-            "code": outcome.code,
-            "message": outcome.refusal.message,
-        }
-    if isinstance(outcome, RediscoveryNeeded):
-        return {
-            "step_id": outcome.step_id,
-            "tool": outcome.tool.name,
-            "code": HarnessCode.REDISCOVERY_NEEDED,
-            "message": outcome.refusal.message
-            or f"the source for requirement {outcome.requirement_id!r} needs discovering again",
-        }
-    # `outcome.detail` wraps the tool's own text ("'aggregate' refused:
-    # ..."), but only when the call left one -- with no `result.text`,
-    # `_refused` falls back to `failure.code` instead of `failure.message`
-    # (`executor.run._Run._stopped_by_refusal`), so `detail` is not a
-    # reliable stand-in for what the tool actually said. `payload`, set on
-    # every `STEP_REFUSED` stop, carries the tool's own `code` and
-    # `message` straight from its `ToolFailure`; a `Refused` raised for any
-    # other reason (`EMPTY_ANSWER`, `SHAPE_MISMATCH`, ...) has no tool call
-    # to report and is told by its kind (`STOP_MESSAGES`) -- unless it
-    # carries `issues` (`executor.run._Run._check_evidence`'s
-    # `REQUIREMENT_UNMET`, the only source of them): `outcome.detail`
-    # there is the generic "requirement X is not met by what Y returned",
-    # naming neither which of `check_evidence`'s ten sub-checks fired nor
-    # what it found versus what the plan required, so the specific
-    # `EvidenceIssueCode` and its own expected/actual detail lead instead.
-    if outcome.payload is not None:
-        return _refused_step(step_id=outcome.step_id, failure=outcome.payload)
-    if outcome.issues:
-        failing = errors(list(outcome.issues)) or list(outcome.issues)
-        return {
-            "step_id": outcome.step_id,
-            "tool": None,
-            "code": failing[0].code.value,
-            "message": "; ".join(issue.detail for issue in failing),
-        }
-    logger.warning(
-        "execute: run %s stopped at step %s as %s: %s",
-        outcome.run_id,
-        outcome.step_id,
-        outcome.refusal.value,
-        outcome.detail,
-    )
-    return {
-        "step_id": outcome.step_id,
-        "tool": None,
-        "code": outcome.refusal.value,
-        "message": STOP_MESSAGES[outcome.refusal],
-    }
+    """`execute`'s `failed_step`, once the replan budget is spent (`executor.outcomes.failed_step`).
 
-
-def _refused_step(*, step_id: str | None, failure: ToolFailure) -> dict[str, Any]:
-    """`execute`'s `failed_step` for a step the tool itself refused.
-
-    A tool's `fix` can carry its own `remedy`: one sentence written for the
-    end user (`data_mcp.tool_errors`: an `over_ceiling` on
-    `member_cardinality`, and a mint dfo-apis refuses `member_not_resolvable`),
-    not the code/detail prose the rest of `fix` holds for a retrying caller.
-    `plan_done` hands it to the orchestrator under `failed_step`.
+    A stop no tool refused and no evidence check explains is told by its kind
+    alone, so its `detail`, which can quote an exception, the ledger's failure
+    reason or literal spec ids, is logged.
     """
-    failed: dict[str, Any] = {
-        "step_id": step_id,
-        "tool": None,
-        "code": failure.code,
-        "message": failure.message,
-    }
-    remedy = failure.fix.get("remedy")
-    if isinstance(remedy, str) and remedy:
-        failed["remedy"] = remedy
-    return failed
+    if isinstance(outcome, Refused) and outcome.payload is None and not outcome.issues:
+        logger.warning(
+            "execute: run %s stopped at step %s as %s: %s",
+            outcome.run_id,
+            outcome.step_id,
+            outcome.refusal.value,
+            outcome.detail,
+        )
+    return failed_step(outcome)
 
 
 def _without_figures(plan_version: int, *, run: dict[str, Any]) -> dict[str, Any]:
@@ -438,6 +360,7 @@ def execute_node(
     publisher: ResultPublisher | None,
     max_concurrent_steps: int,
     fetch_series_stats: FetchSeriesStats,
+    label_refs: LabelRefs,
 ) -> Callable[[Context, Any], AsyncIterator[Any]]:
     """The `execute` node, running the approved plan against `tool_surface`
     as a run of `run_ledger`, its derived results published through
@@ -480,7 +403,10 @@ def execute_node(
         on, and the plan is left as approved.
         `MethodChoiceNeeded` and `RediscoveryNeeded` route "replan" while the budget allows and "ok"
         with `failed_step` once it is spent, the same as any other
-        `Refused`. A stopped run hands back only its presentable steps'
+        `Refused`. The "replan" refusal names the model's own steps and
+        requirements in place of the copies the plan's split added
+        (`_planner_refusal`); `failed_step` keeps the copies' ids, and
+        `plan_done` maps them where it hands them on. A stopped run hands back only its presentable steps'
         frames and summaries (`presentable_steps`: its retrieved ones, since
         its derived ones are never published, so a finished derived terminal
         is withheld and `plan_done` reports it `not_run`); its answer frames
@@ -538,6 +464,7 @@ def execute_node(
                 conversation_id=conversation_of(ctx.session.id),
                 max_concurrent_steps=max_concurrent_steps,
                 fetch_series_stats=fetch_series_stats,
+                label_refs=label_refs,
                 on_progress=on_progress,
             )
         )
@@ -636,7 +563,7 @@ def execute_node(
         replans = int(ctx.state.get("replans", 0))
         if not dead_end and replans < MAX_REPLANS:
             ctx.state["replans"] = replans + 1
-            refusal = _replan_refusal(outcome)
+            refusal = _planner_refusal(outcome, plan=finished)
             if finished.asks:
                 refusal["computed_asks"] = _computed_asks(finished, answers)
             output: dict[str, Any] = {"refusal": refusal, "plan_version": finished.version}

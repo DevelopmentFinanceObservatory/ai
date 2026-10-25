@@ -23,8 +23,11 @@ A create (an intent with a `frame_ref` and no `component_id`):
    select that say which series count: one the frame's population already
    binds, and one that lists fewer values than the frame's view holds for it.
    A dimension pinned to the only value the frame holds narrows nothing.
-3. `common.rolling.anchor_populations` builds the card's populations from the
-   recipe's tree, that selection, and each root frame's column names.
+3. A selection that keeps nothing, on a frame with an anchor of its own, leaves
+   the write as it is, since the card draws the series that anchor was resolved
+   over.
+   Otherwise `common.rolling.anchor_populations` builds the card's populations
+   from the recipe's tree, that selection, and each root frame's column names.
 4. Populations equal to the frame's own leave the write as it is. Otherwise
    the recipe is replayed with them, which resolves the latest period again,
    runs the rolling steps on it, and publishes a new frame with its recipe,
@@ -50,7 +53,7 @@ refused. A revise cannot move a card to another frame, so a select that counts
 other series is refused `rolling_select_needs_new_frame`, and the caller
 writes the merged intent as a new card.
 
-One replay costs a mint request to dfo-apis for each root, one `resolve_anchor`
+One replay costs a mint request to apis for each root, one `resolve_anchor`
 call, one call of each rolling verb and of every verb above it (a population is
 part of an op-spec's identity, so each mints a new frame), one replay-key read,
 and one publish. The frame a replay gave is kept, for the `MAX_REPLAYS_KEPT`
@@ -94,10 +97,12 @@ from common.materialisation import (
 )
 from common.recipe import RecipeAnchorError, RecipeError, build_recipe
 from common.rolling import (
+    PairingKeysUnstatedError,
     PopulationEmptyError,
     PopulationLevelColumnMissingError,
     anchor_populations,
     canonical_populations,
+    flat_populations,
 )
 from common.row_budget import RowBudgetExhausted, row_budget
 from compiler.surface import ToolSurfaceUnavailableError
@@ -120,6 +125,7 @@ __all__ = [
     "card_selection",
     "frame_periods",
     "holds_relative_period",
+    "named_year",
     "resolved_basis",
     "title_refusal",
     "written_title_refusal",
@@ -238,16 +244,21 @@ def title_refusal(title: object, periods: Iterable[object]) -> dict[str, Any] | 
     such year. A year outside `periods` may be named: "Agenda 2030", or the
     fixed first year of a window whose end moves.
     """
+    year = named_year(title, periods)
+    if year is None:
+        return None
+    refusal = harness_refusal(
+        code=HarnessCode.TITLE_QUOTES_ROLLING_PERIOD, message=_TITLE_MESSAGE.format(period=year)
+    )
+    return {**refusal, "fix": {"period": year}}
+
+
+def named_year(title: object, periods: Iterable[object]) -> str | None:
+    """The first year of `periods`, in order, whose digits stand in `title`
+    with no digit on either side, or None when it names none of them."""
     text = str(title or "")
     years = sorted({year for period in periods for year in _YEAR.findall(str(period))})
-    for year in years:
-        if re.search(rf"(?<!\d){year}(?!\d)", text):
-            refusal = harness_refusal(
-                code=HarnessCode.TITLE_QUOTES_ROLLING_PERIOD,
-                message=_TITLE_MESSAGE.format(period=year),
-            )
-            return {**refusal, "fix": {"period": year}}
-    return None
+    return next((year for year in years if re.search(rf"(?<!\d){year}(?!\d)", text)), None)
 
 
 def written_title_refusal(
@@ -649,7 +660,11 @@ class RollingCards:
             CardWithheld: The card's populations cannot be built, a root frame
                 cannot be read for its columns, or the replay gave no frame.
         """
-        populations = await self._populations(frame, select=select, view=view or {})
+        selection = self._selection(frame, select=select, view=view or {})
+        if not selection and frame.recipe["anchor"] is not None:
+            # The card draws the series the frame's own anchor was resolved over.
+            return frame.ref
+        populations = await self._populations(frame, selection=selection)
         if populations == frame.populations:
             return frame.ref
         key = (frame.ref.spec_id, frame.ref.content_version, rfc8785.dumps(populations))
@@ -680,20 +695,34 @@ class RollingCards:
             self._replayed.popitem(last=False)
         return replayed
 
-    async def _populations(
-        self, frame: RollingFrame, *, select: Mapping[str, Any], view: Mapping[str, Any]
-    ) -> list[dict[str, Any]]:
+    @staticmethod
+    def _selection(
+        frame: RollingFrame, *, select: Mapping[str, Any], view: Mapping[str, Any]
+    ) -> dict[str, list[str]]:
+        """The dimensions of the card's `select` that say which series count."""
+        # The columns some population narrows, those on each side of a pairing included.
         bound = frozenset(
-            column for population in frame.populations for column in population["bindings"]
+            column
+            for population in flat_populations(frame.populations)
+            for column in population["bindings"]
         )
+        return card_selection(select, view=view, bound=bound)
+
+    async def _populations(
+        self, frame: RollingFrame, *, selection: Mapping[str, list[str]]
+    ) -> list[dict[str, Any]]:
         try:
             return anchor_populations(
                 frame.recipe["tree"],
                 frame.recipe["roots"],
                 root_columns=await self._columns(frame),
-                selection=card_selection(select, view=view, bound=bound),
+                selection=selection,
             )
-        except (PopulationEmptyError, PopulationLevelColumnMissingError) as exc:
+        except (
+            PopulationEmptyError,
+            PopulationLevelColumnMissingError,
+            PairingKeysUnstatedError,
+        ) as exc:
             raise _withheld(HarnessCode.ROLLING_REPLAY_REFUSED, _REFUSED_MESSAGE, exc) from exc
 
     async def _columns(self, frame: RollingFrame) -> list[frozenset[str]]:

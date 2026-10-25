@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from common.hashed_fields import revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp import client_holder
 from data_mcp.client import UpstreamClient
@@ -492,6 +493,55 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
     assert [(group.label, group.total) for group in source.groups] == [("Africa", "DACAfrica")]
 
 
+@pytest.mark.parametrize(
+    ("marked", "hashed"),
+    [
+        (
+            {"whole_of": ["official"]},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "whole_of": ["official"],
+            },
+        ),
+        (
+            {"whole_of": ["official"], "side_classes": ["official", "residual"]},
+            {
+                "role": "observationAbout",
+                "label": "Africa",
+                "ref": "africa",
+                "whole_of": ["official"],
+                "side_classes": ["official", "residual"],
+            },
+        ),
+        ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
+    ],
+    ids=["with-the-marker", "with-the-sides-classes", "without-the-field"],
+)
+async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
+    monkeypatch: pytest.MonkeyPatch, marked: dict[str, list[str]], hashed: dict[str, Any]
+) -> None:
+    # A seed without the field resolves to the group it always did, so a plan hash over
+    # the source does not move.
+    fixture = Path(__file__).parent / "fixtures" / "search_spec_region_members.json"
+    block = json.loads(fixture.read_text())["spec"]
+    block["resolved"]["entity_groups"]["observationAbout"] |= marked
+    (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
+    resolved: list[Any] = []
+
+    async def capture(surface: object, **kwargs: Any) -> dict[str, Any]:
+        resolved.extend(kwargs["groups"])
+        return {}
+
+    monkeypatch.setattr("harness.seeds.resolve_definition", capture)
+
+    await resolve_seed(ScriptedSurface(), taken)
+
+    (group,) = resolved
+    assert revision_content(group) == hashed
+
+
 async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:
     # The browser hands over "African countries" as Search served it; the seed
     # node's resubmit posts Africa beside the identity, so Search's answer, the
@@ -626,7 +676,7 @@ async def test_a_seed_naming_an_earlier_seed_s_spec_id_fails_its_own_step_and_th
 
 
 def _refused_mint(request: httpx2.Request) -> httpx2.Response:
-    """dfo-apis's 409 `spec_not_exportable`, answering a `spec_id` mint."""
+    """The apis service's 409 `spec_not_exportable`, answering a `spec_id` mint."""
     assert request.url.path == "/api/datasets"
     return httpx2.Response(
         409,
@@ -709,7 +759,7 @@ class _Describes(_Steps):
 
 
 def _ask_user_answer(pause: types.FunctionCall) -> dict[str, Any]:
-    return {"result": {"spec_id": "o1"}}
+    return {"result": {"answers": {"q1": {"kind": "option", "spec_id": "o1"}}}}
 
 
 def _approval(pause: types.FunctionCall) -> dict[str, Any]:
@@ -721,13 +771,21 @@ _PAUSES = {
     "ask_user": (
         lambda: call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         _ask_user_answer,
     ),
     "plan": (
-        lambda: call("plan", brief="rank donors of education aid to Kenya", asks=[]),
+        lambda: call(
+            "plan",
+            brief="rank donors of education aid to Kenya",
+            asks=["rank donors of education aid to Kenya"],
+        ),
         _approval,
     ),
 }
@@ -777,8 +835,12 @@ async def test_a_turn_paused_without_a_seed_node_run_resumes_without_taking_its_
     runner, model = orchestrator_runner(
         call(
             "ask_user",
-            question="Which donors?",
-            options=[{"label": "DAC members"}, {"label": "All"}],
+            questions=[
+                {
+                    "question": "Which donors?",
+                    "options": [{"label": "DAC members"}, {"label": "All"}],
+                }
+            ],
         ),
         types.Part.from_text(text="Here are the donors."),
         executor=steps,

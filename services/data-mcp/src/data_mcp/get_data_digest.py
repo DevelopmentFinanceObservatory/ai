@@ -35,10 +35,11 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from common.materialisation import FrameRef
 from common.period_note import period_note
+from common.place_type import WHOLE_SIDE_POPULATIONS
 from common.price_basis import price_basis_reading
 
 from data_mcp.frame_materialisation import MaterialisationOutcome
@@ -53,6 +54,7 @@ from data_mcp.manifest import (
     party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
+from data_mcp.tool_errors import ENTITY_DCID_MARKER
 from data_mcp.version_description import VersionDescription
 
 # How the digest's frame reference line and operation poll note begin. Both
@@ -82,7 +84,7 @@ _MANIFEST_WARNING_CAP = 5
 # naming all of them would let one role's breadth dominate the sentence.
 _ACKNOWLEDGEMENT_ENTITY_CAP = 8
 
-# At most this many group totals are named per role in the line that says which dfo-apis
+# At most this many group totals are named per role in the line that says which apis
 # left out of the frame; the rest are only counted.
 _LEFT_OUT_TOTALS_CAP = 10
 
@@ -116,13 +118,13 @@ _DEPLOYMENT_CONSTANT_RE = re.compile(r"^Constant(?P<currency>[A-Z]{3})_(?P<year>
 
 _MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
 
-# The manifest warning dfo-apis added, on versions stored before descriptions, when a
+# The manifest warning apis added, on versions stored before descriptions, when a
 # summed mint added more than one StatVar into the series it labels `dcid:<spec_id>`.
 # Its message carries the count of StatVars summed, so it renders outside
 # `_MANIFEST_WARNING_CAP`.
 _STAT_VARS_SUMMED = "stat_vars_summed"
 
-# The coverage dimension dfo-apis counts after every declared role column.
+# The coverage dimension apis counts after every declared role column.
 _YEARS_DIMENSION = "years"
 
 # A reader's noun for each flow axis a role column can sit on; a role with no
@@ -132,7 +134,7 @@ _GRAIN_NOUNS = {"origin": "provider", "destination": "recipient"}
 
 @dataclass(frozen=True, kw_only=True)
 class OperationPollNote:
-    """This call's own mint crossed dfo-apis' sync budget and ran as a queued
+    """This call's own mint crossed apis' sync budget and ran as a queued
     operation, polled to completion before this call returned. Built by
     `get_data_tool.py` from `data_mcp.operations.ResolvedOperation`, whose own
     docstring explains why the digest reports this rather than leaving it to be
@@ -177,12 +179,12 @@ def summed_family(
 ) -> SummedFamily | None:
     """The family `manifest`'s version summed, or `None` when it summed nothing.
 
-    dfo-apis gives a summed series the family ref `dcid:<spec_id>` as its `stat_var`,
+    apis gives a summed series the family ref `dcid:<spec_id>` as its `stat_var`,
     and no other series carries it, so a frame holding that ref summed its family.
     `frame_summed` says whether the frame this call read holds it
     (`MaterialisationOutcome.family_summed`); when this call read no frame, the
     fetched statistics rows say instead. The count is the trace's members with rows,
-    the count dfo-apis' `sum_variables` step states. Only the name comes from
+    the count apis' `sum_variables` step states. Only the name comes from
     `description`, its title unless the title is a gap.
     """
     ref = f"dcid:{manifest.definition.spec_id}"
@@ -277,7 +279,7 @@ def render_get_data_digest(
             frame reference above is real, so a sidecar-artifact hiccup
             degrades this section alone, exactly like a degraded frame fetch
             degrades the frame reference's own section.
-        operation_poll: Set when this call's own mint crossed dfo-apis' sync
+        operation_poll: Set when this call's own mint crossed apis' sync
             budget and was queued as an operation, then polled to completion
             here before returning. `None` (the default) renders no note,
             which is every call's outcome except this one -- an ordinary
@@ -286,7 +288,7 @@ def render_get_data_digest(
             code system at one hierarchy level. Renders a line after the
             coverage that names the frame's `stat_var` and
             `stat_var_<code_system>` columns.
-        description: dfo-apis' description of the manifest's version
+        description: apis' description of the manifest's version
             (`data_mcp.version_description.fetch_version_description`), the one
             the version's cards carry. Its citation, which names the sources, and its
             latest period replace the manifest's citation line, and its steps, caveats and gaps
@@ -297,7 +299,7 @@ def render_get_data_digest(
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
-        coverage, the group totals dfo-apis left out of the frame
+        coverage, the group totals apis left out of the frame
         (`trace.party_totals_left_out`), any warnings that qualify that coverage, the period note
         of a one-year frame (`common.period_note.period_note`), the frame
         reference for downstream tools, then the citation, per-series statistics, any
@@ -326,10 +328,7 @@ def render_get_data_digest(
     ]
     if breakdown is not None:
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
-    sections.extend(
-        _left_out_totals_line(left_out, entity_labels)
-        for left_out in party_totals_left_out(manifest.trace)
-    )
+    sections.extend(_left_out_totals_lines(party_totals_left_out(manifest.trace), entity_labels))
     sections.extend(_warning_lines(shown_coverage))
     if note := period_note(manifest.coverage.model_dump(mode="json")):
         sections.append(note)
@@ -416,7 +415,7 @@ def _acknowledgement_line(
     was minted, and for whom. A summed mint instead names its `family`
     (`_family_name`) and says the family's StatVars were summed into one total series
     per entity role, or, on a `breakdown` mint, into one series per entity role and code
-    at the breakdown's level. dfo-apis sums away the
+    at the breakdown's level. apis sums away the
     StatVar axis and keeps every declared role column, a role the question
     left open included, so the roles come from `coverage.dimensions`, one per
     frame role column plus `years`, less a breakdown's `stat_var_<code_system>`
@@ -546,7 +545,7 @@ def _citation_line(citation: CitationModel) -> str:
 
 def _description_lines(description: VersionDescription) -> list[str]:
     """The citation line with the latest period, then one line each for the steps,
-    the caveats and the members dfo-apis could not fill, when there are any."""
+    the caveats and the members apis could not fill, when there are any."""
     # `cite.text` is the composer's citation line, which names every source.
     citation = f"Source: {description.cite.text}"
     latest = description.freshness.latest_period
@@ -581,15 +580,45 @@ def _gap_words(path: str) -> str:
     return " ".join(named).replace("_", " ")
 
 
+def _left_out_totals_lines(
+    entries: Sequence[PartyTotalsLeftOut], entity_labels: Mapping[str, str]
+) -> list[str]:
+    """The lines naming the group totals apis left out of the frame on each party role
+    (`options.without_party_totals`), one per entry, each total by its label when this call
+    resolved it. The population a search names for a side's whole total follows the last line
+    of the role, once however many datasets the role lost totals in."""
+    last_of_role = {entry.role: index for index, entry in enumerate(entries)}
+    lines = []
+    for index, entry in enumerate(entries):
+        line = _left_out_totals_line(entry, entity_labels)
+        population = WHOLE_SIDE_POPULATIONS.get(entry.role)
+        if population is not None and last_of_role[entry.role] == index:
+            line = (
+                f"{line} For the total across the whole side, search again naming the "
+                f'population ("{population}") with no operation over that side.'
+            )
+        lines.append(line)
+    return lines
+
+
 def _left_out_totals_line(left_out: PartyTotalsLeftOut, entity_labels: Mapping[str, str]) -> str:
-    """The line naming the group totals dfo-apis left out of the frame on one party role
-    (`options.without_party_totals`), each by its label when this call resolved it."""
+    """The line naming the group totals one entry left out of its party role. The entry's
+    scope follows the role: a provenance names the dataset by its dcid, since the manifest
+    carries no label for it; a null provenance says the rows carry no dataset; an entry
+    recorded without the key comes from a trace whose cut covered every dataset, so it
+    names none."""
     totals = [entity_labels.get(ref, ref) for ref in left_out.entities]
     noun = "group total" if len(totals) == 1 else "group totals"
     names = _joined_with_cap(totals, _LEFT_OUT_TOTALS_CAP)
+    if "provenance" not in left_out.model_fields_set:
+        scope = ""
+    elif left_out.provenance is None:
+        scope = " in the rows that carry no dataset"
+    else:
+        scope = f" in {left_out.provenance}"
     return (
-        f"Left out of the frame: {len(totals)} {noun} on {left_out.role} ({names}); the "
-        "frame holds that side's other parties."
+        f"Left out of the frame: {len(totals)} {noun} on {left_out.role}{scope} "
+        f"({names}); the frame holds that side's other parties."
     )
 
 
@@ -843,6 +872,78 @@ def _budget_warnings(
         len(other_warnings) - len(shown_other)
     )
     return shown_coverage, shown_other, remainder
+
+
+def warning_refs(warnings: Sequence[WarningModel]) -> list[str]:
+    """Every ref the counted fields of `warnings` name, once each, in the order
+    `labelled_warnings` names them."""
+    refs = (
+        ref for warning in warnings for field in _counted_fields(warning) for ref, _ in field.named
+    )
+    return list(dict.fromkeys(refs))
+
+
+class _CountedField(NamedTuple):
+    """One counted field of a warning: the noun its sentence opens with, how many things
+    it counts, and the `(ref, years)` of those it names, `years` empty for every field
+    but `omitted_entity_years`."""
+
+    noun: str
+    count: int
+    named: Sequence[tuple[str, Sequence[str]]]
+
+
+def _counted_fields(warning: WarningModel) -> list[_CountedField]:
+    """The counted fields `warning` carries, in the order they are rendered."""
+    fields = [
+        _CountedField(noun, counted.count, [(ref, ()) for ref in counted.refs])
+        for noun, counted in (
+            ("Series at another frequency", warning.off_cadence_members),
+            ("Series with no observation in the requested years", warning.out_of_window_members),
+            ("Entities with no observation", warning.unserved_entities),
+            ("Entities left out", warning.omitted_entities),
+        )
+        if counted is not None
+    ]
+    if (entity_years := warning.omitted_entity_years) is not None:
+        named = [(entity.ref, entity.years) for entity in entity_years.entities]
+        fields.append(_CountedField("Entities left out", entity_years.count, named))
+    return fields
+
+
+def _counted_field_sentence(field: _CountedField, labels: Mapping[str, str]) -> str:
+    """`field`'s noun and the names of the things it names, each with its years, then how
+    many of its count it names none of."""
+    names = []
+    for ref, years in field.named:
+        name = labels.get(ref) or ref.removeprefix(ENTITY_DCID_MARKER)
+        names.append(f"{name} ({', '.join(years)})" if years else name)
+    text = ", ".join(names)
+    if (unnamed := field.count - len(field.named)) > 0:
+        text = f"{text}, and {unnamed} more" if text else f"{unnamed} more"
+    return f"{field.noun}: {text}."
+
+
+def labelled_warnings(
+    warnings: Sequence[WarningModel], labels: Mapping[str, str]
+) -> list[WarningModel]:
+    """`warnings`, each message followed by a sentence for each counted field its warning
+    carries, naming the field's refs by `labels` and a ref outside them by its bare dcid.
+
+    apis' messages state counts only and leave the naming to the reader. `get_data`
+    labels the manifest once, and its digest and returned manifest both carry these
+    messages, so the harness's card copy reads the names the digest does. A warning with
+    no counted field keeps its message, and every warning keeps its fields.
+    """
+    return [
+        warning.model_copy(update={"message": _labelled_message(warning, labels)})
+        for warning in warnings
+    ]
+
+
+def _labelled_message(warning: WarningModel, labels: Mapping[str, str]) -> str:
+    sentences = (_counted_field_sentence(field, labels) for field in _counted_fields(warning))
+    return " ".join([warning.message, *sentences])
 
 
 def _warning_lines(warnings: Sequence[WarningModel]) -> list[str]:

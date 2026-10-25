@@ -388,6 +388,19 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     assert summary.get("group_readings") == readings
 
 
+def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {
+            "origin": {"ref": None, "label": "DAC", "total": "DAC", "whole_of": ["party"]}
+        },
+    }
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert "group_readings" not in summary
+
+
 @pytest.mark.parametrize(
     ("facets", "codes"),
     [

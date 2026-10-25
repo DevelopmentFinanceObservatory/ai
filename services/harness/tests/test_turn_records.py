@@ -38,6 +38,8 @@ from planner.plan import (
     search_pin_slot,
 )
 
+from .split_plan import SPEC_DEBT, stored_split_plan
+
 _FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "turn_records_recorded.json").read_text()
 )
@@ -104,7 +106,7 @@ steps:
 
 def _top_donors() -> tuple[Plan, PlanRecord]:
     plan = _plan("guatemala_top_donors").approve(at=datetime.now(UTC))
-    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_step="top_donors")
+    record = PlanRecord.from_plan(plan, searched={_SEARCHED_SPEC}, failed_steps={"top_donors"})
     return plan, record
 
 
@@ -183,7 +185,7 @@ def test_plan_record_render_fits_its_budget_and_repeats(budget: int) -> None:
 
 def test_plan_record_folds_steps_but_keeps_outputs_and_the_failed_step() -> None:
     plan, _ = _join()
-    record = PlanRecord.from_plan(plan, failed_step="bilateral_oda")
+    record = PlanRecord.from_plan(plan, failed_steps={"bilateral_oda"})
     full = record.render(budget=10_000)
     # One character short of the whole render: only the first level applies.
     text = record.render(budget=len(full) - 1)
@@ -259,15 +261,15 @@ def test_plan_record_reads_each_source_no_search_returned() -> None:
 def test_a_later_turns_reading_of_a_source_states_how_it_is_counted() -> None:
     """A translator-found source offering net beside gross reaches a later
     turn's ledger, through the stored record, with both counts and the net
-    spec_id. A price alternative is no other count."""
+    spec_id. A price alternative is listed under other prices."""
     raw = copy.deepcopy(_FIXTURE["plans"]["guatemala_top_donors"])
     (source,) = raw["workflow"]["sources"]
-    net = "spec_" + "e" * 32
+    net, constant = "spec_" + "e" * 32, "spec_" + "f" * 32
     source["elected_measure"] = {
         "label": "gross disbursements",
         "alternatives": [
             {"spec_id": net, "label": "net disbursements", "axis": "what"},
-            {"spec_id": "spec_" + "f" * 32, "label": "constant prices", "axis": "unit"},
+            {"spec_id": constant, "label": "constant prices", "axis": "unit"},
         ],
     }
     stored = PlanRecord.from_plan(Plan.model_validate(raw)).model_dump(mode="json")
@@ -278,9 +280,9 @@ def test_a_later_turns_reading_of_a_source_states_how_it_is_counted() -> None:
     rendered = render_readings(readings, budget=10_000)
 
     assert (
-        f"   counted as gross disbursements; other counts: net disbursements [{net}]"
-        in rendered.text.splitlines()
-    )
+        f"   counted as gross disbursements; other counts: net disbursements [{net}]; "
+        f"other prices: constant prices [{constant}]"
+    ) in rendered.text.splitlines()
     assert rendered.other_counts == (net,)
 
 
@@ -314,6 +316,70 @@ def test_a_search_pin_decision_is_left_out_of_the_record_and_the_card() -> None:
     decisions = record.render(budget=10_000).split("decisions:")[1].split("warnings:")[0]
     assert "spec_" not in decisions
     assert all(slot not in row["decision_ids"] for row in requirement_rows(plan))
+
+
+_GROSS = ("gross disbursements", "net disbursements")
+
+
+@pytest.mark.parametrize(
+    ("imputed_options", "imputed_chosen", "listed"),
+    [
+        (_GROSS, "gross disbursements", "bilateral"),
+        (("net disbursements", "gross disbursements"), "gross disbursements", "bilateral"),
+        (_GROSS, "net disbursements", "both"),
+        (("gross disbursements", "commitments"), "gross disbursements", "both"),
+    ],
+    ids=["same choice", "same choice, net elected", "different chosen", "different options"],
+)
+def test_search_pins_making_one_choice_list_one_decision(
+    imputed_options: tuple[str, ...], imputed_chosen: str, listed: str
+) -> None:
+    """A numerator and a denominator pin counted the same way list one decision,
+    the one the user settled, and each requirement cites it. Pins whose
+    choices differ list one decision each."""
+    joined = _plan("france_guatemala_join")
+    bilateral, imputed = search_pin_slot(_BILATERAL_SPEC), search_pin_slot(_IMPUTED_SPEC)
+    pins = {
+        "bilateral_oda": Decision(
+            slot=bilateral,
+            description="How the flow is counted.",
+            options=_GROSS,
+            chosen="gross disbursements",
+            resolved_by=ResolvedBy.USER,
+            rationale="The user's question named gross disbursements.",
+            fixes=DecisionFixes(source_spec_id=_BILATERAL_SPEC),
+        ),
+        "imputed_multilateral_oda": Decision(
+            slot=imputed,
+            description="How the flow is counted.",
+            options=imputed_options,
+            chosen=imputed_chosen,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT,
+            rationale="Search elected gross disbursements for this source.",
+            fixes=DecisionFixes(source_spec_id=_IMPUTED_SPEC),
+        ),
+    }
+    plan = joined.model_copy(
+        update={
+            "decisions": (*joined.decisions, *reversed(pins.values())),
+            "evidence_requirements": tuple(
+                r.model_copy(update={"decision_ids": (*r.decision_ids, pins[r.id].slot)})
+                if r.id in pins
+                else r
+                for r in joined.evidence_requirements
+            ),
+        }
+    )
+
+    record = PlanRecord.from_plan(plan)
+
+    expected = [bilateral] if listed == "bilateral" else [imputed, bilateral]
+    assert [d.slot for d in record.decisions][len(joined.decisions) :] == expected
+    cited = {row["id"]: row["decision_ids"] for row in requirement_rows(plan)}
+    for requirement, pin in pins.items():
+        assert cited[requirement][-1] == (bilateral if listed == "bilateral" else pin.slot)
+    shown = {d.slot for d in record.decisions}
+    assert all(slot in shown for slots in cited.values() for slot in slots)
 
 
 def test_plan_record_maps_each_ask_to_its_output_steps_or_its_decline() -> None:
@@ -481,6 +547,31 @@ def test_comparison_intent_survives_reading_serialization(separate: bool | None)
         assert reading.model_dump(mode="json")["separate"] is True
     else:
         assert "separate" not in reading.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("stored", "count_of"),
+    [
+        ({"other_count_of": "spec_gross"}, "spec_gross"),
+        ({"sibling_of": {"spec_id": "spec_gross", "axis": "what"}}, "spec_gross"),
+        ({"sibling_of": {"spec_id": "spec_gross", "axis": "unit"}}, None),
+    ],
+    ids=["stored-before-sibling-of", "another-count", "other-prices"],
+)
+def test_a_stored_sibling_reading_names_the_reading_that_offered_it(
+    stored: dict[str, Any], count_of: str | None
+) -> None:
+    """A reading stored with `other_count_of` reads as another count of the
+    reading it names. A sibling on axis `unit` has no `other_count_of`."""
+    reading = SearchReading.model_validate(
+        {"text": "aid", "status": "chosen", "spec_id": "spec_net", **stored}
+    )
+    dumped = reading.model_dump(mode="json")
+
+    assert reading.sibling_of is not None and reading.sibling_of.spec_id == "spec_gross"
+    assert reading.other_count_of == count_of
+    assert "other_count_of" not in dumped
+    assert SearchReading.model_validate(dumped) == reading
 
 
 def test_reading_reads_the_structured_fields_a_part_adds() -> None:
@@ -870,3 +961,16 @@ def test_plan_record_keeps_translator_source_account_across_turns():
     reading = record.source_readings(observed_at=datetime(2026, 10, 10, tzinfo=UTC))[0]
     assert reading.provenance_ref == "provenance/CRS"
     assert reading.provenance_account == "provider"
+
+
+def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> None:
+    """`debt_history` is code's copy of `debt` for a rolling growth. The record has
+    one step, source and period for `debt`, and one warning, which names `debt`."""
+    record = PlanRecord.from_plan(stored_split_plan(decision))
+
+    assert [step.id for step in record.steps] == ["debt", "total", "last_five"]
+    assert [source.spec_id for source in record.sources] == [SPEC_DEBT]
+    assert [period.requirement_ids for period in record.periods] == [("debt",)]
+    assert [(warning.code, warning.requirement_id) for warning in record.warnings] == [
+        ("window_short", "debt")
+    ]

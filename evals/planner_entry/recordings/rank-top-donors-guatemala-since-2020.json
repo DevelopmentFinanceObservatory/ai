@@ -1,35 +1,55 @@
 {
   "answers": [
-    "7b9ab0b7935329e7",
-    "c575172c328d32d5",
-    "d64a5c5138674dcb",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "3322501baf423872",
+    "9099e045960c63ae",
+    "a25aed12b2ed890f",
+    "b076e9ccad77d481",
+    "c2ffed250abb8895"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:57:48+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:35:30+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 2492,
-            "output_tokens": 137
+            "input_tokens": 0,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1453
+            "by_step": {
+              "coverage": 0,
+              "response_cache_layer2": 1
+            },
+            "total": 3
           },
-          "trace_id": "e3a748df98a94f8b9070f16e4fdf0ad5",
+          "trace_id": "6c48a4ede039448dba509618de559e65",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
-            "departures": [],
+            "assumptions": [
+              {
+                "binding_ref": "how:dac2aAidType",
+                "kind": "declared_default",
+                "refs": [
+                  "DAC2aAidType206"
+                ],
+                "text": "official development assistance"
+              }
+            ],
+            "departures": [
+              {
+                "binding_ref": "origin:",
+                "code": "whole_total_read",
+                "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+              }
+            ],
             "operations": [],
             "restatement": {
               "entities": [
@@ -49,6 +69,9 @@
                   "entities": {
                     "destination": [
                       "country/GTM"
+                    ],
+                    "origin": [
+                      "DACOfficialDonors"
                     ]
                   },
                   "identity_version": "spec1",
@@ -94,7 +117,7 @@
                   ]
                 },
                 "schema_version": 1,
-                "spec_id": "spec_6a3152d3534419922757ee3a498d1661"
+                "spec_id": "spec_de9c7f9172c6c6244af0728c56bc83a9"
               },
               "resolved": {
                 "alternative_measures": [
@@ -105,6 +128,9 @@
                         "entities": {
                           "destination": [
                             "country/GTM"
+                          ],
+                          "origin": [
+                            "DACOfficialDonors"
                           ]
                         },
                         "identity_version": "spec1",
@@ -150,7 +176,7 @@
                         ]
                       },
                       "schema_version": 1,
-                      "spec_id": "spec_ab5d05640b235a4ffd6bc17f5e3467c7"
+                      "spec_id": "spec_51deb254c408c7f67b8a03abc31bc590"
                     },
                     "label": "net disbursements",
                     "measure_axis_values": [
@@ -190,12 +216,12 @@
                         }
                       }
                     ],
-                    "served_rows": 360,
+                    "served_rows": 5,
                     "served_rows_exact": true
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -214,20 +240,20 @@
                   "evidence": "facet_metadata",
                   "has_data": true,
                   "kind": "exact",
-                  "observation_count": 350,
+                  "observation_count": 5,
                   "window": {
                     "end_year": 2024,
                     "start_year": 2020
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
                   },
-                  "rows": 350,
+                  "rows": 5,
                   "rows_exact": true,
-                  "series": 89,
+                  "series": 1,
                   "window": {
                     "end_year": 2024,
                     "start_year": 2020
@@ -239,16 +265,29 @@
                     "label": "Guatemala",
                     "ref": "country/GTM",
                     "role": "destination"
-                  }
-                ],
-                "entity_options": [
+                  },
                   {
-                    "options": [],
-                    "role": "origin",
-                    "source": "observed",
-                    "truncated": true
+                    "entity_type": "DACGroup",
+                    "label": "official donors (DAC)",
+                    "ref": "DACOfficialDonors",
+                    "role": "origin"
                   }
                 ],
+                "entity_groups": {
+                  "origin": {
+                    "label": "official donors (DAC)",
+                    "side_classes": [
+                      "official",
+                      "private",
+                      "residual"
+                    ],
+                    "total": "DACOfficialDonors",
+                    "whole_of": [
+                      "official"
+                    ]
+                  }
+                },
+                "entity_options": [],
                 "facet_options": [
                   {
                     "axis": "provenance",
@@ -291,6 +330,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                     "label": "OECD DAC2A",
                     "ref": "provenance/OECDDAC2A",
                     "source": {
@@ -309,41 +349,41 @@
                   "named_window": {
                     "start_year": 2020
                   },
-                  "observations": 70,
+                  "observations": 1,
                   "recent_years": [
                     {
-                      "observations": 70,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 70,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 70,
+                      "series": 1,
                       "year": 2024
                     },
                     {
-                      "observations": 71,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 71,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 71,
+                      "series": 1,
                       "year": 2023
                     },
                     {
-                      "observations": 71,
+                      "observations": 1,
                       "role_counts": {
-                        "financingProvider": 71,
+                        "financingProvider": 1,
                         "financingRecipient": 1
                       },
-                      "series": 71,
+                      "series": 1,
                       "year": 2022
                     }
                   ],
                   "role_counts": {
-                    "financingProvider": 70,
+                    "financingProvider": 1,
                     "financingRecipient": 1
                   },
-                  "series": 70,
+                  "series": 1,
                   "year": 2024,
                   "year_named": true
                 },
@@ -396,14 +436,7 @@
                   "financialFlowType",
                   "nettingBasis"
                 ],
-                "rendered_sentence": "Gross disbursements to Guatemala from 106 providers for official development assistance, 2020 to 2024. Current US dollars \u00b7 OECD DAC2a.",
-                "role_axis_facts": [
-                  {
-                    "member_count": 106,
-                    "members_available": true,
-                    "role": "origin"
-                  }
-                ],
+                "rendered_sentence": "Gross disbursements to Guatemala from official donors (DAC) for official development assistance, 2020 to 2024. Current US dollars \u00b7 OECD DAC2a.",
                 "sentence_plan": [
                   {
                     "axis": "what",
@@ -448,14 +481,16 @@
                   },
                   {
                     "binding_ref": "origin:",
-                    "entity_refs": [],
+                    "entity_refs": [
+                      "DACOfficialDonors"
+                    ],
                     "kind": "slot",
                     "role": "origin",
                     "segment": "heading",
                     "states": [
                       "origin:"
                     ],
-                    "text": "106 providers"
+                    "text": "official donors (DAC)"
                   },
                   {
                     "entity_refs": [],
@@ -627,7 +662,7 @@
                     },
                     {
                       "axis": "how",
-                      "label": "dac type of finance",
+                      "label": "DAC type of finance",
                       "property": {
                         "label": "DAC type of finance",
                         "ref": "dacTypeOfFinance"
@@ -669,7 +704,7 @@
                         "member_count": 2,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 58,
+                        "served_rows": 5,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -683,7 +718,7 @@
                         "member_count": 1,
                         "parent": "DAC2aAidType206",
                         "relation": "child",
-                        "served_rows": 348,
+                        "served_rows": 5,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -696,7 +731,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 130,
+                        "served_rows": 5,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -709,7 +744,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 39,
+                        "served_rows": 5,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -722,7 +757,7 @@
                       {
                         "member_count": 1,
                         "relation": "root",
-                        "served_rows": 135,
+                        "served_rows": 5,
                         "served_rows_exact": true,
                         "value": {
                           "ref": {
@@ -807,7 +842,7 @@
                     },
                     "key": {
                       "axis": "how",
-                      "label": "dac type of finance",
+                      "label": "DAC type of finance",
                       "property": {
                         "label": "DAC type of finance",
                         "ref": "dacTypeOfFinance"
@@ -870,7 +905,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -883,6 +918,10 @@
                     {
                       "label": "Guatemala",
                       "ref": "country/GTM"
+                    },
+                    {
+                      "label": "official donors (DAC)",
+                      "ref": "DACOfficialDonors"
                     }
                   ],
                   "resolved_sources": [
@@ -891,6 +930,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC2A",
                       "label": "OECD DAC2a",
                       "ref": "provenance/OECDDAC2A",
                       "source": {
@@ -958,7 +998,7 @@
                       "binding_kind": "unbound",
                       "key": {
                         "axis": "how",
-                        "label": "dac type of finance",
+                        "label": "DAC type of finance",
                         "property": {
                           "label": "DAC type of finance",
                           "ref": "dacTypeOfFinance"
@@ -2720,7 +2760,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -2965,30 +3005,41 @@
                 },
                 "unresolved_slots": []
               },
-              "spec_id": "spec_6a3152d3534419922757ee3a498d1661"
+              "spec_id": "spec_de9c7f9172c6c6244af0728c56bc83a9"
             },
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 20,
-                "bind": 907,
-                "materialise": 48,
-                "options": 9,
-                "recall": 1,
-                "shape": 373
+                "answer": 7,
+                "bind": 102,
+                "materialise": 16,
+                "options": 6,
+                "phase_bind": 14,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 1,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 57,
+                "phase_place_bindings": 2,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 25,
+                "recall": 355,
+                "shape": 221,
+                "shape_admission": 1,
+                "shape_arcs": 2,
+                "shape_groups": 4,
+                "shape_labels": 0,
+                "shape_probe": 133,
+                "shape_probe_coverage": 8
               },
-              "total": 1358
+              "total": 806
             },
             "variable_text": "aid",
             "warnings": [
               {
                 "code": "slot_defaulted",
-                "message": "No aid type was named, so the answer covers official development assistance.",
-                "severity": "warn"
-              },
-              {
-                "code": "role_scope_defaulted",
-                "message": "no provider was named; the answer was resolved across every provider with data.",
+                "message": "The answer covers official development assistance of every aid type.",
                 "severity": "warn"
               }
             ]
@@ -2999,7 +3050,7 @@
           "extract_skipped": true,
           "raw_query": "top donors to guatemala since 2020"
         },
-        "rendered_sentence": "Gross disbursements to Guatemala from 106 providers for official development assistance, 2020 to 2024. Current US dollars \u00b7 OECD DAC2a.",
+        "rendered_sentence": "Gross disbursements to Guatemala from official donors (DAC) for official development assistance, 2020 to 2024. Current US dollars \u00b7 OECD DAC2a. No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']. Assumed: official development assistance.",
         "schema_version": 1,
         "sentence_plan": [
           {
@@ -3049,7 +3100,9 @@
           },
           {
             "binding_ref": "origin:",
-            "entity_refs": [],
+            "entity_refs": [
+              "DACOfficialDonors"
+            ],
             "kind": "slot",
             "part_index": 0,
             "role": "origin",
@@ -3057,7 +3110,7 @@
             "states": [
               "origin:"
             ],
-            "text": "106 providers"
+            "text": "official donors (DAC)"
           },
           {
             "entity_refs": [],
@@ -3180,11 +3233,59 @@
             "segment": "byline",
             "states": [],
             "text": "."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "departure",
+            "states": [],
+            "text": "No donor was named, so this shows official donors (DAC), the source's total for every official donor. Private donors are outside it. To list each donor, search again with open_roles ['donor']."
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": " "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "Assumed: "
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "official development assistance"
+          },
+          {
+            "entity_refs": [],
+            "kind": "text",
+            "part_index": 0,
+            "segment": "assumption",
+            "states": [],
+            "text": "."
           }
         ],
         "skills": {
           "oda-dac2a": {
-            "content_version": "sha256:7bcac2cb7069cccca6bcfc82844e69b366e6751d5b625c519d085a5fbbb695fc",
+            "content_version": "sha256:3ac1d1cfd5cff8f8be3bc7c5290593c40a0616255591660df394d13e3d326790",
             "description": "Context for working with the OECD DAC2A table, ODA disbursements by donor and recipient country or region. Covers its measures, multilateral agencies reporting as donors and appearing as recipients, how its totals reconcile with DAC1, the OECD's imputed multilateral ODA by recipient, and the double-counting traps with donor and recipient aggregates, EU aggregates and imputed figures. Load once DAC2A has been chosen for an analysis, or when working with DAC2A figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac2a",
             "name": "oda-dac2a"
@@ -3208,5 +3309,11 @@
       "raw_text": false
     }
   ],
-  "task": "rank-top-donors-guatemala-since-2020"
+  "task": "rank-top-donors-guatemala-since-2020",
+  "translation": {
+    "answers": [
+      "873fca25b099ca55"
+    ],
+    "resolved": {}
+  }
 }

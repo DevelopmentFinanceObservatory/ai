@@ -48,6 +48,7 @@
     "distinction": "join, not comparison: two different measures in one table, with no difference asked for"
   },
   "unit_asked": false,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "Show Zambia's ODA received and its external debt service in one table for each year from 2015 to 2022.",
     "answer_mode": "computed",
@@ -61,16 +62,17 @@
           {
             "name": "Zambia",
             "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
           }
         ],
         "period": {
           "start": 2015,
           "end": 2022
         },
-        "source_spec_id": "spec_77ec17295bcfb8fc376f3abe67d10931",
-        "across": [
-          "donor"
-        ]
+        "source_spec_id": "spec_43878ebe498f66cecae7c1697d24abaa"
       },
       {
         "kind": "aggregate",

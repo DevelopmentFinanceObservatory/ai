@@ -2,10 +2,8 @@
 
 These models are the enforced half of `docs/studio-contract-v1.md` -- the
 prose doc explains the protocol; this module is what the server actually
-validates and emits, and the two ship together. The shapes implement the
-contract drafts (`dfowebsitecontractv1.md` A3 / `dfofrontendpayloads.md`,
-2026-08-04) with the deltas the repo doc indexes (1-17 as of v1.2); deltas
-that change a shape are marked on the field they touch.
+validates and emits, and the two ship together. Deltas the repo doc
+indexes that change a shape are marked on the field they touch.
 
 Four request kinds arrive over POST, discriminated on `kind`
 (`STUDIO_REQUEST_ADAPTER`): `turn.request`, `interrupt.response`,
@@ -20,15 +18,14 @@ Every model forbids unknown members, mirroring the schemas'
 fails loudly at the boundary. The deliberate openings are objects another
 contract owns, referenced by name so the two cannot drift:
 `ComponentCreated.payload` / `ComponentRevised.payload` is the platform's
-Presentation contract (the contract drafts make the same choice), and
-`SeedSpec` reads the Search API's Spec block, keeping the members a seed
-hands over and dropping the rest. `TurnRequest.seed_spec` holds its items
+Presentation contract, and `SeedSpec` reads the Search API's Spec block,
+keeping the members a seed hands over and dropping the rest. `TurnRequest.seed_spec` holds its items
 unparsed: each is read as a `Seed` on its own (`harness.seeds.seeds_slot`),
 so one bad seed fails its own step rather than the request.
 
 `conversation_id` is delta 5: the frontend client mints the conversation
 identifier and sends `Authorization: Bearer <token>` alongside it. The
-drafts' `session_id` is accepted as a deprecated parsing alias in v1
+`session_id` is accepted as a deprecated parsing alias in v1
 (the fixtures still use it); serialisation always writes
 `conversation_id`. The bearer token itself travels in the header, never in
 these bodies -- see `harness.auth`.
@@ -38,8 +35,9 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, cast, get_args
 
+from common.place_type import PartyClass
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -59,7 +57,7 @@ class _WireModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Shared shapes (the contract drafts' common.001.json defs the studio frames use)
+# Shared shapes the studio frames use
 # ---------------------------------------------------------------------------
 
 
@@ -384,8 +382,8 @@ class CompositionManifest(_WireModel):
 # Requests -- discriminated on `kind`
 # ---------------------------------------------------------------------------
 
-# Delta 5: the client mints `conversation_id`; the drafts' `session_id`
-# is accepted as a deprecated parsing alias in v1. Serialisation always
+# Delta 5: the client mints `conversation_id`; `session_id` is
+# accepted as a deprecated parsing alias in v1. Serialisation always
 # writes `conversation_id`.
 _CONVERSATION_ID = Field(validation_alias=AliasChoices("conversation_id", "session_id"))
 
@@ -440,11 +438,11 @@ MAX_SEED_OPERATIONS = 8
 MAX_OPERATION_PHRASE_CHARS = 200
 # The sentence Search renders for a part. Search states no cap on it. The
 # longest recorded is 324 characters, for a 40-character question; 2,000 is
-# the most a whole query may hold (dfo-apis `search.engine.config`'s
+# the most a whole query may hold (apis `search.engine.config`'s
 # `max_query_chars`).
 MAX_SEED_SENTENCE_CHARS = 2_000
 # The entities a block resolves: an identity binds at most 1,024 refs under
-# one role (dfo-apis `search.models.identity`), which a region's members can
+# one role (apis `search.models.identity`), which a region's members can
 # reach. The most recorded is 2.
 MAX_SEED_ENTITIES = 1_024
 # Any other string the harness reads: a dcid, a role, a label, a kind. The
@@ -455,7 +453,7 @@ MAX_SEED_TEXT_CHARS = 256
 # coverage dimensions (3), its role facts (1), and an item's slot values (3)
 # and constraint properties (2).
 MAX_SEED_LIST_ITEMS = 64
-# The roles an identity binds entities under: dfo-apis `search.models.identity`
+# The roles an identity binds entities under: apis `search.models.identity`
 # caps the `entities` mapping at 16 keys.
 MAX_SEED_ROLES = 16
 # A count or a year the harness prints: a whole number of at most 12 digits.
@@ -623,16 +621,27 @@ class SpecBlock(BaseModel):
         return self
 
 
-# The most code points a set's name may span, as dfo-apis bounds `EntityGroup.label`.
+# The most code points a set's name may span, as apis bounds `EntityGroup.label`.
 MAX_SEED_GROUP_LABEL_CHARS = 120
+
+
+# The most classes a whole total's `whole_of` or its side's `side_classes` names: every
+# `common.place_type.PartyClass`.
+MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 
 
 class SeedEntityGroup(BaseModel):
     """A set a seed's places were asked for as (`resolved.entity_groups`), as Search served it.
 
     `total` is the published total party the role bound for the set, absent
-    when it bound the members (`planner.workflow.ResolvedGroup.total`). The
-    members are dfo-apis' `EntityGroup` fields, and any other key is refused,
+    when it bound the members (`planner.workflow.ResolvedGroup.total`).
+    `whole_of` names the classes of party that total, or the set of totals the
+    role bound, holds in full, absent for any other set
+    (`planner.workflow.ResolvedGroup.whole_of`). `side_classes` names the classes
+    of party, totals aside, the dataset publishes on that set's side, absent for
+    any other set and from a Search that predates it
+    (`planner.workflow.ResolvedGroup.side_classes`). The
+    members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
     """
 
@@ -647,6 +656,12 @@ class SeedEntityGroup(BaseModel):
     )
     total: str | None = Field(
         default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
+    )
+    whole_of: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
+    )
+    side_classes: tuple[PartyClass, ...] = Field(
+        default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
 
 
@@ -830,9 +845,37 @@ class InterruptDecision(StrEnum):
     AMEND = "amend"
     REJECT = "reject"
     ANSWER = "answer"
-    # Elicitation only: decline to answer; the run proceeds on its default
-    # (the top-ranked candidate).
+    # Elicitation only, and only when the frame set `skippable`. The user
+    # dismisses the whole pause and no question is answered. The orchestrator's
+    # ask closes the turn. The planner's ask counts it as the user declining
+    # to choose, and the planner plans on without a pick of theirs.
     SKIP = "skip"
+
+
+class OptionAnswer(_WireModel):
+    """The user picked one of the question's offered options."""
+
+    kind: Literal["option"]
+    option_id: str
+
+
+class TextAnswer(_WireModel):
+    """The user answered in their own words (`allow_free_text`)."""
+
+    kind: Literal["text"]
+    text: str = Field(min_length=1)
+
+
+class SkippedAnswer(_WireModel):
+    """The user left this one question to the agent (`skippable` on the
+    question). The pause still resumes as answered."""
+
+    kind: Literal["skipped"]
+
+
+ElicitationAnswer = Annotated[
+    OptionAnswer | TextAnswer | SkippedAnswer, Field(discriminator="kind")
+]
 
 
 class InterruptResponse(_WireModel):
@@ -840,10 +883,11 @@ class InterruptResponse(_WireModel):
 
     `interrupt_id` is echoed verbatim from the frame that paused the run; it
     is opaque (delta 7 -- the fixtures' literal `"approve"` is a sample
-    value). `payload` carries the amendment text for
-    `amend` and the selected option id for `answer`; absent for a plain
-    approve or reject. The response to this POST is a NEW SSE stream
-    continuing the same turn (delta 1).
+    value). An elicitation's `answer` carries `answers`, one entry per
+    question id of the frame, exactly. `payload` carries the amendment text
+    for a plan's `amend`. Both are absent for approve, reject and skip. The
+    response to this POST is a NEW SSE stream continuing the same turn
+    (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -851,10 +895,12 @@ class InterruptResponse(_WireModel):
     conversation_id: str = _CONVERSATION_ID
     interrupt_id: str
     decision: InterruptDecision
-    # Text only: the amendment (amend) or the answer (answer -- an option id,
-    # or free text when the elicitation set allow_free_text). Absent for
-    # approve / reject / skip.
+    # The amendment text of a plan's `amend`. An elicitation opened before
+    # the frame carried `questions` also takes its one answer here: an
+    # offered option id, or free text.
     payload: str | None = None
+    # An elicitation's `answer`: each question id of the frame to its answer.
+    answers: dict[str, ElicitationAnswer] | None = None
 
 
 class MutationOp(StrEnum):
@@ -924,8 +970,8 @@ class CompositionMutation(_WireModel):
     """POST /api/studio/composition -- Pin to Canvas, Reorder, Remove.
     Returns the new manifest. Removing a block does not delete the component.
 
-    `conversation_id` is a delta-5 addition over the drafts' shape (which keys
-    on `composition_id` alone): every studio request names its conversation
+    `conversation_id` is a delta-5 addition to the composition's own
+    `composition_id`: every studio request names its conversation
     so the server can locate its session without a composition index.
     A stale `expected_revision` is refused with `edit_conflict` and nothing
     applies.
@@ -1119,7 +1165,9 @@ class ActivityStep(_WireModel):
     one `harness.sentences` has for the failure's code. The refusal's own
     text is written for the agent and stays in the trace. The run continues
     where the graph allows (delta 4); a stream-fatal problem is an `error`
-    frame instead, whose `detail` is such a sentence too."""
+    frame instead, whose `detail` is such a sentence too. When a later try
+    of the same step succeeds in the turn, a `complete` frame on the failed
+    step's `step_id` settles it."""
 
     event: Literal["activity.step"]
     seq: int = Field(ge=0)
@@ -1220,31 +1268,49 @@ class ElicitationOption(_WireModel):
     id: str
     label: str
     description: str | None = None
-    # Set on at most one option: the candidate the planner's ask favours,
-    # when it favours one. `rationale`, on the frame rather than repeated per
-    # option, is the planner's reason.
+    # Set on at most one option of a question: the candidate the planner's
+    # ask favours, when it favours one. The question's `rationale` is the
+    # planner's reason.
     recommended: bool = False
 
 
-class ElicitationRequest(_WireModel):
-    """A clarifying question. Pauses the run exactly as plan.proposed does
-    (terminal frame, delta 1); answer with `decision: "answer"` and the
-    chosen option id as `payload`."""
+class ElicitationQuestion(_WireModel):
+    """One question of an elicitation. `id` is the key its answer comes back
+    under; option ids are scoped to their question."""
 
-    event: Literal["elicitation.request"]
-    seq: int = Field(ge=0)
-    interrupt_id: str
+    id: str
     question: str
     input: ElicitationInput
     options: list[ElicitationOption] | None = None
-    # The "More Details Question" affordances: an open-ended answer
-    # alongside options, and a Skip button.
+    # An open-ended answer alongside the options.
     allow_free_text: bool = False
+    # A per-question "you choose". The answer is `{"kind": "skipped"}` and
+    # the pause still resumes as answered.
     skippable: bool = False
     # Why the `recommended` option (if any) is recommended, as the planner
     # wrote it for the person settling the choice. `None` when no option is
     # recommended.
     rationale: str | None = None
+
+
+class ElicitationRequest(_WireModel):
+    """One to three clarifying questions in one pause. Pauses the run
+    exactly as plan.proposed does (terminal frame, delta 1); answer with
+    `decision: "answer"` and `answers` keyed by question id."""
+
+    event: Literal["elicitation.request"]
+    seq: int = Field(ge=0)
+    interrupt_id: str
+    questions: list[ElicitationQuestion] = Field(min_length=1, max_length=3)
+    # The whole pause may be dismissed with `decision: "skip"`.
+    skippable: bool = False
+
+    @model_validator(mode="after")
+    def _question_ids_are_unique(self) -> ElicitationRequest:
+        ids = [question.id for question in self.questions]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"question ids repeat: {ids}")
+        return self
 
 
 class SuggestionItem(_WireModel):

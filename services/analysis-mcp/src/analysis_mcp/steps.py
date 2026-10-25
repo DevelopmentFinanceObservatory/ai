@@ -20,7 +20,7 @@ which the kit's operation list uses too.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from common.materialisation import FrameRef
@@ -425,10 +425,21 @@ def build_step(
     return Step.model_validate(members)
 
 
+def left_out_keys(dropped: Iterable[tuple[ExclusionReason, Sized]]) -> list[LeftOut]:
+    """The numerator keys a two-sided result holds no row for, counted as
+    entities: one count for each `(reason, keys)` of `dropped` that has
+    keys, in the order given."""
+    return [
+        LeftOut(reason=reason, count=len(keys), of="entities") for reason, keys in dropped if keys
+    ]
+
+
 # The reasons that count rows a verb's inputs held and the step left out as
 # data gaps, read from the engine's exclusion records. The caller's own
 # selections (`entity_not_selected`, `unit_not_selected`) are parameters.
 _ROW_REASONS: tuple[ExclusionReason, ...] = ("unit_unbound", "period_unmatched")
+# The reasons that leave out flow parties, counted as the distinct parties of each role.
+_PARTY_REASONS: frozenset[ExclusionReason] = frozenset({"party_total", "party_residual"})
 
 
 def left_out_from_exclusions(
@@ -436,25 +447,27 @@ def left_out_from_exclusions(
 ) -> list[LeftOut]:
     """The data gaps `exclusions` records, in first-seen order: each of
     `row_reasons` once, as the values it dropped (`entity_periods`, one per
-    row), and `party_total` once per role, as the distinct flow parties of
-    that role left out across every input (`pooled_entities`). A total both
-    sides of a share over one frame leave out counts once. Other reasons are
-    not counted here."""
+    row), and `party_total` and `party_residual` each once per role, as the
+    distinct flow parties of that role left out across every input
+    (`pooled_entities`). A total both sides of a share over one frame leave
+    out counts once. Other reasons are not counted here."""
     counted = set(row_reasons)
     rows: dict[ExclusionReason, int] = {}
-    parties: dict[str, set[str]] = {}
+    parties: dict[tuple[ExclusionReason, str], set[str]] = {}
     order: dict[tuple[ExclusionReason, str | None], None] = {}
     for record in exclusions.records:
         if record.reason in counted:
             rows[record.reason] = rows.get(record.reason, 0) + record.row_count
             order[record.reason, None] = None
-        elif record.reason == "party_total" and record.parties is not None:
+        elif record.reason in _PARTY_REASONS and record.parties is not None:
             (role,) = record.entities
-            parties.setdefault(role, set()).update(record.parties)
+            parties.setdefault((record.reason, role), set()).update(record.parties)
             order[record.reason, role] = None
     return [
         LeftOut(reason=reason, count=rows[reason], of="entity_periods")
         if role is None
-        else LeftOut(reason=reason, count=len(parties[role]), of="pooled_entities", role=role)
+        else LeftOut(
+            reason=reason, count=len(parties[reason, role]), of="pooled_entities", role=role
+        )
         for reason, role in order
     ]

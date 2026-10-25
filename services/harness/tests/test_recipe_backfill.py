@@ -2,8 +2,8 @@
 derived frame ends as.
 
 The store is `InMemoryMaterialisationStore`, filled by real analysis-mcp verbs so
-the traces are the ones a deployment stores. dfo-apis is `FakeApis` behind
-`httpx2.MockTransport`: the recipe and versions routes, answering as dfo-apis'
+the traces are the ones a deployment stores. apis is `FakeApis` behind
+`httpx2.MockTransport`: the recipe and versions routes, answering as apis'
 publish door does.
 """
 
@@ -30,6 +30,7 @@ from common.materialisation import (
     set_store,
 )
 from common.recipe import build_recipe
+from data_mcp.frame_materialisation import frame_ref_for
 from harness import recipe_backfill
 from harness.recipe_backfill import FRAMES_IN_FLIGHT, BackfillReport, Reason, run_backfill
 
@@ -55,15 +56,17 @@ def problem(status: int, code: str, **members: object) -> httpx2.Response:
     )
 
 
-def _listed(version: dict[str, str | None]) -> dict[str, Any]:
-    """`version` as the versions route lists it: a raw version is `plain`, and a
-    collapse here has no recorded groupby."""
+def _listed(version: dict[str, str | None], *, stamp: str | None) -> dict[str, Any]:
+    """`version` as the versions route lists it: a raw version is `plain`, a
+    collapse here has no recorded groupby, and `stamp` is the stamp it lists, none
+    when `None`."""
     rendering = "plain" if version["base_content_version"] is None else "not_recorded"
-    return {**version, "rendering": rendering, "groupby": None}
+    listed = {**version, "rendering": rendering, "groupby": None}
+    return listed if stamp is None else listed | {"enrichment_stamp": stamp}
 
 
 class FakeApis:
-    """dfo-apis' recipe and versions routes over plain dicts.
+    """apis' recipe and versions routes over plain dicts.
 
     `published` holds the pairs with a version row, `recipes` each pair's stored
     recipe and `versions` each dataset's stored versions. `answers` replaces the
@@ -74,6 +77,9 @@ class FakeApis:
         self.published: set[Pair] = {pair(ref) for ref in published}
         self.recipes: dict[Pair, dict[str, Any]] = {}
         self.versions: dict[str, list[dict[str, str | None]]] = {}
+        # The stamp the versions answer lists at its top and on every version, or
+        # none when apis lists none.
+        self.enrichment_stamp: str | None = None
         self.answers: dict[str, httpx2.Response | Exception] = {}
         self.requests: list[httpx2.Request] = []
         self.in_flight = 0
@@ -90,18 +96,29 @@ class FakeApis:
             self.in_flight -= 1
 
     def _answer(self, request: httpx2.Request) -> httpx2.Response:
-        if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
-            return problem(403, "publish_not_permitted")
         parts = request.url.path.removeprefix("/api/datasets/").split("/")
+        # The versions route is open to every caller and answers in one page here.
         if parts[-1] == "versions":
             return httpx2.Response(
                 200,
                 json={
                     "schema_version": 1,
                     "spec_id": parts[0],
-                    "versions": [_listed(version) for version in self.versions.get(parts[0], [])],
+                    "versions": [
+                        _listed(version, stamp=self.enrichment_stamp)
+                        for version in self.versions.get(parts[0], [])
+                    ],
+                    "next_cursor": None,
+                    "complete": True,
+                    **(
+                        {}
+                        if self.enrichment_stamp is None
+                        else {"enrichment_stamp": self.enrichment_stamp}
+                    ),
                 },
             )
+        if request.headers.get(PRINCIPAL_HEADER) != PRINCIPAL:
+            return problem(403, "publish_not_permitted")
         _, spec_id, content_version, _ = parts
         override = self.answers.get(spec_id)
         if isinstance(override, Exception):
@@ -323,10 +340,58 @@ async def test_a_root_with_no_mint_record_is_recovered_once_and_written_back(
     versions_reads = [r for r in apis.requests if r.url.path.endswith(f"{SPEC}/versions")]
     assert len(versions_reads) == 1
 
-    # A later run reads the record from the store and asks dfo-apis for no version.
+    # A later run reads the record from the store and asks apis for no version.
     later = FakeApis(published=[total, change])
     await backfill(store, later, write=True)
     assert [r for r in later.requests if r.url.path.endswith(f"{SPEC}/versions")] == []
+
+
+@pytest.mark.parametrize(
+    ("listed_stamp", "recovers"),
+    [("stamp-now", True), ("stamp-newer", False), (None, False)],
+    ids=["current-stamp", "older-stamp", "no-stamp-served"],
+)
+async def test_a_kind_root_with_no_mint_record_is_recovered_under_the_stamp_the_versions_route_lists(
+    store: InMemoryMaterialisationStore, listed_stamp: str | None, recovers: bool
+) -> None:
+    """The root was named with the kind columns under `stamp-now`. The versions route
+    lists the stamp current now, and only a root named under it is the one served."""
+    kinds = ("party_kind",)
+    root = await seed_root(
+        store,
+        frame_ref_for(
+            spec_id=SPEC,
+            content_version=ROOT.content_version,
+            columns=kinds,
+            enrichment_stamp="stamp-now",
+        ),
+        mint_record=False,
+    )
+    total = await summed(root)
+    apis = FakeApis(published=[total])
+    apis.versions[SPEC] = [{"content_version": ROOT.content_version, "base_content_version": None}]
+    apis.enrichment_stamp = listed_stamp
+
+    report = await backfill(store, apis, write=True)
+
+    if recovers:
+        assert await store.get_mint_record(root) == MintRecord(
+            frame=root,
+            dataset=ROOT,
+            options=OPTIONS | {"columns": list(kinds)},
+            stat_var_count=1,
+            enrichment_stamp="stamp-now",
+        )
+        assert [outcome.reason for outcome in report.outcomes] == [Reason.STORED]
+    else:
+        assert reasons(report) == [
+            (
+                total,
+                Reason.ROOT_UNRECOVERABLE,
+                f"{root.spec_id} {root.content_version} no_version_matches",
+            )
+        ]
+        assert await store.get_mint_record(root) is None
 
 
 @pytest.mark.parametrize(

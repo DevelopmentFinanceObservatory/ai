@@ -3,7 +3,7 @@ registers the result in the shared materialisation store under its frame
 reference (`frame_ref_for`) -- the step that closes the gap between a mint and
 an analysis-mcp verb's own `frame_ref` resolution.
 
-The frame held under a dfo-apis pair `{spec_id, content_version}` is that
+The frame held under an apis service pair `{spec_id, content_version}` is that
 version's canonical frame, the one its `content_version` names. A mint with no
 `options.columns` and no `options.groupby` registers it under the mint's own pair:
 the bytes are the version's `CANONICAL_FRAME_RENDERING` artifact, which the
@@ -12,11 +12,11 @@ snapshot route lists, and the frame is registered only when
 `content_version`. Every other mint registers the artifact of its own rendering
 under a pair `frame_ref_for` derives from its columns and groupby, unchecked
 against the token, since a selection or a sum is a different frame. A mint with
-`options.without_party_totals` names dfo-apis' version of the frame without group
-totals, so the pair it registers under holds the rows dfo-apis serves for it.
+`options.without_party_totals` names apis' version of the frame without group
+totals, so the pair it registers under holds the rows apis serves for it.
 
 Each mint that reads or parses the frame also writes its mint record
-(`common.materialisation.MintRecord`) to the store: the dfo-apis pair, the
+(`common.materialisation.MintRecord`) to the store: the apis pair, the
 `options` and `scope` the mint was sent with, which a later mint of the same
 rendering needs and the frame's own trace does not hold, and the frame's
 distinct StatVar count.
@@ -29,7 +29,7 @@ import hashlib
 import io
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import combinations
@@ -87,6 +87,7 @@ from dfo_frame_grammar.grammar import validate_unit_request
 from fastmcp.exceptions import ResourceError
 from pydantic import ValidationError
 
+from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
 from data_mcp.manifest import ArtifactEntry, Manifest
 from data_mcp.settings import Settings
@@ -103,17 +104,19 @@ __all__ = [
     "MaterialisationOutcome",
     "frame_ref_for",
     "materialise_and_register",
+    "recorded_stamp",
 ]
 
 logger = logging.getLogger(__name__)
 
 # The bare link GET has its own small retry budget (see `_fetch_artifact_bytes_uncapped`'s
 # docstring): this hop is idempotent, so a handful of quick retries costs little and buys
-# resilience against a transient GCS blip. `read_artifact` (the link lookup) is never
+# resilience against a transient GCS blip. `artifact_link` (the link lookup) is never
 # wrapped in a second retry loop of its own -- it already retries internally against
-# dfo-apis' snapshot route.
+# apis' snapshot route.
 _ARTIFACT_GET_ATTEMPTS = 3
 _ARTIFACT_GET_BACKOFF_S = 0.5  # short: this hop is idempotent and cheap
+_ARTIFACT_GET_TIMEOUT_S = 30.0
 
 # The status the download link answers once its artifact has aged out of the working tier
 # and cannot render again (`artifact_expired`), or its version was taken down
@@ -136,7 +139,7 @@ _AFTER_WRITE_RESERVE_S = 3.0
 # The `options` of a mint that sums nothing and selects no columns. Its frame is
 # read from the version's canonical frame (`CANONICAL_FRAME_RENDERING`), and the
 # requested rendering itself is never fetched. A mint cannot ask for the canonical
-# frame alone, since dfo-apis' `MintOptions.format` is `csv`, `xlsx` or `parquet`
+# frame alone, since apis' `MintOptions.format` is `csv`, `xlsx` or `parquet`
 # and every mint renders one of them, so this asks for the cheapest: a bare parquet
 # file in the frame layout, written with no projection and no graph name read. A
 # mint with `columns` adds them to these options, and its frame is that rendering
@@ -145,7 +148,7 @@ DEFAULT_MINT_OPTIONS: Mapping[str, Any] = MappingProxyType(
     {"format": "parquet", "bundle": False, "layout": "frame"}
 )
 
-# The `rendering` dfo-apis links every version's canonical frame under
+# The `rendering` apis links every version's canonical frame under
 # (`datasets_api.render.CANONICAL_FRAME_RENDERING`). The snapshot route lists it,
 # and a mint's own response does not.
 CANONICAL_FRAME_RENDERING: Mapping[str, object] = MappingProxyType({"format": "frame"})
@@ -162,34 +165,40 @@ TYPE_COLUMN_SELECTIONS: tuple[tuple[str, ...], ...] = tuple(
     for selection in combinations(TYPE_COLUMNS, size)
 )
 
-# The `options.columns` of a flow table's mint. dfo-apis expands a bare `party_kind` to a
-# `{column}_party_kind` column for every entity column the table has, the sides its identity
-# leaves unnamed among them.
-KIND_COLUMNS: tuple[str, ...] = ("party_kind",)
+# The bare tokens apis expands to a `{column}_{token}` column for every party column a flow
+# table has: the party's kind, class and whole-population mark (`common.place_type`). The
+# qualified type tokens are necessary: the door does not expand a bare `type` token. Keep the
+# two kinds of enrichment together so a country filter can distinguish countries from
+# organisations without losing the party-kind proof that excludes published group totals from
+# later sums and ranks.
+KIND_COLUMNS: tuple[str, ...] = ("party_kind", "party_class", "party_whole")
+FLOW_ENRICHMENT_COLUMNS: tuple[str, ...] = (
+    *sorted(type_column(role) for role in PARTY_ROLES),
+    *KIND_COLUMNS,
+)
 
-# The columns a recorded selection may hold that `replayed_mint_options` replaces with
-# `KIND_COLUMNS`: a flow party's type column, and `kind`, the earlier token for the
-# party kind that old recorded selections carry.
-_REPLACED_COLUMNS = frozenset((*(type_column(role) for role in PARTY_ROLES), "kind"))
+# The earlier token for a flow party kind that old recorded selections carry. Replays translate
+# it to the door's current `KIND_COLUMNS` while preserving the rest of the selection.
+_LEGACY_KIND_COLUMN = "kind"
 
-# The mint option that asks dfo-apis for a flow frame without the group totals of the
-# party roles its identity leaves open (dfo-apis' `MintOptions.without_party_totals`). A
-# mint sends it only when true, and dfo-apis records it in the artifact's `rendering` only
+# The mint option that asks apis for a flow frame without the group totals of the
+# party roles its identity leaves open (apis' `MintOptions.without_party_totals`). A
+# mint sends it only when true, and apis records it in the artifact's `rendering` only
 # then. A cut that leaves rows out is a version of its own, which the manifest's pair names.
 WITHOUT_PARTY_TOTALS = "without_party_totals"
 
 
 def place_type_columns_for(identity: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """The `options.columns` `get_data(place_types=True)` asks dfo-apis for.
+    """The `options.columns` `get_data(place_types=True)` asks apis for.
 
-    A spec whose identity names a flow axis, as an entity or an open role, asks for its
-    parties' kinds (`KIND_COLUMNS`); any other spec, and a call holding no identity, for
-    the places' types. A list that names only enrichment columns adds them to every
-    default column, so the decoded `stat_var_<code system>` columns stay beside them.
+    A spec whose identity names a flow axis, as an entity or an open role, asks for each
+    party's type and kind (`FLOW_ENRICHMENT_COLUMNS`); any other spec, and a call holding
+    no identity, for the places' types. A list that names only enrichment columns adds them
+    to every default column, so the decoded `stat_var_<code system>` columns stay beside them.
     """
     roles = {*((identity or {}).get("entities") or {}), *((identity or {}).get("open_roles") or ())}
     if roles & FLOW_ROLE_COLUMNS.keys():
-        return KIND_COLUMNS
+        return FLOW_ENRICHMENT_COLUMNS
     return (type_column(PLACE_ROLE),)
 
 
@@ -198,18 +207,32 @@ def replayed_mint_options(
 ) -> Mapping[str, Any]:
     """`options` as `get_data` sends them for a root of `identity`.
 
-    A flow root (`place_type_columns_for(identity)` is `KIND_COLUMNS`) recorded with no
-    `columns`, and any root recorded with a flow party's type column or the earlier
-    token `kind`, mint with `KIND_COLUMNS`. Every other selection is unchanged. A flow
-    frame minted without kinds holds none, and a sum across its parties refuses without
-    them.
+    A flow root recorded with no `columns` gains every flow enrichment. A recorded flow
+    selection, one holding a party type or a kind token, keeps its other explicit columns
+    in order and then asks for every missing flow enrichment, the kinds as `KIND_COLUMNS`:
+    the earlier `kind` token and a `party_kind` from before the class and whole tokens are
+    read as `KIND_COLUMNS`, even when the identity is no longer available, and a recorded
+    qualified party-type selection proves that the current kind tokens are valid, without
+    guessing other role columns. A root recorded with `without_party_totals` and kinds
+    alone is the rendering `get_data(without_party_totals=True)` mints, and replays with
+    `KIND_COLUMNS`. Every other selection is unchanged. A flow frame without this metadata
+    cannot prove that a sum or rank leaves group totals out.
     """
-    columns = options.get("columns")
-    if columns:
-        upgraded = not _REPLACED_COLUMNS.isdisjoint(columns)
-    else:
-        upgraded = place_type_columns_for(identity) == KIND_COLUMNS
-    return {**options, "columns": list(KIND_COLUMNS)} if upgraded else options
+    columns = options.get("columns") or ()
+    kind_tokens = {_LEGACY_KIND_COLUMN, *KIND_COLUMNS}
+    if options.get(WITHOUT_PARTY_TOTALS) and columns and set(columns) <= kind_tokens:
+        return {**options, "columns": list(KIND_COLUMNS)}
+    flow_root = place_type_columns_for(identity) == FLOW_ENRICHMENT_COLUMNS
+    flow_selection = any(
+        column in kind_tokens or column in FLOW_ENRICHMENT_COLUMNS for column in columns
+    )
+    if not flow_root and not flow_selection:
+        return options
+
+    selected = [column for column in columns if column not in kind_tokens]
+    additions = FLOW_ENRICHMENT_COLUMNS if flow_root else KIND_COLUMNS
+    selected.extend(column for column in additions if column not in selected)
+    return {**options, "columns": selected}
 
 
 # Every reserved column name `build_frame_from_arrow` recognises -- everything else in a
@@ -316,13 +339,15 @@ async def materialise_and_register(
     The store write must end with `_AFTER_WRITE_RESERVE_S` left, and one that runs out
     degrades with `degraded_reason="store_write"`.
     """
-    ref = _ref_or_refusal(manifest, options=options)
+    stamp = _named_stamp(manifest, options=options)
+    ref = _ref_or_refusal(manifest, options=options, stamp=stamp)
     if isinstance(ref, MaterialisationOutcome):
         return ref
     outcome = await _register(
         ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         transport=transport,
@@ -341,6 +366,7 @@ async def materialise_and_register(
                 options=dict(options),
                 scope=dict(scope or {}),
                 stat_var_count=outcome.stat_var_count,
+                enrichment_stamp=stamp,
             ),
             deadline=deadline,
         )
@@ -372,12 +398,14 @@ async def _register(
     *,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     transport: httpx2.AsyncBaseTransport | None,
     deadline: CallDeadline | None,
 ) -> MaterialisationOutcome:
-    """`materialise_and_register` for the frame held under `ref`."""
+    """`materialise_and_register` for the frame held under `ref`, named under `stamp`
+    (`_named_stamp`)."""
     store = get_store()
     checked = await _check_store(
         store, ref, max_frame_rows=settings.max_frame_rows, deadline=deadline
@@ -426,7 +454,7 @@ async def _register(
     progress = _FetchProgress()
     fetched = await _fetch_artifact_bytes(
         subject_id=ref.spec_id,
-        # The artifact sits under dfo-apis' own pair, whatever the rendering.
+        # The artifact sits under apis' own pair, whatever the rendering.
         content_version=manifest.content_version,
         artifact_digest=artifact_digest,
         link=link,
@@ -446,6 +474,7 @@ async def _register(
         ref=ref,
         manifest=manifest,
         options=options,
+        stamp=stamp,
         settings=settings,
         writer=writer,
         store=store,
@@ -475,14 +504,14 @@ async def _locate_canonical_frame(
     manifest without the requested rendering does. A snapshot read that fails or runs
     out of `budget_s` degrades with `fetch_failure_reason`, as a failed fetch does.
 
-    `read_artifact_by_rendering` is imported here for the reason
+    `artifact_link_by_rendering` is imported here for the reason
     `_fetch_artifact_bytes_uncapped` gives.
     """
-    from data_mcp.artifact_resource import read_artifact_by_rendering  # noqa: PLC0415
+    from data_mcp.artifact_resource import artifact_link_by_rendering  # noqa: PLC0415
 
     try:
         async with asyncio.timeout(budget_s):
-            document = await read_artifact_by_rendering(
+            located = await artifact_link_by_rendering(
                 ref.spec_id, ref.content_version, CANONICAL_FRAME_RENDERING
             )
     except (ResourceError, TimeoutError) as exc:
@@ -495,11 +524,11 @@ async def _locate_canonical_frame(
         return MaterialisationOutcome(
             status="degraded", attempts=0, degraded_reason=fetch_failure_reason
         )
-    if document is None:
+    if located is None:
         return _no_artifact_refusal(
             listed_by="the version's snapshot", rendering=CANONICAL_FRAME_RENDERING
         )
-    return document["artifact_digest"], document["url"]
+    return located
 
 
 async def _check_store(
@@ -614,6 +643,7 @@ async def _verify_parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     settings: Settings,
     writer: str,
     store: MaterialisationStore,
@@ -679,6 +709,7 @@ async def _verify_parse_and_register(
             ref=ref,
             manifest=manifest,
             options=options,
+            stamp=stamp,
             writer=writer,
             store=store,
             claim=claim,
@@ -704,6 +735,7 @@ async def _parse_and_register(
     ref: FrameRef,
     manifest: Manifest,
     options: Mapping[str, Any],
+    stamp: str | None,
     writer: str,
     store: MaterialisationStore,
     claim: RowClaim,
@@ -717,13 +749,14 @@ async def _parse_and_register(
     A `canonical` artifact is the version's canonical frame: it is read in the
     canonical layout (`frame_from_verified_parquet_bytes`, which refuses any other
     schema and trusts the cells), and registered only when its `frame_sha256` mints
-    `ref.content_version`, so the frame held under a dfo-apis pair is the one its
+    `ref.content_version`, so the frame held under an apis service pair is the one its
     token names. A mismatch refuses `upstream_response_unusable`. Any other artifact
     is a rendering, validated cell by cell (`_frame_from_parquet_bytes`) and
     registered under its derived pair unchecked.
 
-    The frame's trace keeps the mint's `options`, so `data_mcp.mint_recovery` can
-    rebuild a derived pair from the held frame when its mint record is missing.
+    The frame's trace keeps the mint's `options` and `stamp`, the stamp `ref` is named
+    under, so `data_mcp.mint_recovery` can rebuild a derived pair from the held frame
+    when its mint record is missing.
     """
     # `pyarrow.ArrowException` (a 2xx response whose body isn't a valid/complete Parquet
     # file) and `KeyError` (a Parquet file missing its `time_period` or `value` column,
@@ -761,6 +794,7 @@ async def _parse_and_register(
         spec_id=ref.spec_id,
         content_version=ref.content_version,
         options=dict(options),
+        enrichment_stamp=stamp,
     )
     try:
         async with asyncio.timeout(_seconds_left(write_deadline)):
@@ -807,17 +841,29 @@ def _read_outcome(
     )
 
 
+def requests_kinds(columns: Iterable[str]) -> bool:
+    """Whether `columns` asks apis for any of a flow party's kind, class or whole cells."""
+    return not set(KIND_COLUMNS).isdisjoint(columns)
+
+
+def recorded_stamp(columns: Iterable[str], stamp: str | None) -> str | None:
+    """`stamp` as a frame minted with `columns` is named under (`frame_ref_for`) and its
+    mint record keeps it: only a frame that asks for kinds is named by one."""
+    return stamp if requests_kinds(columns) else None
+
+
 def frame_ref_for(
     *,
     spec_id: str,
     content_version: str,
     columns: tuple[str, ...] = (),
     groupby: Mapping[str, Any] | None = None,
+    enrichment_stamp: str | None = None,
 ) -> FrameRef:
     """The frame reference of the frame a mint names as `{spec_id, content_version}`,
     minted with `options.columns` set to `columns` and `options.groupby` to `groupby`.
 
-    dfo-apis keeps one `content_version` for every rendering of a materialisation,
+    apis keeps one `content_version` for every rendering of a materialisation,
     so a frame minted with extra columns (`get_data(place_types=True)`), a sum that
     keeps the version, and one minted with the default columns come back under one
     pair. The default rendering, with no columns and no groupby, keeps the mint's own
@@ -826,12 +872,20 @@ def frame_ref_for(
     RFC 8785 form of `{"columns": [...], "content_version": ...}`, with `columns`
     sorted and a `"groupby"` member holding `groupby` when it is set. Two renderings
     of one pair are then two frames, and the store's insert-only entry for one is
-    never served for the other. A groupby sum dfo-apis mints as a version of its own
+    never served for the other. A groupby sum apis mints as a version of its own
     is still named by its groupby, since data-mcp cannot tell it from a sum that
     keeps the version: the versions route that says so needs a first-party
     principal this service does not hold.
 
-    `options.without_party_totals` takes no part: dfo-apis mints a frame without
+    A `columns` that asks for `KIND_COLUMNS` also names `enrichment_stamp`, the digest
+    of the code-index facts behind the kind cells of the artifact the frame is read
+    from (`ArtifactEntry.enrichment_stamp`, `_named_stamp`), in the preimage as an
+    `"enrichment_stamp"` member. apis keeps one
+    `content_version` across a change to a party's kind, so without it the store
+    would serve the frame holding the old kinds for as long as it keeps the entry.
+    With no stamp, or with columns that ask for no kinds, the ref is the unsalted one.
+
+    `options.without_party_totals` takes no part: apis mints a frame without
     party totals a version of its own, so `content_version` already names it, and a
     cut that leaves nothing out serves its base's frame under its base's version.
 
@@ -845,6 +899,8 @@ def frame_ref_for(
     preimage: dict[str, Any] = {"columns": sorted(columns), "content_version": content_version}
     if groupby is not None:
         preimage["groupby"] = dict(groupby)
+    if enrichment_stamp is not None and requests_kinds(columns):
+        preimage["enrichment_stamp"] = enrichment_stamp
     rendering = rfc8785.dumps(preimage)
     return FrameRef(
         spec_id=spec_id, content_version=f"cv_{hashlib.sha256(rendering).hexdigest()[:32]}"
@@ -852,11 +908,11 @@ def frame_ref_for(
 
 
 def _ref_or_refusal(
-    manifest: Manifest, *, options: Mapping[str, Any]
+    manifest: Manifest, *, options: Mapping[str, Any], stamp: str | None
 ) -> FrameRef | MaterialisationOutcome:
-    """The reference this frame registers under (`frame_ref_for`), or the refused
-    outcome for a manifest whose `spec_id`/`content_version` combination doesn't match
-    `FrameRef`'s own pair shape.
+    """The reference this frame registers under (`frame_ref_for`, named under `stamp`),
+    or the refused outcome for a manifest whose `spec_id`/`content_version` combination
+    doesn't match `FrameRef`'s own pair shape.
     """
     try:
         return frame_ref_for(
@@ -864,6 +920,7 @@ def _ref_or_refusal(
             content_version=manifest.content_version,
             columns=tuple(options.get("columns") or ()),
             groupby=options.get("groupby"),
+            enrichment_stamp=stamp,
         )
     except ValidationError as exc:
         return MaterialisationOutcome(
@@ -876,12 +933,23 @@ def _ref_or_refusal(
         )
 
 
+def _named_stamp(manifest: Manifest, *, options: Mapping[str, Any]) -> str | None:
+    """The stamp a frame minted with `options` is named under (`frame_ref_for`): the
+    `enrichment_stamp` of the artifact it is read from (`_select_requested_artifact`),
+    for a frame that asks for kinds (`recorded_stamp`). An artifact without one, such
+    as a pinned file rendered under an earlier code index, names the frame unsalted.
+    The canonical frame asks for no kinds."""
+    artifact = _select_requested_artifact(manifest, options=options)
+    stamp = None if artifact is None else artifact.enrichment_stamp
+    return recorded_stamp(options.get("columns") or (), stamp)
+
+
 def _select_requested_artifact(
     manifest: Manifest, *, options: Mapping[str, Any]
 ) -> ArtifactEntry | None:
     """The artifact whose `rendering` equals the mint request's `options`, or `None`.
 
-    dfo-apis stores each artifact's `rendering` as the request's options with unset
+    apis stores each artifact's `rendering` as the request's options with unset
     fields left out, and a manifest lists every rendering stored under its pair: other
     callers' groupby sums and column selections sit beside the requested one, in no
     set order. A manifest whose own artifact has expired lists none that matches.
@@ -915,7 +983,7 @@ async def _fetch_artifact_bytes(
     progress: _FetchProgress,
 ) -> bytes | None:
     """Fetch one artifact's bytes under one wall-clock budget, or return `None`.
-    `link` is the artifact's absolute stable link when the caller has read it
+    `link` is the artifact's root-relative stable link when the caller has read it
     already, else `None`.
 
     A crossed deadline mid-sequence returns `None` (degraded), the same outcome as
@@ -954,25 +1022,27 @@ async def _fetch_artifact_bytes_uncapped(
     transport: httpx2.AsyncBaseTransport | None,
     progress: _FetchProgress,
 ) -> bytes | None:
-    """One `read_artifact` call for the artifact's download link, unless `link` is
-    given -- that function already
-    retries internally against dfo-apis' snapshot route, so it is called once here, never
-    wrapped in a second retry loop -- then up to `_ARTIFACT_GET_ATTEMPTS` bare GETs on the
-    link, which follow its 302 to a freshly signed object-store URL. A `410` from the link
-    (`_ARTIFACT_GONE_STATUS`) ends the fetch at once, since retrying cannot bring the
-    artifact back; any other GET failure retries the link, which signs a new URL each time.
-    `progress` is incremented once per bare GET actually attempted, whatever its outcome.
+    """One `artifact_link` call for the artifact's download link, unless `link` is
+    given -- that function already retries internally against apis' snapshot
+    route, so it is called once here, never wrapped in a second retry loop -- then up
+    to `_ARTIFACT_GET_ATTEMPTS` GETs on the link through `UpstreamClient.stream_link`,
+    which sends the ID token to apis only and follows its 302 to a freshly signed
+    object-store URL. An ID token that cannot be minted fails an attempt as a
+    transport error does. A `410` from the link (`_ARTIFACT_GONE_STATUS`) ends the
+    fetch at once, since retrying cannot bring the artifact back; any other GET
+    failure retries the link, which signs a new URL each time. `progress` is
+    incremented once per GET actually attempted, whatever its outcome.
 
-    `read_artifact` is imported here, not at module level: `data_mcp.artifact_resource`
+    `artifact_link` is imported here, not at module level: `data_mcp.artifact_resource`
     itself imports `_SPEC_ID_PATTERN` from `data_mcp.get_data_tool`, which imports
     `materialise_and_register` from this module -- a module-level import here would be
     circular. Deferred to first call, well after both modules have finished loading.
     """
-    from data_mcp.artifact_resource import read_artifact  # noqa: PLC0415
+    from data_mcp.artifact_resource import artifact_link  # noqa: PLC0415
 
     if link is None:
         try:
-            link = (await read_artifact(subject_id, content_version, artifact_digest))["url"]
+            link = await artifact_link(subject_id, content_version, artifact_digest)
         except ResourceError as exc:
             logger.warning(
                 "materialise_and_register: could not read the artifact link for %s/%s: %s",
@@ -985,46 +1055,48 @@ async def _fetch_artifact_bytes_uncapped(
     logger.info(
         "materialise_and_register: fetching artifact bytes for %s/%s", subject_id, content_version
     )
-    async with httpx2.AsyncClient(
-        transport=transport, timeout=httpx2.Timeout(30.0), follow_redirects=True
-    ) as client:
-        for attempt in range(1, _ARTIFACT_GET_ATTEMPTS + 1):
-            try:
-                response = await client.get(link)
-            except httpx2.TransportError as exc:
-                progress.attempts += 1
-                logger.warning(
-                    "materialise_and_register: GET attempt %d/%d for %s/%s failed: %s",
-                    attempt,
-                    _ARTIFACT_GET_ATTEMPTS,
-                    subject_id,
-                    content_version,
-                    exc,
-                )
-                if attempt < _ARTIFACT_GET_ATTEMPTS:
-                    await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
-                continue
+    upstream = get_client()
+    for attempt in range(1, _ARTIFACT_GET_ATTEMPTS + 1):
+        try:
+            async with upstream.stream_link(
+                link, timeout_s=_ARTIFACT_GET_TIMEOUT_S, transport=transport
+            ) as response:
+                status = response.status_code
+                body = await response.aread() if response.is_success else None
+        except httpx2.TransportError as exc:
             progress.attempts += 1
-            if response.is_success:
-                return response.content
-            if response.status_code == _ARTIFACT_GONE_STATUS:
-                logger.warning(
-                    "materialise_and_register: the link for %s/%s answered %d; not retrying",
-                    subject_id,
-                    content_version,
-                    response.status_code,
-                )
-                return None
             logger.warning(
-                "materialise_and_register: GET attempt %d/%d for %s/%s returned status %d",
+                "materialise_and_register: GET attempt %d/%d for %s/%s failed: %s",
                 attempt,
                 _ARTIFACT_GET_ATTEMPTS,
                 subject_id,
                 content_version,
-                response.status_code,
+                exc,
             )
             if attempt < _ARTIFACT_GET_ATTEMPTS:
                 await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
+            continue
+        progress.attempts += 1
+        if body is not None:
+            return body
+        if status == _ARTIFACT_GONE_STATUS:
+            logger.warning(
+                "materialise_and_register: the link for %s/%s answered %d; not retrying",
+                subject_id,
+                content_version,
+                status,
+            )
+            return None
+        logger.warning(
+            "materialise_and_register: GET attempt %d/%d for %s/%s returned status %d",
+            attempt,
+            _ARTIFACT_GET_ATTEMPTS,
+            subject_id,
+            content_version,
+            status,
+        )
+        if attempt < _ARTIFACT_GET_ATTEMPTS:
+            await asyncio.sleep(_ARTIFACT_GET_BACKOFF_S)
     logger.warning(
         "materialise_and_register: exhausted %d GET attempt(s) for %s/%s",
         _ARTIFACT_GET_ATTEMPTS,
@@ -1156,13 +1228,13 @@ _UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,)).field(UNIT_COLUMN).type
 def _tagged_unit_from_text(text: object) -> object:
     """One text `unit` cell as the value of the frame's tagged unit struct.
 
-    dfo-apis writes a text `unit` column (`materialise.formats._cell_text`): a unit ref
+    apis writes a text `unit` column (`materialise.formats._cell_text`): a unit ref
     as its own text, and a converted unit as the JCS text of its
     `{currency, prices, base_year}` object. A unit ref never starts with `{`, so a cell
     that does is a converted unit. It must parse as JSON, which makes it an object, and
     the grammar's `unit_cell_from_json` must read it as a unit request, so Arrow never
     drops an unknown member or fails on a mistyped one while building the struct. A
-    composed unit is refused `invalid_unit`: an artifact dfo-apis mints holds none.
+    composed unit is refused `invalid_unit`: an artifact apis mints holds none.
     """
     if text is None:
         return None
@@ -1211,7 +1283,7 @@ def observed_shape(frame: Frame) -> tuple[tuple[str, ...], int]:
 def holds_family_ref(frame: Frame, *, spec_id: str) -> bool:
     """Whether `frame`'s `stat_var` column holds the family ref `dcid:<spec_id>`.
 
-    dfo-apis writes that ref only on the series of a `groupby` that summed the family's
+    apis writes that ref only on the series of a `groupby` that summed the family's
     StatVars (`datasets_api.render`), so it marks a summed frame whatever the version's
     description or warnings say."""
     return pc.index(frame.table.column(STAT_VAR_COLUMN), f"dcid:{spec_id}").as_py() >= 0
@@ -1234,8 +1306,10 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
     A text `unit` column holds unit refs and converted units as JCS object text, each
     decoded into the frame's own unit cell (`_with_text_units_decoded`).
 
-    A `{role}_type` or `{role}_party_kind` column, which `get_data(place_types=True)` asks for,
-    is a role key too, with each empty cell written `UNTYPED` (`_with_untyped_places`).
+    A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or
+    `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
+    `get_data(place_types=True)` asks for, is a role key too, with each empty cell
+    written `UNTYPED` (`_with_untyped_places`).
     """
     table = _with_untyped_places(pq.read_table(io.BytesIO(data)))
     role_keys = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]
@@ -1254,12 +1328,12 @@ def _frame_from_parquet_bytes(data: bytes) -> Frame:
 
 
 def _with_untyped_places(table: pa.Table) -> pa.Table:
-    """`table` with each empty or null cell of every type or kind column of a role it
+    """`table` with each empty or null cell of every enrichment column of a role it
     carries (`common.place_type.enrichment_role`) written as `common.place_type.UNTYPED`.
 
-    dfo-apis leaves the cell empty for a place its graph holds no type for and for a
-    party it declares no kind for, and `build_frame_from_arrow` refuses an empty role
-    cell. A column typed null holds no value at all. A column of another type is left
+    apis leaves the cell empty for a place its graph holds no type for, for a party it
+    declares no kind for, and in the class column of a total holding parties of more than
+    one class, and `build_frame_from_arrow` refuses an empty role cell. A column typed null holds no value at all. A column of another type is left
     unchanged, for `build_frame_from_arrow` to refuse.
     """
     roles = [name for name in table.schema.names if name not in _RESERVED_COLUMNS]

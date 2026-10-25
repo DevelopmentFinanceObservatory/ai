@@ -1,0 +1,90 @@
+{
+  "id": "aggregate-peak-year-oda-kenya",
+  "kind": "aggregate",
+  "origin": "authored",
+  "question": "In which year did aid to Kenya peak?",
+  "searches": [
+    {
+      "query": "In which year did aid to Kenya peak?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "In which year did the official development assistance Kenya received from all donors reach its highest, and how much was it? The user named no span of years, so every year on record counts.",
+  "asks": [
+    {
+      "text": "The year aid to Kenya peaked, and the amount that year",
+      "over": [
+        "donor"
+      ],
+      "across_years": true
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "neighbour": {
+    "kind": "rank",
+    "distinction": "aggregate, not rank: the peak of one recipient's aid is the max of its own years, and a rank orders entities, not the years of one"
+  },
+  "unit_asked": false,
+  "period_reduction": "across_years",
+  "reference_payload": {
+    "question": "In which year did the official development assistance Kenya received from all donors reach its highest, and how much was it? The user named no span of years, so every year on record counts.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "source_spec_id": "spec_64bd62678d22debf1f39b36eefef98db"
+      },
+      {
+        "kind": "aggregate",
+        "id": "peak",
+        "input_id": "oda",
+        "reduction": "max",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "peak"
+        ]
+      }
+    ]
+  }
+}

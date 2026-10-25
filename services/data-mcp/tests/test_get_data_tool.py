@@ -16,6 +16,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import AuthProvider
 from common.materialisation import (
     FrameRef,
     InMemoryMaterialisationStore,
@@ -24,6 +25,7 @@ from common.materialisation import (
     frame_to_parquet_bytes,
 )
 from common.materialisation import set_store as set_frame_store
+from common.place_type import PARTY_KINDS
 from data_mcp import client_holder, get_data_tool
 from data_mcp.deadline import EXTERNAL_CALL_BUDGET, CallDeadline, use_call_budget
 from data_mcp.definition_store import (
@@ -36,6 +38,7 @@ from data_mcp.definition_store import (
 )
 from data_mcp.frame_materialisation import (
     CANONICAL_FRAME_RENDERING,
+    KIND_COLUMNS,
     MaterialisationOutcome,
     frame_ref_for,
 )
@@ -58,8 +61,9 @@ from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
+from .node_fixtures import load_node_fixture
 from .resolve_results import members_result, resolve_result, resolved_result
-from .test_client import _client, _problem_body, text_of
+from .test_client import _client, _problem_body, id_token_auth, text_of
 from .test_operations import _FakeClock
 
 Handler = (
@@ -330,9 +334,13 @@ def _mint_only_handler(status: int, payload: dict[str, Any]) -> Handler:
 
 
 async def _call_get_data(
-    handler: Handler, store: Any, arguments: dict[str, object]
+    handler: Handler,
+    store: Any,
+    arguments: dict[str, object],
+    *,
+    auth: AuthProvider | None = None,
 ) -> CallToolResult:
-    async with _client(handler) as upstream:
+    async with _client(handler, auth=auth) as upstream:
         client_holder.set_client(upstream)
         async with Client(mcp) as client:
             # server.py's lifespan already built its own store on entering
@@ -528,9 +536,9 @@ async def test_the_definition_sidecar_is_always_sent(arguments_extra: dict[str, 
     }
 
 
-# A mint that crosses dfo-apis' own sync budget: 202, then polled to completion
+# A mint that crosses apis' own sync budget: 202, then polled to completion
 
-# Shaped like dfo-apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
+# Shaped like apis' own `op_` + sha256-hex ids (`OperationEnvelope.operation_id`'s
 # own pattern constraint) so these tests exercise the real validated shape rather than
 # a placeholder a stricter pattern would itself reject.
 _OPERATION_ID = "op_" + hashlib.sha256(b"test-operation").hexdigest()
@@ -754,6 +762,7 @@ async def test_a_202_hands_the_poll_the_calls_own_deadline(
         deadline: CallDeadline,
         poll_interval_s: float,
         on_poll: object = None,
+        raise_upstream_error: bool = False,
     ) -> object:
         captured["deadline"] = deadline
         return ResolvedOperation(
@@ -835,7 +844,7 @@ async def test_identity_mismatch_refuses_capability_unavailable() -> None:
 
 async def test_registry_fallback_serves_a_definition_store_never_held() -> None:
     """A `spec_id` this process's store never saw can still be served straight from
-    dfo-apis' own permanent registry: the platform contract's `definition_not_held` means
+    apis' own permanent registry: the platform contract's `definition_not_held` means
     "held by neither store nor registry", not "held by neither store nor a sidecar this
     call carried" -- so a store miss alone must not refuse before trying the registry.
     """
@@ -933,7 +942,7 @@ async def test_mint_transport_failure_becomes_a_refusal() -> None:
 async def test_upstream_invalid_role_ref_pointer_matches_the_local_entities_convention() -> None:
     """A locally-rejected name and an upstream-rejected role both point at
     `/scope/entities/{role}` -- this tool's own argument path -- rather than
-    leaking dfo-apis' `/input`-wrapped wire envelope. The rendered message agrees
+    leaking apis' `/input`-wrapped wire envelope. The rendered message agrees
     with the structured `fix.pointer`: `request_invalid`'s factory embeds the
     pointer inline in `message`, so both come from the same rebase call rather
     than naming two different paths for the same mistake.
@@ -973,7 +982,7 @@ _UNIT_ISSUE_DETAIL = (
     "facet axis 'unit' is unbound, no default policy is declared, and no "
     "probed candidate has any observations"
 )
-# dfo-apis#1221 carries each issue's own code and detail.
+# The platform sends each issue's own code and detail.
 _FACET_REFUSAL: dict[str, Any] = {
     "retryable": False,
     "detail": "one or more facet axes could not be resolved",
@@ -990,7 +999,7 @@ _FACET_REFUSAL: dict[str, Any] = {
 
 @pytest.mark.parametrize("path", ["sync", "polled"])
 async def test_a_refused_mint_names_the_spec_and_places_it_was_minting(path: str) -> None:
-    """`default_facet_undefined` relays dfo-apis' detail and retryable flag as sent, and
+    """`default_facet_undefined` relays apis' detail and retryable flag as sent, and
     adds only what get_data was asking for: the spec_id and the places it bound. The same
     holds when the mint ran as a 202 operation and its poll reports the refusal."""
     stored = _stored_definition(entities={"observationAbout": ["africa"]})
@@ -1977,7 +1986,7 @@ async def test_the_result_states_no_frame_shape_when_the_frame_was_not_read(
 
 
 def _stat_var_entries(count: int) -> list[dict[str, Any]]:
-    """`count` `trace.resolved_stat_vars` entries shaped as dfo-apis writes them."""
+    """`count` `trace.resolved_stat_vars` entries shaped as apis writes them."""
     prefix = "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSPurposeCode"
     return [
         {
@@ -2432,7 +2441,7 @@ async def test_the_registry_fallback_mint_posts_the_spec_id_alone() -> None:
 
 
 async def test_a_member_list_is_refused_before_any_call() -> None:
-    """dfo-apis resolves a family's members itself and takes no list."""
+    """apis resolves a family's members itself and takes no list."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("a refused argument must not reach dfo-apis")
@@ -2491,7 +2500,7 @@ def _parquet_bytes() -> bytes:
 
 
 def _content_version_of(data: bytes) -> str:
-    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    """The `content_version` apis mints for the canonical frame `data` holds."""
     return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
 
 
@@ -2829,7 +2838,7 @@ async def test_a_mint_post_cut_by_its_own_cap_with_deadline_left_refuses_as_unan
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The mint POST's own `CallBudget.mint_timeout_s` (125s) cap ends it first, well inside the
-    165s call deadline (135s remained after the pre-mint reserve). dfo-apis does not
+    165s call deadline (135s remained after the pre-mint reserve). apis does not
     cancel a mint whose client went away, so this refuses with `mint_unanswered`, like
     a deadline-cut POST, whose message says the mint may still be running."""
     clock = _FakeClock()
@@ -2924,7 +2933,7 @@ def _poll_waits_move(clock: _FakeClock, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _operation_done_at(clock: _FakeClock, *, done_at: float, spec_id: str) -> Handler:
-    """dfo-apis for one mint over its sync budget, done once `clock` reaches `done_at`.
+    """apis for one mint over its sync budget, done once `clock` reaches `done_at`.
 
     Every POST answers 202 with the same operation id, as a repeat submit rejoins
     the operation while coverage is unchanged.
@@ -3037,7 +3046,7 @@ async def test_an_external_mint_post_gets_the_32s_before_the_reserve_and_promise
 
 
 def _mint_never_answers(clock: _FakeClock, posted: list[str]) -> Handler:
-    """dfo-apis running every mint synchronously for longer than the external
+    """apis running every mint synchronously for longer than the external
     budget's 32s: each POST records its spec_id and gets no answer."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -3052,7 +3061,7 @@ def _mint_never_answers(clock: _FakeClock, posted: list[str]) -> Handler:
 async def test_an_abandoned_external_mint_holds_its_slot_until_its_window_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dfo-apis runs an abandoned synchronous mint for up to 120s after its POST, and the
+    """apis runs an abandoned synchronous mint for up to 120s after its POST, and the
     ledger holds its slot a further margin past that. Until then a mint for another
     definition finds the one external slot held and refuses without sending, with the
     time left as its wait."""
@@ -3143,6 +3152,30 @@ async def test_a_direct_call_is_neither_limited_nor_counted_by_the_mint_ledger(
     assert unanswered.structured_content["retry_after_s"] == 5.0
     assert external.is_error is False
     assert posted == [held.spec_id, other.spec_id, other.spec_id, other.spec_id]
+
+
+async def test_a_mint_with_no_id_token_refuses_unavailable_and_frees_its_slot() -> None:
+    """A token that cannot be minted means the POST was never sent, so the external
+    slot is freed at once and the next external mint is admitted."""
+    failed, other = _stored_definition(), _stored_definition(shape_id="OtherShape")
+    posted: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        spec_id = json.loads(request.content)["input"]["spec_id"]
+        posted.append(spec_id)
+        return httpx2.Response(200, json=_manifest_response(spec_id=spec_id))
+
+    with use_call_budget(EXTERNAL_CALL_BUDGET):
+        refused = await _call_get_data(
+            handler, _StubStore(failed), {"spec_id": failed.spec_id}, auth=id_token_auth(mints=0)
+        )
+        admitted = await _call_get_data(handler, _StubStore(other), {"spec_id": other.spec_id})
+
+    assert refused.structured_content is not None
+    assert refused.structured_content["code"] == "service_unavailable"
+    assert refused.structured_content["retry_after_s"] == 5.0
+    assert admitted.is_error is False
+    assert posted == [other.spec_id]
 
 
 def _statistics_manifest() -> Manifest:
@@ -3271,7 +3304,7 @@ def _summed_manifest_response(
 ) -> dict[str, Any]:
     """A summed mint's manifest: the groupby rendering, a trace listing two StatVars with
     rows and one without, and, for a version stored before descriptions
-    (`contributing_member_count` set), dfo-apis' `stat_vars_summed` warning."""
+    (`contributing_member_count` set), apis' `stat_vars_summed` warning."""
     response = _manifest_response(
         spec_id=spec_id, content_version=content_version, artifact_digest=artifact_digest
     )
@@ -3626,9 +3659,9 @@ async def _call_get_data_in_one_process(
 
 
 class _RawAndSummedMint:
-    """dfo-apis for one spec: the raw frame under one `content_version`, and the summed
+    """apis for one spec: the raw frame under one `content_version`, and the summed
     frame under its own unless a single StatVar contributed (`sole_contributor`), when
-    dfo-apis serves the raw frame's own manifest. Each version's canonical frame is its
+    apis serves the raw frame's own manifest. Each version's canonical frame is its
     bytes. Records every artifact fetch."""
 
     def __init__(self, *, spec_id: str, sole_contributor: bool = False) -> None:
@@ -3690,7 +3723,7 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
 ) -> None:
     """The frame store is insert-only and keyed on `{spec_id, content_version}`: the
     raw frame is the raw version's canonical frame under its pair, and the summed
-    frame, which dfo-apis minted as a version of its own, is held under the pair
+    frame, which apis minted as a version of its own, is held under the pair
     naming its groupby, whichever call comes first. The summed frame's family ref
     marks it summed, with no warning or description."""
     monkeypatch.undo()  # the real `materialise_and_register`
@@ -3740,7 +3773,7 @@ async def test_raw_and_summed_calls_for_one_spec_register_two_distinct_frames(
 
 
 def _breakdown_frame_parquet(*, spec_id: str, sectors: list[str]) -> bytes:
-    """dfo-apis' frame for a `groupby.levels` roll-up: one row per sector, every row's
+    """apis' frame for a `groupby.levels` roll-up: one row per sector, every row's
     `stat_var` the family ref, and `stat_var_crsPurpose` the sector's label."""
     table = pa.table(
         {
@@ -3760,7 +3793,7 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A breakdown frame reaches the store under the pair naming the roll-up's groupby
-    and the `content_version` dfo-apis minted for it, with `stat_var_crsPurpose` as a
+    and the `content_version` apis minted for it, with `stat_var_crsPurpose` as a
     role column and one StatVar."""
     monkeypatch.undo()  # the real `materialise_and_register`
     stored = _stored_definition()
@@ -3821,7 +3854,7 @@ async def test_a_breakdown_frame_registers_under_its_own_pair_with_the_code_colu
 async def test_a_sole_contributor_summed_call_returns_the_raw_frame_without_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With one StatVar holding rows, dfo-apis answers a summed request with the raw
+    """With one StatVar holding rows, apis answers a summed request with the raw
     frame's own `content_version` and no `stat_vars_summed` warning. The sum keeps the
     raw version, so its rendering is held under the pair naming its groupby, apart
     from the raw version's canonical frame."""
@@ -3892,6 +3925,15 @@ async def test_place_types_asks_for_the_type_column_alone(
     ]
 
 
+async def test_place_types_names_every_party_kind_a_flow_frame_can_hold() -> None:
+    """A kind the description leaves out is one an outside model meets as a bare token."""
+    async with Client(mcp) as client:
+        (tool,) = [tool for tool in await client.list_tools() if tool.name == "get_data"]
+
+    description = tool.input_schema["properties"]["place_types"]["description"]
+    assert {kind for kind in PARTY_KINDS if kind not in description} == set()
+
+
 async def test_a_call_without_place_types_sends_no_columns() -> None:
     stored = _stored_definition()
     options: list[dict[str, Any]] = []
@@ -3907,7 +3949,7 @@ async def test_a_call_without_place_types_sends_no_columns() -> None:
 
 
 def _column_unknown(*, served: list[str], truncated: bool = False) -> httpx2.Response:
-    """dfo-apis' 422 for an `options.columns` token the table lacks, listing what it serves."""
+    """apis' 422 for an `options.columns` token the table lacks, listing what it serves."""
     return httpx2.Response(
         422,
         json={
@@ -3920,6 +3962,28 @@ def _column_unknown(*, served: list[str], truncated: bool = False) -> httpx2.Res
             "alternatives": [{"ref": ref, "label": ref} for ref in served],
             "truncated": truncated,
             "retryable": False,
+        },
+    )
+
+
+def _failed_operation_column_unknown(
+    *,
+    served: list[str],
+    pointer: str = "/options/columns",
+    truncated: bool = False,
+) -> httpx2.Response:
+    """An operation failure that records apis' column refusal as its cause."""
+    return httpx2.Response(
+        500,
+        json={
+            "type": "/codes/operation_failed",
+            "status": 500,
+            "code": "operation_failed",
+            "pointer": pointer,
+            "alternatives": [{"ref": ref, "label": ref} for ref in served],
+            "truncated": truncated,
+            "retryable": False,
+            "cause": {"code": "column_unknown"},
         },
     )
 
@@ -3945,6 +4009,228 @@ async def test_place_types_a_table_without_the_place_column_mints_the_default_co
     assert [sent.get("columns") for sent in options] == [["observationAbout_type"], None]
 
 
+@pytest.mark.parametrize("queued", [False, True], ids=["direct", "terminal-operation"])
+@pytest.mark.parametrize(
+    ("pointer", "alternatives"),
+    [
+        ("/input/spec_id", [{"ref": "stat_var", "label": "stat_var"}]),
+        ("/options/columns", [{"label": "stat_var"}]),
+    ],
+    ids=["wrong-pointer", "malformed-alternatives"],
+)
+async def test_an_ineligible_nonflow_place_type_refusal_is_relayed_without_a_retry(
+    queued: bool, pointer: str, alternatives: list[dict[str, str]]
+) -> None:
+    stored = _stored_definition(entities={"recipient": ["country/KEN"]})
+    posts: list[httpx2.Request] = []
+
+    def refusal() -> httpx2.Response:
+        if queued:
+            return httpx2.Response(
+                500,
+                json={
+                    "type": "/codes/operation_failed",
+                    "status": 500,
+                    "code": "operation_failed",
+                    "pointer": pointer,
+                    "alternatives": alternatives,
+                    "truncated": False,
+                    "retryable": False,
+                    "cause": {"code": "column_unknown"},
+                },
+            )
+        return httpx2.Response(
+            422,
+            json={
+                "type": "/codes/column_unknown",
+                "status": 422,
+                "code": "column_unknown",
+                "pointer": pointer,
+                "alternatives": alternatives,
+                "truncated": False,
+                "retryable": False,
+            },
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(request)
+            if not queued:
+                return refusal()
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "failed",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return refusal()
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content is not None
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(posts) == 1
+
+
+async def test_a_polled_column_refusal_retries_with_the_flow_metadata_the_table_serves() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    options: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            options.append(json.loads(request.content)["options"])
+            if len(options) == 1:
+                return httpx2.Response(
+                    202,
+                    json={
+                        "operation": {
+                            "operation_id": _OPERATION_ID,
+                            "status": "failed",
+                            "poll": _OPERATION_POLL_PATH,
+                        }
+                    },
+                )
+            return httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(
+            served=["financingProvider_type", "financingProvider_party_kind"]
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [sent["columns"] for sent in options] == [
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        ["financingProvider_type", *KIND_COLUMNS],
+    ]
+
+
+async def test_a_second_mixed_column_refusal_does_not_submit_a_third_mint() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    posts: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(json.loads(request.content)["options"])
+            if len(posts) == 1:
+                return _column_unknown(
+                    served=["financingProvider_type", "financingProvider_party_kind"]
+                )
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "failed",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(
+            served=["financingProvider_type", "financingProvider_party_kind"]
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(posts) == 2
+
+
+@pytest.mark.parametrize(
+    ("pointer", "truncated"),
+    [("/input/spec_id", False), ("/options/columns", True)],
+    ids=["pointer-ineligible", "truncated"],
+)
+async def test_an_ineligible_polled_column_refusal_is_relayed_without_a_retry(
+    pointer: str, truncated: bool
+) -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    posts: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(request)
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "failed",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(
+            served=["financingProvider_type", "financingProvider_party_kind"],
+            pointer=pointer,
+            truncated=truncated,
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(posts) == 1
+
+
+async def test_a_polled_column_refusal_with_malformed_alternatives_is_relayed() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    posts: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(request)
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "failed",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return httpx2.Response(
+            500,
+            json={
+                "type": "/codes/operation_failed",
+                "status": 500,
+                "code": "operation_failed",
+                "pointer": "/options/columns",
+                "alternatives": [{"label": "financingProvider_type"}],
+                "truncated": False,
+                "retryable": False,
+                "cause": {"code": "column_unknown"},
+            },
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(posts) == 1
+
+
 @pytest.mark.parametrize(
     "served",
     [
@@ -3968,7 +4254,6 @@ async def test_place_types_a_flow_table_serving_no_kind_is_refused(served: list[
     )
 
     assert result.is_error is True
-    assert result.structured_content["upstream_code"] == "column_unknown"
     assert len(calls) == 1
 
 
@@ -3997,7 +4282,119 @@ async def test_place_types_a_spec_naming_a_flow_axis_asks_for_kinds(
     )
 
     assert result.is_error is False, result.structured_content
-    assert [sent["columns"] for sent in options] == [["party_kind"]]
+    assert [sent["columns"] for sent in options] == [
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entities", "served", "expected"),
+    [
+        (
+            {"origin": ["country/FRA"]},
+            ["financingProvider_type", "financingProvider_party_kind"],
+            ["financingProvider_type", *KIND_COLUMNS],
+        ),
+        (
+            {"destination": ["country/KEN"]},
+            ["financingRecipient_type", "financingRecipient_party_kind"],
+            ["financingRecipient_type", *KIND_COLUMNS],
+        ),
+    ],
+    ids=["provider-only", "destination-only"],
+)
+async def test_place_types_retries_with_the_flow_metadata_the_table_serves(
+    entities: dict[str, list[str]], served: list[str], expected: list[str]
+) -> None:
+    stored = _stored_definition(entities=entities)
+    options: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        options.append(json.loads(request.content)["options"])
+        return (
+            _column_unknown(served=served)
+            if len(options) == 1
+            else httpx2.Response(200, json=_manifest_response(spec_id=stored.spec_id))
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is False, result.structured_content
+    assert [sent["columns"] for sent in options] == [
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        expected,
+    ]
+
+
+async def test_a_second_flow_metadata_refusal_is_relayed_after_one_retry() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    calls: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return _column_unknown(served=["financingProvider_type", "financingProvider_party_kind"])
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "served",
+    [
+        ["financingProvider_party_kind"],
+        ["financingProvider_type"],
+    ],
+    ids=["present-role-without-type", "missing-qualified-kind"],
+)
+async def test_incomplete_remaining_flow_metadata_is_relayed_without_a_retry(
+    served: list[str],
+) -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    calls: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return _column_unknown(served=served)
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert len(calls) == 1
+
+
+async def test_a_column_unknown_with_malformed_alternatives_is_relayed_without_a_retry() -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    calls: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return httpx2.Response(
+            422,
+            json={
+                "type": "/codes/column_unknown",
+                "status": 422,
+                "code": "column_unknown",
+                "pointer": "/options/columns",
+                "alternatives": [{"label": "financingProvider_type"}],
+                "truncated": False,
+            },
+        )
+
+    result = await _call_get_data(
+        handler, _StubStore(stored), {"spec_id": stored.spec_id, "place_types": True}
+    )
+
+    assert result.is_error is True
+    assert len(calls) == 1
 
 
 async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_retry() -> None:
@@ -4017,9 +4414,9 @@ async def test_a_column_unknown_listing_a_truncated_set_is_refused_without_a_ret
 
 
 class _PlainAndTypedMint:
-    """dfo-apis for one place-subject spec: the default columns, or the place-type
+    """apis for one place-subject spec: the default columns, or the place-type
     column added when `options.columns` names it, both under one `content_version`
-    (dfo-apis keeps it across renderings), each its own artifact. Every manifest lists
+    (apis keeps it across renderings), each its own artifact. Every manifest lists
     both renderings, the one not requested first, as a done operation lists every
     rendering stored under its pair. Records every artifact fetch as
     `(content_version, artifact_digest)`."""
@@ -4089,7 +4486,7 @@ class _PlainAndTypedMint:
 async def _mint_recorded_root(
     handler: Handler, stored: StoredDefinition, record: MintRecord
 ) -> RootMint | QueuedOperation | ToolResult:
-    """`mint_recorded_root` for `record` against `handler` as dfo-apis."""
+    """`mint_recorded_root` for `record` against `handler` as apis."""
     async with _client(handler) as upstream:
         client_holder.set_client(upstream)
         set_store(_StubStore(stored))
@@ -4186,7 +4583,7 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
         operation_id=_OPERATION_ID, status="pending", retry_after_s=1.5
     )
     assert isinstance(again, RootMint)
-    # The repeat is the same request, which dfo-apis answers from the operation it holds.
+    # The repeat is the same request, which apis answers from the operation it holds.
     assert submitted[0] == submitted[1]
     assert len(submitted) == 2
 
@@ -4197,21 +4594,44 @@ async def test_a_queued_root_mint_returns_at_once_and_a_repeat_rejoins_it(
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["financingProvider_type", "financingRecipient_type"]},
-            {"format": "parquet", "columns": ["party_kind"]},
+            {
+                "format": "parquet",
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            },
         ),
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["kind"]},
+            {
+                "format": "parquet",
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            },
+        ),
+        (
+            {"origin": ["country/FRA"]},
             {"format": "parquet", "columns": ["party_kind"]},
+            {
+                "format": "parquet",
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            },
         ),
         (
             {"origin": ["country/FRA"]},
             {"format": "parquet"},
-            {"format": "parquet", "columns": ["party_kind"]},
+            {
+                "format": "parquet",
+                "columns": ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            },
         ),
         ({"recipient": ["country/KEN"]}, {"format": "parquet"}, {"format": "parquet"}),
     ],
-    ids=["flow-party-types", "flow-retired-kind", "flow-no-columns", "place-no-columns"],
+    ids=[
+        "flow-party-types",
+        "flow-retired-kind",
+        "flow-kind-without-class-and-whole",
+        "flow-no-columns",
+        "place-no-columns",
+    ],
 )
 async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_them(
     monkeypatch: pytest.MonkeyPatch,
@@ -4220,7 +4640,7 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     minted: dict[str, Any],
 ) -> None:
     # A flow root recorded before kinds were served holds no kinds, and a sum across its
-    # parties would refuse; the replay mints and registers it with `["party_kind"]`.
+    # parties would refuse; the replay mints and registers it with `KIND_COLUMNS`.
     stored = _stored_definition(entities=entities)
     registered: list[Mapping[str, Any]] = []
 
@@ -4247,11 +4667,14 @@ async def test_a_recorded_flow_root_minted_without_kinds_is_minted_again_with_th
     assert registered == [minted]
 
 
+@pytest.mark.parametrize(
+    "recorded_columns", [list(KIND_COLUMNS), ["party_kind"]], ids=["kinds", "kind-alone"]
+)
 async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_option(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, recorded_columns: list[str]
 ) -> None:
-    # The option is dfo-apis': the replay sends it as recorded, and the record of the new
-    # pair keeps it.
+    # The option is apis': the replay sends it as recorded, with the kinds alone it asks
+    # for now, and the record of the new pair keeps it.
     stored = _stored_definition(**_FLOW_OPEN_PROVIDER)
     registered: list[Mapping[str, Any]] = []
 
@@ -4275,17 +4698,263 @@ async def test_a_recorded_root_without_party_totals_is_minted_again_with_the_opt
             200, json=_manifest_response(spec_id=stored.spec_id, content_version="cv_" + "2" * 32)
         )
 
-    recorded = {"format": "parquet", "columns": ["party_kind"], "without_party_totals": True}
+    recorded = {"format": "parquet", "columns": recorded_columns, "without_party_totals": True}
+    expected = recorded | {"columns": list(KIND_COLUMNS)}
     root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
 
     minted = await _mint_recorded_root(
         handler, stored, MintRecord(frame=root, dataset=root, options=recorded)
     )
 
-    assert sent == [recorded]
-    assert registered == [recorded]
+    assert sent == [expected]
+    assert registered == [expected]
     assert isinstance(minted, RootMint)
-    assert minted.options == recorded
+    assert minted.options == expected
+
+
+@pytest.mark.parametrize(
+    ("entities", "served", "expected"),
+    [
+        (
+            {"origin": ["country/FRA"]},
+            ["financingProvider_type", "financingProvider_party_kind"],
+            ["financingProvider_type", *KIND_COLUMNS],
+        ),
+        (
+            {"destination": ["country/KEN"]},
+            ["financingRecipient_type", "financingRecipient_party_kind"],
+            ["financingRecipient_type", *KIND_COLUMNS],
+        ),
+    ],
+    ids=["provider-only", "destination-only"],
+)
+async def test_a_replayed_flow_root_records_the_metadata_options_that_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+    entities: dict[str, list[str]],
+    served: list[str],
+    expected: list[str],
+) -> None:
+    stored = _stored_definition(entities=entities)
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    sent: list[dict[str, Any]] = []
+
+    async def registered(*, manifest: Manifest, **_: Any) -> MaterialisationOutcome:
+        return MaterialisationOutcome(
+            status="registered",
+            attempts=0,
+            frame_ref=root,
+            stat_var_count=1,
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", registered)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content)["options"])
+        return (
+            _column_unknown(served=served)
+            if len(sent) == 1
+            else httpx2.Response(
+                200,
+                json=_manifest_response(
+                    spec_id=stored.spec_id, content_version=root.content_version
+                ),
+            )
+        )
+
+    minted = await _mint_recorded_root(
+        handler,
+        stored,
+        MintRecord(frame=root, dataset=root, options={"format": "parquet"}),
+    )
+
+    assert isinstance(minted, RootMint)
+    assert minted.options == {"format": "parquet", "columns": expected}
+    assert [options["columns"] for options in sent] == [
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        expected,
+    ]
+
+
+async def test_a_replayed_terminal_column_refusal_retries_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    posts: list[dict[str, Any]] = []
+
+    async def should_not_materialise(**_: Any) -> MaterialisationOutcome:
+        raise AssertionError("the retried operation is still queued")
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", should_not_materialise)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(json.loads(request.content)["options"])
+            if len(posts) == 1:
+                return httpx2.Response(
+                    202,
+                    json={
+                        "operation": {
+                            "operation_id": _OPERATION_ID,
+                            "status": "failed",
+                            "poll": _OPERATION_POLL_PATH,
+                        }
+                    },
+                )
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "pending",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(
+            served=["financingProvider_type", "financingProvider_party_kind"]
+        )
+
+    result = await _mint_recorded_root(
+        handler, stored, MintRecord(frame=root, dataset=root, options={"format": "parquet"})
+    )
+
+    assert result == QueuedOperation(
+        operation_id=_OPERATION_ID, status="pending", retry_after_s=2.0
+    )
+    assert [options["columns"] for options in posts] == [
+        ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+        ["financingProvider_type", *KIND_COLUMNS],
+    ]
+
+
+async def test_a_replayed_terminal_column_refusal_records_the_corrected_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+
+    async def registered(*, manifest: Manifest, **_: Any) -> MaterialisationOutcome:
+        return MaterialisationOutcome(
+            status="registered", attempts=0, frame_ref=root, stat_var_count=1
+        )
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", registered)
+    posts: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(json.loads(request.content)["options"])
+            if len(posts) == 1:
+                return httpx2.Response(
+                    202,
+                    json={
+                        "operation": {
+                            "operation_id": _OPERATION_ID,
+                            "status": "failed",
+                            "poll": _OPERATION_POLL_PATH,
+                        }
+                    },
+                )
+            return httpx2.Response(
+                200,
+                json=_manifest_response(
+                    spec_id=stored.spec_id, content_version=root.content_version
+                ),
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(
+            served=["financingProvider_type", "financingProvider_party_kind"]
+        )
+
+    result = await _mint_recorded_root(
+        handler, stored, MintRecord(frame=root, dataset=root, options={"format": "parquet"})
+    )
+
+    assert isinstance(result, RootMint)
+    assert result.options == {
+        "format": "parquet",
+        "columns": ["financingProvider_type", *KIND_COLUMNS],
+    }
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["direct", "terminal-operation"])
+async def test_a_replayed_explicit_place_type_is_not_removed_by_negotiation(
+    queued: bool,
+) -> None:
+    stored = _stored_definition(entities={"recipient": ["country/KEN"]})
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    posts: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            posts.append(json.loads(request.content)["options"])
+            if not queued:
+                return _column_unknown(served=["stat_var", "entity", "value"])
+            return httpx2.Response(
+                202,
+                json={
+                    "operation": {
+                        "operation_id": _OPERATION_ID,
+                        "status": "failed",
+                        "poll": _OPERATION_POLL_PATH,
+                    }
+                },
+            )
+        assert request.url.path == _OPERATION_POLL_PATH
+        return _failed_operation_column_unknown(served=["stat_var", "entity", "value"])
+
+    result = await _mint_recorded_root(
+        handler,
+        stored,
+        MintRecord(
+            frame=root,
+            dataset=root,
+            options={"format": "parquet", "columns": ["observationAbout_type"]},
+        ),
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert posts == [{"format": "parquet", "columns": ["observationAbout_type"]}]
+
+
+async def test_a_replayed_explicit_flow_type_is_not_removed_by_negotiation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = _stored_definition(entities={"origin": ["country/FRA"]})
+    root = FrameRef(spec_id=stored.spec_id, content_version="cv_" + "1" * 32)
+    calls: list[httpx2.Request] = []
+
+    async def should_not_materialise(**_: Any) -> MaterialisationOutcome:
+        raise AssertionError("the explicit unsupported type must be relayed")
+
+    monkeypatch.setattr(get_data_tool, "materialise_and_register", should_not_materialise)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append(request)
+        return _column_unknown(served=["financingProvider_type", "financingProvider_party_kind"])
+
+    result = await _mint_recorded_root(
+        handler,
+        stored,
+        MintRecord(
+            frame=root,
+            dataset=root,
+            options={"format": "parquet", "columns": ["financingRecipient_type", "custom"]},
+        ),
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.structured_content["upstream_code"] == "column_unknown"
+    assert len(calls) == 1
+    assert json.loads(calls[0].content)["options"]["columns"] == [
+        "financingRecipient_type",
+        "custom",
+        "financingProvider_type",
+        *KIND_COLUMNS,
+    ]
 
 
 async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
@@ -4322,7 +4991,7 @@ async def test_a_root_whose_frame_could_not_be_fetched_refuses_with_a_wait(
 async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     monkeypatch: pytest.MonkeyPatch, order: tuple[bool, bool]
 ) -> None:
-    """dfo-apis answers both renderings under one `{spec_id, content_version}`. The
+    """apis answers both renderings under one `{spec_id, content_version}`. The
     store is insert-only, so under one key whichever was stored first would be served
     to the other. The plain frame keeps the mint's pair, so a frame stored before
     renderings had their own identity still resolves, and the typed frame is held
@@ -4352,7 +5021,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     assert plain_ref == FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
     assert typed_ref.spec_id == stored.spec_id
     assert typed_ref.content_version != upstream.content_version
-    # The manifest stays dfo-apis' document, naming the materialisation its artifacts
+    # The manifest stays apis' document, naming the materialisation its artifacts
     # are read under.
     assert {c["content_version"] for c in content.values()} == {upstream.content_version}
     assert content[False]["role_keys"] == ["observationAbout"]
@@ -4369,7 +5038,7 @@ async def test_a_typed_and_a_plain_read_of_one_mint_are_two_frames(
     typed_frame = await frame_store.get(typed_ref)
     assert plain_frame is not None
     assert typed_frame is not None
-    # Each frame's mint record sits under the frame's own pair and names dfo-apis'.
+    # Each frame's mint record sits under the frame's own pair and names apis'.
     dataset = FrameRef(spec_id=stored.spec_id, content_version=upstream.content_version)
     plain_options = {"format": "parquet", "bundle": False, "layout": "frame"}
     assert await frame_store.get_mint_record(plain_ref) == MintRecord(
@@ -4396,8 +5065,19 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
 @pytest.mark.parametrize(
     ("identity", "arguments", "columns", "cut"),
     [
-        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, ["party_kind"], True),
-        (_FLOW_OPEN_PROVIDER, {"place_types": True}, ["party_kind"], False),
+        (_FLOW_OPEN_PROVIDER, {"without_party_totals": True}, list(KIND_COLUMNS), True),
+        (
+            _FLOW_OPEN_PROVIDER,
+            {"place_types": True},
+            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            False,
+        ),
+        (
+            _FLOW_OPEN_PROVIDER,
+            {"without_party_totals": True, "place_types": True},
+            ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS],
+            True,
+        ),
         (_FLOW_OPEN_PROVIDER, {}, None, False),
         (_PLACE_SPEC, {"without_party_totals": True}, None, False),
         (
@@ -4407,7 +5087,14 @@ _PLACE_SPEC = {"entities": {"recipient": ["country/KEN"]}}
             False,
         ),
     ],
-    ids=["flow-totals-only", "flow-types-only", "flow-neither", "place-totals-only", "place-both"],
+    ids=[
+        "flow-totals-only",
+        "flow-types-only",
+        "flow-both",
+        "flow-neither",
+        "place-totals-only",
+        "place-both",
+    ],
 )
 async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
     monkeypatch: pytest.MonkeyPatch,
@@ -4440,7 +5127,7 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
 
     assert result.is_error is False, result.structured_content
     assert [sent_options.get("columns") for sent_options in sent] == [columns]
-    # Sent only when true, as dfo-apis records it in a rendering only then.
+    # Sent only when true, as apis records it in a rendering only then.
     assert [sent_options.get("without_party_totals") for sent_options in sent] == [
         True if cut else None
     ]
@@ -4448,9 +5135,9 @@ async def test_without_party_totals_sends_a_flow_spec_the_option_with_its_kinds(
 
 
 class _FlowMint:
-    """dfo-apis for a flow spec with an open provider side and a named recipient. Its frame
+    """apis for a flow spec with an open provider side and a named recipient. Its frame
     holds single parties, group totals, a residual and a party of no kind. A mint with
-    `options.without_party_totals` answers as dfo-apis cuts it: the rows of the providers of
+    `options.without_party_totals` answers as apis cuts it: the rows of the providers of
     kind `total` left out, under a version of its own (`CUT_VERSION`) whose coverage counts
     the rows kept and whose trace lists the totals left out. The artifact of each mint is the
     rendering it asked for. Records every artifact fetch."""
@@ -4551,11 +5238,11 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     assert left_out_again.structured_content is not None
     kept_ref = FrameRef.model_validate(with_totals.structured_content["frame_ref"])
     cut_ref = FrameRef.model_validate(left_out.structured_content["frame_ref"])
-    # The manifest names dfo-apis' cut version, and the frame is held under the pair its
+    # The manifest names apis' cut version, and the frame is held under the pair its
     # kinds derive from that version.
     assert left_out.structured_content["content_version"] == _FlowMint.CUT_VERSION
     assert cut_ref == frame_ref_for(
-        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=("party_kind",)
+        spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION, columns=KIND_COLUMNS
     )
     assert cut_ref != kept_ref
     # The repeat is a store hit: it fetches nothing and names the same frame.
@@ -4576,7 +5263,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         "country/FRA",
         "country/XYZ",
     ]
-    # The record keeps the option, so a replay asks dfo-apis for the cut again.
+    # The record keeps the option, so a replay asks apis for the cut again.
     record = await frame_store.get_mint_record(cut_ref)
     assert record is not None
     assert record.dataset == FrameRef(spec_id=stored.spec_id, content_version=_FlowMint.CUT_VERSION)
@@ -4584,7 +5271,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
         "format": "parquet",
         "bundle": False,
         "layout": "frame",
-        "columns": ["party_kind"],
+        "columns": list(KIND_COLUMNS),
         "without_party_totals": True,
     }
     # The digest names the totals the manifest's trace lists, on the fresh mint and the hit.
@@ -4596,7 +5283,7 @@ async def test_a_frame_without_party_totals_is_dfo_apis_cut_version_held_and_ser
     assert "Left out of the frame" not in text_of(with_totals)
 
 
-# `GET /api/datasets/{id}/options` as dfo-apis answered it for the DAC2a spec "official
+# `GET /api/datasets/{id}/options` as apis answered it for the DAC2a spec "official
 # development assistance to Kenya from every provider, 2015-2022".
 _REGISTRY_OPTIONS = json.loads(
     (Path(__file__).parent / "fixtures" / "options_dac2a_kenya_open_provider.json").read_text()
@@ -4605,7 +5292,7 @@ _REGISTRY_SPEC_ID = _REGISTRY_OPTIONS["definition"]["spec_id"]
 
 
 class _RegistryFlowMint:
-    """dfo-apis for the spec `_REGISTRY_OPTIONS` records, which the definition store does not
+    """apis for the spec `_REGISTRY_OPTIONS` records, which the definition store does not
     hold: its registry answers the options route, and a flow table refuses a place type
     column and serves the artifact of the rendering that asks for party kinds, cut of the
     providers of kind `total` under a version of its own (`CUT_VERSION`) when the mint asks
@@ -4693,11 +5380,14 @@ class _RegistryFlowMint:
 
 
 @pytest.mark.parametrize(
-    ("argument", "totals_served"),
-    [("place_types", True), ("without_party_totals", False)],
+    ("argument", "columns", "totals_served"),
+    [
+        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS], True),
+        ("without_party_totals", list(KIND_COLUMNS), False),
+    ],
 )
 async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
-    monkeypatch: pytest.MonkeyPatch, argument: str, totals_served: bool
+    monkeypatch: pytest.MonkeyPatch, argument: str, columns: list[str], totals_served: bool
 ) -> None:
     monkeypatch.undo()  # the real `materialise_and_register`
     upstream = _RegistryFlowMint()
@@ -4718,7 +5408,7 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
         (path, body and body["options"].get("columns")) for path, body in upstream.requests
     ] == [
         (f"/api/datasets/{_REGISTRY_SPEC_ID}/options", None),
-        ("/api/datasets", ["party_kind"]),
+        ("/api/datasets", columns),
     ]
     mint = upstream.requests[1][1]
     assert mint is not None
@@ -4734,9 +5424,15 @@ async def test_a_flow_spec_the_definition_store_lacks_is_minted_with_kinds(
     assert ("country/XYZ" in providers) and ("country/FRA" in providers)
 
 
-@pytest.mark.parametrize("argument", ["place_types", "without_party_totals"])
+@pytest.mark.parametrize(
+    ("argument", "columns"),
+    [
+        ("place_types", ["financingProvider_type", "financingRecipient_type", *KIND_COLUMNS]),
+        ("without_party_totals", list(KIND_COLUMNS)),
+    ],
+)
 async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_and_no_sidecar(
-    monkeypatch: pytest.MonkeyPatch, argument: str
+    monkeypatch: pytest.MonkeyPatch, argument: str, columns: list[str]
 ) -> None:
     # The registry answers the definition under its own id, which the requested id is not,
     # so the mint cannot carry it. Its flow sides still choose the columns.
@@ -4753,7 +5449,7 @@ async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_
     assert result.is_error is False, result.structured_content
     mint = upstream.requests[1][1]
     assert mint is not None
-    assert mint["options"]["columns"] == ["party_kind"]
+    assert mint["options"]["columns"] == columns
     assert "definition" not in mint["input"]
     # Only the manifest's own definition is kept, as for any re-mint under another id.
     assert [put.spec_id for put in definitions.put_calls] == [_REGISTRY_SPEC_ID]
@@ -4763,7 +5459,7 @@ async def test_a_spec_the_registry_serves_under_another_id_is_minted_with_kinds_
 async def test_a_flow_frame_that_cannot_carry_the_asked_kinds_is_refused(
     monkeypatch: pytest.MonkeyPatch, argument: str
 ) -> None:
-    # The registry reads the spec as a place spec, and dfo-apis then serves a flow manifest
+    # The registry reads the spec as a place spec, and apis then serves a flow manifest
     # for the mint without kinds: that frame would carry every group total.
     monkeypatch.undo()  # the real `materialise_and_register`
     place = _stored_definition(entities={"recipient": ["country/KEN"]})
@@ -4838,3 +5534,166 @@ def test_a_refusal_names_a_place_by_its_label_and_only_counts_one_without() -> N
         == "Kenya and 1 more place"
     )
     assert get_data_tool._places_named(["country/GHA", "country/NGA"], labels) == "2 places"
+
+
+# Warning refs: every warning's refs labelled by one node lookup
+
+_NODES_PATH = "/api/graph/nodes"
+
+# Two warnings naming three distinct refs between them, `country/KEN` in both, and one
+# naming none.
+_REF_WARNINGS: list[dict[str, Any]] = [
+    {
+        "code": "coverage_below_scope",
+        "severity": "warn",
+        "message": "2 of 14 series report at a different frequency.",
+        "member_count": 14,
+        "off_cadence_members": {"count": 2, "refs": ["dcid:country/KEN", "dcid:country/UGA"]},
+    },
+    {
+        "code": "deflator_missing_omitted",
+        "severity": "warn",
+        "message": "It left out 3 entities.",
+        "omitted_entity_years": {
+            "count": 3,
+            "entities": [
+                {"ref": "dcid:country/KEN", "years": ["2004"]},
+                {"ref": "dcid:country/TCD", "years": ["2010-2012"]},
+            ],
+        },
+    },
+    {"code": "facet_fallback", "severity": "info", "message": "Fell back."},
+]
+
+
+def _returned_warnings(result: CallToolResult) -> list[dict[str, Any]]:
+    assert result.structured_content is not None
+    return result.structured_content["warnings"]
+
+
+def _with_messages(*messages: str) -> list[dict[str, Any]]:
+    """`_REF_WARNINGS` with the given messages, in order, every field kept, and the two
+    `stat_vars_summed` fields the stripped manifest dumps as null."""
+    return [
+        {"contributing_member_count": None, "stat_var_label": None, **warning, "message": message}
+        for warning, message in zip(_REF_WARNINGS, messages, strict=True)
+    ]
+
+
+def _ref_warnings_handler(
+    spec_id: str,
+    nodes: Handler,
+    node_requests: list[list[str]],
+    *,
+    on_mint: Callable[[], None] = lambda: None,
+) -> Handler:
+    """Answer the mint with `_REF_WARNINGS`, calling `on_mint` first, and the node batch
+    route with `nodes`, recording each request's dcids in `node_requests`."""
+    payload = _manifest_response(spec_id=spec_id)
+    payload["warnings"] = _REF_WARNINGS
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/datasets":
+            on_mint()
+            return httpx2.Response(200, json=payload)
+        if request.url.path == _NODES_PATH:
+            node_requests.append(json.loads(request.content)["dcids"])
+            response = nodes(request)
+            return response if isinstance(response, httpx2.Response) else await response
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    return handler
+
+
+async def _never_answers(_request: httpx2.Request) -> httpx2.Response:
+    await asyncio.Event().wait()
+    raise AssertionError("the wait above never ends")
+
+
+def _labelled_nodes(request: httpx2.Request) -> httpx2.Response:
+    """Kenya and Uganda by name; `country/TCD` not held."""
+    country = load_node_fixture("node_country")
+    labels = {"country/KEN": "Kenya", "country/UGA": "Uganda"}
+    entries = [
+        {**country, "ref": dcid, "label": labels[dcid]}
+        if dcid in labels
+        else {"ref": dcid, "status": "not_held"}
+        for dcid in json.loads(request.content)["dcids"]
+    ]
+    return httpx2.Response(200, json={"nodes": entries})
+
+
+async def test_every_warnings_refs_are_labelled_by_one_node_lookup() -> None:
+    stored = _stored_definition()
+    node_requests: list[list[str]] = []
+
+    result = await _call_get_data(
+        _ref_warnings_handler(stored.spec_id, _labelled_nodes, node_requests),
+        _StubStore(stored),
+        {"spec_id": stored.spec_id},
+    )
+
+    assert result.is_error is False
+    assert node_requests == [["country/KEN", "country/UGA", "country/TCD"]]
+    text = text_of(result)
+    assert "Series at another frequency: Kenya, Uganda." in text
+    assert "Entities left out: Kenya (2004), country/TCD (2010-2012), and 1 more." in text
+    # The harness copies the returned messages into card warnings.
+    assert _returned_warnings(result) == _with_messages(
+        "2 of 14 series report at a different frequency. "
+        "Series at another frequency: Kenya, Uganda.",
+        "It left out 3 entities. "
+        "Entities left out: Kenya (2004), country/TCD (2010-2012), and 1 more.",
+        "Fell back.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("nodes", "seconds_left"),
+    [
+        (
+            lambda _request: httpx2.Response(
+                500, content=_problem_body(code="internal", retryable=False)
+            ),
+            None,
+        ),
+        (lambda _request: httpx2.Response(200, json={"nodes": "not a list"}), None),
+        # The mint answers with 3.05s of the call deadline left, so the label read, which
+        # must leave 3s unspent, gets 0.05s: its request is sent and cut unanswered.
+        (_never_answers, get_data_tool._STATISTICS_RESERVE_S + 0.05),
+    ],
+    ids=["refused", "unparsable", "past_its_reserve"],
+)
+async def test_a_failed_label_lookup_names_the_warnings_refs_bare(
+    monkeypatch: pytest.MonkeyPatch, nodes: Handler, seconds_left: float | None
+) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(get_data_tool, "_deadline_clock", clock)
+    stored = _stored_definition()
+    node_requests: list[list[str]] = []
+
+    def on_mint() -> None:
+        if seconds_left is not None:
+            clock.now = Settings().get_data_deadline_s - seconds_left
+
+    # Without the read's own bound, the unanswered route would hold the call open; this
+    # guard turns that into a failure instead of a hang.
+    async with asyncio.timeout(5.0):
+        result = await _call_get_data(
+            _ref_warnings_handler(stored.spec_id, nodes, node_requests, on_mint=on_mint),
+            _StubStore(stored),
+            {"spec_id": stored.spec_id},
+        )
+
+    assert result.is_error is False
+    assert len(node_requests) == 1
+    text = text_of(result)
+    assert "Series at another frequency: country/KEN, country/UGA." in text
+    assert "Entities left out: country/KEN (2004), country/TCD (2010-2012), and 1 more." in text
+    assert _returned_warnings(result) == _with_messages(
+        "2 of 14 series report at a different frequency. "
+        "Series at another frequency: country/KEN, country/UGA.",
+        "It left out 3 entities. "
+        "Entities left out: country/KEN (2004), country/TCD (2010-2012), and 1 more.",
+        "Fell back.",
+    )

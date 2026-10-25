@@ -1,14 +1,19 @@
 """Record what data-mcp answers for each task: its searches and the skills they name.
 
-Runs data-mcp in process (`data_mcp.server.mcp`) against the dfo-apis at `DFO_APIS_URL`,
+Runs data-mcp in process (`data_mcp.server.mcp`) against the apis service at `DFO_APIS_URL`,
 so that platform has to be reachable. Each task's searches go through the
 orchestrator's own `search` tool, as `entry.orchestrator_state` replays them, so the
 recording holds exactly the calls a replay makes. Then every skill a search names, and
 `dfo-faq`, is read with each file it lists, page by page, and each first-year read
 `propose_plan` can make for a dataset the planner is shown (`submission.service.first_year_reads`).
+Last, every call production's translation makes for each of the task's payloads: the
+search `discover_source` sends for each dataset requirement, with its warnings, each
+definition it resolves or describes, each entity name it resolves, and each code node
+it reads to climb a breakdown's named codes up their hierarchy.
 
     just eval-planner-entry-record                   # tasks with no recording, a stale one,
-                                                     # or one lacking a first-year read
+                                                     # or one lacking a first-year read or
+                                                     # a call its translation makes
     just eval-planner-entry-record --all             # every task again
     just eval-planner-entry-record --only share-health-oda-kenya
 
@@ -36,6 +41,7 @@ from entry import (
     RecordingMismatchError,
     Task,
     TaskStateError,
+    TranslationCalls,
     load_recording,
     load_tasks,
     orchestrator_state,
@@ -46,13 +52,14 @@ from entry import (
     surface_key,
 )
 from fastmcp import Client
+from harness.settings import Settings
 from harness.tool_contracts import ResolverError, resolver_digest
 from mcp.types import TextContent
 from planner.agent import read_full_history
 from planner.plan import SessionState
 from planner.skills import DFO_FAQ_SKILL_ID
 from submission.service import first_year_reads
-from validate import ScriptedLlm
+from validate import ScriptedLlm, accepted_run, task_payloads, tool_schemas
 
 
 class RecordingResolver:
@@ -175,6 +182,59 @@ async def _first_year_results(
     return surface.results
 
 
+def _call_result(result: Any) -> dict[str, Any]:
+    """A tool result as `compiler.surface.McpSurface` hands it on, `_meta` included,
+    where `search` puts the envelope `discover_source` reads."""
+    return {**_result(result), "meta": dict(result.meta) if result.meta else None}
+
+
+class TranslationRecordError(RuntimeError):
+    """A live translation that would leave its recording short: the task is not saved."""
+
+
+async def _translation_calls(
+    client: Any, task: Task, recording: Mapping[str, Any], *, wall_s: float
+) -> dict[str, Any]:
+    """Every call the translation of each of `task`'s payloads makes, as the recording's
+    `translation` holds them: answered from `recording` where it holds the call under
+    the same arguments, and made now otherwise. Calls no payload makes any more are left
+    out. Each entry may take `wall_s`, a served request's wall-clock bound.
+
+    Raises:
+        TranslationRecordError: If an entry errored or ran out of time, a live call
+            raised or was refused for now (`TranslationCalls.failures`), or a replay
+            of what was kept still misses a call, such as one the entry's time left
+            unissued. The message names the payload and the call.
+    """
+
+    async def live(tool: ToolId, arguments: Mapping[str, object]) -> dict[str, Any]:
+        return _call_result(
+            await client.call_tool(tool.name, dict(arguments), raise_on_error=False)
+        )
+
+    schemas = await tool_schemas()
+    calls = TranslationCalls(recording.get("translation") or {}, schemas=schemas, live=live)
+    payloads = task_payloads(task)
+    for payload in payloads:
+        run = await accepted_run(task, recording, payload, calls, timeout_s=wall_s)
+        if run.timed_out:
+            raise TranslationRecordError(f"{payload.label}: ran past {wall_s:g} s")
+        if calls.failures:
+            raise TranslationRecordError(f"{payload.label}: {calls.failures[0]}")
+        if run.error is not None:
+            raise TranslationRecordError(f"{payload.label}: {run.error.splitlines()[0]}")
+    kept = calls.kept()
+    replay = TranslationCalls(kept, schemas=schemas)
+    for payload in payloads:
+        await accepted_run(task, recording, payload, replay)
+        if replay.misses:
+            raise TranslationRecordError(
+                f"{payload.label}: a replay misses {replay.misses[0]}, which the live "
+                "translation never asked"
+            )
+    return kept
+
+
 async def record_task(client: Any, task: Task) -> dict[str, Any]:
     """`task`'s recording: its searches' envelopes, every skill they name, and each
     first-year read the planner can make."""
@@ -190,6 +250,9 @@ async def record_task(client: Any, task: Task) -> dict[str, Any]:
         "tools": await _skill_results(client, [*resolver.skills, DFO_FAQ_SKILL_ID]),
     }
     recording["tools"] |= await _first_year_results(client, task, recording)
+    recording["translation"] = await _translation_calls(
+        client, task, recording, wall_s=Settings().turn_wall_s
+    )
     return recording
 
 
@@ -222,9 +285,17 @@ async def main_async(args: argparse.Namespace) -> int:
             try:
                 if held is not None:
                     added = await _first_year_results(client, task, held)
-                    if added:
-                        save_recording(task.id, {**held, "tools": held["tools"] | added})
-                        print(f"ok   {task.id}: first-year reads {len(added)}", file=sys.stderr)
+                    held = {**held, "tools": held["tools"] | added}
+                    translation = await _translation_calls(
+                        client, task, held, wall_s=Settings().turn_wall_s
+                    )
+                    if added or translation != held.get("translation"):
+                        save_recording(task.id, {**held, "translation": translation})
+                        print(
+                            f"ok   {task.id}: first-year reads {len(added)}, translation "
+                            f"calls {len(translation['calls'])}",
+                            file=sys.stderr,
+                        )
                     return
                 recording = await record_task(client, task)
             except Exception as exc:

@@ -1,0 +1,87 @@
+{
+  "id": "aggregate-total-education-oda-kenya-coverage-brief",
+  "kind": "aggregate",
+  "origin": "authored",
+  "question": "Net ODA for education to Kenya",
+  "searches": [
+    {
+      "query": "Net ODA for education to Kenya",
+      "parts": [
+        {
+          "variable": "net ODA for education",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ],
+          "open_roles": [
+            "donor"
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "Total net ODA disbursements for education to Kenya from all providers between 1990 and 2024.",
+  "asks": [
+    {
+      "text": "Sum total net ODA disbursements for education to Kenya across all providers (1990 to 2024)",
+      "over": [
+        "donor"
+      ]
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "unit_asked": false,
+  "period_reduction": "none",
+  "reference_payload": {
+    "question": "Total net ODA disbursements for education to Kenya from all providers between 1990 and 2024.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "education",
+        "measure": "net ODA disbursements for education",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          }
+        ],
+        "period": {
+          "start": 1990,
+          "end": 2024
+        },
+        "across": [
+          "donor"
+        ],
+        "source_spec_id": "spec_d4364e1b45055289f0befcfc769c4011"
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "education",
+        "reduction": "sum",
+        "group_by": [
+          "period"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

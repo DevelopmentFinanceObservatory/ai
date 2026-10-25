@@ -1,7 +1,7 @@
 """Tests for `data_mcp.manifest`: URL stripping, the `extra="ignore"`
 policy, and the shapes `strip_manifest` accepts.
 
-`_DEFINITION_MANIFEST` was captured by driving dfo-apis' own offline `TestClient`
+`_DEFINITION_MANIFEST` was captured by driving apis' own offline `TestClient`
 (`tests/datasets_api/conftest.py::make_client`) through `POST /api/datasets`, the
 same way `tests/datasets_api/test_mint_spec_id.py` does it, then rewriting each
 artifact's `url` to the stable link `/api/datasets/{id}/{cv}/files/{digest}` --
@@ -9,7 +9,7 @@ pasted as JSON so a real production shape backs every assertion here, including
 ones a hand-built fixture would happily satisfy while describing something
 production never emits. The capture's inline `statistics` array is edited by hand,
 replaced by `series_count` plus a `rendering: {"statistics": "series"}` artifact
-entry -- the shape dfo-apis uses for per-series figures stored in their own Parquet
+entry, the shape apis uses for per-series figures stored in their own Parquet
 artifact; nothing else in the capture is touched by hand."""
 
 from __future__ import annotations
@@ -227,6 +227,24 @@ def test_a_manifest_without_year_counts_dumps_neither_member() -> None:
     coverage = strip_manifest(_DEFINITION_MANIFEST).model_dump(mode="json")["coverage"]
 
     assert coverage.keys() == _DEFINITION_MANIFEST["coverage"].keys()
+
+
+def test_an_artifacts_enrichment_stamp_survives_stripping_and_stays_out_of_a_dump_without_one() -> (
+    None
+):
+    [artifact, *others] = _DEFINITION_MANIFEST["artifacts"]
+    stamped = strip_manifest(
+        {
+            **_DEFINITION_MANIFEST,
+            "artifacts": [{**artifact, "enrichment_stamp": "stamp-a"}, *others],
+        }
+    )
+
+    assert stamped.artifacts[0].enrichment_stamp == "stamp-a"
+    assert stamped.model_dump(mode="json")["artifacts"][0]["enrichment_stamp"] == "stamp-a"
+    bare = strip_manifest(_DEFINITION_MANIFEST)
+    assert bare.artifacts[0].enrichment_stamp is None
+    assert "enrichment_stamp" not in bare.model_dump(mode="json")["artifacts"][0]
 
 
 def test_a_coverage_dimension_from_a_dfo_apis_without_axes_still_parses() -> None:

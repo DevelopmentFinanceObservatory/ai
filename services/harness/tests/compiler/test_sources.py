@@ -9,12 +9,16 @@ from typing import Any
 import pytest
 from compiler.sources import (
     DiscoveryStatus,
+    MembersAnswer,
+    bound_refs,
     is_family,
     measure_named_by_query,
+    members_reading,
     outcome_from_envelope,
     pinned_stat_var,
     source_from_spec_block,
     stat_var_count,
+    total_reading,
     wire_groups,
 )
 from planner.records import Period
@@ -73,6 +77,40 @@ def _part(status: str, **payload: Any) -> dict[str, Any]:
 def _envelope(status: str, **payload: Any) -> dict[str, Any]:
     """A single-part envelope, the shape one `discover_source` call gets back."""
     return {"schema_version": 1, "status": status, "parts": [_part(status, **payload)]}
+
+
+@pytest.mark.parametrize(
+    ("part", "expected"),
+    [
+        (
+            {
+                "entity_refs": [
+                    {"text": "G7", "refs": ["GroupOfSeven"]},
+                    {"text": "Africa", "refs": ["DACAfrica"]},
+                ]
+            },
+            {"g7": ("GroupOfSeven",), "africa": ("DACAfrica",)},
+        ),
+        # A text Search bound nothing for names nothing by ref.
+        ({"entity_refs": [{"text": "Atlantis", "refs": []}]}, {}),
+        # A Search that predates `entity_refs` states none, whatever it restates.
+        ({"restatement": {"entities": [{"text": "G7", "role_text": "from"}]}}, {}),
+        # A text stated twice binds every ref either row states.
+        (
+            {
+                "entity_refs": [
+                    {"text": "Kenya", "refs": ["country/KEN"]},
+                    {"text": "kenya", "refs": ["KEN2"]},
+                ]
+            },
+            {"kenya": ("country/KEN", "KEN2")},
+        ),
+    ],
+)
+def test_each_entity_text_maps_to_the_refs_it_bound(
+    part: dict[str, Any], expected: dict[str, tuple[str, ...]]
+) -> None:
+    assert bound_refs(part) == expected
 
 
 def test_a_definite_answer_yields_the_one_source_it_resolved() -> None:
@@ -204,7 +242,7 @@ def test_no_data_carries_the_reason_and_the_nearest_real_series() -> None:
 def test_no_data_carries_a_reason_this_service_does_not_yet_recognise() -> None:
     # The reason vocabulary belongs to another service: a value it has not
     # been taught yet is still data to carry, not grounds to refuse the
-    # envelope. `entity_set_too_large` is real on dfo-apis' own feature
+    # envelope. `entity_set_too_large` is real on apis' own feature
     # branch and absent from its published `dev` vocabulary at the time of
     # writing -- exactly the kind of value this has to survive.
     outcome = outcome_from_envelope(
@@ -594,7 +632,7 @@ def test_a_block_stating_no_scope_and_no_role_axis_fact_opens_nothing() -> None:
 
 
 # Africa as a DAC2A recipient, bound to the one party DAC publishes as its
-# total, and the G7 read as its members, as dfo-apis states `entity_groups`.
+# total, and the G7 read as its members, as apis states `entity_groups`.
 _GROUPS = {
     "destination": {
         "ref": "africa",
@@ -628,6 +666,104 @@ def test_a_resubmit_posts_each_set_without_its_total() -> None:
     }
 
 
+# "ODA to Ethiopia from all donors" binds the OECD's official-donors total; the
+# union "all donors including private" binds that total and the private one.
+_WHOLE_ENTITIES = [
+    {"role": "origin", "label": "Official Donors, Total", "ref": "DACOfficialDonors"},
+    {"role": "origin", "label": "Private Donors, Total", "ref": "DACPrivateDonors"},
+]
+_WHOLE_TOTAL = {
+    "origin": {
+        "ref": None,
+        "label": "all donors",
+        "entity_type": None,
+        "total": "DACOfficialDonors",
+        "whole_of": ["official"],
+    }
+}
+_WHOLE_SET = {
+    "origin": {
+        "ref": None,
+        "label": "all donors including private",
+        "entity_type": None,
+        "total": None,
+        "whole_of": ["official", "private"],
+    }
+}
+
+
+def test_a_group_carries_the_classes_its_whole_total_holds() -> None:
+    sided = {"origin": _WHOLE_TOTAL["origin"] | {"side_classes": ["official", "private"]}}
+    single = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=sided))
+    union = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET))
+    members = source_from_spec_block(_spec(entities=_ENTITIES, entity_groups=_GROUPS))
+
+    assert [(g.total, g.whole_of, g.side_classes) for g in single.groups] == [
+        ("DACOfficialDonors", ("official",), ("official", "private"))
+    ]
+    assert [(g.total, g.whole_of, g.side_classes) for g in union.groups] == [
+        (None, ("official", "private"), ())
+    ]
+    assert [(g.whole_of, g.side_classes) for g in members.groups] == [((), ()), ((), ())]
+
+
+def test_a_group_naming_a_party_kind_as_its_class_fails_the_block() -> None:
+    """`party` is a frame kind and no class of party, so a block from a Search
+    that wrote kinds into `whole_of` fails rather than being read as some class."""
+    kinds = {"origin": _WHOLE_TOTAL["origin"] | {"whole_of": ["party"]}}
+
+    with pytest.raises(ValueError):
+        source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=kinds))
+
+
+@pytest.mark.parametrize(
+    ("side_classes", "outside"),
+    [
+        (["official", "private", "residual"], " (private donors are outside it)"),
+        (["official", "residual"], ""),
+        (None, ""),
+    ],
+    ids=["dac2a-publishes-private-donors", "dac2b-publishes-none", "search-without-the-field"],
+)
+def test_a_whole_total_is_read_with_the_population_it_holds(
+    side_classes: list[str] | None, outside: str
+) -> None:
+    labels = {entity["ref"]: entity["label"] for entity in _WHOLE_ENTITIES}
+    total = _WHOLE_TOTAL["origin"] | (
+        {} if side_classes is None else {"side_classes": side_classes}
+    )
+    (single,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups={"origin": total})
+    ).groups
+    (union,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET)
+    ).groups
+
+    assert total_reading(single, labels) == (
+        "The figures for all donors are Official Donors, Total, the total the source "
+        f"publishes for all official donors{outside}, "
+        "not its members' figures added up."
+    )
+    assert total_reading(union, labels) == (
+        "The figure for all donors including private adds up the totals the source "
+        "publishes for all official donors and private donors, not its members' figures."
+    )
+
+
+def test_a_set_read_as_its_whole_total_is_not_also_read_as_members() -> None:
+    (union,) = source_from_spec_block(
+        _spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_SET)
+    ).groups
+
+    assert members_reading(union, answer=MembersAnswer.SUMMED) is None
+
+
+def test_a_resubmit_posts_a_whole_total_without_its_marker() -> None:
+    source = source_from_spec_block(_spec(entities=_WHOLE_ENTITIES, entity_groups=_WHOLE_TOTAL))
+
+    assert wire_groups(source.groups) == {"origin": {"label": "all donors"}}
+
+
 def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:
     source = source_from_spec_block(_spec())
 
@@ -638,7 +774,7 @@ def test_a_source_saved_before_entity_refs_dumps_as_it_did() -> None:
 
 
 def _alternative(spec_id: str, label: str, axis: str) -> dict[str, Any]:
-    """One `resolved.alternative_measures` entry as dfo-apis states it."""
+    """One `resolved.alternative_measures` entry as apis states it."""
     return {
         "definition": {"schema_version": 1, "spec_id": spec_id, "identity": {"stat_var": "y"}},
         "label": label,

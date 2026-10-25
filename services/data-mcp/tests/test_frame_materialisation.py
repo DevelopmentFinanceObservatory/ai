@@ -7,7 +7,7 @@ import decimal
 import hashlib
 import io
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -15,6 +15,7 @@ import httpx2
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from common.apis_auth import TOKEN_HEADER
 from common.materialisation import (
     FrameIntegrityError,
     FrameRef,
@@ -31,12 +32,14 @@ from common.materialisation import (
 from common.materialisation import get_store as get_frame_store
 from common.materialisation import set_store as set_frame_store
 from common.materialisation.memory_store import FRAME_TTL
+from common.materialisation.mint_record import encode_mint_record
 from common.row_budget import ROW_BUDGET_RETRY_AFTER_S, RowBudget, row_budget, set_row_budget
 from data_mcp import client_holder, frame_materialisation
 from data_mcp.deadline import CallDeadline
 from data_mcp.frame_materialisation import (
     _ARTIFACT_GET_ATTEMPTS,
     CANONICAL_FRAME_RENDERING,
+    KIND_COLUMNS,
     MaterialisationOutcome,
     frame_ref_for,
     materialise_and_register,
@@ -57,7 +60,8 @@ from dfo_frame_grammar import (
 from google.api_core.exceptions import NotFound
 
 from .net_guard import no_network  # noqa: F401 -- imported for its autouse fixture
-from .test_client import _client
+from .test_client import ID_TOKEN, _client, id_token_auth
+from .test_client import _settings as _upstream_settings
 from .test_operations import _FakeClock
 
 _SPEC_ID = "spec_" + "1" * 32
@@ -73,7 +77,7 @@ def _parquet_bytes(
     values: list[float] | None = None,
     stat_vars: list[str] | None = None,
 ) -> bytes:
-    """A tiny frame in the canonical layout dfo-apis writes a version's canonical
+    """A tiny frame in the canonical layout apis writes a version's canonical
     frame in (`frame_to_parquet_bytes`): `stat_var`, one role column
     (`observationAbout`), `time_period`, `value`, and the null `unit`, facet and
     `status` columns. Every row carries `dcid:Test` unless `stat_vars` names one per
@@ -96,7 +100,7 @@ def _parquet_bytes(
 
 
 def _content_version_of(data: bytes) -> str:
-    """The `content_version` dfo-apis mints for the canonical frame `data` holds."""
+    """The `content_version` apis mints for the canonical frame `data` holds."""
     return mint_content_version(frame_sha256=frame_sha256(frame_from_verified_parquet_bytes(data)))
 
 
@@ -126,9 +130,11 @@ def _manifest(
     artifact_digest: str = _ARTIFACT_DIGEST,
     trace: dict[str, Any] | None = None,
     renderings: dict[str, dict[str, object]] | None = None,
+    stamps: Mapping[str, str] | None = None,
 ) -> Manifest:
     """A manifest listing one default-rendering artifact under `artifact_digest`, or one
-    artifact per `renderings` entry (digest to rendering), in its order."""
+    artifact per `renderings` entry (digest to rendering), in its order, each carrying
+    the `enrichment_stamp` `stamps` gives its digest, if any."""
     if renderings is None:
         renderings = {artifact_digest: {"bundle": False, "format": "parquet", "layout": "frame"}}
     payload: dict[str, Any] = {
@@ -146,6 +152,7 @@ def _manifest(
                 "media_type": "application/vnd.apache.parquet",
                 "created_at": "2026-08-11T00:00:00+00:00",
                 "tier": "working",
+                **({"enrichment_stamp": stamps[digest]} if digest in (stamps or {}) else {}),
             }
             for digest, rendering in renderings.items()
         ],
@@ -877,7 +884,7 @@ async def test_a_malformed_manifest_spec_id_refuses_rather_than_raising() -> Non
     assert outcome.refusal.code.value == "upstream_error"
 
 
-# A done operation lists every rendering dfo-apis stores under the pair. Dev listed
+# A done operation lists every rendering apis stores under the pair. Dev listed
 # another caller's groupby sum first, then the plain rendering and its statistics.
 _SUM_GROUPBY: dict[str, object] = {"by": ["time_period", "crsPurpose"], "op": "sum"}
 _SUM_SIBLING_RENDERING: dict[str, object] = {
@@ -950,7 +957,7 @@ async def test_the_fetched_artifact_is_the_one_whose_rendering_the_mint_requeste
     assert fetched == [digests[requested_at]]
     ref = FrameRef(spec_id=_SPEC_ID, content_version=ref_content_version)
     assert outcome.frame_ref == ref
-    # The mint record sits under the frame's pair and names dfo-apis' own.
+    # The mint record sits under the frame's pair and names apis' own.
     assert await get_frame_store().get_mint_record(ref) == MintRecord(
         frame=ref, dataset=_FRAME_REF, options=options, stat_var_count=1
     )
@@ -1069,6 +1076,39 @@ async def test_a_sign_failure_before_any_get_returns_degraded_with_zero_attempts
     assert outcome.refusal is None
 
 
+async def test_an_id_token_that_cannot_mint_fails_each_get_as_a_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The snapshot read takes the first token. Every mint for the link GET fails
+    and is retried as a failed GET is, and the fetch degrades with nothing sent."""
+    monkeypatch.setattr(frame_materialisation, "_ARTIFACT_GET_BACKOFF_S", 0.0)
+    manifest = _manifest()
+    seen: list[httpx2.Request] = []
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_snapshot_payload())
+
+    def get_handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    set_frame_store(InMemoryMaterialisationStore())
+    async with _client(snapshot_handler, auth=id_token_auth(mints=1)) as upstream:
+        client_holder.set_client(upstream)
+        outcome = await materialise_and_register(
+            options=_OPTIONS,
+            manifest=manifest,
+            settings=_settings(),
+            writer="tester",
+            transport=httpx2.MockTransport(get_handler),
+        )
+
+    assert outcome.status == "degraded"
+    assert outcome.degraded_reason == "fetch"
+    assert outcome.attempts == _ARTIFACT_GET_ATTEMPTS
+    assert seen == []
+
+
 async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> None:
     data = _parquet_bytes()
     digest = _digest_for(data)
@@ -1087,7 +1127,11 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     set_frame_store(InMemoryMaterialisationStore())
-    async with _client(snapshot_handler) as upstream:
+    # The site origin is the model-facing one. This fetch must not use it.
+    upstream_settings = _upstream_settings(dfo_site_origin="https://site.example")
+    async with _client(
+        snapshot_handler, settings=upstream_settings, auth=id_token_auth()
+    ) as upstream:
         client_holder.set_client(upstream)
         outcome = await materialise_and_register(
             options=_OPTIONS,
@@ -1098,8 +1142,12 @@ async def test_the_link_is_followed_across_origins_carrying_no_credentials() -> 
         )
 
     assert outcome.status == "registered"
-    assert [r.url.path for r in seen] == [_LINK, "/signed"]
-    assert seen[1].url.host == "storage.example"
+    assert [(r.url.host, r.url.path) for r in seen] == [
+        ("localhost", _LINK),
+        ("storage.example", "/signed"),
+    ]
+    assert seen[0].headers[TOKEN_HEADER] == ID_TOKEN
+    assert TOKEN_HEADER not in seen[1].headers
     credential_headers = {"authorization", "cookie", "x-dfo-principal"}
     for request in seen:
         assert credential_headers.isdisjoint(request.headers.keys())
@@ -1732,7 +1780,7 @@ _UNIT_STRUCT = pa.struct(
 
 
 def _unit_struct_parquet(unit: dict[str, object]) -> bytes:
-    """A one-row artifact whose `unit` column is the struct dfo-apis writes for a converted member."""
+    """A one-row artifact whose `unit` column is the struct apis writes for a converted member."""
     table = pa.table(
         {
             "stat_var": pa.array(["dcid:Test"], type=pa.string()),
@@ -2041,7 +2089,7 @@ def test_a_unit_struct_in_the_frame_tagged_form_refuses_as_an_invalid_unit(
 
 
 def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_them() -> None:
-    """dfo-apis writes a ref as its own text and a converted unit as JCS object text."""
+    """apis writes a ref as its own text and a converted unit as JCS object text."""
     unit = pa.array(
         [
             "dcid:USDollar",
@@ -2184,8 +2232,8 @@ def test_an_empty_parquet_file_with_an_int_typed_column_refuses(column: str) -> 
     assert raised.value.category == "schema_violation"
 
 
-# A frame asked for place types: GDP with no place named, as dfo-apis renders it with
-# `observationAbout_type` (dfo-apis `materialise.enrichment`): every `typeOf` sorted and
+# A frame asked for place types: GDP with no place named, as apis renders it with
+# `observationAbout_type` (apis `materialise.enrichment`): every `typeOf` sorted and
 # comma-joined, and an empty cell for a place its graph holds no type for.
 _EVERY_PLACE_ROWS = [
     ("Earth", "Place"),
@@ -2246,7 +2294,7 @@ def test_a_place_type_column_is_a_role_and_an_empty_cell_reads_untyped() -> None
 
 @pytest.mark.parametrize("described", ["financingRecipient_party_kind", "financingRecipient_type"])
 def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> None:
-    # dfo-apis leaves the kind cell empty for a party it declares no kind for. Filled, the
+    # apis leaves the kind cell empty for a party it declares no kind for. Filled, the
     # frame registers, and a sum across the parties refuses `place_levels_mixed`.
     table = pa.table(
         {
@@ -2275,13 +2323,60 @@ def test_an_empty_flow_party_kind_or_type_cell_reads_untyped(described: str) -> 
     assert set(frame.table.column("financingProvider_party_kind").to_pylist()) == {"untyped"}
 
 
+def test_a_partys_class_and_whole_cells_pass_through_and_an_empty_class_reads_untyped() -> None:
+    """apis leaves the class cell empty for a total holding more than one class. The
+    decoder writes that cell as `untyped` and every served cell reaches the frame as it
+    was served."""
+    table = pa.table(
+        {
+            "stat_var": pa.array(["dcid:Oda"] * 5),
+            "financingProvider": pa.array(
+                [
+                    "country/FRA",
+                    "GatesFoundation",
+                    "DACOfficialDonors",
+                    "DACUnspecified",
+                    "DACAllDonors",
+                ]
+            ),
+            "financingRecipient": pa.array(["country/ETH"] * 5),
+            "time_period": pa.array(["2021"] * 5),
+            "value": pa.array([1.0] * 5),
+            "financingProvider_party_kind": pa.array(
+                ["party", "party", "total", "residual", "total"]
+            ),
+            "financingProvider_party_class": pa.array(
+                ["official", "private", "official", "residual", ""]
+            ),
+            "financingProvider_party_whole": pa.array(["false", "false", "true", "false", "false"]),
+        }
+    )
+    buf = io.BytesIO()
+    pq.write_table(table, buf)
+
+    frame = frame_materialisation._frame_from_parquet_bytes(buf.getvalue())
+
+    rows = frame.table.select(
+        ["financingProvider", "financingProvider_party_class", "financingProvider_party_whole"]
+    ).to_pylist()
+    assert {row["financingProvider"]: tuple(row.values())[1:] for row in rows} == {
+        "country/FRA": ("official", "false"),
+        "GatesFoundation": ("private", "false"),
+        "DACOfficialDonors": ("official", "true"),
+        "DACUnspecified": ("residual", "false"),
+        "DACAllDonors": ("untyped", "false"),
+    }
+
+
 @pytest.mark.parametrize(
     "identity",
     [{"entities": {"origin": ["country/FRA"]}}, {"entities": {"recipient": ["country/KEN"]}}, None],
     ids=["flow", "place", "unheld"],
 )
 @pytest.mark.parametrize(
-    "recorded", (*frame_materialisation.TYPE_COLUMN_SELECTIONS, ("kind",)), ids="+".join
+    "recorded",
+    (*frame_materialisation.TYPE_COLUMN_SELECTIONS, ("kind",), ("party_kind",), KIND_COLUMNS),
+    ids="+".join,
 )
 def test_a_replayed_selection_asks_a_flow_root_for_kinds(
     recorded: tuple[str, ...], identity: dict[str, Any] | None
@@ -2292,10 +2387,22 @@ def test_a_replayed_selection_asks_a_flow_root_for_kinds(
 
     replayed = frame_materialisation.replayed_mint_options(options, identity=identity)
 
-    party_typed = {"financingProvider_type", "financingRecipient_type", "kind"} & set(recorded)
-    flow_unselected = not recorded and identity is not None and "origin" in identity["entities"]
-    if party_typed or flow_unselected:
-        assert replayed == options | {"columns": ["party_kind"]}
+    flow_root = identity is not None and "origin" in identity["entities"]
+    expected = [column for column in recorded if column not in {"kind", *KIND_COLUMNS}]
+    if flow_root:
+        expected.extend(
+            column
+            for column in frame_materialisation.FLOW_ENRICHMENT_COLUMNS
+            if column not in expected
+        )
+        assert replayed == options | {"columns": expected}
+    elif recorded:
+        if any(
+            column in {"kind", *frame_materialisation.FLOW_ENRICHMENT_COLUMNS}
+            for column in recorded
+        ):
+            expected.extend(KIND_COLUMNS)
+        assert replayed == options | {"columns": expected}
     else:
         assert replayed == options
 
@@ -2360,6 +2467,8 @@ def test_extra_columns_name_a_frame_of_their_own() -> None:
             ("financingRecipient_type", "financingProvider_type"),
             "cv_3b6c33d24aa1d42e0de5d54574aa1ca5",
         ),
+        (("party_kind",), "cv_aa6883b65fa153b6b5fd56e03a5dca14"),
+        (KIND_COLUMNS, "cv_f91d484f1789bbcde7595066c052e2fe"),
     ],
 )
 def test_a_columns_only_pair_keeps_the_recorded_derivation(
@@ -2394,6 +2503,202 @@ def test_a_groupby_names_a_frame_apart_from_the_plain_and_the_typed_pair() -> No
         ).hexdigest()[:32]
     )
     assert len({ref.content_version for ref in (_FRAME_REF, summed, summed_typed, typed)}) == 4
+
+
+_KIND_OPTIONS: dict[str, object] = _OPTIONS | {"columns": ["party_kind"]}
+
+
+@pytest.mark.parametrize(
+    ("columns", "keyed_by_stamp"),
+    [
+        (("party_kind",), True),
+        (KIND_COLUMNS, True),
+        (("party_class",), True),
+        (("party_whole",), True),
+        (("observationAbout_type",), False),
+        ((), False),
+    ],
+    ids=["kind", "kind-class-whole", "class", "whole", "types", "default"],
+)
+def test_the_enrichment_stamp_names_only_a_frame_that_asks_for_kinds(
+    columns: tuple[str, ...], keyed_by_stamp: bool
+) -> None:
+    """The kind cells come from apis's code index, which moves with no change to the
+    version, so a stamp of it names the frame. Types come from the graph at render time,
+    and the default frame is the version's canonical one."""
+    refs = {
+        stamp: frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=columns,
+            enrichment_stamp=stamp,
+        )
+        for stamp in (None, "stamp-a", "stamp-b")
+    }
+
+    assert (refs["stamp-a"] != refs["stamp-b"]) is keyed_by_stamp
+    assert (refs["stamp-a"] != refs[None]) is keyed_by_stamp
+
+
+def test_a_stamped_groupby_sum_of_kinds_is_named_apart_from_the_unstamped_one() -> None:
+    refs = {
+        frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            groupby=_SUM_GROUPBY,
+            enrichment_stamp=stamp,
+        ).content_version
+        for stamp in (None, "stamp-a", "stamp-b")
+    }
+
+    assert len(refs) == 3
+
+
+async def test_two_manifests_differing_in_the_enrichment_stamp_register_two_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = _parquet_bytes()
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcomes = {
+        stamp: await materialise_and_register(
+            options=_KIND_OPTIONS,
+            manifest=_manifest(
+                renderings={_digest_for(blob): _KIND_OPTIONS},
+                stamps={_digest_for(blob): stamp},
+            ),
+            settings=_settings(),
+            writer="tester",
+        )
+        for stamp in ("stamp-a", "stamp-b")
+    }
+
+    refs = {stamp: outcome.frame_ref for stamp, outcome in outcomes.items()}
+    assert all(outcome.status == "registered" for outcome in outcomes.values())
+    assert refs["stamp-a"] != refs["stamp-b"]
+    for stamp, ref in refs.items():
+        assert ref == frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            enrichment_stamp=stamp,
+        )
+        record = await store.get_mint_record(ref)
+        assert record is not None
+        assert record.enrichment_stamp == stamp
+        _, trace = await store.get(ref)
+        assert trace.enrichment_stamp == stamp
+
+
+async def test_a_manifest_without_a_stamp_keeps_todays_ref_and_a_record_without_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blob = _parquet_bytes()
+
+    async def fake_fetch(**_: Any) -> bytes:
+        return blob
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcome = await materialise_and_register(
+        options=_KIND_OPTIONS,
+        manifest=_manifest(renderings={_digest_for(blob): _KIND_OPTIONS}),
+        settings=_settings(),
+        writer="tester",
+    )
+
+    assert outcome.frame_ref == frame_ref_for(
+        spec_id=_SPEC_ID, content_version=_CONTENT_VERSION, columns=("party_kind",)
+    )
+    assert outcome.frame_ref is not None
+    record = await store.get_mint_record(outcome.frame_ref)
+    assert record is not None
+    assert record.enrichment_stamp is None
+    assert b"enrichment_stamp" not in encode_mint_record(record)
+
+
+async def test_a_frame_is_named_under_the_stamp_of_the_artifact_it_is_read_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One manifest lists a pinned kind file rendered under an earlier code index, which
+    apis sends without a stamp, beside a kind file rendered under the current one. Each frame is named
+    by its own file's stamp, and the pinned one unsalted."""
+    blobs = _bytes_by_digest(2)
+    pinned, current = blobs
+    summed = _KIND_OPTIONS | {"groupby": _SUM_GROUPBY}
+
+    async def fake_fetch(*, artifact_digest: str, **_: Any) -> bytes:
+        return blobs[artifact_digest]
+
+    monkeypatch.setattr(frame_materialisation, "_fetch_artifact_bytes", fake_fetch)
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+    manifest = _manifest(
+        renderings={pinned: _KIND_OPTIONS, current: summed}, stamps={current: "stamp-a"}
+    )
+
+    for options, stamp in ((_KIND_OPTIONS, None), (summed, "stamp-a")):
+        outcome = await materialise_and_register(
+            options=options, manifest=manifest, settings=_settings(), writer="tester"
+        )
+        assert outcome.status == "registered"
+        assert outcome.frame_ref == frame_ref_for(
+            spec_id=_SPEC_ID,
+            content_version=_CONTENT_VERSION,
+            columns=("party_kind",),
+            groupby=options.get("groupby"),
+            enrichment_stamp=stamp,
+        )
+        record = await store.get_mint_record(outcome.frame_ref)
+        assert record is not None
+        assert record.enrichment_stamp == stamp
+        _, trace = await store.get(outcome.frame_ref)
+        assert trace.enrichment_stamp == stamp
+
+
+async def test_a_stamped_default_mint_records_no_stamp() -> None:
+    """A default frame is the version's canonical one, so its pair does not depend on the
+    stamp and its record, a function of the pair, does not hold one."""
+    canonical = _parquet_bytes()
+    store = InMemoryMaterialisationStore()
+    set_frame_store(store)
+
+    outcome, _snapshot_paths, _fetched = await _register_default(
+        snapshot=_snapshot_listing(
+            (_digest_for(canonical), dict(CANONICAL_FRAME_RENDERING), _CANONICAL_LINK)
+        ),
+        served={_CANONICAL_LINK: canonical},
+        manifest=_manifest(stamps={_ARTIFACT_DIGEST: "stamp-a"}),
+    )
+
+    assert outcome.frame_ref == _FRAME_REF
+    assert await store.get_mint_record(_FRAME_REF) == MintRecord(
+        frame=_FRAME_REF, dataset=_FRAME_REF, options=_OPTIONS, stat_var_count=1
+    )
+
+
+def test_a_stamped_manifest_selects_the_artifact_whose_rendering_equals_the_options() -> None:
+    """The stamp salts the frame's name and takes no part in the selection: apis lists
+    one artifact per rendering, and a rendering is the request's options as sent."""
+    digests = list(_bytes_by_digest(3))
+    manifest = _manifest(
+        renderings=dict(zip(digests, [_OPTIONS, _KIND_OPTIONS, _TYPED_OPTIONS], strict=True)),
+        stamps={digests[1]: "stamp-a"},
+    )
+
+    selected = frame_materialisation._select_requested_artifact(manifest, options=_KIND_OPTIONS)
+
+    assert selected is not None
+    assert selected.artifact_digest == digests[1]
 
 
 # A mint response lists the requested rendering and its statistics. The snapshot of
@@ -2611,7 +2916,7 @@ async def test_a_canonical_frame_whose_rows_no_frame_holds_refuses(order: list[i
 
 def _decoded_column_parquet() -> bytes:
     """`_parquet_bytes()`'s row in the rendering's frame layout, with the decoded
-    `stat_var_dac2aAidType` column dfo-apis adds to it."""
+    `stat_var_dac2aAidType` column apis adds to it."""
     table = pq.read_table(io.BytesIO(_parquet_bytes())).replace_schema_metadata(None)
     table = table.add_column(2, "stat_var_dac2aAidType", pa.array(["A01"], type=pa.string()))
     buf = io.BytesIO()

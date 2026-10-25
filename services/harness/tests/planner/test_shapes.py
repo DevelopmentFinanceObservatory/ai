@@ -12,12 +12,18 @@ from planner.records import (
     PlaceType,
     RankAmong,
     Reduction,
+    RelativePeriod,
+    RollingWindow,
 )
 from planner.shapes import (
+    FIXED,
     SEVERAL,
+    EndDrift,
     FrameShape,
+    PeriodDrift,
     RoleDimension,
     ShapeVerb,
+    StartDrift,
     TimeLabel,
     ValueKind,
     YearFilter,
@@ -25,6 +31,7 @@ from planner.shapes import (
     compared,
     filtered,
     grown,
+    join_key_pairs,
     joined,
     quotiented,
     ranked,
@@ -32,6 +39,7 @@ from planner.shapes import (
     retrieved,
     shared,
     summed_sides,
+    windowed,
     year_filter,
 )
 
@@ -44,8 +52,17 @@ def _role(
     narrowed: bool = False,
     *,
     open: bool = False,
+    place: bool = False,
+    breakdown: bool = False,
 ) -> RoleDimension:
-    return RoleDimension(role=role, requirement_id=requirement_id, narrowed=narrowed, open=open)
+    return RoleDimension(
+        role=role,
+        requirement_id=requirement_id,
+        narrowed=narrowed,
+        open=open,
+        place=place,
+        breakdown=breakdown,
+    )
 
 
 def _shape(
@@ -61,6 +78,7 @@ def _shape(
     roots: tuple[str, ...] = ("req_a",),
     unsummable_axes: tuple[str, ...] | None = None,
     composed_unit: bool = False,
+    drift: PeriodDrift = FIXED,
 ) -> FrameShape:
     return FrameShape(
         roles=roles,
@@ -74,7 +92,16 @@ def _shape(
         roots=roots,
         unsummable_axes=unsummable_axes,
         composed_unit=composed_unit,
+        drift=drift,
     )
+
+
+# A period with no end year.
+_END_OPEN = PeriodDrift(end=EndDrift.DATA)
+# Both ends on the anchor, and a start on it ahead of an end open to the data.
+_MOVING = PeriodDrift(start=StartDrift.ANCHOR, start_offset=0, end=EndDrift.ANCHOR, end_offset=0)
+_ROLLING_START = PeriodDrift(start=StartDrift.ANCHOR, start_offset=0, end=EndDrift.DATA)
+_NEWEST = RelativePeriod(offset=0)
 
 
 # --- retrieved ---------------------------------------------------------
@@ -94,12 +121,84 @@ def test_retrieved_stamps_every_role_with_the_requirement_and_leaves_it_unnarrow
     assert shape.roots == ("req_a",)
 
 
+def test_a_role_level_filter_leaves_another_roles_mixed_levels_in_place() -> None:
+    recipient = RoleDimension(
+        role="recipient", requirement_id="req_a", open=True, level_filterable=True
+    )
+    donor = RoleDimension(
+        role="donor",
+        requirement_id="req_a",
+        open=True,
+        mixed_levels=True,
+        level_filterable=True,
+    )
+    shape = FrameShape(
+        roles=(recipient, donor),
+        measures=1,
+        value=ValueKind.MEASURED,
+        time=TimeLabel.OBSERVATION,
+        period=_PERIOD,
+        one_row_per_entity=False,
+        cut_per_period=False,
+        limited=False,
+        roots=("req_a",),
+    )
+
+    kept = filtered(
+        shape,
+        narrowed_roles=(),
+        years=YearFilter(period=_PERIOD, leaves_one_year=False),
+        levelled_role_keys=((recipient.requirement_id, recipient.role),),
+    )
+
+    assert kept.roles[0].levelled is True
+    assert kept.roles[1].mixed_levels is True
+    assert kept.roles[1].level_filterable is True
+    assert kept.mixed_levels is True
+
+
+def test_a_calculation_keeps_a_selected_levels_proof_but_not_its_type_capability() -> None:
+    recipient = RoleDimension(
+        role="recipient", requirement_id="req_a", open=True, levelled=True, level_filterable=True
+    )
+    shape = _shape(roles=(recipient,))
+
+    out = ranked(shape, axis="recipient", window=None, per_period=False, limit=None, step_id=None)
+
+    assert out.roles[0].levelled is True
+    assert out.roles[0].level_filterable is False
+
+
+def test_a_country_filtered_branch_does_not_rewrite_the_shared_broad_branch() -> None:
+    recipient = RoleDimension(
+        role="recipient",
+        requirement_id="req_a",
+        open=True,
+        place=True,
+        mixed_levels=True,
+        level_filterable=True,
+    )
+    broad = _shape(roles=(recipient,))
+    countries = filtered(
+        broad,
+        narrowed_roles=(),
+        years=YearFilter(period=_PERIOD, leaves_one_year=False),
+        levelled_role_keys=((recipient.requirement_id, recipient.role),),
+    )
+
+    shared_broad = shared(broad, countries, axis="recipient", scope=DenominatorScope.POOLED)
+
+    assert broad.roles[0].mixed_levels is True
+    assert countries.roles[0].mixed_levels is False
+    assert shared_broad.mixed_levels is True
+
+
 # --- aggregated ----------------------------------------------------------
 
 
 def test_aggregated_by_entity_and_period_keeps_roles_and_stays_observation():
     shape = _shape(roles=(_role(),))
-    out = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True)
+    out = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None)
     assert out.roles == shape.roles
     assert out.measures == shape.measures
     assert out.value == shape.value
@@ -115,7 +214,7 @@ def test_aggregated_by_entity_keeps_the_named_roles_and_sums_the_open_one():
     recipient, donors = _role(role="recipient"), _role(role="donor", open=True)
     shape = _shape(roles=(recipient, donors))
 
-    out = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True)
+    out = aggregated(shape, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None)
 
     assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=True) is None
     assert out.roles == (recipient,)
@@ -150,6 +249,20 @@ def test_aggregated_by_entity_keeps_the_named_roles_and_sums_the_open_one():
             TimeLabel.OBSERVATION,
             id="max-over-one-year-keeps-that-year",
         ),
+        pytest.param(
+            Reduction.MAX,
+            True,
+            _shape(roles=(_role(),), period=Period(start=2020, end=2020), drift=_END_OPEN),
+            TimeLabel.PICKED,
+            id="max-over-one-year-newer-data-widens-picks-a-year",
+        ),
+        pytest.param(
+            Reduction.MAX,
+            True,
+            _shape(roles=(_role(),), period=Period(start=2020, end=2020), drift=_MOVING),
+            TimeLabel.OBSERVATION,
+            id="max-over-the-newest-year-as-it-moves-keeps-that-year",
+        ),
     ],
 )
 def test_aggregated_without_period_collapses_a_sum_or_mean_and_picks_an_extreme_s_year(
@@ -157,7 +270,7 @@ def test_aggregated_without_period_collapses_a_sum_or_mean_and_picks_an_extreme_
 ):
     # analysis-mcp labels a max or min row with the period its value came
     # from: one year per entity over a series, the span itself over a span.
-    out = aggregated(shape, reduction=reduction, by_entity=by_entity, by_period=False)
+    out = aggregated(shape, reduction=reduction, by_entity=by_entity, by_period=False, step_id=None)
     assert out.time is time
     assert out.period == shape.period
     assert out.one_row_per_entity is True
@@ -168,7 +281,9 @@ def test_aggregated_without_period_collapses_a_sum_or_mean_and_picks_an_extreme_
 
 def test_grown_relative_reads_a_dimensionless_ratio_labelled_the_window_span():
     shape = _shape(roles=(_role(),))
-    out = grown(shape, change=GrowthChange.RELATIVE, window=Period(start=2016, end=2020))
+    out = grown(
+        shape, change=GrowthChange.RELATIVE, window=Period(start=2016, end=2020), step_id=None
+    )
     assert out.roles == shape.roles
     assert out.measures == shape.measures
     assert out.value is ValueKind.RATIO
@@ -180,7 +295,9 @@ def test_grown_relative_reads_a_dimensionless_ratio_labelled_the_window_span():
 
 def test_grown_absolute_reads_a_difference_in_the_inputs_own_unit():
     shape = _shape(roles=(_role(),))
-    out = grown(shape, change=GrowthChange.ABSOLUTE, window=Period(start=2016, end=2020))
+    out = grown(
+        shape, change=GrowthChange.ABSOLUTE, window=Period(start=2016, end=2020), step_id=None
+    )
     assert out.value is ValueKind.DIFFERENCE
     assert out.period == Period(start=2016, end=2020)
     assert out.one_row_per_entity is True
@@ -191,7 +308,7 @@ def test_grown_absolute_reads_a_difference_in_the_inputs_own_unit():
 
 def test_ranked_collapse_mode_carries_the_measured_value_as_a_span():
     shape = _shape(roles=(_role(role="recipient"),))
-    out = ranked(shape, axis=None, window=None, per_period=False, limit=None)
+    out = ranked(shape, axis=None, window=None, per_period=False, limit=None, step_id=None)
     assert out.roles == (_role(role="recipient"),)
     assert out.measures == shape.measures
     assert out.value is ValueKind.MEASURED
@@ -203,7 +320,7 @@ def test_ranked_collapse_mode_carries_the_measured_value_as_a_span():
 def test_ranked_per_period_mode_carries_the_rank_position_as_an_ordinal_observation():
     role = _role(role="recipient", narrowed=True)
     shape = _shape(roles=(role,))
-    out = ranked(shape, axis="recipient", window=None, per_period=True, limit=None)
+    out = ranked(shape, axis="recipient", window=None, per_period=True, limit=None, step_id=None)
     # The axis role's own narrowed flag travels forward unchanged.
     assert out.roles == (role,)
     assert out.measures == 1
@@ -215,7 +332,7 @@ def test_ranked_per_period_mode_carries_the_rank_position_as_an_ordinal_observat
 def test_ranked_uses_the_lone_role_when_axis_is_none_and_carries_the_ranks_own_window():
     shape = _shape(roles=(_role(role="recipient"),))
     window = Period(start=2018, end=2020)
-    out = ranked(shape, axis=None, window=window, per_period=False, limit=None)
+    out = ranked(shape, axis=None, window=window, per_period=False, limit=None, step_id=None)
     assert out.roles == (_role(role="recipient"),)
     assert out.period == window
 
@@ -225,7 +342,7 @@ def test_ranked_over_an_axis_naming_no_role_carries_no_role_forward():
     # refusal before a transform ever runs against it. The transform itself
     # degrades to no role rather than raising.
     shape = _shape(roles=(_role(role="recipient"),))
-    out = ranked(shape, axis="creditor", window=None, per_period=False, limit=None)
+    out = ranked(shape, axis="creditor", window=None, per_period=False, limit=None, step_id=None)
     assert out.roles == ()
 
 
@@ -237,7 +354,11 @@ def test_filtered_marks_the_matched_role_narrowed_and_keeps_everything_else():
     other = _role(role="sector", narrowed=False)
     shape = _shape(roles=(role, other), value=ValueKind.RATIO, time=TimeLabel.SPAN)
     narrowed_period = Period(start=2018, end=2018)
-    out = filtered(shape, narrowed_roles=("donor",), period=narrowed_period, pins_one_year=True)
+    out = filtered(
+        shape,
+        narrowed_roles=("donor",),
+        years=YearFilter(period=narrowed_period, leaves_one_year=True),
+    )
     assert out.roles == (_role(role="donor", narrowed=True), other)
     assert out.period == narrowed_period
     assert out.one_row_per_entity is True
@@ -248,7 +369,9 @@ def test_filtered_marks_the_matched_role_narrowed_and_keeps_everything_else():
 
 def test_filtered_with_no_narrowing_keeps_the_period_the_caller_passed_back():
     shape = _shape(roles=(_role(),), one_row_per_entity=True)
-    out = filtered(shape, narrowed_roles=(), period=shape.period, pins_one_year=False)
+    out = filtered(
+        shape, narrowed_roles=(), years=YearFilter(period=shape.period, leaves_one_year=False)
+    )
     assert out.roles == shape.roles
     assert out.period == shape.period
     assert out.one_row_per_entity is True
@@ -263,7 +386,9 @@ def test_filtered_with_an_unqualified_predicate_narrows_every_role():
     donor = _role(role="donor", narrowed=False)
     sector = _role(role="sector", requirement_id="req_b", narrowed=False)
     shape = _shape(roles=(donor, sector))
-    out = filtered(shape, narrowed_roles=(None,), period=shape.period, pins_one_year=False)
+    out = filtered(
+        shape, narrowed_roles=(None,), years=YearFilter(period=shape.period, leaves_one_year=False)
+    )
     assert out.roles == (
         _role(role="donor", narrowed=True),
         _role(role="sector", requirement_id="req_b", narrowed=True),
@@ -274,7 +399,11 @@ def test_filtered_with_an_unqualified_predicate_alongside_a_named_one_still_narr
     donor = _role(role="donor", narrowed=False)
     sector = _role(role="sector", requirement_id="req_b", narrowed=False)
     shape = _shape(roles=(donor, sector))
-    out = filtered(shape, narrowed_roles=("sector", None), period=shape.period, pins_one_year=False)
+    out = filtered(
+        shape,
+        narrowed_roles=("sector", None),
+        years=YearFilter(period=shape.period, leaves_one_year=False),
+    )
     assert all(role.narrowed for role in out.roles)
 
 
@@ -454,6 +583,104 @@ def test_joined_keeps_only_the_shared_role_dimensions_from_the_left_side():
     assert out.roots == ("req_a", "req_b")
 
 
+_PLACE = _role(role=None, place=True)
+_SECTOR = _role(role="sector", breakdown=True)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "pairs"),
+    [
+        pytest.param((_role(),), (_role(),), [("donor", "donor")], id="same-role"),
+        pytest.param(
+            (_role(role="creditor"),),
+            (_role(role="donor"),),
+            [("creditor", "donor")],
+            id="same-side-of-a-flow",
+        ),
+        pytest.param(
+            (_PLACE,), (_role(role="recipient"),), [(None, "recipient")], id="one-place-each"
+        ),
+        pytest.param(
+            (_SECTOR, _PLACE),
+            (_role(role="recipient"), _SECTOR),
+            [("sector", "sector"), (None, "recipient")],
+            id="a-shared-breakdown-and-one-place-each",
+        ),
+        pytest.param(
+            (_PLACE, _role()),
+            (_PLACE, _role(role="recipient")),
+            [(None, None)],
+            id="a-shared-place-leaves-the-parties-unpaired",
+        ),
+        pytest.param(
+            (_PLACE,), (_role(), _role(role="recipient")), [], id="flow-side-keeps-both-parties"
+        ),
+        pytest.param((_PLACE,), (), [], id="a-side-keeping-no-entity"),
+        pytest.param((_PLACE, _PLACE), (_PLACE,), [], id="one-name-twice-on-a-side"),
+    ],
+)
+def test_join_key_pairs_match_one_name_or_the_one_entity_role_each_side_keeps(
+    left: tuple[RoleDimension, ...],
+    right: tuple[RoleDimension, ...],
+    pairs: list[tuple[str | None, str | None]],
+):
+    found = join_key_pairs(left, right)
+    assert [(one.role, other.role) for one, other in found] == pairs
+    reason = rejects(ShapeVerb.JOIN, _shape(roles=left), other=_shape(roles=right))
+    assert (reason is None) is bool(pairs)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "held"),
+    [
+        pytest.param(
+            (_PLACE,),
+            (_role(role="recipient"), _SECTOR),
+            "the breakdown by 'sector'",
+            id="a-breakdown-beside-an-inferred-pair",
+        ),
+        pytest.param(
+            (_role(role="recipient"),),
+            (
+                _role(role="recipient", requirement_id="req_b"),
+                _role(open=True, requirement_id="req_b"),
+            ),
+            "every 'donor'",
+            id="an-open-party-beside-a-shared-role",
+        ),
+        pytest.param((_SECTOR, _PLACE), (_SECTOR, _PLACE), None, id="every-breakdown-paired"),
+    ],
+)
+def test_a_join_refuses_a_breakdown_or_open_party_outside_its_pairs(
+    left: tuple[RoleDimension, ...], right: tuple[RoleDimension, ...], held: str | None
+):
+    left_shape, right_shape = _shape(roles=left), _shape(roles=right)
+    reasons = [
+        rejects(ShapeVerb.JOIN, shape, other=other)
+        for shape, other in ((left_shape, right_shape), (right_shape, left_shape))
+    ]
+    if held is None:
+        assert reasons == [None, None]
+        return
+    assert reasons[0] is None
+    assert reasons[1] is not None
+    assert held in reasons[1]
+
+
+def test_a_place_word_names_the_place_whichever_layer_marks_it():
+    # The plan marks an `across` of "countries" a place; the compiler keeps it
+    # unmarked when the word covers a flow axis.
+    unmarked = _role(role="countries", open=True)
+    assert [
+        (one.role, other.role) for one, other in join_key_pairs((_PLACE,), (unmarked, _role()))
+    ] == [(None, "countries")]
+
+
+def test_joined_keeps_the_left_dimension_of_a_pair_on_different_roles():
+    out = joined(_shape(roles=(_PLACE,)), _shape(roles=(_role(role="recipient"),)))
+    assert out.roles == (_PLACE,)
+
+
 # --- the narrow-lineage invariant ---------------------------------------------
 
 
@@ -470,10 +697,12 @@ def test_every_non_terminal_transforms_output_roles_name_one_requirement():
     share = shared(numerator, denominator, axis="donor", scope=DenominatorScope.PER_AXIS)
     assert {role.requirement_id for role in share.roles} == {"req_num"}
 
-    rank = ranked(share, axis="donor", window=None, per_period=False, limit=None)
+    rank = ranked(share, axis="donor", window=None, per_period=False, limit=None, step_id=None)
     assert {role.requirement_id for role in rank.roles} == {"req_num"}
 
-    grow = grown(rank, change=GrowthChange.ABSOLUTE, window=Period(start=2019, end=2020))
+    grow = grown(
+        rank, change=GrowthChange.ABSOLUTE, window=Period(start=2019, end=2020), step_id=None
+    )
     assert {role.requirement_id for role in grow.roles} == {"req_num"}
 
     quotient = quotiented(numerator, denominator, axis="donor", denominator_axis="donor")
@@ -504,6 +733,7 @@ def test_rejects_rank_with_no_roles():
                 _shape(roles=(_role(),)),
                 change=GrowthChange.RELATIVE,
                 window=Period(start=2016, end=2020),
+                step_id=None,
             ),
             id="rank-over-a-growth",
         ),
@@ -563,15 +793,19 @@ _PICKED = _shape(roles=(_role(),), time=TimeLabel.PICKED, one_row_per_entity=Tru
     [
         pytest.param(_SPAN, id="span"),
         pytest.param(
-            grown(_shape(roles=(_role(),)), change=GrowthChange.ABSOLUTE, window=_PERIOD),
+            grown(
+                _shape(roles=(_role(),)), change=GrowthChange.ABSOLUTE, window=_PERIOD, step_id=None
+            ),
             id="growth",
         ),
         pytest.param(
-            aggregated(_SPAN, reduction=Reduction.SUM, by_entity=True, by_period=True),
+            aggregated(
+                _SPAN, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None
+            ),
             id="aggregate-by-period",
         ),
         pytest.param(
-            ranked(_SPAN, axis=None, window=None, per_period=True, limit=5),
+            ranked(_SPAN, axis=None, window=None, per_period=True, limit=5, step_id=None),
             id="per-period-rank",
         ),
         pytest.param(
@@ -580,7 +814,11 @@ _PICKED = _shape(roles=(_role(),), time=TimeLabel.PICKED, one_row_per_entity=Tru
         ),
         pytest.param(
             aggregated(
-                _shape(roles=(_role(),)), reduction=Reduction.MAX, by_entity=True, by_period=False
+                _shape(roles=(_role(),)),
+                reduction=Reduction.MAX,
+                by_entity=True,
+                by_period=False,
+                step_id=None,
             ),
             id="growth-after-max",
         ),
@@ -632,7 +870,7 @@ def test_an_aggregate_by_entity_over_a_frame_naming_no_entity_is_refused(
     assert reason is not None
     assert "sums its open ['donor'] away, and this input names no entity" in reason
     assert "group by period alone" in reason
-    assert "rank with a reduction" in reason
+    assert "rank the members" in reason
     assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True) is None
 
 
@@ -806,8 +1044,8 @@ def test_share_of_refuses_a_side_summing_per_unit_figures(
 
 def test_a_growth_of_a_quotient_is_a_ratio_or_a_difference_in_its_unit():
     quotient = _shape(roles=(_role(),), composed_unit=True)
-    relative = grown(quotient, change=GrowthChange.RELATIVE, window=_PERIOD)
-    absolute = grown(quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD)
+    relative = grown(quotient, change=GrowthChange.RELATIVE, window=_PERIOD, step_id=None)
+    absolute = grown(quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD, step_id=None)
     assert (relative.value, relative.composed_unit) == (ValueKind.RATIO, False)
     assert (absolute.value, absolute.composed_unit) == (ValueKind.DIFFERENCE, True)
 
@@ -819,21 +1057,29 @@ def test_every_transform_keeps_a_composed_unit_exactly_where_it_keeps_the_unit()
     plain = _shape(roles=(_role(),))
     kept = {
         "aggregate": aggregated(
-            quotient, reduction=Reduction.MEAN, by_entity=True, by_period=False
+            quotient, reduction=Reduction.MEAN, by_entity=True, by_period=False, step_id=None
         ),
-        "absolute growth": grown(quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD),
-        "collapsing rank": ranked(quotient, axis=None, window=None, per_period=False, limit=None),
+        "absolute growth": grown(
+            quotient, change=GrowthChange.ABSOLUTE, window=_PERIOD, step_id=None
+        ),
+        "collapsing rank": ranked(
+            quotient, axis=None, window=None, per_period=False, limit=None, step_id=None
+        ),
         "limited per-period rank": ranked(
-            quotient, axis=None, window=None, per_period=True, limit=3
+            quotient, axis=None, window=None, per_period=True, limit=3, step_id=None
         ),
-        "filter": filtered(quotient, narrowed_roles=(), period=_PERIOD, pins_one_year=False),
+        "filter": filtered(
+            quotient, narrowed_roles=(), years=YearFilter(period=_PERIOD, leaves_one_year=False)
+        ),
         "quotient_of": quotiented(plain, plain, axis=None, denominator_axis=None),
         "compare": compared(quotient, quotient),
     }
     cleared = {
-        "relative growth": grown(quotient, change=GrowthChange.RELATIVE, window=_PERIOD),
+        "relative growth": grown(
+            quotient, change=GrowthChange.RELATIVE, window=_PERIOD, step_id=None
+        ),
         "per-period rank position": ranked(
-            quotient, axis=None, window=None, per_period=True, limit=None
+            quotient, axis=None, window=None, per_period=True, limit=None, step_id=None
         ),
         "share_of": shared(quotient, quotient, axis=None, scope=None),
         "join": joined(quotient, quotient),
@@ -886,7 +1132,60 @@ _SPAN_2015_TO_2020 = _shape(roles=(_role(),), time=TimeLabel.SPAN)
 _POINTS = _shape(roles=(_role(),))
 _ONE_YEAR_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=Period(start=2020, end=2020))
 _UNKNOWN_SPAN = _shape(roles=(_role(),), time=TimeLabel.SPAN, period=None)
-_PICKED_TOTAL = aggregated(_PICKED, reduction=Reduction.SUM, by_entity=True, by_period=False)
+_PICKED_TOTAL = aggregated(
+    _PICKED, reduction=Reduction.SUM, by_entity=True, by_period=False, step_id=None
+)
+# Spans over 2015-2020 whose labels move with newer data: a total of years
+# open to the data, a growth or rank whose last year follows the newest, one
+# whose first year follows too, one stopped at 2025, and two whose first
+# year follows the newest from behind 2015, six and eight years back.
+_SPAN_OPEN = _shape(roles=(_role(),), time=TimeLabel.SPAN, drift=_END_OPEN)
+_SPAN_END_FOLLOWS = _shape(
+    roles=(_role(),), time=TimeLabel.SPAN, drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0)
+)
+_SPAN_FOLLOWS = _shape(roles=(_role(),), time=TimeLabel.SPAN, drift=_MOVING)
+_SPAN_END_STOPS = _shape(
+    roles=(_role(),),
+    time=TimeLabel.SPAN,
+    drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0, until=2025),
+)
+_SPAN_TRAILS, _SPAN_TRAILS_FURTHER = (
+    _shape(
+        roles=(_role(),),
+        time=TimeLabel.SPAN,
+        drift=PeriodDrift(start=StartDrift.TRAILS, start_offset=offset),
+    )
+    for offset in (-6, -8)
+)
+# Picked frames over 2015-2020 whose years move: open to the data, on the
+# anchor, and both ends on it, with series around them that move or not.
+_PICKED_OPEN = _shape(roles=(_role(),), time=TimeLabel.PICKED, drift=_END_OPEN)
+_PICKED_END_FOLLOWS = _shape(
+    roles=(_role(),), time=TimeLabel.PICKED, drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0)
+)
+_PICKED_FOLLOWS = _shape(roles=(_role(),), time=TimeLabel.PICKED, drift=_MOVING)
+_WIDER = Period(start=2010, end=2020)
+_SERIES_FIXED = _shape(roles=(_role(),), period=_WIDER)
+_SERIES_OPEN = _shape(roles=(_role(),), period=_WIDER, drift=_END_OPEN)
+_SERIES_END_FOLLOWS = _shape(
+    roles=(_role(),), period=_WIDER, drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0)
+)
+_SERIES_END_STOPS = _shape(
+    roles=(_role(),),
+    period=_WIDER,
+    drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0, until=2025),
+)
+_SERIES_FOLLOWS = _shape(roles=(_role(),), drift=_MOVING)
+# A series from 2015 whose first year a bound on the anchor will pass, open to the data.
+_SERIES_TRAILS = _shape(
+    roles=(_role(),), drift=PeriodDrift(start=StartDrift.TRAILS, start_offset=-6, end=EndDrift.DATA)
+)
+_PICKED_LATER = Period(start=2016, end=2020)
+_LESS_2017 = PeriodDrift(excluded=frozenset({2017}))
+_ROLLING_END = RollingWindow(window_end=_NEWEST)
+_ROLLING_BOTH = RollingWindow(
+    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+)
 _ALL_PAIRED = frozenset(
     {
         ShapeVerb.SHARE_OF,
@@ -949,6 +1248,116 @@ _ALL_PAIRED = frozenset(
             _PICKED_TOTAL, _SPAN_2015_TO_2020, _ALL_PAIRED, id="total-of-picked-against-span"
         ),
         pytest.param(_UNKNOWN_SPAN, _UNKNOWN_SPAN, _ALL_PAIRED, id="two-unknown-spans"),
+        pytest.param(_SPAN_OPEN, _SPAN_OPEN, True, id="two-spans-open-to-the-data"),
+        pytest.param(
+            _SPAN_OPEN, _SPAN_2015_TO_2020, True, id="a-span-open-to-the-data-and-a-fixed-one"
+        ),
+        pytest.param(
+            _SPAN_END_FOLLOWS, _SPAN_END_FOLLOWS, False, id="two-spans-ending-on-the-newest"
+        ),
+        pytest.param(_SPAN_FOLLOWS, _SPAN_FOLLOWS, False, id="two-spans-following-the-newest"),
+        pytest.param(
+            _SPAN_END_FOLLOWS,
+            _SPAN_2015_TO_2020,
+            True,
+            id="a-span-ending-on-the-newest-and-a-fixed-one",
+        ),
+        pytest.param(
+            _SPAN_FOLLOWS,
+            _SPAN_END_FOLLOWS,
+            True,
+            id="a-span-following-the-newest-and-one-ending-on-it",
+        ),
+        pytest.param(_SPAN_END_STOPS, _SPAN_END_STOPS, False, id="two-spans-a-fixed-year-stops"),
+        pytest.param(
+            _SPAN_TRAILS, _SPAN_TRAILS_FURTHER, True, id="two-spans-whose-first-years-trail-apart"
+        ),
+        pytest.param(
+            _SPAN_TRAILS, _SPAN_TRAILS, False, id="two-spans-whose-first-years-trail-alike"
+        ),
+        pytest.param(
+            _SPAN_END_STOPS,
+            _SPAN_END_FOLLOWS,
+            True,
+            id="a-span-a-fixed-year-stops-and-one-ending-on-the-newest",
+        ),
+        pytest.param(
+            _PICKED_OPEN, _SERIES_FIXED, _ALL_PAIRED, id="picked-open-to-the-data-a-fixed-series"
+        ),
+        pytest.param(
+            _PICKED_END_FOLLOWS,
+            _SERIES_FIXED,
+            _ALL_PAIRED,
+            id="picked-ending-on-the-newest-a-fixed-series",
+        ),
+        pytest.param(
+            _PICKED_END_FOLLOWS,
+            _SERIES_END_FOLLOWS,
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-and-series-ending-on-the-newest",
+        ),
+        pytest.param(
+            _PICKED_END_FOLLOWS,
+            _SERIES_END_STOPS,
+            _ALL_PAIRED,
+            id="picked-ending-on-the-newest-a-series-a-fixed-year-stops",
+        ),
+        pytest.param(
+            _PICKED_END_FOLLOWS,
+            _SERIES_OPEN,
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-ending-on-the-newest-a-series-open-to-the-data",
+        ),
+        pytest.param(
+            _PICKED_OPEN,
+            _SERIES_OPEN,
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-and-series-open-to-the-same-data",
+        ),
+        pytest.param(
+            _PICKED_OPEN,
+            _shape(roles=(_role(),), period=_WIDER, roots=("req_b",), drift=_END_OPEN),
+            _ALL_PAIRED,
+            id="picked-and-series-open-to-other-data",
+        ),
+        pytest.param(
+            _PICKED,
+            _SERIES_FOLLOWS,
+            _ALL_PAIRED,
+            id="fixed-picked-a-series-following-the-newest",
+        ),
+        pytest.param(
+            _PICKED,
+            _shape(roles=(_role(),), period=_WIDER, drift=_LESS_2017),
+            _ALL_PAIRED,
+            id="picked-against-a-series-a-filter-removed-a-year-from",
+        ),
+        pytest.param(
+            _shape(roles=(_role(),), time=TimeLabel.PICKED, drift=_LESS_2017),
+            _shape(roles=(_role(),), period=_WIDER, drift=_LESS_2017),
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-and-series-less-the-same-year",
+        ),
+        pytest.param(
+            _PICKED_FOLLOWS,
+            _SERIES_FOLLOWS,
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-and-series-following-the-newest",
+        ),
+        pytest.param(
+            _shape(
+                roles=(_role(),), time=TimeLabel.PICKED, period=_PICKED_LATER, drift=_ROLLING_START
+            ),
+            _SERIES_TRAILS,
+            frozenset({ShapeVerb.SHARE_OF}),
+            id="picked-on-the-anchor-a-series-whose-first-year-trails",
+        ),
+        pytest.param(
+            _shape(roles=(_role(),), time=TimeLabel.PICKED, period=_PICKED_LATER, drift=_END_OPEN),
+            _SERIES_TRAILS,
+            _ALL_PAIRED,
+            id="fixed-picked-a-series-whose-first-year-trails",
+        ),
     ],
 )
 def test_a_two_sided_verb_refuses_sides_whose_period_labels_cannot_match(
@@ -970,38 +1379,90 @@ def test_a_two_sided_verb_refuses_sides_whose_period_labels_cannot_match(
 
 
 @pytest.mark.parametrize(
-    ("shape", "window", "refused"),
+    ("shape", "window", "refused", "rolling"),
     [
-        pytest.param(_SPAN_2015_TO_2020, None, False, id="span-no-window"),
-        pytest.param(_SPAN_2015_TO_2020, _PERIOD, False, id="span-the-same-window"),
+        pytest.param(_SPAN_2015_TO_2020, None, False, None, id="span-no-window"),
+        pytest.param(_SPAN_2015_TO_2020, _PERIOD, False, None, id="span-the-same-window"),
         pytest.param(
-            _SPAN_2015_TO_2020, Period(start=2010, end=2025), False, id="span-a-wider-window"
+            _SPAN_2015_TO_2020, Period(start=2010, end=2025), False, None, id="span-a-wider-window"
         ),
         pytest.param(
-            _SPAN_2015_TO_2020, Period(start=2017, end=2020), True, id="span-cut-at-the-start"
+            _SPAN_2015_TO_2020, Period(start=2017, end=2020), True, None, id="span-cut-at-the-start"
         ),
         pytest.param(
-            _SPAN_2015_TO_2020, Period(start=2015, end=2018), True, id="span-cut-at-the-end"
+            _SPAN_2015_TO_2020, Period(start=2015, end=2018), True, None, id="span-cut-at-the-end"
         ),
         pytest.param(
-            _SPAN_2015_TO_2020, Period(start=2021, end=2025), True, id="span-outside-the-window"
+            _SPAN_2015_TO_2020,
+            Period(start=2021, end=2025),
+            True,
+            None,
+            id="span-outside-the-window",
         ),
-        pytest.param(_POINTS, Period(start=2017, end=2020), False, id="points-any-window"),
-        pytest.param(_POINTS, Period(start=2021, end=2025), True, id="points-outside-the-window"),
-        pytest.param(_UNKNOWN_SPAN, None, False, id="unknown-span-no-window"),
+        pytest.param(_POINTS, Period(start=2017, end=2020), False, None, id="points-any-window"),
         pytest.param(
-            _UNKNOWN_SPAN, Period(start=2010, end=2025), True, id="unknown-span-any-window"
+            _POINTS, Period(start=2021, end=2025), True, None, id="points-outside-the-window"
+        ),
+        pytest.param(_UNKNOWN_SPAN, None, False, None, id="unknown-span-no-window"),
+        pytest.param(
+            _UNKNOWN_SPAN, Period(start=2010, end=2025), True, None, id="unknown-span-any-window"
+        ),
+        pytest.param(_SPAN_OPEN, _PERIOD, True, None, id="span-open-to-the-data-a-fixed-window"),
+        pytest.param(
+            _SPAN_OPEN, _PERIOD, True, _ROLLING_END, id="span-open-to-the-data-a-rolling-end"
+        ),
+        pytest.param(
+            _SPAN_END_FOLLOWS, _PERIOD, True, None, id="span-ending-on-the-newest-a-fixed-window"
+        ),
+        pytest.param(
+            _SPAN_END_FOLLOWS,
+            _PERIOD,
+            False,
+            _ROLLING_END,
+            id="span-ending-on-the-newest-a-rolling-end",
+        ),
+        pytest.param(
+            _SPAN_END_FOLLOWS,
+            _PERIOD,
+            True,
+            _ROLLING_BOTH,
+            id="span-ending-on-the-newest-a-window-rolling-both-ends",
+        ),
+        pytest.param(
+            _SPAN_FOLLOWS,
+            _PERIOD,
+            False,
+            _ROLLING_BOTH,
+            id="span-following-the-newest-a-rolling-window",
+        ),
+        pytest.param(
+            _SPAN_FOLLOWS,
+            Period(start=2010, end=2025),
+            True,
+            None,
+            id="span-following-the-newest-a-fixed-window",
+        ),
+        pytest.param(
+            _SPAN_END_STOPS,
+            Period(start=2010, end=2025),
+            False,
+            None,
+            id="span-a-fixed-year-stops-inside-the-window",
+        ),
+        pytest.param(
+            _SPAN_END_STOPS, _PERIOD, True, None, id="span-a-fixed-year-stops-past-the-window"
         ),
     ],
 )
 def test_a_rank_window_must_keep_a_row_of_its_input(
-    shape: FrameShape, window: Period | None, refused: bool
+    shape: FrameShape, window: Period | None, refused: bool, rolling: RollingWindow | None
 ):
     # analysis-mcp keeps a span row only when the window holds both its start
-    # and end years; a window cutting the span leaves no row to rank. A span
+    # and end years. A window cutting the span leaves no row to rank, today
+    # or once newer data moves the span's years past the window's. A span
     # whose years only the data decides fits no window known here. A window
     # sharing no year with the input keeps no row, and run_rank refuses it.
-    reason = rejects(ShapeVerb.RANK, shape, axis="donor", window=window)
+    reason = rejects(ShapeVerb.RANK, shape, axis="donor", window=window, rolling=rolling)
     assert (reason is not None) is refused
 
 
@@ -1047,7 +1508,9 @@ def test_a_reader_within_one_year_refuses_a_picked_frame(
 def test_a_year_filter_over_a_picked_frame_leaves_one_year_as_an_observation(
     period: Period, time: TimeLabel
 ):
-    out = filtered(_PICKED, narrowed_roles=(), period=period, pins_one_year=False)
+    out = filtered(
+        _PICKED, narrowed_roles=(), years=YearFilter(period=period, leaves_one_year=False)
+    )
     assert out.time is time
 
 
@@ -1093,7 +1556,7 @@ def test_a_rank_holds_the_years_of_its_input_its_window_keeps(
     # run_rank labels a collapsed row with the extent of the periods it
     # ranked, so a 2010-2025 window over 2015-2020 labels it 2015/2020, the
     # label a total over 2015-2020 carries.
-    out = ranked(shape, axis=None, window=window, per_period=per_period, limit=None)
+    out = ranked(shape, axis=None, window=window, per_period=per_period, limit=None, step_id=None)
     assert out.period == period
 
 
@@ -1183,6 +1646,7 @@ def test_rejects_share_of_over_an_ordinal_side():
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
     reason = rejects(ShapeVerb.SHARE_OF, ordinal, axis=None)
     assert reason is not None
@@ -1198,6 +1662,7 @@ def test_a_limited_per_period_rank_carries_the_measured_value_and_share_of_reads
         window=None,
         per_period=True,
         limit=5,
+        step_id=None,
     )
     assert limited.value is ValueKind.MEASURED
     assert limited.time is TimeLabel.OBSERVATION
@@ -1212,6 +1677,7 @@ def test_rejects_relative_growth_over_a_per_period_rank():
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
     reason = rejects(ShapeVerb.GROWTH, ordinal, change=GrowthChange.RELATIVE)
     assert reason is not None
@@ -1225,6 +1691,7 @@ def test_absolute_growth_over_a_collapsing_rank_is_refused_as_a_span():
         window=None,
         per_period=False,
         limit=None,
+        step_id=None,
     )
     reason = rejects(ShapeVerb.GROWTH, collapsed, change=GrowthChange.ABSOLUTE)
     assert reason is not None
@@ -1238,6 +1705,7 @@ def test_absolute_growth_over_an_unnarrowed_per_period_rank_names_the_filter_as_
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
     reason = rejects(ShapeVerb.GROWTH, ordinal, change=GrowthChange.ABSOLUTE)
     assert reason is not None
@@ -1257,6 +1725,7 @@ def test_absolute_growth_over_a_narrowed_per_period_rank_is_accepted():
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
     assert rejects(ShapeVerb.GROWTH, ordinal, change=GrowthChange.ABSOLUTE) is None
 
@@ -1289,6 +1758,7 @@ def _top_five_each_year(period: Period | None = _PERIOD) -> FrameShape:
         window=None,
         per_period=True,
         limit=5,
+        step_id=None,
     )
 
 
@@ -1297,27 +1767,37 @@ def test_only_a_limited_per_period_rank_over_several_years_is_cut():
     # One year has no gap between years to leave.
     assert _top_five_each_year(Period(start=2020, end=2020)).cut_per_period is False
     source = _shape(roles=(_role(role="donor"),))
-    unlimited = ranked(source, axis="donor", window=None, per_period=True, limit=None)
-    collapsed = ranked(source, axis="donor", window=None, per_period=False, limit=5)
+    unlimited = ranked(source, axis="donor", window=None, per_period=True, limit=None, step_id=None)
+    collapsed = ranked(source, axis="donor", window=None, per_period=False, limit=5, step_id=None)
     assert unlimited.cut_per_period is False
     assert collapsed.cut_per_period is False
     # Re-ranking each period of a cut frame keeps its gaps.
-    reranked = ranked(_top_five_each_year(), axis="donor", window=None, per_period=True, limit=None)
+    reranked = ranked(
+        _top_five_each_year(), axis="donor", window=None, per_period=True, limit=None, step_id=None
+    )
     assert reranked.cut_per_period is True
 
 
 def test_a_filter_carries_the_cut_only_while_its_period_spans_years():
     cut = _top_five_each_year()
-    kept = filtered(cut, narrowed_roles=("donor",), period=cut.period, pins_one_year=False)
+    kept = filtered(
+        cut, narrowed_roles=("donor",), years=YearFilter(period=cut.period, leaves_one_year=False)
+    )
     one_year = filtered(
-        cut, narrowed_roles=(), period=Period(start=2020, end=2020), pins_one_year=True
+        cut,
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2020, end=2020), leaves_one_year=True),
     )
     # A lone `year >= 2020` narrows the period to its last year without pinning it.
     last_year = filtered(
-        cut, narrowed_roles=(), period=Period(start=2020, end=2020), pins_one_year=False
+        cut,
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2020, end=2020), leaves_one_year=False),
     )
     last_two = filtered(
-        cut, narrowed_roles=(), period=Period(start=2019, end=2020), pins_one_year=False
+        cut,
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2019, end=2020), leaves_one_year=False),
     )
     assert kept.cut_per_period is True
     assert one_year.cut_per_period is False
@@ -1330,11 +1810,15 @@ def test_a_filter_carries_the_cut_only_while_its_period_spans_years():
 def test_an_aggregate_keeps_the_cut_only_when_it_keeps_entity_and_period_apart():
     cut = _top_five_each_year()
     assert (
-        aggregated(cut, reduction=Reduction.SUM, by_entity=True, by_period=True).cut_per_period
+        aggregated(
+            cut, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None
+        ).cut_per_period
         is True
     )
     assert (
-        aggregated(cut, reduction=Reduction.SUM, by_entity=False, by_period=True).cut_per_period
+        aggregated(
+            cut, reduction=Reduction.SUM, by_entity=False, by_period=True, step_id=None
+        ).cut_per_period
         is False
     )
 
@@ -1343,7 +1827,10 @@ def test_every_other_transform_clears_the_cut():
     cut = _top_five_each_year()
     whole = _shape(roles=(_role(role="donor"),))
     window = Period(start=2016, end=2020)
-    assert grown(cut, change=GrowthChange.ABSOLUTE, window=window).cut_per_period is False
+    assert (
+        grown(cut, change=GrowthChange.ABSOLUTE, window=window, step_id=None).cut_per_period
+        is False
+    )
     assert shared(cut, whole, axis=None, scope=None).cut_per_period is False
     assert compared(cut, whole).cut_per_period is False
     assert joined(cut, whole).cut_per_period is False
@@ -1364,7 +1851,9 @@ def test_growth_over_a_limited_per_period_rank_is_refused_even_when_narrowed():
     limit removes the years an entity missed the cut, so no narrowing makes
     the series whole."""
     cut = _top_five_each_year()
-    narrowed = filtered(cut, narrowed_roles=("donor",), period=cut.period, pins_one_year=False)
+    narrowed = filtered(
+        cut, narrowed_roles=("donor",), years=YearFilter(period=cut.period, leaves_one_year=False)
+    )
     for shape in (cut, narrowed):
         for change in GrowthChange:
             reason = rejects(ShapeVerb.GROWTH, shape, change=change)
@@ -1420,7 +1909,21 @@ def test_an_aggregate_by_entity_alone_over_a_limited_per_period_rank_is_refused(
     cut = _top_five_each_year()
     reason = rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=False)
     assert reason is not None
-    assert "rank the source once, with the reduction, the limit and per_period=false" in reason
+    assert "rank the source once with the limit and per_period=false instead" in reason
+    # One figure over every row, or one per code, sums the same cut years.
+    assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=False, by_period=False) == reason
+    sectors = ranked(
+        _shape(roles=(RoleDimension(role="sector", requirement_id="req_a", breakdown=True),)),
+        axis="sector",
+        window=None,
+        per_period=True,
+        limit=5,
+        step_id=None,
+    )
+    assert (
+        rejects(ShapeVerb.AGGREGATE, sectors, by_entity=False, by_period=False, by_breakdown=True)
+        == reason
+    )
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=False, by_period=True) is None
     assert rejects(ShapeVerb.AGGREGATE, cut, by_entity=True, by_period=True) is None
 
@@ -1430,7 +1933,7 @@ def test_the_plan_the_aggregate_refusal_advises_is_one_rank_reads():
     reduced to one value, then the limit."""
     source = _shape(roles=(_role(role="donor"),))
     assert rejects(ShapeVerb.RANK, source, axis="donor", among=RankAmong.POPULATION) is None
-    top = ranked(source, axis="donor", window=None, per_period=False, limit=5)
+    top = ranked(source, axis="donor", window=None, per_period=False, limit=5, step_id=None)
     assert top.one_row_per_entity is True
     assert top.cut_per_period is False
 
@@ -1441,13 +1944,13 @@ def test_the_plan_the_aggregate_refusal_advises_is_one_rank_reads():
 def test_a_limit_marks_the_frame_limited_in_either_mode_and_over_one_year():
     source = _shape(roles=(_role(role="donor"),))
     one_year = _top_five_each_year(Period(start=2020, end=2020))
-    collapsed = ranked(source, axis="donor", window=None, per_period=False, limit=5)
-    unlimited = ranked(source, axis="donor", window=None, per_period=True, limit=None)
+    collapsed = ranked(source, axis="donor", window=None, per_period=False, limit=5, step_id=None)
+    unlimited = ranked(source, axis="donor", window=None, per_period=True, limit=None, step_id=None)
     assert _top_five_each_year().limited is True
     assert one_year.limited is True
     assert one_year.cut_per_period is False
     # A span is one period, so a limit over it leaves no gap between periods.
-    over_a_span = ranked(_SPAN, axis=None, window=None, per_period=True, limit=5)
+    over_a_span = ranked(_SPAN, axis=None, window=None, per_period=True, limit=5, step_id=None)
     assert (over_a_span.limited, over_a_span.cut_per_period) == (True, False)
     assert collapsed.limited is True
     assert unlimited.limited is False
@@ -1458,13 +1961,19 @@ def test_every_transform_that_keeps_the_kept_entities_carries_limited():
     whole = _shape(roles=(_role(role="donor"),))
     window = Period(start=2016, end=2020)
     one_year = Period(start=2020, end=2020)
-    assert filtered(limited, narrowed_roles=(), period=one_year, pins_one_year=True).limited
-    assert aggregated(limited, reduction=Reduction.SUM, by_entity=True, by_period=True).limited
-    assert aggregated(limited, reduction=Reduction.SUM, by_entity=False, by_period=True).limited
-    assert grown(limited, change=GrowthChange.ABSOLUTE, window=window).limited
+    assert filtered(
+        limited, narrowed_roles=(), years=YearFilter(period=one_year, leaves_one_year=True)
+    ).limited
+    assert aggregated(
+        limited, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None
+    ).limited
+    assert aggregated(
+        limited, reduction=Reduction.SUM, by_entity=False, by_period=True, step_id=None
+    ).limited
+    assert grown(limited, change=GrowthChange.ABSOLUTE, window=window, step_id=None).limited
     assert shared(limited, whole, axis="donor", scope=DenominatorScope.POOLED).limited
-    # A share keeps every numerator entity, so a limited denominator does not
-    # limit it.
+    # A pooled share keeps every numerator entity, so a limited denominator
+    # does not limit it.
     assert not shared(whole, limited, axis="donor", scope=DenominatorScope.POOLED).limited
     assert quotiented(limited, whole, axis="donor", denominator_axis=None).limited
     # A quotient over one total keeps every numerator entity; one keyed on
@@ -1474,8 +1983,8 @@ def test_every_transform_that_keeps_the_kept_entities_carries_limited():
 
 
 def test_a_per_axis_share_of_over_a_limited_denominator_is_refused():
-    """`run_share_of` refuses a per-axis call at the first numerator entity
-    with no denominator group, and a limit drops some. One year proves the
+    """`run_share_of` leaves out each numerator entity with no denominator
+    group in a per-axis call, and a limit drops some. One year proves the
     refusal rests on the limit, not on the cut."""
     one_year = Period(start=2022, end=2022)
     top = _top_five_each_year(one_year)
@@ -1506,18 +2015,25 @@ def test_any_rank_over_a_limited_rank_is_refused():
     """The review's case: among each year's top 10, which 3 received least.
     The frame holds the 8th to 10th largest, so neither `among` is true of it."""
     source = _shape(roles=(_role(role="donor"),))
-    top_ten = ranked(source, axis="donor", window=None, per_period=True, limit=10)
+    top_ten = ranked(source, axis="donor", window=None, per_period=True, limit=10, step_id=None)
     single_year = ranked(
         _shape(roles=(_role(role="donor"),), period=Period(start=2022, end=2022)),
         axis="donor",
         window=None,
         per_period=True,
         limit=10,
+        step_id=None,
     )
     last_year = filtered(
-        top_ten, narrowed_roles=(), period=Period(start=2020, end=2020), pins_one_year=True
+        top_ten,
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2020, end=2020), leaves_one_year=True),
     )
-    named = filtered(top_ten, narrowed_roles=("donor",), period=top_ten.period, pins_one_year=False)
+    named = filtered(
+        top_ten,
+        narrowed_roles=("donor",),
+        years=YearFilter(period=top_ten.period, leaves_one_year=False),
+    )
     order = "rank the source once with the limit the question needs"
     for shape, among in (
         (top_ten, RankAmong.POPULATION),
@@ -1536,15 +2052,21 @@ def test_any_rank_over_rank_positions_is_refused():
     2 as "the top donor". A filter and a group that keeps both entity and
     period carry the positions through."""
     source = _shape(roles=(_role(role="donor"),))
-    each_year = ranked(source, axis="donor", window=None, per_period=True, limit=None)
+    each_year = ranked(source, axis="donor", window=None, per_period=True, limit=None, step_id=None)
     assert each_year.value is ValueKind.ORDINAL
     named = filtered(
-        each_year, narrowed_roles=("donor",), period=each_year.period, pins_one_year=False
+        each_year,
+        narrowed_roles=("donor",),
+        years=YearFilter(period=each_year.period, leaves_one_year=False),
     )
     one_year = filtered(
-        each_year, narrowed_roles=(), period=Period(start=2020, end=2020), pins_one_year=True
+        each_year,
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2020, end=2020), leaves_one_year=True),
     )
-    regrouped = aggregated(each_year, reduction=Reduction.SUM, by_entity=True, by_period=True)
+    regrouped = aggregated(
+        each_year, reduction=Reduction.SUM, by_entity=True, by_period=True, step_id=None
+    )
     order = "rank the source once with the limit the question needs"
     for shape, among in (
         (each_year, RankAmong.POPULATION),
@@ -1568,8 +2090,11 @@ def test_a_change_in_rank_position_stays_ordinal():
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
-    places = grown(positions, change=GrowthChange.ABSOLUTE, window=Period(start=2015, end=2020))
+    places = grown(
+        positions, change=GrowthChange.ABSOLUTE, window=Period(start=2015, end=2020), step_id=None
+    )
     assert places.value is ValueKind.ORDINAL
     assert rejects(ShapeVerb.RANK, places, axis="donor", among=RankAmong.NAMED) is not None
     assert rejects(ShapeVerb.SHARE_OF, places, axis=None) is not None
@@ -1585,6 +2110,7 @@ def test_a_relative_growth_over_unnarrowed_rank_positions_names_both_corrections
         window=None,
         per_period=True,
         limit=None,
+        step_id=None,
     )
     reason = rejects(ShapeVerb.GROWTH, positions, change=GrowthChange.RELATIVE)
     assert reason is not None
@@ -1592,7 +2118,9 @@ def test_a_relative_growth_over_unnarrowed_rank_positions_names_both_corrections
     assert "filter" in reason
     assert "recipient" in reason
     narrowed = filtered(
-        positions, narrowed_roles=("recipient",), period=positions.period, pins_one_year=False
+        positions,
+        narrowed_roles=("recipient",),
+        years=YearFilter(period=positions.period, leaves_one_year=False),
     )
     assert rejects(ShapeVerb.GROWTH, narrowed, change=GrowthChange.ABSOLUTE) is None
 
@@ -1647,8 +2175,10 @@ def test_a_year_filter_narrows_the_period_and_says_whether_one_year_is_left(
     if left is None:
         assert out == f"the year filter leaves no year of {start}-{end}"
     else:
-        assert out == YearFilter(
-            period=Period(start=left[0], end=left[1]), leaves_one_year=left[0] == left[1]
+        assert isinstance(out, YearFilter)
+        assert (out.period, out.leaves_one_year) == (
+            Period(start=left[0], end=left[1]),
+            left[0] == left[1],
         )
 
 
@@ -1670,7 +2200,10 @@ def test_a_filter_with_no_year_predicate_leaves_the_period_and_no_one_year(perio
 def test_an_unbounded_period_stays_unbounded_under_a_year_filter(
     predicates: tuple[PeriodThreshold, ...], leaves_one_year: bool
 ) -> None:
-    assert year_filter(None, predicates) == YearFilter(period=None, leaves_one_year=leaves_one_year)
+    out = year_filter(None, predicates)
+
+    assert isinstance(out, YearFilter)
+    assert (out.period, out.leaves_one_year, out.drift) == (None, leaves_one_year, FIXED)
 
 
 def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() -> None:
@@ -1679,7 +2212,9 @@ def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() ->
     assert isinstance(years, YearFilter)
 
     one_year = filtered(
-        cut, narrowed_roles=(), period=years.period, pins_one_year=years.leaves_one_year
+        cut,
+        narrowed_roles=(),
+        years=YearFilter(period=years.period, leaves_one_year=years.leaves_one_year),
     )
 
     assert cut.cut_per_period is True
@@ -1696,17 +2231,27 @@ def test_a_year_exclusion_leaving_one_year_of_a_limited_rank_clears_its_cut() ->
 def _every_place() -> FrameShape:
     return retrieved(
         requirement_id="req_a",
-        roles=(_role(role="country", open=True),),
+        roles=(
+            RoleDimension(
+                role="country",
+                requirement_id="req_a",
+                open=True,
+                place=True,
+                mixed_levels=True,
+                level_filterable=True,
+            ),
+        ),
         period=_PERIOD,
         measures=1,
-        place_typed=True,
-        mixed_levels=True,
     )
 
 
 def _countries(shape: FrameShape) -> FrameShape:
     return filtered(
-        shape, narrowed_roles=(), period=shape.period, pins_one_year=False, keeps_one_level=True
+        shape,
+        narrowed_roles=(),
+        years=YearFilter(period=shape.period, leaves_one_year=False),
+        levelled_role_keys=(("req_a", "country"),),
     )
 
 
@@ -1739,7 +2284,7 @@ def test_a_growth_keeps_each_place_apart_and_carries_mixed_levels():
 
     assert rejects(ShapeVerb.GROWTH, shape, change=GrowthChange.RELATIVE) is None
     assert rejects(ShapeVerb.AGGREGATE, shape, by_entity=True, by_period=False) is not None
-    growth = grown(shape, change=GrowthChange.RELATIVE, window=_PERIOD)
+    growth = grown(shape, change=GrowthChange.RELATIVE, window=_PERIOD, step_id=None)
 
     assert (growth.mixed_levels, growth.place_typed) == (True, False)
     assert rejects(ShapeVerb.RANK, growth, axis="country") is not None
@@ -1747,7 +2292,9 @@ def test_a_growth_keeps_each_place_apart_and_carries_mixed_levels():
 
 def test_a_level_filter_leaves_one_level_and_any_other_filter_leaves_them_mixed():
     one_year = filtered(
-        _every_place(), narrowed_roles=(), period=Period(start=2020, end=2020), pins_one_year=True
+        _every_place(),
+        narrowed_roles=(),
+        years=YearFilter(period=Period(start=2020, end=2020), leaves_one_year=True),
     )
     countries = _countries(one_year)
 
@@ -1759,7 +2306,7 @@ def test_a_level_filter_leaves_one_level_and_any_other_filter_leaves_them_mixed(
 
 def test_a_level_filter_reads_only_a_frame_that_still_carries_place_types():
     named = retrieved(requirement_id="req_a", roles=(_role(),), period=_PERIOD, measures=1)
-    per_place = grown(_every_place(), change=GrowthChange.RELATIVE, window=_PERIOD)
+    per_place = grown(_every_place(), change=GrowthChange.RELATIVE, window=_PERIOD, step_id=None)
 
     assert rejects(ShapeVerb.FILTER, _every_place(), place_level=True) is None
     assert rejects(ShapeVerb.FILTER, named) is None
@@ -1773,3 +2320,329 @@ def test_a_plan_states_exactly_the_levels_analysis_mcp_keeps():
     # A PlaceLevel compiles to analysis-mcp's place_level predicate, whose level
     # is one of common.place_type.PLACE_LEVELS.
     assert {level.value for level in PlaceType} == PLACE_LEVELS
+
+
+def _threshold(op: str, year: int, *, rolls: bool = False, offset: int = 0) -> PeriodThreshold:
+    rolling = RelativePeriod(offset=offset) if rolls else None
+    return PeriodThreshold.model_validate({"op": op, "year": year, "rolling": rolling})
+
+
+@pytest.mark.parametrize(
+    ("period", "drift", "predicates", "left", "drift_left", "one_year"),
+    [
+        pytest.param(
+            (2024, 2024),
+            _END_OPEN,
+            (_threshold("gte", 2024),),
+            (2024, 2024),
+            _END_OPEN,
+            False,
+            id="a-fixed-first-year-of-an-open-year",
+        ),
+        pytest.param(
+            (2024, 2024),
+            _END_OPEN,
+            (_threshold("lte", 2024),),
+            (2024, 2024),
+            FIXED,
+            True,
+            id="a-fixed-last-year-stops-it",
+        ),
+        pytest.param(
+            (2020, 2022),
+            _END_OPEN,
+            (_threshold("lte", 2024),),
+            (2020, 2022),
+            PeriodDrift(end=EndDrift.DATA, until=2024),
+            False,
+            id="a-fixed-last-year-newer-data-has-yet-to-reach",
+        ),
+        pytest.param(
+            (2020, 2024),
+            _END_OPEN,
+            (_threshold("eq", 2024, rolls=True),),
+            (2024, 2024),
+            _MOVING,
+            True,
+            id="the-newest-year-as-it-moves",
+        ),
+        pytest.param(
+            (2020, 2024),
+            _END_OPEN,
+            (_threshold("gte", 2024, rolls=True),),
+            (2024, 2024),
+            _ROLLING_START,
+            False,
+            id="a-first-year-on-the-anchor-ahead-of-an-end-open-to-the-data",
+        ),
+        pytest.param(
+            (1990, 2024),
+            _END_OPEN,
+            (_threshold("gte", 2019, rolls=True),),
+            (2019, 2024),
+            _ROLLING_START,
+            False,
+            id="a-first-year-inside-a-whole-history",
+        ),
+        pytest.param(
+            (2023, 2024),
+            FIXED,
+            (_threshold("ne", 2023),),
+            (2024, 2024),
+            PeriodDrift(excluded=frozenset({2023})),
+            True,
+            id="an-exclusion-at-the-start-of-fixed-years",
+        ),
+        pytest.param(
+            (2020, 2024),
+            _END_OPEN,
+            (_threshold("lte", 2023, rolls=True, offset=-1),),
+            (2020, 2023),
+            PeriodDrift(end=EndDrift.ANCHOR, end_offset=-1),
+            False,
+            id="a-last-year-on-the-anchor-at-its-offset",
+        ),
+        pytest.param(
+            (2020, 2024),
+            _END_OPEN,
+            (_threshold("lt", 2024, rolls=True),),
+            (2020, 2023),
+            PeriodDrift(end=EndDrift.ANCHOR, end_offset=-1),
+            False,
+            id="a-last-year-before-the-anchor-at-one-less-than-its-offset",
+        ),
+    ],
+)
+def test_a_year_filter_says_how_newer_data_moves_the_years_it_leaves(
+    period: tuple[int, int],
+    drift: PeriodDrift,
+    predicates: tuple[PeriodThreshold, ...],
+    left: tuple[int, int],
+    drift_left: PeriodDrift | None,
+    one_year: bool,
+) -> None:
+    out = year_filter(Period(start=period[0], end=period[1]), predicates, drift=drift)
+
+    if drift_left is None:
+        assert out == f"the year filter leaves no year of {period[0]}-{period[1]}"
+    else:
+        assert isinstance(out, YearFilter)
+        kept = Period(start=left[0], end=left[1])
+        assert (out.period, out.leaves_one_year, out.drift) == (kept, one_year, drift_left)
+
+
+def _without(*years: int) -> FrameShape:
+    """2020-2024 once a filter has removed each of `years`."""
+    shape = _shape(roles=(_role(),), period=Period(start=2020, end=2024))
+    kept = year_filter(shape.period, _years(*(("ne", year) for year in years)))
+    assert isinstance(kept, YearFilter)
+    return filtered(shape, narrowed_roles=(), years=kept)
+
+
+@pytest.mark.parametrize(
+    ("predicates", "left"),
+    [
+        pytest.param(_years(("lte", 2022)), (2020, 2021), id="a-last-year-it-removed"),
+        pytest.param(
+            _years(("gte", 2022), ("lte", 2023)), (2023, 2023), id="a-first-year-it-removed"
+        ),
+        pytest.param(_years(("eq", 2022)), None, id="the-one-year-it-removed"),
+    ],
+)
+def test_a_later_filter_ending_on_a_year_a_fixed_exclusion_removed_ends_beyond_it(
+    predicates: tuple[PeriodThreshold, ...], left: tuple[int, int] | None
+) -> None:
+    shape = _without(2022)
+
+    out = year_filter(shape.period, predicates, drift=shape.drift)
+
+    if left is None:
+        assert out == "the year filter leaves no year of 2020-2024"
+    else:
+        assert isinstance(out, YearFilter)
+        assert (out.period, out.leaves_one_year) == (
+            Period(start=left[0], end=left[1]),
+            left[0] == left[1],
+        )
+
+
+@pytest.mark.parametrize(
+    ("removed", "window", "left", "grows"),
+    [
+        pytest.param((2022,), (2022, 2023), (2023, 2023), False, id="a-first-year-it-removed"),
+        pytest.param((2022,), (2021, 2022), (2021, 2021), False, id="a-last-year-it-removed"),
+        pytest.param((2022, 2024), (2022, 2024), (2023, 2023), False, id="both-ends-it-removed"),
+        pytest.param((2022,), (2022, 2022), None, False, id="only-years-it-removed"),
+        pytest.param((2022,), (2021, 2023), (2021, 2023), True, id="a-year-inside-it-removed"),
+    ],
+)
+def test_a_window_ending_on_years_a_fixed_exclusion_removed_ends_beyond_them_or_grows_not(
+    removed: tuple[int, ...], window: tuple[int, int], left: tuple[int, int] | None, grows: bool
+) -> None:
+    """A rank reads the years its window keeps, and a growth each entity's
+    values on its window's first and last years, which a removed year leaves
+    no entity."""
+    shape = _without(*removed)
+    years = Period(start=window[0], end=window[1])
+
+    reason = rejects(ShapeVerb.RANK, shape, axis="donor", window=years)
+    growth = rejects(ShapeVerb.GROWTH, shape, change=GrowthChange.ABSOLUTE, window=years)
+
+    if left is None:
+        assert reason is not None
+        assert "less the years a filter removed" in reason
+    else:
+        assert reason is None
+        assert windowed(shape, years)[0] == Period(start=left[0], end=left[1])
+    assert (growth is None) is grows
+
+
+@pytest.mark.parametrize(
+    ("years", "held"),
+    [
+        pytest.param((2022, 2024), (2023, 2024), id="a-year-one-side-removed"),
+        pytest.param((2022, 2022), None, id="only-a-year-one-side-removed"),
+        pytest.param((2025, 2026), None, id="no-year-today"),
+    ],
+)
+def test_a_two_sided_verb_holds_no_year_either_side_removed(
+    years: tuple[int, int], held: tuple[int, int] | None
+) -> None:
+    """Sides sharing no year today, or only years a filter removed, match no
+    period, so `sum_of` writes no row and the step is refused."""
+    other = _shape(roles=(_role(),), period=Period(start=years[0], end=years[1]))
+
+    for left, right in ((_without(2022), other), (other, _without(2022))):
+        reason = rejects(ShapeVerb.SUM_OF, left, other=right)
+        if held is None:
+            assert reason is not None
+            assert "share no year today" in reason
+        else:
+            assert reason is None
+            assert summed_sides(left, right).period == Period(start=held[0], end=held[1])
+
+
+@pytest.mark.parametrize(
+    ("first", "rolling", "years", "drift_left"),
+    [
+        pytest.param(
+            2024,
+            RollingWindow(window_end=_NEWEST),
+            (2024, 2024),
+            PeriodDrift(end=EndDrift.ANCHOR, end_offset=0),
+            id="end-alone",
+        ),
+        pytest.param(
+            2024,
+            RollingWindow(window_start=_NEWEST, window_end=_NEWEST),
+            (2024, 2024),
+            _MOVING,
+            id="both-ends",
+        ),
+        pytest.param(2024, None, (2024, 2024), FIXED, id="fixed-ends"),
+        pytest.param(1990, None, (2020, 2024), FIXED, id="a-fixed-start-inside-a-whole-history"),
+    ],
+)
+def test_a_rank_window_says_how_newer_data_moves_the_years_it_keeps(
+    first: int,
+    rolling: RollingWindow | None,
+    years: tuple[int, int],
+    drift_left: PeriodDrift,
+) -> None:
+    """A window over years open to the data from `first` to 2024."""
+    shape = _shape(period=Period(start=first, end=2024), drift=_END_OPEN)
+    window = Period(start=years[0], end=2024)
+
+    assert windowed(shape, window, rolling) == (Period(start=years[0], end=years[1]), drift_left)
+
+
+def test_a_two_sided_verb_holds_the_years_both_sides_hold_as_newer_data_moves_them() -> None:
+    """A whole history from 1990 holds the other side's later start, and a
+    fixed end stops an open one."""
+    history = _shape(period=Period(start=1990, end=2024), drift=_END_OPEN)
+    closed = _shape(period=Period(start=2020, end=2026))
+
+    out = summed_sides(history, closed)
+
+    assert out.period == Period(start=2020, end=2024)
+    assert out.drift == PeriodDrift(end=EndDrift.DATA, until=2026)
+
+
+def _whole_history(first: int, start: str) -> FrameShape:
+    """A dataset read from its first year on record, `first`, to 2024 with no end year,
+    once a bound sets its start as `start` says: none, one following the newest data, or
+    a fixed year with a bound on the anchor trailing it.
+    """
+    if start == "fixed":
+        return _shape(period=Period(start=first, end=2024), drift=_END_OPEN)
+    offset = first - 2000 - 10
+    if start == "anchor":
+        drift = PeriodDrift(start=StartDrift.ANCHOR, start_offset=offset, end=EndDrift.DATA)
+        return _shape(period=Period(start=2024 + offset, end=2024), drift=drift)
+    drift = PeriodDrift(start=StartDrift.TRAILS, start_offset=offset - 20, end=EndDrift.DATA)
+    return _shape(period=Period(start=first + 5, end=2024), drift=drift)
+
+
+_STARTS = ("fixed", "anchor", "trails")
+
+
+@pytest.mark.parametrize("earlier", _STARTS)
+@pytest.mark.parametrize("later", _STARTS)
+def test_two_whole_histories_with_different_first_years_pair_alike_in_either_side_order(
+    earlier: str, later: str
+) -> None:
+    """One side read whole from 1990, the other from 2000, each with its start
+    set as `earlier` and `later` say. A whole history starts at its first year
+    like any other frame, so the pair holds the same years, moving the same
+    way, whichever side comes first."""
+    from_1990, from_2000 = _whole_history(1990, earlier), _whole_history(2000, later)
+
+    stated, swapped = summed_sides(from_1990, from_2000), summed_sides(from_2000, from_1990)
+
+    assert (stated.period, stated.drift) == (swapped.period, swapped.drift)
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        pytest.param(
+            PeriodDrift(
+                start=StartDrift.TRAILS, start_offset=-6, end=EndDrift.ANCHOR, end_offset=0
+            ),
+            id="a-fixed-first-year-a-bound-on-the-anchor-trails",
+        ),
+        pytest.param(_MOVING, id="a-first-year-on-the-anchor"),
+        pytest.param(PeriodDrift(end=EndDrift.ANCHOR, end_offset=0), id="a-fixed-first-year"),
+    ],
+)
+def test_a_two_sided_verb_keeps_the_later_first_year_as_it_moves_in_either_side_order(
+    start: PeriodDrift,
+) -> None:
+    """2020-2024 ending on the anchor, beside 2024 whose first year moves as
+    `start` says. The pair holds 2024, moving as that side does, whichever
+    side comes first."""
+    earlier = _shape(
+        period=Period(start=2020, end=2024), drift=PeriodDrift(end=EndDrift.ANCHOR, end_offset=0)
+    )
+    later = _shape(period=Period(start=2024, end=2024), drift=start)
+
+    for left, right in ((earlier, later), (later, earlier)):
+        out = summed_sides(left, right)
+
+        assert (out.period, out.drift) == (Period(start=2024, end=2024), start)
+
+
+def test_a_two_sided_verb_ends_before_the_years_its_fixed_side_removed() -> None:
+    """An open end against fixed 2020-2025 less 2024 holds 2020-2023 today,
+    and 2025 with them once the open side reaches it."""
+    open_end = _shape(roles=(_role(),), period=Period(start=2020, end=2024), drift=_END_OPEN)
+    to_2025 = _shape(roles=(_role(),), period=Period(start=2020, end=2025))
+    kept = year_filter(to_2025.period, _years(("ne", 2024)))
+    assert isinstance(kept, YearFilter)
+    fixed = filtered(to_2025, narrowed_roles=(), years=kept)
+
+    for left, right in ((open_end, fixed), (fixed, open_end)):
+        out = summed_sides(left, right)
+
+        assert out.period == Period(start=2020, end=2023)
+        assert (out.drift.end, out.drift.until) == (EndDrift.DATA, 2025)

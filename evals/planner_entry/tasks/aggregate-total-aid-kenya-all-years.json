@@ -1,0 +1,86 @@
+{
+  "id": "aggregate-total-aid-kenya-all-years",
+  "kind": "aggregate",
+  "origin": "authored",
+  "question": "How much aid has Kenya received in total, over all years?",
+  "searches": [
+    {
+      "query": "How much aid has Kenya received in total, over all years?",
+      "parts": [
+        {
+          "variable": "official development assistance",
+          "entities": [
+            {
+              "text": "Kenya",
+              "role": "to"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "brief": "How much official development assistance has Kenya received in total, as one figure over all years on record? The user asked for every year and named no span.",
+  "asks": [
+    {
+      "text": "Total aid Kenya has received over all years, as one figure",
+      "over": [
+        "donor"
+      ],
+      "across_years": true
+    }
+  ],
+  "required_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "acceptable_kinds": [
+    "dataset",
+    "aggregate"
+  ],
+  "unit_asked": false,
+  "period_reduction": "across_years",
+  "reference_payload": {
+    "question": "How much official development assistance has Kenya received in total, as one figure over all years on record? The user asked for every year and named no span.",
+    "answer_mode": "computed",
+    "decisions": [],
+    "evidence_requirements": [
+      {
+        "kind": "dataset",
+        "id": "oda",
+        "measure": "ODA",
+        "entities": [
+          {
+            "name": "Kenya",
+            "role": "recipient"
+          },
+          {
+            "name": "official donors (DAC)",
+            "role": "donor"
+          }
+        ],
+        "period": {
+          "start": 1960,
+          "end": 2025
+        },
+        "source_spec_id": "spec_64bd62678d22debf1f39b36eefef98db"
+      },
+      {
+        "kind": "aggregate",
+        "id": "total",
+        "input_id": "oda",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      }
+    ],
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total"
+        ]
+      }
+    ]
+  }
+}

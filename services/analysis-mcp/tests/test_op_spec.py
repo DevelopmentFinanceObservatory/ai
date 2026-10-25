@@ -17,6 +17,7 @@ from analysis_mcp.op_spec import (
     JoinOpSpec,
     OpSpecAdapter,
     OrderedThresholdPredicate,
+    PlaceLevelPredicate,
     QuotientOfOpSpec,
     RankOpSpec,
     RollingRef,
@@ -25,6 +26,7 @@ from analysis_mcp.op_spec import (
     with_anchor_key,
 )
 from common.materialisation import FrameRef
+from common.rolling import canonical_populations
 from dfo_frame_grammar import ANCHOR_RULE
 from dfo_frame_grammar.grammar import ComposedUnit, StatVarPart, UnitRequest
 from pydantic import ValidationError
@@ -245,6 +247,30 @@ def test_filter_accepts_the_closed_predicate_vocabulary() -> None:
         ),
     )
     assert len(op_spec.predicates) == 2
+
+
+def test_a_strict_country_predicate_changes_the_approved_operation_identity() -> None:
+    legacy = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(PlaceLevelPredicate(column="financingRecipient_type", level="Country"),),
+    )
+    explicit_legacy = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(
+            PlaceLevelPredicate(column="financingRecipient_type", level="Country", strict=False),
+        ),
+    )
+    strict = FilterOpSpec(
+        frame_ref=SNAPSHOT_REF,
+        predicates=(
+            PlaceLevelPredicate(column="financingRecipient_type", level="Country", strict=True),
+        ),
+    )
+
+    assert op_spec_hash_for(legacy) == op_spec_hash_for(explicit_legacy)
+    assert op_spec_hash_for(strict) != op_spec_hash_for(legacy)
+    assert "strict" not in build_op_spec_preimage(legacy)["parameters"]["predicates"][0]
+    assert build_op_spec_preimage(strict)["parameters"]["predicates"][0]["strict"] is True
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -495,6 +521,23 @@ def _back(offset: int) -> dict[str, object]:
     return {**LATEST, "offset": offset}
 
 
+def _pairing(
+    *,
+    left: list[dict[str, object]] | None = None,
+    right: list[dict[str, object]] | None = None,
+    keys: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """A pairing population over `left` and `right`, by default every series of
+    each root, paired on `keys`, by default `recipient` on both sides."""
+    return {
+        "pair": [
+            [{"spec_id": ROOT}] if left is None else left,
+            [{"spec_id": OTHER_ROOT}] if right is None else right,
+        ],
+        "keys": {"recipient": "recipient"} if keys is None else keys,
+    }
+
+
 def _rolling(**bounds: object) -> dict[str, object]:
     return {"population": EVERY_SERIES, **bounds}
 
@@ -575,6 +618,14 @@ def test_a_rolling_window_whose_literals_agree_with_its_offsets_is_accepted(
             {"window_end": LATEST, "population": [{"spec_id": ROOT, "bindings": {"reporter": []}}]},
             id="empty-binding",
         ),
+        pytest.param(
+            {"window_end": LATEST, "population": [_pairing(keys={})]},
+            id="pairing-without-keys",
+        ),
+        pytest.param(
+            {"window_end": LATEST, "population": [_pairing(right=[])]},
+            id="pairing-with-an-empty-side",
+        ),
     ],
 )
 def test_a_malformed_or_inconsistent_rolling_window_is_refused(rolling: dict[str, object]) -> None:
@@ -628,6 +679,11 @@ def test_populations_have_one_spelling() -> None:
     ]
     assert op_spec_hash_for(growth_over(listed)) == op_spec_hash_for(growth_over(respelled))
     assert op_spec_hash_for(growth_over(listed)) != op_spec_hash_for(growth_over([usa]))
+    # A pairing is spelled as `common.rolling` spells it, after every flat entry.
+    paired = [_pairing(left=listed, keys={"recipient": "observationAbout"}), *listed]
+    assert build_op_spec_preimage(growth_over(paired))["parameters"]["rolling"]["population"] == (
+        canonical_populations(paired)
+    )
 
 
 @pytest.mark.parametrize(

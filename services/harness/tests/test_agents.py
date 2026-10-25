@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import translator.tool as translator_tool
 from compiler.surface import FixtureSurface, McpSurface, ToolCallResult
+from data_mcp import resolution
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import InMemorySessionService
@@ -19,6 +21,7 @@ from google.adk.tools.function_tool import FunctionTool
 from harness.agents import build_tool_surface, create_planner_with_translator
 from harness.settings import Settings
 from planner.settings import AgentSettings
+from translator import discovery
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +32,30 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _planner() -> LlmAgent:
     return create_planner_with_translator(settings=Settings(), surface=FixtureSurface(schemas=[]))
+
+
+async def test_the_served_translation_resolves_through_the_graph_and_reads_the_newest_year(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The planner's translation takes the real resolve door and newest-year read, the
+    two `evals/planner_entry` replaces through `build_translate`'s keywords."""
+    built: dict[str, Any] = {}
+    real_core = translator_tool.build_translator_core
+
+    def spy(**kwargs: Any) -> Any:
+        built.update(kwargs)
+        return real_core(**kwargs)
+
+    monkeypatch.setattr(translator_tool, "build_translator_core", spy)
+
+    _planner()
+
+    assert built["resolve_entities"] is discovery.graph_resolve
+    assert built["anchor_read"] is translator_tool.read_within_entry
+    # `graph_resolve` reads `data_mcp.resolution` when called, so the conftest's
+    # stand-in for the graph answers here.
+    outcomes = await discovery.graph_resolve({"names": ["Kenya"]})
+    assert outcomes == {"names": {"Kenya": resolution.NotFound(near_matches=[])}}
 
 
 def test_creates_a_planner_whose_propose_plan_translates_without_a_tool_of_its_own() -> None:

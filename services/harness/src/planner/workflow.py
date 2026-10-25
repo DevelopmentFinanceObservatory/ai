@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from common.hashed_fields import HASHED_WHEN_SET
+from common.place_type import PartyClass
 from pydantic import Field, JsonValue, model_validator
 
 from planner.records import (
@@ -76,10 +77,17 @@ class ResolvedGroup(StrictModel):
     graph node, `None` when the graph holds none (a resolver group such as
     "G7"). `total` is the party the dataset publishes as the set's own total
     (`GroupOfSeven`, `DACAfrica`) when the role binds that one party; `None`
-    when the role binds the set's members, one entity each. A requirement's
-    `Entity` naming the label, case-folded, on the set's side of the flow is
-    met by the source under either reading (`compiler.evidence.resolve_group`),
-    except that one asking for the members is not met by the total.
+    when the role binds the set's members, one entity each. `whole_of` names
+    the classes of party (`common.place_type.PartyClass`) the bound total holds
+    in full, or all the totals of a union read as one population ("all donors
+    including private"), whose `total` is `None`; empty for any other set.
+    `side_classes` names the classes of party, totals aside, the source publishes
+    on the side such a set is read on, so a reading can say what the population
+    leaves out; empty for any other set and on a search answer without it.
+    A requirement's `Entity` naming the label, case-folded, on the set's side
+    of the flow is met by the source under either reading
+    (`compiler.evidence.resolve_group`), except that one asking for the members
+    is not met by the total.
     """
 
     role: str = Field(min_length=1)
@@ -90,13 +98,25 @@ class ResolvedGroup(StrictModel):
     total: Annotated[str | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda total: total is None
     )
+    whole_of: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda classes: not classes
+    )
+    side_classes: Annotated[tuple[PartyClass, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda classes: not classes
+    )
+
+    @property
+    def reads_total(self) -> bool:
+        """Whether the role binds a total, the set's own (`total`) or a whole
+        population's (`whole_of`), and no member."""
+        return self.total is not None or bool(self.whole_of)
 
 
 class OpenAxis(StrictModel):
     """One constraint property a source's family of StatVars varies along.
 
     `property` is the slot's constraint property dcid, as `search` resolved
-    it. `summable` is whether dfo-apis may sum the family's members over it:
+    it. `summable` is whether apis may sum the family's members over it:
     the slot declares it summable, and every member resolved a value on it.
     """
 
@@ -137,7 +157,7 @@ class MeasureAlternative(StrictModel):
     identity with its measure axes swapped. `label` names the measure without
     its price basis ("net disbursements") on axis `what`, or names the prices
     ("constant prices") on axis `unit`. `axis` is a plain string, since
-    the vocabulary belongs to dfo-apis and an unknown axis must not fail
+    the vocabulary belongs to apis and an unknown axis must not fail
     validation. `identity` preserves the sibling definition for approval
     amendments and later turns, so choosing it resolves the recorded
     dataset without a fresh search.
@@ -268,6 +288,31 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
+    `bound_refs` maps each entity text of the search part, case-folded, to
+    the refs Search states it bound (the part's `entity_refs`,
+    `compiler.sources.bound_refs`), so "G7" names the set Search labels
+    "Group of Seven" by its ref `GroupOfSeven`
+    (`compiler.evidence.named_members`). Empty for a part stating no
+    `entity_refs`, and for a source read from a block no search part
+    carried: a pin copied over another window
+    (`translator.discovery._recorded_source`) is resolved again by its
+    definition, which restates no entity, so its names match by label and
+    the graph's resolve door alone.
+
+    `code_paths` maps each code the identity binds on a breakdown's code
+    system (`compiler.sources.bound_codes`) to its path through the code
+    hierarchy, from the root down to the code itself: `CRSPurposeCode120`
+    (health) reads `("CRSPurposeCode100", "CRSPurposeCode120")`. A path's
+    length less one is the code's level. `translator.discovery.fetch_code_paths`
+    reads them from the graph's `specializationOf` parents for a requirement
+    stating a breakdown, and `compiler.shapes.breakdown_level` sets the level
+    the breakdown reads from them. Empty until that read runs, and for a
+    source no breakdown reads. `leaf_codes` are those of the codes the same
+    read found nothing below (the node states no `children` link): a leaf
+    keeps its own level when named alone. A named code missing from it has
+    children, or was read before the field was recorded, and reads the
+    level below it, which for a leaf apis answers under the code's own label.
+
     `exact_codes` are the publisher series codes the source is exactly:
     the entries of `resolved.stat_vars.source_codes` that Search marks
     `exact`, meaning a `source_code` search for that code would accept this
@@ -308,6 +353,21 @@ class SelectedSource(StrictModel):
     # its serialised form.
     entity_refs: Annotated[dict[str, str], HASHED_WHEN_SET] = Field(
         default_factory=dict, exclude_if=lambda refs: not refs
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    bound_refs: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda refs: not refs
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    code_paths: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
+        default_factory=dict, exclude_if=lambda paths: not paths
+    )
+    # Left out of every dump while empty, so a source saved without it keeps
+    # its serialised form.
+    leaf_codes: Annotated[tuple[str, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda codes: not codes
     )
     open_entity_axes: Annotated[tuple[OpenEntityAxis, ...] | None, HASHED_WHEN_SET] = None
     unit_ref: str | None = None

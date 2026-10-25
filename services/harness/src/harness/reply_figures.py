@@ -352,8 +352,8 @@ def card_holds(series: Sequence[DrawnSeries], *, cut: TopMembers | None = None) 
 
     - `cut`, on a card cut to the largest members of a dimension: how many it
       draws, of how many members with a value at which period, and how many
-      it leaves out as members of another kind or level (`other_kinds`) and
-      for having no value at that period (`unvalued`).
+      it leaves out as group totals, unallocated amounts or members of another
+      level (`other_kinds`) and for having no value at that period (`unvalued`).
     - `direction`, on a card of several series: how many of those holding
       more than one period end higher than, lower than or level with their
       own first value by period (`series_ends`), and among how many.

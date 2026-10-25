@@ -9,6 +9,7 @@ completed with a resolved period, analysis-mcp's own op-spec models read them.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -50,6 +51,7 @@ from planner.operations import (
 )
 from planner.plan import (
     AnswerMode,
+    AskAnswer,
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
@@ -57,11 +59,15 @@ from planner.plan import (
     Entity,
     EvidenceRequirement,
     FilterRequirement,
+    FirstYear,
     GrowthRequirement,
     Plan,
     PlanStatus,
     RankRequirement,
     RequirementSide,
+    open_window,
+    retrieves_period,
+    split_of,
 )
 from planner.records import (
     EntityIn,
@@ -75,8 +81,10 @@ from planner.records import (
     RollingWindow,
     ValueThreshold,
 )
-from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
+from planner.shapes import FIXED, EndDrift, PeriodDrift, StartDrift
+from planner.workflow import OpenEntityAxis, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import JsonValue
+from submission.service import _open_window
 
 SPEC_DEBT = "spec_" + "a" * 32
 SPEC_GDP = "spec_" + "b" * 32
@@ -116,13 +124,27 @@ def build(live: dict[str, ToolSchema], source: SourceFactory) -> Compile:
         decisions: Sequence[Decision],
         discovered: dict[str, SelectedSource] | None = None,
         answer_mode: AnswerMode = AnswerMode.COMPUTED,
+        first_years: dict[str, int] | None = None,
+        asks: Sequence[AskAnswer] = (),
     ) -> CompileResult:
         plan = Plan(
             question="How has Kenya's debt service changed over the last five years?",
             answer_mode=answer_mode,
             decisions=decisions,
             evidence_requirements=requirements,
+            asks=[f"ask {ask.ask}" for ask in asks],
+            answered=asks,
+            first_years=_first_years(requirements, first_years),
             status=PlanStatus.DRAFT,
+        )
+        # Compile reads the plan as it is recorded, with its whole-history reads split.
+        split = split_of(plan)
+        plan = Plan.model_validate(
+            {
+                **plan.model_dump(),
+                "evidence_requirements": split.requirements,
+                "rolling_copies": split.copies,
+            }
         )
         return compile_plan(
             plan=plan,
@@ -133,6 +155,18 @@ def build(live: dict[str, ToolSchema], source: SourceFactory) -> Compile:
         )
 
     return _compile
+
+
+def _first_years(
+    requirements: Sequence[EvidenceRequirement], stated: dict[str, int] | None
+) -> tuple[FirstYear, ...]:
+    """The first year on record of each open dataset, from `stated` or else its period's start, which splits nothing."""
+    stated = stated or {}
+    return tuple(
+        FirstYear(requirement_id=r.id, year=stated.get(r.id, r.period.start))
+        for r in requirements
+        if isinstance(r, DatasetRequirement) and r.period_end_open
+    )
 
 
 def _retrieve(**overrides: Any) -> RetrieveOperation:
@@ -158,7 +192,7 @@ def _growth_pair(
     )
 
 
-def _rank_pair() -> tuple[RankRequirement, RankOperation]:
+def _rank_pair(**overrides: Any) -> tuple[RankRequirement, RankOperation]:
     """A rank of the last five years' totals, as a requirement and its operation."""
     fields: dict[str, Any] = {
         "direction": RankDirection.HIGHEST_FIRST,
@@ -167,7 +201,7 @@ def _rank_pair() -> tuple[RankRequirement, RankOperation]:
         "window_start": 2019,
         "window_end": 2024,
         "rolling": LAST_FIVE,
-    }
+    } | overrides
     return (
         RankRequirement(
             id="ranked",
@@ -291,6 +325,142 @@ def test_a_rolling_rank_keeps_its_planned_years_and_adds_the_overlay(
     assert ANCHOR_KEY_PARAMETER not in step.args
 
 
+def test_a_year_filter_rolling_from_its_start_reads_the_copy_of_its_dataset_and_leaves_the_series_alone(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    """The filter keeps 2012, before the stated 2015. It reads its dataset from the first
+    year on record, 1990 (`planner.plan.whole_history_split`), so it reads a copy and the
+    series answer keeps the stated 2015-2024."""
+    predicates = (PeriodThreshold(op="eq", year=2012, rolling=RelativePeriod(offset=-12)),)
+
+    result = build(
+        [
+            requirement(period_end_open=True),
+            FilterRequirement(
+                id="then",
+                decision_ids=["measure"],
+                input_id="annual_debt_service",
+                predicates=predicates,
+            ),
+        ],
+        [
+            _retrieve(),
+            _retrieve(id="debt_history", requirement_id="annual_debt_service_history"),
+            FilterOperation(
+                id="then", requirement_id="then", input="debt_history", predicates=predicates
+            ),
+        ],
+        terminal=["debt", "then"],
+        decisions=[decision()],
+        discovered={
+            "annual_debt_service": source(),
+            "annual_debt_service_history": source(),
+        },
+        first_years={"annual_debt_service": 1990},
+        asks=[
+            AskAnswer(ask=0, outputs=("annual_debt_service",)),
+            AskAnswer(ask=1, outputs=("then",)),
+        ],
+    )
+
+    assert result.ok, result.issues
+    assert result.workflow is not None
+    (group,) = anchor_groups(result.workflow)
+    assert group.steps == ("then",)
+    assert group.roots == ("debt_history",)
+
+
+def test_a_growth_rolling_from_its_start_before_the_stated_period_reads_the_whole_history(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    source: SourceFactory,
+) -> None:
+    """Stated 2019-2024 with 2010 on record, a growth over the last five years stated from
+    2023 starts in 2018. Its copy of the dataset starts in 2010, so the window falls inside
+    the years it reads, as the plan's own shape rule holds (`planner.plan._growth_shape`)."""
+    growth_req, change = _growth_pair(window_start=2018, window_end=2023, reads="debt_history")
+
+    result = build(
+        [requirement(period=Period(start=2019, end=2024), period_end_open=True), growth_req],
+        [
+            _retrieve(),
+            _retrieve(id="debt_history", requirement_id="annual_debt_service_history"),
+            change,
+        ],
+        terminal=["debt", "change"],
+        decisions=[decision()],
+        discovered={
+            "annual_debt_service": source(),
+            "annual_debt_service_history": source(),
+        },
+        first_years={"annual_debt_service": 2010},
+        asks=[
+            AskAnswer(ask=0, outputs=("annual_debt_service",)),
+            AskAnswer(ask=1, outputs=("growth_of_debt",)),
+        ],
+    )
+
+    step = _step(result, "change")
+    assert (step.args["window_start"], step.args["window_end"]) == ("2018", "2023")
+
+
+def test_each_retrievals_shape_starts_in_the_year_its_pins_requested_window_starts(
+    decision: DecisionFactory, requirement: RequirementFactory, source: SourceFactory
+) -> None:
+    """The window `submission.service` mints for a pin (`_open_window`) starts at the first year on
+    record for a whole-history read and at the stated start otherwise, and `retrieves_period`
+    accepts exactly that window. The shape the compiler resolves for the retrieval starts at the
+    same year, so the frame holds what the pin retrieves."""
+    dataset = requirement(period_end_open=True)
+    then = FilterRequirement(
+        id="then",
+        decision_ids=["measure"],
+        input_id=dataset.id,
+        predicates=(PeriodThreshold(op="eq", year=2012, rolling=RelativePeriod(offset=-12)),),
+    )
+    plan = Plan(
+        question="Q",
+        decisions=[decision()],
+        evidence_requirements=[dataset, then],
+        asks=["ask 0", "ask 1"],
+        answered=[AskAnswer(ask=0, outputs=(dataset.id,)), AskAnswer(ask=1, outputs=("then",))],
+        first_years=[FirstYear(requirement_id=dataset.id, year=1990)],
+    )
+    split = split_of(plan)
+    by_id = {r.id: r for r in split.requirements}
+    retrievals = {
+        "debt": _retrieve(),
+        "debt_history": _retrieve(id="debt_history", requirement_id="annual_debt_service_history"),
+    }
+
+    shapes, issues = shapes_for(
+        retrievals,
+        requirements=by_id,
+        sources={"debt": source(), "debt_history": source()},
+        order=list(retrievals),
+        whole_history=split.whole_history,
+    )
+
+    assert issues == []
+    started = {step: shapes[step].shape.period.start for step in retrievals if step in shapes}
+    assert started == {"debt": 2015, "debt_history": 1990}
+    for step, operation in retrievals.items():
+        requested = by_id[operation.requirement_id]
+        assert isinstance(requested, DatasetRequirement)
+        pinned = _open_window(requested, whole_history=split.whole_history)
+        assert pinned == open_window(started[step])
+        assert retrieves_period(pinned, requested, first_year=split.whole_history.get(requested.id))
+        if requested.id in split.whole_history:
+            stated = open_window(requested.period.start)
+            assert not retrieves_period(
+                stated, requested, first_year=split.whole_history[requested.id]
+            )
+
+
 def test_a_rolling_filter_states_the_reference_on_its_period_threshold_alone(
     build: Compile, decision: DecisionFactory, requirement: RequirementFactory
 ) -> None:
@@ -348,11 +518,17 @@ def test_a_rolling_operation_resolves_the_shape_a_fixed_one_does(
             requirements={"annual_debt_service": requirement(period_end_open=rolling is not None)},
             sources={"debt": source()},
             order=["debt", "change"],
+            whole_history={},
         )
         assert reasons == []
-        return shapes["change"]
+        return shapes["change"].shape
 
-    assert resolved(LAST_FIVE) == resolved(None)
+    rolling, fixed = resolved(LAST_FIVE), resolved(None)
+
+    assert replace(rolling, drift=FIXED) == fixed
+    assert rolling.drift == PeriodDrift(
+        start=StartDrift.ANCHOR, start_offset=-5, end=EndDrift.ANCHOR, end_offset=0
+    )
 
 
 # --- The population ------------------------------------------------------------------
@@ -548,6 +724,56 @@ def test_a_place_level_filter_holds_the_population_to_that_level(
             }
         ]
     }
+
+
+def test_a_rolling_rank_over_a_strict_country_filter_holds_the_population_to_countries(
+    build: Compile, decision: DecisionFactory, source: SourceFactory
+) -> None:
+    # Every recipient's debt service, kept to the countries, ranked over the
+    # last five years. The strict level reaches the rank's population, which
+    # analysis-mcp's op-spec rule reads at compile time
+    # (`compiler.arguments.op_spec_errors`): a strict level names a level column.
+    every_recipient = source(
+        entities=(), open_entity_axes=(OpenEntityAxis(column="destination", member_count=134),)
+    )
+    debt = DatasetRequirement(
+        id="annual_debt_service",
+        decision_ids=["measure"],
+        measure="external debt service",
+        across=("recipient",),
+        period=Period(start=2015, end=2024),
+        period_end_open=True,
+    )
+    predicates = (PlaceLevel(level=PlaceType.COUNTRY, role="recipient", strict=True),)
+    countries_req = FilterRequirement(
+        id="countries",
+        decision_ids=["measure"],
+        input_id="annual_debt_service",
+        predicates=predicates,
+    )
+    countries = FilterOperation(
+        id="countries", requirement_id="countries", input="debt", predicates=predicates
+    )
+    ranked_req, ranked = _rank_pair(axis="recipient")
+    ranked_req = ranked_req.model_copy(update={"input_id": "countries"})
+    ranked = ranked.model_copy(update={"input": "countries"})
+
+    result = build(
+        [debt, countries_req, ranked_req],
+        [_retrieve(spec_id=every_recipient.spec_id), countries, ranked],
+        terminal=["ranked"],
+        decisions=[decision(), _population_decision(decision)],
+        discovered={"annual_debt_service": every_recipient},
+    )
+
+    assert _step(result, "ranked").args["rolling"]["population"] == [
+        {
+            "spec_id": every_recipient.spec_id,
+            "bindings": {},
+            "levels": {"destination_type": "Country"},
+            "strict_levels": ["destination_type"],
+        }
+    ]
 
 
 # --- Issues --------------------------------------------------------------------------
@@ -785,6 +1011,35 @@ def test_a_resolved_rank_and_filter_are_ones_analysis_mcp_accepts(
     ]
     assert rank_spec.rolling is not None and filter_spec.rolling is not None
     assert rank_spec.rolling.population == filter_spec.rolling.population
+
+
+def test_a_rank_of_the_newest_year_alone_is_a_call_analysis_mcp_accepts(
+    build: Compile,
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+) -> None:
+    # The input holds 2015-2024 and the window keeps one of them, so each
+    # entity has one row and the call states no aggregation.
+    newest = RollingWindow(
+        window_start=RelativePeriod(offset=0), window_end=RelativePeriod(offset=0)
+    )
+    ranked_req, ranked = _rank_pair(
+        reduction=None, window_start=2024, window_end=2024, rolling=newest
+    )
+    result = build(
+        [requirement(period_end_open=True), ranked_req],
+        [_retrieve(), ranked],
+        terminal=["ranked"],
+        decisions=[decision(), _population_decision(decision)],
+    )
+
+    step = _step(result, "ranked")
+    assert (step.args["window_start"], step.args["window_end"]) == ("2024", "2024")
+    assert "aggregation" not in step.args
+    arguments = _run_arguments(step, period="2025")
+    key = arguments.pop(ANCHOR_KEY_PARAMETER)
+    spec = with_anchor_key(RankOpSpec.model_validate(arguments), key)
+    assert (spec.window_start, spec.window_end, spec.aggregation) == ("2025", "2025", None)
 
 
 def test_a_compiled_rolling_step_alone_is_not_a_call_analysis_mcp_accepts(

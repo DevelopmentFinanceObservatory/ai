@@ -19,10 +19,10 @@ from dfo_frame_grammar.rolling import latest_anchor
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.wire import RetryMode
 
-# dfo-apis's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
+# The apis service's `MAX_SERIES_PER_COMPONENT`: the assembler refuses a component
 # whose selection's estimated series count (`_series_estimate`) exceeds this.
 MAX_SERIES_PER_COMPONENT = 24
-# The most rows dfo-apis's assembler draws in one table (`MAX_TABLE_ROWS` in
+# The most rows the apis service's assembler draws in one table (`MAX_TABLE_ROWS` in
 # dfo-data-tools' `assembler/limits.py`): series times periods.
 MAX_TABLE_ROWS = 2_000
 # The catalogue grammar's `maxItems` on a `line_chart` select's one array
@@ -31,7 +31,7 @@ MAX_TABLE_ROWS = 2_000
 LINE_CHART_MAX_VALUES = 8
 # Charts one make_charts call may draw.
 MAX_CHARTS_PER_CALL = 8
-# dfo-apis's `facet_dimension_names` (dfo-data-tools' `assembler/frame_view.py`):
+# The apis service's `facet_dimension_names` (dfo-data-tools' `assembler/frame_view.py`):
 # the facet columns a select may leave unbound. The platform refuses one only
 # when it splits a series, and its estimate counts an unbound facet as 1.
 _FACET_DIMENSIONS = frozenset({UNIT_COLUMN, *FACET_IDENTITY_COLUMNS})
@@ -58,7 +58,7 @@ def _plural_dimension_names(view: dict[str, Any]) -> set[str]:
 
 def periods_covered(view: Mapping[str, Any]) -> int:
     """The periods a table of a frame with `view` draws rows at: every period
-    from the first to the last the frame covers, gaps included, as dfo-apis
+    from the first to the last the frame covers, gaps included, as apis
     binds a table's window. A day counts as up to 31 a month, so the count
     errs high, never low. A span frame (`2020/2024`) has one period."""
     coverage = view.get("coverage") or []
@@ -117,7 +117,7 @@ def select_binding_ok(
     than one dimension; a `line_chart` array longer than
     `LINE_CHART_MAX_VALUES`; and for every other type, a select whose
     `_series_estimate` exceeds `MAX_SERIES_PER_COMPONENT` (24), the cap
-    dfo-apis's assembler enforces although the catalogue grammar's
+    the apis service's assembler enforces although the catalogue grammar's
     `maxItems` allows an array of 30. `table` may array more than one
     dimension; the catalogue grammar restricts the single-array-dimension
     rule to `line_chart` and `bar_chart`. A non-mapping `select`
@@ -333,7 +333,8 @@ class TopMembers:
     """The `members` of one dimension with the largest values at `period`,
     highest first, out of the `holding` compared members that hold a value
     there. `unvalued` are the compared members with no value at `period`, and
-    `other_kinds` counts the members left uncompared for their kind or level."""
+    `other_kinds` counts the members left uncompared as group totals, unallocated
+    amounts or members of another level."""
 
     members: list[str]
     period: str
@@ -366,7 +367,7 @@ def top_members(
     member's kind or type cell, only the ones one ranking compares
     (`comparable_members`). A member outside them does not move the period.
     Only a member holding a value at the period is ranked. Cells are compared
-    as dfo-apis spells them in a view and a select (`coordinate_text`).
+    as apis spells them in a view and a select (`coordinate_text`).
 
     Returns:
         None when there is nothing to rank honestly: no matching rows, rows
@@ -460,10 +461,36 @@ def _differing(matching: Sequence[Mapping[str, Any]], *, dimension: str) -> list
     return sorted(name for name in coordinates if len({row.get(name) for row in matching}) > 1)
 
 
+def latest_shared_period(
+    *, rows: Sequence[Mapping[str, Any]], select: dict[str, Any]
+) -> str | None:
+    """The latest period at which every series among `rows` matching `select`
+    holds a value, the period apis draws a bar chart or a stat card at when
+    its intent names no window; None when no rows match or the series share
+    no period. A series is the rows sharing every coordinate, and cells are
+    compared as apis spells them in a select (`coordinate_text`)."""
+    held: dict[tuple[tuple[str, Any], ...], set[str]] = {}
+    for row in rows:
+        keyed = {
+            name: cell if name in _NOT_COORDINATES else coordinate_text(cell)
+            for name, cell in row.items()
+        }
+        if keyed.get("value") is None or not all(
+            keyed.get(name) in value if isinstance(value, list) else keyed.get(name) == value
+            for name, value in select.items()
+        ):
+            continue
+        series = tuple(sorted((n, c) for n, c in keyed.items() if n not in _NOT_COORDINATES))
+        held.setdefault(series, set()).add(str(keyed["time_period"]))
+    shared = set.intersection(*held.values()) if held else set()
+    return max(shared, default=None)
+
+
 def comparable_members(cells: Mapping[str, str], *, dimension: str) -> frozenset[str]:
     """The members of `dimension` that one ranking compares, from each member's
     served kind or type cell (`common.place_type`): on a flow party role, the
-    members of kind `party`, so a group total such as the G7 is left out; on a
+    members of kind `party`, official and private alike, so a group total such
+    as the G7, a whole-population total and an unallocated residual are left out; on a
     place role, the members at the level in `PLACE_LEVELS` most of them sit
     at, so a World Bank aggregate or a region among countries is left out."""
     if dimension in PARTY_ROLES:
@@ -537,7 +564,7 @@ def _declared_dimensions(view: dict[str, Any]) -> dict[str, int]:
 
 
 def _series_estimate(*, select: dict[str, Any], declared: dict[str, int]) -> int:
-    """dfo-apis's own upper bound on the series `select` resolves to
+    """The apis service's own upper bound on the series `select` resolves to
     (`_check_series_estimate` in dfo-data-tools' `assembler/resolve.py`):
     the product, over every declared dimension, of the bound array's
     length, 1 for a single bound value or an unbound facet column, and

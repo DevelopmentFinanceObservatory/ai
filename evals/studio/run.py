@@ -111,8 +111,8 @@ async def _run_message_turn(
     resume protocol itself produces: once the turn's plan decisions are
     spent, a further plan card is a re-proposal the case did not ask for, so
     the runner declines it and the turn ends there. The last member maps each
-    elicitation's `interrupt_id` to the `{decision, payload}` the runner sent
-    for it: the wire carries the question but not the reply, and the judge
+    elicitation's `interrupt_id` to the `{decision, answers}` the runner sent
+    for it: the wire carries the questions but not the reply, and the judge
     needs both."""
     component_ref = None
     if "component_ref" in turn:
@@ -169,21 +169,18 @@ async def _run_message_turn(
                 )
                 break
             decision = plan_decisions.pop(0)
-            payload = turn.get("amend_note") if decision == "amend" else None
+            reply = {"payload": turn.get("amend_note") if decision == "amend" else None}
         else:
             decision = turn.get("elicitation_decision", "answer")
-            payload = None
+            reply = {"answers": None}
             if decision == "answer":
-                payload = turn.get("elicitation_text") or (pause.get("options") or [{}])[0].get(
-                    "id"
+                reply["answers"], miss = _elicitation_reply(
+                    pause, turn.get("elicitation_answers") or []
                 )
-                if payload is None:
-                    missed.append(
-                        "elicitation.request offered no options and the turn names no "
-                        "elicitation_text to answer it with"
-                    )
+                if miss:
+                    missed.append(miss)
                     break
-            answers[pause["interrupt_id"]] = {"decision": decision, "payload": payload}
+            answers[pause["interrupt_id"]] = {"decision": decision, **reply}
         resumes += 1
         segment = await _stream_frames(
             client,
@@ -193,12 +190,42 @@ async def _run_message_turn(
                 conversation_id,
                 interrupt_id=pause["interrupt_id"],
                 decision=decision,
-                payload=payload,
+                **reply,
             ),
         )
         violations += checks.check_segment(segment, label=f"resume stream {resumes}")
         frames += segment
     return frames, violations, missed, answers
+
+
+def _elicitation_reply(
+    pause: dict[str, Any], scripted: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """The `answers` the runner sends for an elicitation, and the miss that
+    stops it when it cannot answer. `scripted` is the turn's
+    `elicitation_answers`, one entry per question by position: `{"option": n}`
+    picks the question's nth option (from 1), `{"text": ...}` answers in the
+    user's words, `{"skipped": true}` leaves the question to the agent. A
+    question past the list gets its first option."""
+    reply: dict[str, dict[str, Any]] = {}
+    for position, question in enumerate(pause["questions"]):
+        entry = scripted[position] if position < len(scripted) else {"option": 1}
+        options = question.get("options") or []
+        if "text" in entry:
+            reply[question["id"]] = {"kind": "text", "text": entry["text"]}
+        elif entry.get("skipped"):
+            reply[question["id"]] = {"kind": "skipped"}
+        elif 0 < entry.get("option", 0) <= len(options):
+            reply[question["id"]] = {
+                "kind": "option",
+                "option_id": options[entry["option"] - 1]["id"],
+            }
+        else:
+            return reply, (
+                f"elicitation.request question {position + 1} offers {len(options)} option(s) "
+                f"and the turn answers it with {entry!r}"
+            )
+    return reply, None
 
 
 async def _run_mutate_turn(
@@ -233,11 +260,10 @@ async def _run_mutate_turn(
     return {"status": response.status_code, "manifest": manifest, "error_body": body}
 
 
-def _canvas_series(before: Sequence[dict[str, Any]]) -> set[str]:
-    """The ids of the series the cards on the canvas drew after the frames
-    `before`, as `make_charts` reads the canvas as a turn begins: every
-    series of each card the last `composition.updated` holds, read from that
-    card's newest frame with a payload."""
+def _canvas_cards(before: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The cards on the canvas after the frames `before`, as `make_charts`
+    reads the canvas: each card the last `composition.updated` holds, by its
+    id, as that card's newest frame with a payload."""
     drawn: dict[str, dict[str, Any]] = {}
     composed: list[str] = []
     for frame in before:
@@ -245,13 +271,27 @@ def _canvas_series(before: Sequence[dict[str, Any]]) -> set[str]:
             drawn[frame["component_id"]] = frame
         elif frame["event"] == "composition.updated":
             composed = [block["component_id"] for block in frame["manifest"]["blocks"]]
-    return {
-        one.id
-        for component_id in composed
-        if component_id in drawn
-        for one in checks.reply_card(drawn[component_id]).series
-        if one.id
-    }
+    return {component_id: drawn[component_id] for component_id in composed if component_id in drawn}
+
+
+def _turn_cards(frames: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cards a turn's `frames` created or revised, in the order first
+    seen, each as its newest frame with a payload, so a card revised in the
+    turn is read at the revision the reply sees."""
+    cards: list[dict[str, Any]] = []
+    at: dict[str, int] = {}
+    for frame in frames:
+        revised = frame["event"] == "component.revised" and "payload" in frame
+        if frame["event"] != "component.created" and not revised:
+            continue
+        component_id = frame.get("component_id")
+        if component_id in at:
+            cards[at[component_id]] = frame
+            continue
+        if component_id is not None:
+            at[component_id] = len(cards)
+        cards.append(frame)
+    return cards
 
 
 def _reply_faults(
@@ -261,8 +301,10 @@ def _reply_faults(
     before: Sequence[dict[str, Any]] = (),
 ) -> tuple[list[checks.ReplyFault], list[checks.ReplyCard], set[float]]:
     """The faults of the closing message of the last of `turns` against the
-    cards that turn drew (`checks.check_reply`), those cards, and the values
-    they gave the reply to state (`checks.stated_values`).
+    cards that turn drew or revised (`_turn_cards`) and the cards on the
+    canvas as it began (`checks.check_reply`), those cards, and the values
+    they gave the reply to state (`checks.stated_values`). A turn reads a card on the canvas
+    again by asking `make_charts` for it, which draws nothing.
 
     The stream carries no tool result, so a card's figures are read from
     the card. Under a `reply` expectation they are what a card gives unasked,
@@ -270,18 +312,25 @@ def _reply_faults(
     expectation they are any point the card draws, since nothing says which
     the model was given, and such a point grounds where the message states
     it beside its own series and year. A card whose every series was on the
-    canvas as the turn began (`_canvas_series` of `before`, the frames of
+    canvas as the turn began (`_canvas_cards` of `before`, the frames of
     the turns before and the canvas each mutation left) is a redraw, which
-    states nothing.
+    states nothing unasked.
     """
     expect = turn.get("expect", {}).get("reply")
     if expect is not None and checks.reply_expect_problems(expect):
         expect = None
-    on_canvas = _canvas_series(before)
+    held = _canvas_cards(before)
+    on_canvas = {
+        one.id for frame in held.values() for one in checks.reply_card(frame).series if one.id
+    }
+    drawn = _turn_cards(turns[-1])
+    ids = {frame.get("component_id") for frame in drawn}
     cards = [
-        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None)
-        for frame in turns[-1]
-        if frame["event"] == "component.created"
+        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None) for frame in drawn
+    ] + [
+        checks.reply_card(frame, on_canvas=on_canvas, any_point=expect is None, held=True)
+        for component_id, frame in held.items()
+        if component_id not in ids
     ]
     message = "\n".join(f["text"] for f in turns[-1] if f["event"] == "message.complete")
     states = expect["states"] if expect else []
@@ -409,7 +458,7 @@ TURN_EXPECT_KEYS: dict[str, frozenset[str] | None] = {
     "blocks": None,
     "activity_steps": None,
     "step_tools": None,
-    "elicitation": frozenset({"min_options", "allow_free_text", "skippable"}),
+    "elicitation": frozenset({"min_questions", "min_options", "allow_free_text", "skippable"}),
     "plan": frozenset({"min_steps", "min_version", "max_version", "operations_contain"}),
     "no_plan": None,
     "card_title_contains": None,
@@ -589,16 +638,33 @@ def _check_turn_expectations(
             violations.append(f"{label}: expected an elicitation.request, saw none")
         else:
             pause, rules = pauses[0], expect["elicitation"]
-            if rules.get("min_options") and len(pause.get("options") or []) < rules["min_options"]:
+            questions = pause.get("questions") or []
+            if rules.get("min_questions") and len(questions) < rules["min_questions"]:
                 violations.append(
-                    f"{label}: elicitation has {len(pause.get('options') or [])} "
-                    f"options, expected >= {rules['min_options']}"
+                    f"{label}: elicitation asks {len(questions)} question(s), "
+                    f"expected >= {rules['min_questions']}"
                 )
-            violations.extend(
-                f"{label}: elicitation {flag}={pause.get(flag)}, expected {rules[flag]}"
-                for flag in ("allow_free_text", "skippable")
-                if flag in rules and bool(pause.get(flag)) is not rules[flag]
-            )
+            for position, question in enumerate(questions, start=1):
+                offered = len(question.get("options") or [])
+                if rules.get("min_options") and offered < rules["min_options"]:
+                    violations.append(
+                        f"{label}: elicitation question {position} has {offered} "
+                        f"options, expected >= {rules['min_options']}"
+                    )
+                if (
+                    "allow_free_text" in rules
+                    and bool(question.get("allow_free_text")) is not rules["allow_free_text"]
+                ):
+                    violations.append(
+                        f"{label}: elicitation question {position} "
+                        f"allow_free_text={question.get('allow_free_text')}, "
+                        f"expected {rules['allow_free_text']}"
+                    )
+            if "skippable" in rules and bool(pause.get("skippable")) is not rules["skippable"]:
+                violations.append(
+                    f"{label}: elicitation skippable={pause.get('skippable')}, "
+                    f"expected {rules['skippable']}"
+                )
     if expect.get("no_plan"):
         proposed = sum(1 for f in frames if f["event"] == "plan.proposed")
         if proposed:
@@ -721,25 +787,40 @@ Rules:
 
 
 def _elicitation_digest(frame: dict[str, Any], reply: dict[str, Any] | None) -> dict[str, Any]:
-    """A question the agent put to the user, its options by label, and what
-    the runner sent back (`None` when the turn ended unanswered). An option id
-    in the reply reads as that option's label; free text reads as itself."""
-    options = frame.get("options") or []
-    labels = {option["id"]: option["label"] for option in options}
-    if reply is None:
-        answer = None
-    elif reply["decision"] == "answer":
-        answer = labels.get(reply["payload"], reply["payload"])
-    else:
-        answer = reply["decision"]
-    return {
-        "question": frame["question"],
-        "options": [
-            {"label": option["label"], "description": option.get("description")}
-            for option in options
-        ],
-        "answer": answer,
-    }
+    """The questions the agent put to the user in one pause, each with its
+    options by label and the answer the runner sent: an option reads as its
+    label, free text as itself, a skipped question as "left to the agent".
+    The answer is `None` when the turn ended unanswered and "skip" when the
+    runner dismissed the whole pause."""
+    sent = (reply or {}).get("answers") or {}
+    asked = []
+    for question in frame.get("questions") or []:
+        options = question.get("options") or []
+        labels = {option["id"]: option["label"] for option in options}
+        answer = sent.get(question["id"])
+        if reply is None:
+            shown = None
+        elif reply["decision"] != "answer":
+            shown = reply["decision"]
+        elif answer is None:
+            shown = None
+        elif answer["kind"] == "option":
+            shown = labels.get(answer["option_id"], answer["option_id"])
+        elif answer["kind"] == "text":
+            shown = answer["text"]
+        else:
+            shown = "left to the agent"
+        asked.append(
+            {
+                "question": question["question"],
+                "options": [
+                    {"label": option["label"], "description": option.get("description")}
+                    for option in options
+                ],
+                "answer": shown,
+            }
+        )
+    return {"questions": asked}
 
 
 def _turn_digest(

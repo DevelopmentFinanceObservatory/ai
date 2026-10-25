@@ -28,7 +28,7 @@ def extract_frame_ref(
     """Read a frame reference from `structured_content` the way `extract` says to.
 
     `get_data`'s result is a definition manifest with the frame's reference beside
-    it as `frame_ref`. The manifest's own pair names dfo-apis' materialisation, and
+    it as `frame_ref`. The manifest's own pair names apis' materialisation, and
     a frame minted with extra columns is held under a `content_version` of its own
     (`data_mcp.frame_materialisation.frame_ref_for`), so the reference later steps
     read is `frame_ref`. `manifest_frame_ref` reads the manifest's own pair.
@@ -59,9 +59,9 @@ def extract_frame_ref(
 def manifest_frame_ref(structured_content: Mapping[str, object]) -> FrameRef:
     """The manifest's own `{spec_id, content_version}` in `get_data`'s result.
 
-    dfo-apis serves the frame under this pair, so it is the pair a retrieval is
+    apis serves the frame under this pair, so it is the pair a retrieval is
     described and drawn by. A frame minted with extra columns is held by data-mcp
-    under a `content_version` of its own (`extract_frame_ref`), which dfo-apis
+    under a `content_version` of its own (`extract_frame_ref`), which apis
     never minted and does not serve.
 
     Raises:
@@ -123,19 +123,29 @@ def declared_shape(
     )
 
 
-def declared_dropped_key_count(structured_content: Mapping[str, object] | None) -> int:
-    """How many keys a successful call declared it left out of its result
-    (`analysis_mcp.result.VerbResult.dropped_key_count`): the numerator keys
-    a keyed `quotient_of` found no denominator for.
+def declared_dropped_key_counts(
+    structured_content: Mapping[str, object] | None,
+) -> tuple[int, int]:
+    """How many keys of its first and of its second input a successful call
+    declared it left out of its result
+    (`analysis_mcp.result.VerbResult.dropped_key_count` and
+    `right_dropped_key_count`): the numerator keys a keyed `quotient_of` or
+    `share_of` found nothing to divide by, and the entities of each side of
+    a `join` that matched in no period.
 
-    0 when the content carries no count, as `get_data`'s manifest never does,
-    and when the member is not a count, read the way `declared_shape` reads a
-    malformed `stat_var_count` as absent.
+    0 for a count the content does not carry, as `get_data`'s manifest
+    carries neither, and for a member that is not a count, read the way
+    `declared_shape` reads a malformed `stat_var_count` as absent.
     """
-    count = (structured_content or {}).get("dropped_key_count")
-    if isinstance(count, bool) or not isinstance(count, int):
-        return 0
-    return max(count, 0)
+    content = structured_content or {}
+
+    def count(member: str) -> int:
+        value = content.get(member)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 0
+        return max(value, 0)
+
+    return count("dropped_key_count"), count("right_dropped_key_count")
 
 
 def declared_ranked_before_limit(structured_content: Mapping[str, object] | None) -> int | None:

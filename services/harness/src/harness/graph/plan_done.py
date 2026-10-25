@@ -9,7 +9,6 @@ import re
 from collections.abc import (
     AsyncIterator,
     Callable,
-    Collection,
     Mapping,
 )
 from dataclasses import dataclass, field
@@ -24,9 +23,10 @@ from google.adk import Context
 from planner.plan import (
     Plan,
     SessionState,
+    authored_text,
+    copy_origins,
     load_asks,
 )
-from planner.workflow import Workflow as PlanWorkflow
 
 from harness import plan_display
 from harness.chart_binding import MAX_SERIES_PER_COMPONENT
@@ -254,32 +254,36 @@ def _ask_status(
     ask: PlanAsk,
     ran: Mapping[str, dict[str, Any]],
     failed: Mapping[str, Any] | None,
-    stopped: Collection[str],
+    stopped: Mapping[str, str],
 ) -> dict[str, Any]:
     """One ask as `plan_done` reports it: declined, with the plain reason, or
     each step answering it with its status, and for an ask answered in part
     the part not computed with its reason. `ran` holds each final step that
     produced a frame. `data` and `empty` name the frame, and `empty` means it
     holds no series. `not_chartable` gives the reason no view was prepared.
-    A step outside `ran` is `failed` when it is in `stopped` (the failed step
-    and every step whose inputs trace back to it, `_stopped_steps`), naming
-    the failed step (`failed_at`) and its refusal `code`, and `not_run`
+    A step outside `ran` is `failed` when it is in `stopped` (each step the
+    stop stopped, mapped to the step it landed on, `_stop_causes`), naming
+    that step (`failed_at`) and the refusal `code`, and `not_run`
     otherwise: a step the run never reached, or a derived step whose frame
     is withheld because it is not published (`presentable_steps`), as on a
     stopped run or one whose publication is unfinished."""
     if ask.declined is not None and not ask.outputs:
         return {"ask": ask.ask, "declined": DECLINE_REASONS[ask.declined]}
-    failure = {"status": "failed"}
-    if failed is not None:
-        failure["failed_at"] = str(failed.get("step_id"))
-        if failed.get("code"):
-            failure["code"] = str(failed["code"])
+
+    def failure(step: str) -> dict[str, str]:
+        entry = {"status": "failed"}
+        if failed is not None:
+            entry["failed_at"] = stopped[step]
+            if failed.get("code"):
+                entry["code"] = str(failed["code"])
+        return entry
+
     status: dict[str, Any] = {
         "ask": ask.ask,
         "answered_by": [
             {
                 "step": step,
-                **ran.get(step, failure if step in stopped else {"status": "not_run"}),
+                **ran.get(step, failure(step) if step in stopped else {"status": "not_run"}),
             }
             for step in ask.outputs
         ],
@@ -352,16 +356,91 @@ def _partial_result(asks: list[dict[str, Any]] | None, *, frames: bool) -> str:
     return " ".join(sentences) or "Its result is not available."
 
 
-def _stopped_steps(workflow: PlanWorkflow | None, failed_step: str | None) -> set[str]:
-    """`failed_step` and every step of `workflow` whose bindings trace back to
-    it. Steps are in run order, so one pass sees each step's inputs first."""
-    if failed_step is None:
-        return set()
-    stopped = {failed_step}
-    for step in workflow.steps if workflow is not None else ():
-        if any(binding.from_step in stopped for binding in step.bindings.values()):
-            stopped.add(step.id)
-    return stopped
+# The fields of a run's report that name a step or a requirement, or carry
+# prose about them, at any depth. Inside a tool's `fix` that maps `remedy`,
+# `detail` and a nested refusal's `message`. Every other field (a spec_id, a
+# frame reference, a candidate source, the rest of `fix`) holds refs the
+# split never renames.
+_AUTHORED_FIELDS = frozenset({"step_id", "requirement_id", "detail", "message", "remedy"})
+
+
+def authored_report(report: Any, plan: Plan) -> Any:
+    """`report`, part of what a run of `plan` reports, with each copy named by the requirement it copies.
+
+    A run executes `plan` as stored, beside the copies the split of
+    whole-history reads added (`Plan.rolling_copies`), so a stop names a
+    copy's step and requirement, which exist only in the stored plan. Each
+    string under a field in `_AUTHORED_FIELDS`, at any depth, reads through
+    `planner.plan.authored_text`; every other string is kept as it is. What
+    `execute` hands the planner reads through this, and the failure
+    `plan_done` hands the orchestrator reads through `shown_failure`. The
+    run's outcome, and the `failed_step` `execute` hands `plan_done`, keep
+    the copy's ids, which the run's lineage and `_stop_causes` look steps
+    up by.
+    """
+    if not plan.rolling_copies:
+        return report
+    return _authored(report, copy_origins(plan.rolling_copies))
+
+
+def _authored(value: Any, origins: Mapping[str, str], *, names: bool = False) -> Any:
+    if isinstance(value, str):
+        return authored_text(value, origins) if names else value
+    if isinstance(value, list):
+        return [_authored(item, origins, names=names) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _authored(item, origins, names=key in _AUTHORED_FIELDS)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _stop_causes(plan: Plan, step_id: str | None) -> dict[str, str]:
+    """Each step of `plan` a stop at `step_id` stopped, mapped to the step the model wrote that the stop landed on.
+
+    The stopped steps are `step_id` and every step whose bindings trace back
+    to it. The stop lands on `step_id` when the model wrote it. A copy the
+    split added is not shown (`plan_display.shown_plan`), so a stop on one
+    lands on each shown step that reads it through copies only: one per
+    rolling reader of the copy, whose results the stop withholds. The copy's
+    origin ran on its own pin and is not among them. Every other stopped
+    shown step maps to the step its first stopped input landed on, and a
+    stopped copy maps to nothing and is left out. Steps are in run order, so
+    one pass sees each step's inputs first, and the result keeps that order.
+    """
+    if step_id is None:
+        return {}
+    steps = plan.workflow.steps if plan.workflow is not None else ()
+    hidden: set[str] = set()
+    if plan.rolling_copies:
+        shown = plan_display.shown_plan(plan).workflow
+        kept = {step.id for step in shown.steps} if shown is not None else set()
+        hidden = {step.id for step in steps} - kept
+    landed: dict[str, str | None] = {step_id: None if step_id in hidden else step_id}
+    for step in steps:
+        inputs = [b.from_step for b in step.bindings.values() if b.from_step in landed]
+        if step.id in landed or not inputs:
+            continue
+        cause = next((landed[i] for i in inputs if landed[i] is not None), None)
+        landed[step.id] = cause if cause is not None or step.id in hidden else step.id
+    return {step: cause for step, cause in landed.items() if cause is not None}
+
+
+def shown_failure(
+    failed: Mapping[str, Any] | None, plan: Plan, stopped: Mapping[str, str]
+) -> dict[str, Any] | None:
+    """`failed`, a run's `failed_step`, as the orchestrator and the user read it.
+
+    Its `step_id` is the first step, in run order, the stop landed on
+    (`_stop_causes`, given as `stopped`), or its own where it landed on
+    none, and its prose names each copy by the requirement it copies
+    (`authored_report`).
+    """
+    if failed is None:
+        return None
+    landed = next((step for step, cause in stopped.items() if step == cause), None)
+    return {**authored_report(failed, plan), "step_id": landed or failed.get("step_id")}
 
 
 # Closed vocabulary for a describe_frame refusal, bucketed by retry_mode so
@@ -499,6 +578,7 @@ def record_plan(
     plan: Plan,
     *,
     failed: Mapping[str, Any] | None = None,
+    stopped: Mapping[str, str] | None = None,
     run_id: str | None = None,
 ) -> PlanRecord:
     """Record `plan` as run this turn, and return its record.
@@ -508,26 +588,32 @@ def record_plan(
     turn, so the next turn can recall it and keep the spec blocks of the
     sources it used. Each step's StatVar reading joins
     `ORCHESTRATOR_READINGS_KEY`, so `fetch` reads such a spec the way the
-    plan did. A `failed` step refused with `capability_unavailable` marks its
-    spec_id unavailable to `fetch` for the rest of the turn. The record names
-    every source by spec_id, so the agent can fetch a part a failure did not
-    touch without searching again. `run_id` is the run the plan executed as,
-    which a later turn reads the record's status from.
+    plan did. `failed` is the run's `failed_step` as `execute` hands it,
+    naming the step that failed, a copy the split added included. Refused
+    with `capability_unavailable`, it marks that step's own spec_id
+    unavailable to `fetch` for the rest of the turn. `stopped` maps each step
+    the stop stopped to the step it landed on (`_stop_causes`, read off
+    `failed` when not given), and the record marks failed each step it
+    landed on. The record names every source
+    by spec_id, so the agent can fetch a part a failure did not touch
+    without searching again. `run_id` is the run the plan executed as, which
+    a later turn reads the record's status from.
     """
-    missing_capability = _missing_capability(failed)
     readings = dict(state.get(ORCHESTRATOR_READINGS_KEY) or {})
     unavailable = dict(state.get(ORCHESTRATOR_UNAVAILABLE_KEY) or {})
     for row in plan_display.step_rows(plan):
         args = cast("dict[str, Any]", row["args"])
         if args.get("spec_id") and args.get("stat_vars"):
             readings[args["spec_id"]] = args["stat_vars"]
-        if (
-            failed is not None
-            and missing_capability
-            and args.get("spec_id")
-            and row["id"] == failed.get("step_id")
-        ):
-            unavailable[args["spec_id"]] = str(failed.get("message") or "")
+    failed_step = failed.get("step_id") if failed is not None else None
+    if stopped is None:
+        stopped = _stop_causes(plan, failed_step)
+    if failed is not None and _missing_capability(failed) and plan.workflow is not None:
+        for step in plan.workflow.steps:
+            if step.id == failed_step and step.args.get("spec_id"):
+                unavailable[str(step.args["spec_id"])] = str(
+                    authored_report(failed, plan).get("message") or ""
+                )
     state[ORCHESTRATOR_READINGS_KEY] = readings
     state[ORCHESTRATOR_UNAVAILABLE_KEY] = unavailable
     plan_record = PlanRecord.from_plan(
@@ -538,7 +624,7 @@ def record_plan(
             *(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
             *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("spec_ids", []),
         },
-        failed_step=failed.get("step_id") if failed else None,
+        failed_steps=frozenset(stopped.values()),
         run_id=run_id,
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
@@ -673,12 +759,17 @@ def plan_done_node(
         record = ""
         plan = readable_plan(ctx, ctx.state.get("plan"))
         if plan is not None:
+            stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(
-                ctx.state, plan, failed=failed, run_id=run.get("run_id") if run else None
+                ctx.state,
+                plan,
+                failed=failed,
+                stopped=stopped,
+                run_id=run.get("run_id") if run else None,
             )
+            failed = shown_failure(failed, plan, stopped)
             record = "\n" + plan_record.render(budget=_PLAN_RECORD_CHARS)
             if plan_record.asks and not unrecorded:
-                stopped = _stopped_steps(plan.workflow, failed.get("step_id") if failed else None)
                 asks = [_ask_status(ask, ran, failed, stopped) for ask in plan_record.asks]
         if (failed or unfinished) and asks:
             asks = [

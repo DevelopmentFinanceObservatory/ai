@@ -1,34 +1,40 @@
 {
   "answers": [
-    "3bda4d8f9ff7a016",
     "4929055c98d5bbb5",
-    "83076d57407729d3",
-    "e7e3c48d56e3d761",
-    "f279c775491b5692"
+    "a25aed12b2ed890f",
+    "bdbdc1988f8c7afc",
+    "c2ffed250abb8895",
+    "caaba48996d56166"
   ],
-  "dfo_apis_url": "https://dfo-dev-apis-zms5lj4zhq-nn.a.run.app",
-  "recorded_at": "2026-10-12T05:57:04+00:00",
+  "dfo_apis_url": "http://localhost:8083",
+  "recorded_at": "2026-10-24T09:34:39+00:00",
   "schema": 2,
   "searches": [
     {
       "envelope": {
         "diagnostics": {
-          "engine_build": "3c49570945bd107f0484c1a16044d714410b1e25",
+          "engine_build": "a6d8b2b706e3debb2e21c2d31f62cc3786253d07",
           "llm_usage": {
             "cached_tokens": 0,
-            "input_tokens": 2288,
-            "output_tokens": 155
+            "input_tokens": 0,
+            "jev_input_tokens": 2946,
+            "jev_output_tokens": 552,
+            "output_tokens": 0
           },
           "timed_out": false,
           "timing_ms": {
-            "total": 1981
+            "by_step": {
+              "coverage": 0
+            },
+            "total": 389
           },
-          "trace_id": "16081cb3f6eb4bddad3e3ac14b268684",
+          "trace_id": "ff31c6d775c3411a9467b81356e18fc1",
           "warnings": []
         },
         "kind": "resolution",
         "parts": [
           {
+            "assumptions": [],
             "departures": [],
             "operations": [],
             "restatement": {
@@ -279,7 +285,7 @@
                   }
                 ],
                 "available_at_place": true,
-                "confidence": "medium",
+                "confidence": "high",
                 "coverage": {
                   "dimensions": [
                     {
@@ -304,7 +310,7 @@
                     "start_year": 2023
                   }
                 },
-                "coverage_stamp": "75f0dd0656b52cc6014f68e85c4ee297",
+                "coverage_stamp": "a96c17447553d3838f26ba0be30e0b3ddbd9f9620c086aa63cae5e36a47751e0",
                 "download": {
                   "licence": {
                     "label": "OECD Terms and Conditions"
@@ -368,6 +374,7 @@
                       "id": "dfo",
                       "label": "Development Finance Observatory"
                     },
+                    "documentation": "/api/graph/documentation/provenance/OECDDAC1",
                     "label": "OECD DAC1",
                     "ref": "provenance/OECDDAC1",
                     "source": {
@@ -902,7 +909,7 @@
                   "served_count": 1
                 },
                 "trace": {
-                  "capability_version": "cap_daf889452657d56d",
+                  "capability_version": "cap_94e25737d859392c",
                   "default_reading": {
                     "applied": true,
                     "removed_stat_vars": []
@@ -937,6 +944,7 @@
                         "id": "dfo",
                         "label": "Development Finance Observatory"
                       },
+                      "documentation": "/api/graph/documentation/provenance/OECDDAC1",
                       "label": "OECD DAC1",
                       "ref": "provenance/OECDDAC1",
                       "source": {
@@ -2758,7 +2766,7 @@
                       "noun": "Trinidad and Tobago dollars"
                     },
                     {
-                      "base_year_max": 2024,
+                      "base_year_max": 2025,
                       "base_year_min": 2023,
                       "code": "TWD",
                       "constant_years": {
@@ -2766,7 +2774,7 @@
                         "start_year": 2023
                       },
                       "current_years": {
-                        "end_year": 2024,
+                        "end_year": 2025,
                         "start_year": 2023
                       },
                       "noun": "New Taiwan dollars"
@@ -3008,14 +3016,30 @@
             "status": "definite",
             "timing_ms": {
               "by_step": {
-                "answer": 11,
-                "bind": 990,
-                "materialise": 117,
-                "options": 6,
+                "answer": 8,
+                "bind": 82,
+                "materialise": 10,
+                "options": 5,
+                "phase_bind": 12,
+                "phase_check_entities": 0,
+                "phase_derive_shapes": 0,
+                "phase_facet_requests": 0,
+                "phase_materialise": 0,
+                "phase_outcome": 35,
+                "phase_place_bindings": 2,
+                "phase_prune_and_rank": 0,
+                "phase_resolve_places": 0,
+                "phase_settle": 12,
                 "recall": 1,
-                "shape": 787
+                "shape": 220,
+                "shape_admission": 0,
+                "shape_arcs": 1,
+                "shape_groups": 2,
+                "shape_labels": 0,
+                "shape_probe": 115,
+                "shape_probe_coverage": 6
               },
-              "total": 1912
+              "total": 387
             },
             "variable_text": "ODA",
             "warnings": []
@@ -3207,7 +3231,7 @@
         ],
         "skills": {
           "oda-dac1": {
-            "content_version": "sha256:b9dc0317d230b1377e6fc9dfaec27dc6d9df63b50c6f4f12c8f7047e4eb11ed6",
+            "content_version": "sha256:546b7e59fad41cd75e79864bd8c3bc4603015c4e0547c98bb8991511ce10f794",
             "description": "Context for working with the OECD DAC1 table, the donor-level totals of ODA, OOF, export credits and private flows by aid type. Covers who reports, the flow types (grant equivalent, net and gross disbursements, commitments) and price bases, what the ODA total includes (in-donor costs and core multilateral contributions), private sector instruments, ODA/GNI, and the double-counting traps with donor aggregates, EU Institutions, nested aid-type lines and memo items. Load once DAC1 has been chosen for an analysis, or when working with DAC1 figures. For choosing between DAC datasets, use oda-dataset-selection.",
             "id": "oda-dac1",
             "name": "oda-dac1"
@@ -3231,5 +3255,9 @@
       "raw_text": false
     }
   ],
-  "task": "growth-decline-german-oda"
+  "task": "growth-decline-german-oda",
+  "translation": {
+    "answers": [],
+    "resolved": {}
+  }
 }

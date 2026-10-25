@@ -94,9 +94,11 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     block bare; an envelope of two or more parts labels each block by its
     `variable_text`. A definite block also names the measure Search elected
     and each sibling measure's own spec_id (`_measure_choice_line`).
-    `envelope["status"] == "mixed"` (the parts disagree) is stated as a
-    leading line. A part whose ask named sources ends its block with one line
-    saying which it asked for and which it excluded (`_sources_line`). Each
+    A mixed envelope leads with Search's "Answered 2 of 3 parts.", the text of
+    its `sentence_plan` tokens of segment `coverage` (`_answered_line`); an
+    envelope with none has no leading line. A part whose ask named
+    sources ends its block with one line saying which it asked for and
+    which it excluded (`_sources_line`). Each
     part's own warnings render inside its block, though a refused part
     (`_is_refusal`) limits its warnings to those about the caller's own
     input. The skills the envelope's specs name render next, each with its
@@ -116,13 +118,21 @@ def render_digest(envelope: Mapping[str, Any]) -> str:
     multi = len(parts) > 1
     blocks = [_render_part(index, part, multi=multi) for index, part in enumerate(parts)]
     sections = list(blocks)
-    if envelope.get("status") == "mixed":
-        sections.insert(0, "Mixed outcome: the parts below differ in status.")
+    if answered := _answered_line(envelope):
+        sections.insert(0, answered)
     skills = _skills_section(envelope)
     if skills is not None:
         sections.append(skills)
     trailer = [_warning_line(warning) for warning in _diagnostics_warnings(envelope)]
     return "\n\n".join([*sections, *trailer]) if trailer else "\n\n".join(sections)
+
+
+def _answered_line(envelope: Mapping[str, Any]) -> str | None:
+    """The text of the envelope sentence's `coverage` tokens, the "Answered N of M parts."
+    the Search API opens a mixed resolution with, or None when it sends none."""
+    plan = envelope.get("sentence_plan") or []
+    text = "".join(token.get("text", "") for token in plan if token.get("segment") == "coverage")
+    return text.strip() or None
 
 
 def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:

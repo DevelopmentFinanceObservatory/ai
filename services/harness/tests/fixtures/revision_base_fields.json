@@ -172,6 +172,10 @@
     "input_id",
     "predicates"
   ],
+  "planner.plan.FirstYear": [
+    "requirement_id",
+    "year"
+  ],
   "planner.plan.GrowthRequirement": [
     "kind",
     "id",
@@ -187,6 +191,11 @@
     "decision_ids",
     "left_id",
     "right_id"
+  ],
+  "planner.plan.PeriodLicence": [
+    "step_id",
+    "step_kind",
+    "reduction"
   ],
   "planner.plan.Plan": [
     "question",
@@ -225,6 +234,10 @@
   "planner.plan.RequirementSide": [
     "input_id",
     "entity"
+  ],
+  "planner.plan.RollingCopy": [
+    "copy_id",
+    "origin_id"
   ],
   "planner.plan.ShareOfRequirement": [
     "kind",
@@ -289,6 +302,11 @@
   "planner.records.RollingWindow": [
     "window_start",
     "window_end"
+  ],
+  "planner.records.SeriesEntity": [
+    "role",
+    "ref",
+    "label"
   ],
   "planner.records.ValueThreshold": [
     "kind",

@@ -38,6 +38,7 @@
     "distinction": "Africa named alone is one recipient with its own DAC2a series, so nothing is summed over African countries"
   },
   "unit_asked": true,
+  "period_reduction": "none",
   "reference_payload": {
     "question": "France's gross disbursements of official development assistance to Africa from 1960 to 2024 in current US dollars",
     "answer_mode": "series",

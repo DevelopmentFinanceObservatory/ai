@@ -137,6 +137,7 @@ async def store_result_and_render(
     digest: Callable[[], str],
     step: Step | None = None,
     dropped_key_count: int = 0,
+    right_dropped_key_count: int = 0,
     ranked_before_limit: int | None = None,
 ) -> ToolResult:
     """Store `frame`/`trace` under the pair identity `trace` already carries
@@ -164,8 +165,10 @@ async def store_result_and_render(
     -- `role_keys`/`stat_var_count` read off `frame` itself via
     `observed_shape`, so the payload matches `result.VERB_OUTPUT_SCHEMA`,
     the schema `server._register` declares at each verb's registration site.
-    `dropped_key_count` is the number of keys the verb left out of `frame`,
-    which `frame` cannot state; only a keyed `quotient_of` passes one.
+    `dropped_key_count` and `right_dropped_key_count` are the numbers of
+    the first and second inputs' keys the verb left out of `frame`, which
+    `frame` cannot state. A keyed `quotient_of` or `share_of` passes the
+    first, a `join` both.
     `ranked_before_limit` is how many entries a limited `rank` ranked before
     its limit cut them, which `frame` cannot state. Only `rank` passes one.
     """
@@ -188,6 +191,7 @@ async def store_result_and_render(
         role_keys=role_keys,
         stat_var_count=stat_var_count,
         dropped_key_count=dropped_key_count,
+        right_dropped_key_count=right_dropped_key_count,
         ranked_before_limit=ranked_before_limit,
         exclusions=trace.exclusions,
         time=trace.time,

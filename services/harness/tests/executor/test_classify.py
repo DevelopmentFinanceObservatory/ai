@@ -150,7 +150,7 @@ def test_every_placed_code_round_trips_through_tool_failure(code: str) -> None:
         ({"code": "role_ambiguous", "retry_mode": "correct_and_retry"}, Disposition.STOP),
         ({"code": "frame_not_held", "retry_mode": "correct_and_retry"}, Disposition.STOP),
         ({"code": "internal_error", "retry_mode": "do_not_retry"}, Disposition.STOP),
-        # dfo-apis cannot sum the family `get_data` asked to sum. It stops by
+        # apis cannot sum the family `get_data` asked to sum. It stops by
         # its code too, whatever mode it arrives under: reading the family
         # separately is a different plan.
         ({"code": "rollup_not_summable", "retry_mode": "do_not_retry"}, Disposition.STOP),
@@ -283,7 +283,7 @@ def test_a_refusal_is_retried_referred_or_stopped_on_by_its_mode_and_code(
     assert classify_refusal(parse_tool_failure(payload)) is expected
 
 
-# One row ceiling as dfo-apis reports it: refused inline by the mint door, and as a
+# One row ceiling as apis reports it: refused inline by the mint door, and as a
 # failed operation whose poll carries the stored refusal's ceiling fields.
 _ROW_CEILING_DETAIL = (
     "materialised coverage of 120000 rows exceeds the sync materialisation ceiling of 100000 rows"
@@ -302,7 +302,7 @@ _OVER_CEILING_CAUSE = {"cause": {"code": "over_ceiling", "entities": [], "trunca
             _ROW_CEILING_FIELDS | _OVER_CEILING_CAUSE,
             Disposition.METHOD_CHOICE,
         ),
-        # An operation failed before dfo-apis stored its refusal names the code alone.
+        # An operation failed before apis stored its refusal names the code alone.
         (500, "operation_failed", _OVER_CEILING_CAUSE, Disposition.STOP),
     ],
     ids=["inline", "operation", "operation-without-stored-refusal"],
@@ -423,6 +423,11 @@ def _failure(**overrides: object) -> ToolFailure:
         # No year is held by half of the series: a fact of the data.
         (
             {"code": "rolling_anchor_unresolved", "fix": {"detail": "no_qualifying_period"}},
+            False,
+        ),
+        # The two sides of a pairing name no entity in common: a fact of the data.
+        (
+            {"code": "rolling_anchor_unresolved", "fix": {"detail": "pairing_shares_no_key"}},
             False,
         ),
         # Every other detail, and a refusal stating none, says what the run

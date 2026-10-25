@@ -24,7 +24,7 @@ from enum import StrEnum
 from typing import cast
 
 import rfc8785
-from common.place_type import FLOW_ROLE_COLUMNS
+from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
     AmbiguousSourceReading,
     Period,
@@ -42,7 +42,7 @@ from planner.workflow import (
     ResolvedGroup,
     SelectedSource,
 )
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
 # The `coverage.kind` under which `search` reports a real series window.
 EXACT_COVERAGE = "exact"
@@ -79,7 +79,7 @@ class PartWarning(StrictModel):
     spec_id: str | None = None
 
 
-# The `no_data` reasons (`NoDataReason` in dfo-apis' `search.models.vocab`)
+# The `no_data` reasons (`NoDataReason` in apis' `search.models.vocab`)
 # that refuse a `source_code` itself, whatever dataset is pinned to the
 # requirement stating it.
 SOURCE_CODE_REFUSALS = frozenset(
@@ -94,7 +94,7 @@ class DiscoveryOutcome(StrictModel):
     reading of a `definite` answer, every candidate of a `candidates` one,
     and the nearest real series a `no_data` answer offers instead. `detail`
     is the envelope's own explanation for `no_data` and `unsupported`. `reason`
-    is `no_data`'s own closed reason code (`NoDataReason` in dfo-apis'
+    is `no_data`'s own closed reason code (`NoDataReason` in apis'
     `search.models.vocab`, e.g. `"no_observations"`), kept as a plain string
     rather than a closed set of our own: the vocabulary belongs to another
     service, and a value it does not yet recognise is still data to carry,
@@ -143,6 +143,27 @@ def source_constraint_matches(
     )
 
 
+def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """The refs Search bound for each entity text of `part`, by the text case-folded.
+
+    Search states, beside the part's `restatement`, one `entity_refs` row
+    per entity text it restates: the text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
+    bound to nothing, being ambiguous, not held or not found, states no
+    refs and is left out, and so is every text of a part without
+    `entity_refs`, from a Search that predates the field. Such a name is
+    matched by label or through the graph's resolve door. A text stated
+    twice binds every ref either row states.
+    """
+    refs: dict[str, tuple[str, ...]] = {}
+    for row in _sequence(part.get("entity_refs")):
+        text, bound = _text(row.get("text")), _strings(row.get("refs"))
+        if text is not None and bound:
+            key = text.casefold()
+            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
+    return refs
+
+
 def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
 
@@ -163,8 +184,10 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
     warnings = _warnings(envelope, part)
     mentions = resolved_source_mentions(part)
 
+    bound = bound_refs(part)
+
     def constrained(source: SelectedSource) -> SelectedSource:
-        return source.model_copy(update={"resolved_sources": mentions})
+        return source.model_copy(update={"resolved_sources": mentions, "bound_refs": bound})
 
     if status is DiscoveryStatus.DEFINITE:
         spec = _mapping(part.get("spec"))
@@ -248,6 +271,11 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
+            bound_refs={
+                text: tuple(refs)
+                for text, raw in _mapping(block.get("_bound_refs")).items()
+                if (refs := _strings(raw))
+            },
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -311,7 +339,7 @@ def _open_axes(resolved: Mapping[str, object]) -> tuple[OpenAxis, ...]:
     value, and a binding kind this reader does not know are open. An open
     slot is summable when it says so (`summable`, read as false when
     absent) and is not listed in `unresolved_slots`, where some member
-    carries a value dfo-apis could not decode and so could not sum.
+    carries a value apis could not decode and so could not sum.
     """
     inapplicable = set(_strings(resolved.get("inapplicable_slots")))
     unresolved = set(_strings(resolved.get("unresolved_slots")))
@@ -419,7 +447,12 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     families are `DISJOINT` when a shape field differs as both state it, or
     when a property both bind to stated codes admits no code in common.
     Health and education aid bind `crsPurpose` to two subtrees of the code
-    index that share no code.
+    index that share no code. They are `DISJOINT` too when one binds a
+    property its own identity lists and the other's does not, since a member
+    carries a code only on a property its family's schema lists. DAC2a aid
+    binds `dac2aAidType`, which no IDS debt family lists, so no StatVar is
+    both. A bound slot no identity lists, a where-classed constraint such as
+    `comparisonRegion`, proves nothing (`_binds_unlisted`).
 
     A shape field differs only when both sides state it as a dcid string, or
     both as `{"ref": dcid}`, and the dcids differ. A field one side leaves out
@@ -438,9 +471,10 @@ def family_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOverlap
     Everything else is `UNDECIDED`. That covers a side with no described shape
     or no `slot_codes`, a property bound to codes not stated (a `None` entry)
     where the verdict would rest on it, two families that each bind a property
-    the other leaves open, and two that would nest but whose shapes differ in
-    a field one side leaves out, leaves unresolved, or spells another way,
-    since the open fields may name different nodes.
+    the other leaves open or whose identity lists no slots, and two that would
+    nest but whose shapes differ in a field one side leaves out, leaves
+    unresolved, or spells another way, since the open fields may name
+    different nodes.
     """
     pinned = [pinned_stat_var(source.identity) for source in (left, right)]
     if pinned[0] is not None and pinned[1] is not None:
@@ -460,17 +494,69 @@ def _described_overlap(left: SelectedSource, right: SelectedSource) -> FamilyOve
         return FamilyOverlap.DISJOINT
     if left.slot_codes is None or right.slot_codes is None:
         return FamilyOverlap.UNDECIDED
-    if any(
-        codes is not None
-        and (other := right.slot_codes.get(prop)) is not None
-        and set(codes).isdisjoint(other)
-        for prop, codes in left.slot_codes.items()
+    if (
+        any(
+            codes is not None
+            and (other := right.slot_codes.get(prop)) is not None
+            and set(codes).isdisjoint(other)
+            for prop, codes in left.slot_codes.items()
+        )
+        or _binds_unlisted(left, right)
+        or _binds_unlisted(right, left)
     ):
         return FamilyOverlap.DISJOINT
     nested = _holds(left.slot_codes, right.slot_codes) or _holds(right.slot_codes, left.slot_codes)
     if nested and _same_shape(left_shape, right_shape):
         return FamilyOverlap.NESTED
     return FamilyOverlap.UNDECIDED
+
+
+def _binds_unlisted(source: SelectedSource, other: SelectedSource) -> bool:
+    """Whether `source` binds a property both identities could list and `other`'s does not.
+
+    An identity lists the what and how slots alone: apis leaves every when,
+    where and source slot out, a constraint property classed `where` such as
+    `comparisonRegion` included (`search.engine.spec_id._EXCLUDED_SLOT_AXES`).
+    So only a property `source`'s own identity lists counts, and a slot
+    missing from both identities never reads as a binding difference.
+    Proves nothing when either identity states no slot list.
+    """
+    own, listed = _listed_properties(source), _listed_properties(other)
+    if own is None or listed is None:
+        return False
+    return any(prop in own and prop not in listed for prop in source.slot_codes or {})
+
+
+def bound_codes(source: SelectedSource, prop: str) -> tuple[str, ...]:
+    """The codes `source`'s identity binds `prop` to, in identity order.
+
+    A `value` binding names one code and a `set` binding each of its refs, once;
+    an unbound property, one the identity does not list, and a source with
+    no identity name none. These are the codes the question named, before
+    the code index widened them to their descendants (`slot_codes`).
+    """
+    slots = (source.identity or {}).get("slots")
+    for slot in slots if isinstance(slots, list) else ():
+        if not isinstance(slot, Mapping) or slot.get("property") != prop:
+            continue
+        binding = _mapping(slot.get("binding"))
+        match binding.get("state"):
+            case "value":
+                refs: Sequence[object] = [binding.get("ref")]
+            case "set":
+                refs = _sequence_of_any(binding.get("refs"))
+            case _:
+                refs = []
+        return tuple(dict.fromkeys(ref for ref in refs if isinstance(ref, str) and ref))
+    return ()
+
+
+def _listed_properties(source: SelectedSource) -> set[object] | None:
+    """The properties `source`'s identity lists a slot for, or `None` when it lists none."""
+    slots = (source.identity or {}).get("slots")
+    if not isinstance(slots, list):
+        return None
+    return {slot.get("property") for slot in slots if isinstance(slot, Mapping)}
 
 
 def _same_shape(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
@@ -552,10 +638,15 @@ def stat_var_count(source: SelectedSource) -> int:
     return source.stat_var_member_count or 0
 
 
+def stat_var_count_is_floor(source: SelectedSource) -> bool:
+    """Whether `stat_var_count(source)` is a floor: no served count, and `search` states its confirmed members as one."""
+    return source.served_count is None and source.stat_var_member_count_exact is False
+
+
 def member_digest(dcids: Iterable[str]) -> str:
     """Lowercase SHA-256 hex of the RFC 8785 canonical JSON of the sorted `dcids`.
 
-    The digest `search` states as `resolved.shape.member_digest` (dfo-apis
+    The digest `search` states as `resolved.shape.member_digest` (apis
     `statvar_members.digest.member_digest`). Callers pass bare dcids, without
     the `dcid:` prefix.
     """
@@ -566,7 +657,7 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     """How a family is read when the plan does not say: summed when every open axis is summable.
 
     A family with no open axis has nothing to sum over, so it reads
-    separately; so does one with any axis dfo-apis may not sum over (a sex,
+    separately; so does one with any axis apis may not sum over (a sex,
     a netting basis), since its members are different measures.
     """
     if source.open_axes and all(axis.summable for axis in source.open_axes):
@@ -634,6 +725,11 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
     A group stating no name names nothing a requirement can ask for, so it is
     left out rather than failing the block. `total` is the published total
     party the role binds for the set, absent or `null` when it binds members.
+    `whole_of` is the classes of party a whole-population total holds, or a
+    union of such totals, absent for any other set. `side_classes` is the
+    classes of party, totals aside, the dataset publishes on such a set's side,
+    absent for any other set and from a Search that predates it. A class outside
+    `common.place_type.PartyClass` fails the block.
     """
     found = []
     for role, raw in groups.items():
@@ -645,6 +741,8 @@ def _groups(groups: Mapping[str, object]) -> tuple[ResolvedGroup, ...]:
                     label=label,
                     ref=_text(group.get("ref")),
                     total=_text(group.get("total")),
+                    whole_of=_party_classes(group.get("whole_of")),
+                    side_classes=_party_classes(group.get("side_classes")),
                 )
             )
     return tuple(found)
@@ -751,13 +849,61 @@ def alternative_definitions(block: Mapping[str, object]) -> dict[str, dict[str, 
     return definitions
 
 
+# What a whole-population total holds, by flow side and class of party.
+_WHOLE_OF_HOLDS: dict[tuple[str, PartyClass], str] = {
+    ("origin", "official"): "all official donors",
+    ("origin", "private"): "private donors",
+    ("destination", "official"): "every recipient country",
+    ("destination", "residual"): "aid the source allocates to no single country",
+}
+
+
+def _whole_scope(group: ResolvedGroup) -> str:
+    """What `group`'s whole-population total holds, and on the donor side the private
+    donors it leaves out when the source publishes some there (`side_classes`). A group
+    without `side_classes` says nothing it leaves out, since nothing says what the side
+    holds."""
+    held = " and ".join(_WHOLE_OF_HOLDS.get((group.role, cls), cls) for cls in group.whole_of)
+    if (
+        group.role == "origin"
+        and "private" in group.side_classes
+        and "private" not in group.whole_of
+    ):
+        return f"{held} (private donors are outside it)"
+    return held
+
+
+def _whole_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str:
+    """The sentence saying `group` is read as the source's total for a whole population."""
+    scope = _whole_scope(group)
+    if group.total is None:
+        return (
+            f"The figure for {group.label} adds up the totals the source publishes for "
+            f"{scope}, not its members' figures."
+        )
+    party = labels.get(group.total, group.total)
+    subject = (
+        group.label if party.casefold() == group.label.casefold() else f"{group.label} are {party}"
+    )
+    return (
+        f"The figures for {subject}, the total the source publishes for {scope}, "
+        "not its members' figures added up."
+    )
+
+
 def total_reading(group: ResolvedGroup, labels: Mapping[str, str]) -> str | None:
     """The sentence saying `group` is read as its published total, or `None` when it binds members.
 
     `labels` maps a ref to its label, so the total party is named as the
     source names it ("Africa, Total") where that differs from the set's
-    own name.
+    own name. A group with `whole_of` is read as the source's total for a
+    whole population ("Official Donors, Total, the total the source publishes
+    for all official donors (private donors are outside it)" where the source
+    publishes private donors), or as the sum of such totals when it names no
+    single party.
     """
+    if group.whole_of:
+        return _whole_reading(group, labels)
     if group.total is None:
         return None
     party = labels.get(group.total, group.total)
@@ -790,7 +936,7 @@ def members_reading(group: ResolvedGroup, *, answer: MembersAnswer | None) -> st
     members leaves out what the source allocates to the group and to no
     single member ("Africa, regional"), which only the group's total counts.
     """
-    if group.total is not None:
+    if group.reads_total:
         return None
     if answer is None:
         return (
@@ -883,6 +1029,18 @@ def _sequence_of_any(value: object) -> list[object]:
 
 def _strings(value: object) -> list[str]:
     return [item for item in _sequence_of_any(value) if isinstance(item, str)]
+
+
+_PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
+
+
+def _party_classes(value: object) -> tuple[PartyClass, ...]:
+    """The classes of party `value` lists, none when it lists none.
+
+    Raises:
+        pydantic.ValidationError: When it lists a class outside `PartyClass`.
+    """
+    return _PARTY_CLASSES.validate_python(_strings(value))
 
 
 def _text(value: object) -> str | None:

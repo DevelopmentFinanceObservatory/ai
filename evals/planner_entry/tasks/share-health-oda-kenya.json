@@ -34,7 +34,10 @@
   ],
   "brief": "What share of Kenya's ODA went to health between 2015 and 2022?",
   "asks": [
-    "Share of Kenya's ODA that went to health, 2015 to 2022"
+    {
+      "text": "Share of Kenya's ODA that went to health, 2015 to 2022",
+      "across_years": true
+    }
   ],
   "required_kinds": [
     "dataset",
@@ -43,13 +46,13 @@
   "acceptable_kinds": [
     "dataset",
     "aggregate",
-    "filter",
     "share_of"
   ],
   "neighbour": {
     "kind": "quotient_of",
     "distinction": "share_of, not quotient_of: health ODA is a part of Kenya's total ODA, both in one unit"
   },
+  "period_reduction": "across_years",
   "reference_payload": {
     "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
     "answer_mode": "computed",
@@ -92,13 +95,31 @@
         ]
       },
       {
+        "kind": "aggregate",
+        "id": "health_period",
+        "input_id": "oda_health",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      },
+      {
+        "kind": "aggregate",
+        "id": "total_period",
+        "input_id": "oda_total",
+        "reduction": "sum",
+        "group_by": [
+          "entity"
+        ]
+      },
+      {
         "kind": "share_of",
         "id": "share",
         "numerator": {
-          "input_id": "oda_health"
+          "input_id": "health_period"
         },
         "denominator": {
-          "input_id": "oda_total"
+          "input_id": "total_period"
         }
       }
     ],
@@ -113,7 +134,7 @@
   },
   "alternative_payloads": [
     {
-      "description": "Total each side over the donors by year, then take the share.",
+      "description": "Total each side into one figure over its donors and years, then take the share.",
       "payload": {
         "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
         "answer_mode": "computed",
@@ -157,114 +178,26 @@
           },
           {
             "kind": "aggregate",
-            "id": "health_by_year",
+            "id": "health_period",
             "input_id": "oda_health",
             "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
+            "group_by": []
           },
           {
             "kind": "aggregate",
-            "id": "total_by_year",
+            "id": "total_period",
             "input_id": "oda_total",
             "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
+            "group_by": []
           },
           {
             "kind": "share_of",
             "id": "share",
             "numerator": {
-              "input_id": "health_by_year"
+              "input_id": "health_period"
             },
             "denominator": {
-              "input_id": "total_by_year"
-            }
-          }
-        ],
-        "answered": [
-          {
-            "ask": 0,
-            "outputs": [
-              "share"
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "description": "Read one retrieval split by sector, keep the health sector, and divide by the total of all sectors.",
-      "payload": {
-        "question": "What share of Kenya's ODA went to health between 2015 and 2022?",
-        "answer_mode": "computed",
-        "decisions": [],
-        "evidence_requirements": [
-          {
-            "kind": "dataset",
-            "id": "oda",
-            "measure": "ODA",
-            "entities": [
-              {
-                "name": "Kenya",
-                "role": "recipient"
-              }
-            ],
-            "period": {
-              "start": 2015,
-              "end": 2022
-            },
-            "across": [
-              "donor"
-            ],
-            "breakdown": {
-              "dimension": "sector",
-              "level": 0
-            },
-            "stat_vars": "separate"
-          },
-          {
-            "kind": "aggregate",
-            "id": "by_sector",
-            "input_id": "oda",
-            "reduction": "sum",
-            "group_by": [
-              "period",
-              "breakdown"
-            ]
-          },
-          {
-            "kind": "filter",
-            "id": "health",
-            "input_id": "by_sector",
-            "predicates": [
-              {
-                "kind": "entity_in",
-                "names": [
-                  "Health"
-                ],
-                "role": "sector"
-              }
-            ]
-          },
-          {
-            "kind": "aggregate",
-            "id": "all_sectors",
-            "input_id": "oda",
-            "reduction": "sum",
-            "group_by": [
-              "period"
-            ]
-          },
-          {
-            "kind": "share_of",
-            "id": "share",
-            "numerator": {
-              "input_id": "health"
-            },
-            "denominator": {
-              "input_id": "all_sectors"
+              "input_id": "total_period"
             }
           }
         ],

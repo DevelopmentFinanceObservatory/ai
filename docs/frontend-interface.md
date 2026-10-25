@@ -224,23 +224,51 @@ for the dataset again.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
-| Field             | Type                                                             | Notes                                                                 |
-| ----------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `kind`            | `"interrupt.response"`                                           | required                                                              |
-| `schema_version`  | `1`                                                              | required                                                              |
-| `conversation_id` | string                                                           | required                                                              |
-| `interrupt_id`    | string                                                           | required; copy it from the pausing frame; it is opaque and single-use |
-| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"answer"` \| `"skip"` | required                                                              |
-| `payload`         | string \| null                                                   | required for `amend` and `answer`; forbidden for the others           |
+| Field             | Type                                                             | Notes                                                                                                 |
+| ----------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `kind`            | `"interrupt.response"`                                           | required                                                                                              |
+| `schema_version`  | `1`                                                              | required                                                                                              |
+| `conversation_id` | string                                                           | required                                                                                              |
+| `interrupt_id`    | string                                                           | required; copy it from the pausing frame; it is opaque and single-use                                 |
+| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"answer"` \| `"skip"` | required                                                                                              |
+| `payload`         | string \| null                                                   | required for `amend`; for `answer` only on an elicitation paused before delta 21; forbidden otherwise |
+| `answers`         | object \| null                                                   | required for `answer` (except as above): question id → answer; forbidden otherwise                    |
+
+Each answer in `answers` is one of:
+
+- `{"kind": "option", "option_id": "<id>"}`: an option the question offered.
+- `{"kind": "text", "text": "<the user's words>"}`: non-empty; offer it when
+  the question sets `allow_free_text: true`.
+- `{"kind": "skipped"}`: the user leaves this question to the agent. Only on
+  a question that sets `skippable: true`; the turn still resumes as answered.
+
+```json
+{
+  "kind": "interrupt.response",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "interrupt_id": "elc_7a1c0e5b42d94f18",
+  "decision": "answer",
+  "answers": {
+    "q1": {"kind": "option", "option_id": "spec_4d5e6f7a33333333"},
+    "q2": {"kind": "skipped"}
+  }
+}
+```
 
 Rules the server enforces with HTTP 422:
 
 - `approve`, `amend`, `reject` apply only to a `plan.proposed` pause.
 - `answer`, `skip` apply only to an `elicitation.request` pause.
-- For `answer`, send an option `id`, or free text when the elicitation set
-  `allow_free_text: true`.
-- `skip` is permitted when the elicitation set `skippable: true`. The agent
-  then continues with its default reading.
+- `answers` names every question id of the frame exactly once, and an
+  `option_id` must be one that question offered.
+- `skip` is permitted when the frame sets `skippable: true`. It dismisses
+  the whole pause and answers no question. When the orchestrator asked, the
+  turn closes. When the planner asked, the skip counts as the user declining
+  to choose, and the planner plans on without a pick of theirs.
+- An elicitation that paused before the frame carried `questions` takes
+  its one answer as `payload` (an option `id` or free text) instead of
+  `answers`.
 
 ### 4.3 `composition.mutate` → POST `/api/studio/composition`
 
@@ -306,7 +334,7 @@ Every frame has `event` and `seq`. The other fields per type:
 | `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`         | A new card exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                            | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
 | `composition.updated` | `manifest`                                                                                                                                     | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `elicitation.request` | `interrupt_id`, `question`, `input`, `options[]?`, `allow_free_text`, `skippable`                                                              | A question for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                            | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `suggestions`         | `items[]`                                                                                                                                      | Follow-up chips. The list is empty in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `error`               | `error` (a ToolError object)                                                                                                                   | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `done`                | `trace_id`, `composition?`                                                                                                                     | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -332,7 +360,9 @@ Notes on specific fields:
   optional. A client that ignores them renders the same plan card it
   always has.
 - `activity.step.status` is one of `pending`, `running`, `complete`,
-  `failed`, `skipped`. A `failed` step is recoverable; the turn continues.
+  `failed`, `skipped`. A `failed` step is recoverable; the turn continues. A
+  failed step can be followed by a `complete` frame on the same `step_id`
+  when a later try succeeds, with `detail` "This worked on a later try."
   `detail` holds a one-line result on success in plain words: a plan's
   fetch step carries the retrieval's summary (observations, years,
   source, series), as a fetch does; a plan's analysis step and a card's
@@ -410,12 +440,12 @@ Notes on specific fields:
 
 A client that wants the raw frame behind a card takes its reference from `payload.provenance.inputs[0]` = `{spec_id, content_version}` (a note has none) and fetches it from the datasets door:
 
-1. Send `GET /api/datasets/{spec_id}/{content_version}` to `dfo-apis`.
-   How your app reaches `dfo-apis` (direct, through your proxy, or another
+1. Send `GET /api/datasets/{spec_id}/{content_version}` to `apis`.
+   How your app reaches `apis` (direct, through your proxy, or another
    way) is your decision; the reference pages already talk to the same
    service.
 1. Read `artifacts[0].url` from the response. It is a root-relative link
-   that does not expire. Resolve it against the `dfo-apis` origin.
+   that does not expire. Resolve it against the `apis` origin.
 1. Fetch that link and follow its 302 redirect to the file. The redirect
    target is a signed URL that lasts five minutes, so follow it at once.
    The body is a Parquet file. Each row is one point:
@@ -457,14 +487,22 @@ it, so its raw frame is not served. The card's own points are in `payload.compon
   creation date gets today's date (`YYYY-MM-DD`) as `last_refreshed`, and
   its `data_through` is `""` when that retrieval has no end year. A card
   whose retrievals cannot all be identified is withheld.
-- `elicitation.request.input` is `single_select`, `multi_select`, or
-  `text`. In v1 the server emits only `single_select`, and the `answer`
-  payload is one string. Treat `multi_select` as reserved.
+- `elicitation.request.questions[]` holds one to three questions, each
+  `{id, question, input, options[]?, allow_free_text, skippable, rationale?}`.
+  Answer each under its `id`. Option ids are scoped to their question, so
+  two questions may both offer `o1`. One question comes with a frame-level
+  `skippable: true` and question-level `skippable: false`; several come
+  with the frame-level flag off and each question skippable on its own.
+  An option with `recommended: true` is the planner's pick, and the
+  question's `rationale` says why.
+- A question's `input` is `single_select`, `multi_select`, or `text`. In v1
+  the server emits only `single_select`, and each answer is one option or
+  one text. Treat `multi_select` as reserved.
 
 ## 6. Pauses and resumes
 
-A turn can pause more than once. The agent asks at most two clarifying
-questions a turn, then goes on with what it has. Plan reviews
+A turn can pause more than once. The agent pauses to ask at most twice a
+turn, one to three questions each time, then goes on with what it has. Plan reviews
 recur after each amendment, with no fixed count. Follow this procedure in
 a loop:
 
@@ -472,8 +510,9 @@ a loop:
 1. If the last frame is `plan.proposed`: show the plan. Send
    `interrupt.response` with `approve`, `amend` (payload = the user's
    change request), or `reject`.
-1. If the last frame is `elicitation.request`: show the question. Send
-   `answer` (payload = option id or free text) or `skip`.
+1. If the last frame is `elicitation.request`: show its questions. Send
+   one `answer` with `answers` for every question, or `skip` when the
+   frame is `skippable`.
 1. The `/interrupt` response is a new stream that continues the same turn.
    Read it the same way.
 1. After `amend`, the new stream sends `plan.versioned` and then a new
@@ -497,7 +536,7 @@ on any instance, the retry answers 409 `transient_unavailable` with
 `retry_after_seconds`; once that stream is gone, the retry resumes the
 turn again on a fresh stream, with `seq` restarting 1000 higher than
 whatever the dead stream already sent. Retrying with a different
-decision or payload than the one that actually resumed answers 409
+decision, payload or answers than the one that actually resumed answers 409
 `edit_conflict`.
 
 ## 7. Errors

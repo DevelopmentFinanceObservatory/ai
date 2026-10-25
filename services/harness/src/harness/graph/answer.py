@@ -10,6 +10,7 @@ before the run (`store_run_plan`, `stored_run_plan`).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import (
     Callable,
     Collection,
@@ -22,6 +23,8 @@ from typing import Any, NamedTuple
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
+from common.rolling import flat_populations
+from compiler.evidence import series_rank
 from compiler.frame_columns import FRAME_PARAMETER
 from compiler.sources import MembersAnswer, members_reading, total_reading
 from compiler.surface import ToolSurface
@@ -29,19 +32,28 @@ from executor.artifacts import declared_shape, parse_manifest
 from executor.ledger import RunLedger, store_faults
 from executor.outcomes import (
     Accepted,
+    EvidenceRecord,
     RunOutcome,
     StepRecord,
 )
+from planner.parties import singular
+from planner.phrasing import pluralize
 from planner.plan import (
     DatasetRequirement,
     Decision,
     EvidenceRequirement,
+    JoinRequirement,
     QuotientRequirement,
     ResolvedBy,
+    ShareOfRequirement,
+    authored,
+    copy_origins,
+    frame_shapes,
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import Reduction
+from planner.records import EvidenceIssueCode, Period, Reduction, SeriesEntity
+from planner.shapes import PLACE_PHRASE, join_key_pairs
 from planner.workflow import ReadingSetBy, ResolvedGroup, SelectedSource, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
 
@@ -204,7 +216,7 @@ def answer_frames(outcome: RunOutcome, *, published: bool = True) -> dict[str, A
 
     Each frame comes with both its pairs (`AnswerFrame`): a final retrieval
     minted with extra columns is described and drawn by its manifest's own
-    pair, which dfo-apis serves, while the store holds it under its
+    pair, which apis serves, while the store holds it under its
     `frame_ref`, the pair the steps reading it were bound to."""
     records = {record.step_id: record for record in presentable_steps(outcome, published=published)}
     answers = outcome.results if isinstance(outcome, Accepted) else outcome.answers
@@ -398,7 +410,7 @@ def _stat_var_totals(
     both sides of a `compare` get their sentence. A retrieval is summed when
     its recorded `get_data` result (`_RecordingSurface.retrieval_manifest`,
     looked up via `getattr` like `link_evidence`) names the StatVars
-    dfo-apis added into the family total
+    apis added into the family total
     (`summed_stat_var_count`). The sentence names the family, states that
     count and who set the reading (`_reading_set_by`), and says when the
     figures add up, or are computed from, recipients the question did not
@@ -467,13 +479,18 @@ def answer_notes(
     """The notes on how an answer's figures were computed, over every
     answer frame (`answer_frames`) or only those of `terminals`: one per
     summed family (`_stat_var_totals`), one per named set a retrieval reads
-    (`_group_reading_sentences`), one per step that left keys out
+    (`_group_reading_sentences`), one per entity a retrieval left out
+    (`_left_out_entity_sentences`), one per window of the user's that a
+    series misses part of and one per window a series misses years inside
+    (`_short_series_sentences`), one per step that left keys out
     (`_dropped_key_sentences`), then one per one-year retrieval when a newer
     year holds data, the year served is not the elected year, or a fuller
     earlier year is named (`_period_notes`)."""
     return [
         *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
         *_group_reading_sentences(outcome, plan=plan, terminals=terminals),
+        *_left_out_entity_sentences(outcome, plan=plan, terminals=terminals),
+        *_short_series_sentences(outcome, plan=plan, terminals=terminals),
         *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
         *_period_notes(tool_surface, outcome, plan=plan, terminals=terminals),
     ]
@@ -651,30 +668,376 @@ def _group_column(group: ResolvedGroup, role_keys: Sequence[str] | None) -> str 
     return roles[0] if len(roles) == 1 else None
 
 
+def _answer_evidence(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[EvidenceRecord]:
+    """The evidence of each retrieval under an answer frame (`answer_frames`),
+    or only under those of `terminals`, listed per answer frame in the plan's
+    step order, so a retrieval under two frames comes twice."""
+    return [record for _, record in _terminal_evidence(outcome, plan=plan, terminals=terminals)]
+
+
+def _terminal_evidence(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[tuple[str, EvidenceRecord]]:
+    """`_answer_evidence`, each record beside the answer frame's step id it
+    is listed under."""
+    workflow = plan.workflow
+    if workflow is None:
+        return []
+    retrieval_step_ids = frozenset(binding.step_id for binding in workflow.evidence_bindings)
+    steps_by_id = {step.id: step for step in workflow.steps}
+    step_order = {step.id: index for index, step in enumerate(workflow.steps)}
+    evidence_by_step = {record.step_id: record for record in outcome.evidence}
+    memo: dict[str, frozenset[str]] = {}
+    records: list[tuple[str, EvidenceRecord]] = []
+    for terminal_id in answer_frames(outcome):
+        if terminals is not None and terminal_id not in terminals:
+            continue
+        under = _upstream_retrievals(
+            terminal_id, steps_by_id=steps_by_id, retrieval_step_ids=retrieval_step_ids, memo=memo
+        )
+        records.extend(
+            (terminal_id, record)
+            for retrieval_id in sorted(under, key=step_order.__getitem__)
+            if (record := evidence_by_step.get(retrieval_id)) is not None
+        )
+    return records
+
+
+def _left_out_entity_sentences(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One sentence per entity a retrieval under an answer frame held no
+    series for and left out (an `ENTITY_MISSING` among its
+    `EvidenceRecord.gaps`), over every answer frame (`answer_frames`) or
+    only those of `terminals`.
+
+    The sentence names the entity and the years the retrieval holds
+    (`EvidenceRecord.window`), in which it has no data. Retrievals are taken
+    in the plan's step order (`_answer_evidence`), and identical sentences
+    are stated once.
+    """
+    sentences: list[str] = []
+    for record in _answer_evidence(outcome, plan=plan, terminals=terminals):
+        window = record.window
+        if window is None:
+            years = "in the years retrieved"
+        elif window.start == window.end:
+            years = f"in {window.start}"
+        else:
+            years = f"from {window.start} to {window.end}"
+        for gap in record.gaps:
+            if gap.code is not EvidenceIssueCode.ENTITY_MISSING:
+                continue
+            sentence = f"{gap.required} has no data {years} and was left out."
+            if sentence not in sentences:
+                sentences.append(sentence)
+    return sentences
+
+
+# The most short series one note names; it counts the rest.
+_SHORT_SERIES_NAMED = 3
+
+# A series by the source the requirement the model wrote that reads it is
+# approved to retrieve, its StatVar, and its entities' roles and refs.
+type _SeriesKey = tuple[str, str | None, tuple[tuple[str, str], ...]]
+
+
+class _ShortSeries(NamedTuple):
+    """One series a note states: whose it is ("Kenya's"), `None` where one
+    of its entities has no label; the measure its requirement reads; how it
+    falls short ("ends in 2021"); the verb phrase, plural and singular, a
+    count of series short the same way takes; and where it sorts among the
+    note's series, largest first (`compiler.evidence.series_rank`)."""
+
+    owner: str | None
+    measure: str
+    shortfall: str
+    counted: tuple[str, str]
+    rank: tuple[bool, float, str, tuple[str, ...]]
+
+
+def _short_series_sentences(
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One note per window of the user's that series of retrievals under an
+    answer frame (`answer_frames`), or only those of `terminals`, miss part
+    of, and one per such window whose series miss years inside it.
+
+    A series is read from the `WINDOW_SHORT` and `COVERAGE_GAPS` findings
+    among its retrieval's `EvidenceRecord.gaps` and held to the user's
+    window (`_users_window`) as the answer frame it is under reads it
+    (`_answer_anchors`). Under rolling steps of the frame's, only a series
+    their newest period was taken over is stated, so a sibling answer over
+    the same retrieval changes neither the window nor the series stated. A
+    series reaching across that window is not stated, even where its
+    retrieval reads from the first year on record and the series starts
+    after it. Missing years are stated only where the retrieval's window
+    (`EvidenceRecord.window`) lies inside the user's, since a finding counts
+    them without saying which. A series is one StatVar's for one set
+    of entities in the source a requirement the model wrote is approved to
+    retrieve (`EvidenceBinding.spec_id`), so a series two retrievals of a
+    requirement read, or two requirements over one source, is stated once
+    (`_short_series_note` words the notes).
+    """
+    written = {
+        requirement.id: requirement
+        for requirement in authored(plan).evidence_requirements
+        if isinstance(requirement, DatasetRequirement)
+    }
+    origins = copy_origins(plan.rolling_copies)
+    steps_by_id = {step.id: step for step in plan.workflow.steps} if plan.workflow else {}
+    sources: dict[str, str] = {}
+    for binding in plan.workflow.evidence_bindings if plan.workflow else ():
+        sources.setdefault(binding.requirement_id, binding.spec_id)
+    anchors: dict[str, dict[str, _Anchoring]] = {}
+    reaches: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
+    holes: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
+    for terminal_id, record in _terminal_evidence(outcome, plan=plan, terminals=terminals):
+        origin = origins.get(record.requirement_id, record.requirement_id)
+        requirement = written.get(origin)
+        if requirement is None:
+            continue
+        if terminal_id not in anchors:
+            anchors[terminal_id] = _answer_anchors(
+                outcome, terminal_id=terminal_id, steps_by_id=steps_by_id
+            )
+        anchoring = anchors[terminal_id].get(record.step_id)
+        window = _users_window(
+            requirement, record, anchor=anchoring.year if anchoring is not None else None
+        )
+        for gap in record.gaps:
+            if not gap.entities:
+                continue
+            if anchoring is not None and not anchoring.counts(gap.entities, spec_id=record.spec_id):
+                continue
+            key = (
+                sources.get(origin, origin),
+                gap.stat_var,
+                tuple((one.role, one.ref) for one in gap.entities),
+            )
+            owner = _owner_of(gap.entities)
+            if gap.code is EvidenceIssueCode.WINDOW_SHORT and isinstance(gap.found, dict):
+                short = _short_reach(Period.model_validate(gap.found), window)
+                if short is not None:
+                    reaches.setdefault(window, {}).setdefault(
+                        key, _ShortSeries(owner, requirement.measure, *short, series_rank(gap))
+                    )
+            elif (
+                gap.code is EvidenceIssueCode.COVERAGE_GAPS
+                and record.window is not None
+                and window.covers(record.window)
+                and isinstance(gap.found, int)
+                and isinstance(gap.required, int)
+            ):
+                missing = gap.required - gap.found
+                holes.setdefault(window, {}).setdefault(
+                    key,
+                    _ShortSeries(
+                        owner,
+                        requirement.measure,
+                        f"has no data for {missing} of its {gap.required} years",
+                        ("miss years", "misses years"),
+                        series_rank(gap),
+                    ),
+                )
+    return [
+        _short_series_note(by_series) for notes in (reaches, holes) for by_series in notes.values()
+    ]
+
+
+class _Anchoring(NamedTuple):
+    """How an answer frame's rolling steps read one retrieval: the year of
+    the newest period they stand on, and the flat populations it was taken
+    over (`AnchorResult.populations`)."""
+
+    year: int
+    populations: tuple[Mapping[str, Any], ...]
+
+    def counts(self, entities: Sequence[SeriesEntity], *, spec_id: str) -> bool:
+        """Whether the series of `entities` in the retrieval approved for
+        `spec_id` is one the newest period was taken over.
+
+        A population keeps the series of its dataset whose entity on each
+        column it binds is one of the values bound. A column the series
+        holds no entity on, such as a StatVar's own dimension, keeps it,
+        since its entities cannot say otherwise."""
+        refs = {entity.role: entity.ref for entity in entities}
+        for population in self.populations:
+            bindings = population.get("bindings")
+            if population.get("spec_id") != spec_id or not isinstance(bindings, Mapping):
+                continue
+            if all(refs[column] in values for column, values in bindings.items() if column in refs):
+                return True
+        return False
+
+
+def _answer_anchors(
+    outcome: RunOutcome, *, terminal_id: str, steps_by_id: dict[str, WorkflowStep]
+) -> dict[str, _Anchoring]:
+    """How the rolling steps the answer frame `terminal_id` rests on
+    (`_upstream_steps`, `AnchorResult.steps`) read each retrieval they root
+    (`AnchorResult.roots`), by its step id: at the earliest of their years
+    where groups of them root it, over every population of those groups.
+
+    A retrieval no rolling step of the frame's roots is absent, whatever a
+    sibling answer's rolling steps read of it."""
+    under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
+    anchorings: dict[str, _Anchoring] = {}
+    for anchor in outcome.anchors:
+        head = anchor.period[:4]
+        if not head.isdigit() or under.isdisjoint(anchor.steps):
+            continue
+        populations = tuple(
+            flat_populations(
+                population for population in anchor.populations if isinstance(population, dict)
+            )
+        )
+        for root in anchor.roots:
+            held = anchorings.get(root)
+            anchorings[root] = (
+                _Anchoring(int(head), populations)
+                if held is None
+                else _Anchoring(min(held.year, int(head)), (*held.populations, *populations))
+            )
+    return anchorings
+
+
+def _users_window(
+    requirement: DatasetRequirement, record: EvidenceRecord, *, anchor: int | None
+) -> Period:
+    """The years `requirement` asks of `record`'s retrieval: its period as
+    the model wrote it, ending, where that end is open (`period_end_open`),
+    at the newest year the run read. That is the `anchor` year of the
+    answer's rolling steps the retrieval roots, where it roots any, and
+    otherwise the newest year the retrieval holds (`EvidenceRecord.window`)."""
+    period = requirement.period
+    if not requirement.period_end_open:
+        return period
+    if anchor is not None:
+        end = anchor
+    elif record.window is not None:
+        end = record.window.end
+    else:
+        return period
+    return Period(start=period.start, end=max(end, period.start))
+
+
+def _short_reach(reach: Period, window: Period) -> tuple[str, tuple[str, str]] | None:
+    """How a series reaching over `reach` falls short of `window`, with the
+    verb phrase a count of series short that way takes, or `None` where it
+    reaches across `window`."""
+    if reach.covers(window):
+        return None
+    if reach.start <= window.start:
+        return f"ends in {reach.end}", (f"end before {window.end}", f"ends before {window.end}")
+    if reach.end >= window.end:
+        return f"starts in {reach.start}", (
+            f"start after {window.start}",
+            f"starts after {window.start}",
+        )
+    years = str(reach.start) if reach.start == reach.end else f"{reach.start} to {reach.end}"
+    return f"covers only {years}", (
+        f"start after {window.start} and end before {window.end}",
+        f"starts after {window.start} and ends before {window.end}",
+    )
+
+
+def _owner_of(entities: Sequence[SeriesEntity]) -> str | None:
+    """Whose series `entities` hold, as a sentence names them ("Germany's"),
+    or `None` where one of them has no label."""
+    labels = [entity.label for entity in entities]
+    if None in labels:
+        return None
+    name = " and ".join(label for label in labels if label is not None)
+    return f"{name}'" if name.endswith("s") else f"{name}'s"
+
+
+def _short_series_note(short: Mapping[_SeriesKey, _ShortSeries]) -> str:
+    """The note naming up to `_SHORT_SERIES_NAMED` of the series `short`
+    holds, the largest first (`_ShortSeries.rank`), and counting the rest by
+    how they fall short, the most common way first ("30 other series start
+    after 2015, and 20 other series end before 2023").
+
+    A series is named by its owner, and by its measure as well where
+    `short` holds series of several sources. One with no owner, or one whose
+    name another series shares, as each StatVar's series of one entity in
+    one source does, is counted. Where every series counted is one owner's
+    in one source, they differ by StatVar alone, so they are counted as
+    that owner's indicators ("2 of Kenya's indicators end before 2024"),
+    the noun the plan counts a family's StatVars in.
+    """
+    several = len({source for source, _, _ in short}) > 1
+    ranked = sorted(short.items(), key=lambda item: item[1].rank)
+    names = [
+        None
+        if one.owner is None
+        else f"{one.owner} series for {one.measure}"
+        if several
+        else f"{one.owner} series"
+        for _, one in ranked
+    ]
+    shared = Counter(names)
+    named: list[str] = []
+    rest: dict[_SeriesKey, _ShortSeries] = {}
+    for name, (key, one) in zip(names, ranked, strict=True):
+        if name is not None and shared[name] == 1 and len(named) < _SHORT_SERIES_NAMED:
+            named.append(f"{name} {one.shortfall}")
+        else:
+            rest[key] = one
+    owners = {one.owner for one in rest.values()}
+    sources = {source for source, _, _ in rest}
+    if len(owners) == 1 and len(sources) == 1 and None not in owners and len(rest) > 1:
+        counted = f"of {owners.pop()} indicators"
+    else:
+        counted = "other series" if named else "series"
+    parts = list(named)
+    for (many, once), count in Counter(one.counted for one in rest.values()).most_common():
+        parts.append(f"1 {counted} {once}" if count == 1 else f"{count} {counted} {many}")
+    if len(parts) < 3:
+        return f"{' and '.join(parts)}."
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}."
+
+
 def _dropped_key_sentences(
     outcome: RunOutcome,
     *,
     plan: PlannerPlan,
     terminals: Collection[str] | None = None,
 ) -> list[str]:
-    """One sentence per step under an answer frame that left keys out of its
-    result (`StepRecord.dropped_key_count`), over every answer frame
+    """The sentences for each step under an answer frame that left keys out
+    of its result (`StepRecord.dropped_key_count`,
+    `StepRecord.right_dropped_key_count`), over every answer frame
     (`answer_frames`) or only those of `terminals`.
 
-    A keyed `quotient_of` drops each numerator key it has nothing to divide
-    by, and every step reading its frame, a `rank` among them, works over
-    the keys that remain. So the walk covers every step an answer frame
-    rests on (`_upstream_steps`), in the plan's step order. Identical
-    sentences are stated once.
+    A keyed `quotient_of` or `share_of` drops each numerator key it has
+    nothing to divide by, a `join` each entity of either side that matches
+    in no period, and every step reading such a frame, a `rank` among them,
+    works over the keys that remain. So the walk covers every step an
+    answer frame rests on (`_upstream_steps`), in the plan's step order.
+    Identical sentences are stated once.
     """
     workflow = plan.workflow
     if workflow is None:
         return []
-    dropped = {
-        record.step_id: record.dropped_key_count
+    dropped = [
+        record
         for record in _ran(outcome)
-        if record.dropped_key_count
-    }
+        if record.dropped_key_count or record.right_dropped_key_count
+    ]
     if not dropped:
         return []
     steps_by_id = {step.id: step for step in workflow.steps}
@@ -683,12 +1046,12 @@ def _dropped_key_sentences(
         if terminals is not None and terminal_id not in terminals:
             continue
         under = _upstream_steps(terminal_id, steps_by_id=steps_by_id)
-        for step_id, count in dropped.items():
-            if step_id not in under:
+        for record in dropped:
+            if record.step_id not in under:
                 continue
-            sentence = _dropped_key_sentence(count, *_dropped_key_nouns(step_id, plan))
-            if sentence not in sentences:
-                sentences.append(sentence)
+            for sentence in _step_dropped_key_sentences(record, plan):
+                if sentence not in sentences:
+                    sentences.append(sentence)
     return sentences
 
 
@@ -706,39 +1069,68 @@ def _upstream_steps(step_id: str, *, steps_by_id: dict[str, WorkflowStep]) -> fr
     return frozenset(found)
 
 
-def _dropped_key_nouns(step_id: str, plan: PlannerPlan) -> tuple[str | None, str | None]:
-    """The plan's own words for the keys step `step_id` divides and for what
-    it divides them by: the quotient requirement's `axis`, and the measure
-    of the dataset requirement under its denominator. `None` for either the
-    plan does not state.
+def _step_dropped_key_sentences(record: StepRecord, plan: PlannerPlan) -> list[str]:
+    """The sentences for the keys step `record` left out, in the plan's own
+    words where the step's requirement gives them.
 
     A step carries out the operation it is named for (`WorkflowStep.id`),
-    and that operation names its requirement.
+    and that operation names its requirement. A join's sentences name its
+    keys by their roles (`_join_key_noun`) and each side by its measure,
+    with one sentence for the left side's entities and one for the right's.
+    A quotient or
+    share names its keys by its `axis` and what it divides by by its
+    denominator's measure.
     """
     operations = plan.translation.operations if plan.translation is not None else ()
     requirement_id = next(
-        (operation.requirement_id for operation in operations if operation.id == step_id), None
+        (operation.requirement_id for operation in operations if operation.id == record.step_id),
+        None,
     )
     requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
     requirement = requirements.get(requirement_id or "")
-    if not isinstance(requirement, QuotientRequirement):
-        return None, None
-    divisor = requirements.get(requirement.denominator.input_id)
-    # A denominator read through a filter or an aggregate keeps its
-    # dataset's measure.
-    while divisor is not None and not isinstance(divisor, DatasetRequirement):
-        divisor = requirements.get(getattr(divisor, "input_id", None) or "")
-    return requirement.axis, divisor.measure if divisor is not None else None
+    if isinstance(requirement, JoinRequirement):
+        left = _measure_under(requirement.left_id, requirements)
+        right = _measure_under(requirement.right_id, requirements)
+        noun = _join_key_noun(requirement, plan)
+        return [
+            _unmatched_key_sentence(count, noun=noun, held=held, lacking=lacking)
+            for count, held, lacking in (
+                (record.dropped_key_count, left, right),
+                (record.right_dropped_key_count, right, left),
+            )
+            if count
+        ]
+    if not record.dropped_key_count:
+        return []
+    if isinstance(requirement, QuotientRequirement | ShareOfRequirement):
+        axis = requirement.axis
+        divisor = _measure_under(requirement.denominator.input_id, requirements)
+    else:
+        axis = divisor = None
+    return [_dropped_key_sentence(record.dropped_key_count, axis, divisor)]
+
+
+def _measure_under(
+    requirement_id: str, requirements: Mapping[str, EvidenceRequirement]
+) -> str | None:
+    """The measure of the dataset requirement `requirement_id` reads, through
+    any filter or aggregate, which keep their dataset's measure. `None` when
+    the walk reaches no dataset requirement."""
+    requirement = requirements.get(requirement_id)
+    while requirement is not None and not isinstance(requirement, DatasetRequirement):
+        requirement = requirements.get(getattr(requirement, "input_id", None) or "")
+    return requirement.measure if requirement is not None else None
 
 
 def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> str:
-    """The sentence for `count` keys a quotient left out: how many, of which
-    role when the plan names one (`axis`), and that each had nothing to
-    divide by, named by its measure when the plan states one (`divisor`).
+    """The sentence for `count` keys a quotient or share left out: how many,
+    of which role when the plan names one (`axis`), and that each had
+    nothing to divide by, named by its measure when the plan states one
+    (`divisor`).
 
     A key is left out when the denominator holds no entry for it, none in a
-    period the key reports, or only zeros where it does, and the one wording
-    is true of all three.
+    period the key reports, or, for a quotient, only zeros where it does,
+    and the one wording is true of all three.
 
     The role phrase is the planner's own word and is not inflected: it
     qualifies "entry" or "entries", which carries the number.
@@ -750,8 +1142,48 @@ def _dropped_key_sentence(count: int, axis: str | None, divisor: str | None) -> 
     return f"{subject} had {lacked} and {verb} left out."
 
 
+def _join_key_noun(requirement: JoinRequirement, plan: PlannerPlan) -> str:
+    """What one key of the join `requirement` is, in the plan's role words.
+    It is the role of each key pair the planner joins the two sides on
+    (`planner.shapes.join_key_pairs`, over `planner.plan.frame_shapes`),
+    as the left side names it, or "country" for a place stating none.
+
+    One pair gives its role ("country", "donor"), two or more give the
+    roles joined as a pair or a combination ("donor and recipient pair").
+    The planner refuses a join with no pair.
+    """
+    shapes = frame_shapes(plan)
+    pairs = join_key_pairs(shapes[requirement.left_id].roles, shapes[requirement.right_id].roles)
+    words = [singular(PLACE_PHRASE if role.role is None else role.role) for role, _ in pairs]
+    if len(words) == 1:
+        return words[0]
+    joint = "pair" if len(words) == 2 else "combination"
+    return f"{', '.join(words[:-1])} and {words[-1]} {joint}"
+
+
+def _unmatched_key_sentence(count: int, *, noun: str, held: str | None, lacking: str | None) -> str:
+    """The sentence for `count` keys of one side of a join that matched in
+    no period: how many, named by `noun` (`_join_key_noun`), and that the
+    other side holds no figure for any year their side holds one, named by
+    each side's measure (`lacking`, `held`) when the plan states both.
+
+    A key is left out when the other side holds no row for it, holds it
+    only in other years, or a filter on the other side removed it, and the
+    one wording is true of all three. A key both sides hold in years that
+    never overlap counts on each side, and each side's sentence is true.
+    """
+    subject = f"{count:,} {noun if count == 1 else pluralize(noun)}"
+    own, covers = ("its", "it covers") if count == 1 else ("their", "they cover")
+    verb = "was" if count == 1 else "were"
+    if held and lacking:
+        had = f"had no {lacking} figure for the same year as {own} {held}"
+    else:
+        had = f"had no figure on the other side of the join for any year {covers}"
+    return f"{subject} {had} and {verb} left out."
+
+
 def _family_name(manifest: Mapping[str, Any], source: SelectedSource | None) -> str:
-    """The name narration gives a summed family: the name dfo-apis gave the
+    """The name narration gives a summed family: the name apis gave the
     family (`summed_stat_var_label`), else the name of its source."""
     label = manifest.get("summed_stat_var_label")
     if isinstance(label, str) and label:
@@ -829,13 +1261,13 @@ def _total_sentence(
 ) -> str:
     """The sentence stated for one summed family.
 
-    `count` is the StatVars dfo-apis summed, named indicators as the card's
+    `count` is the StatVars apis summed, named indicators as the card's
     attribution names them. It describes the family, so it stays true of
     figures a later filter or verb drew from the sum. `across_recipients`
     is how the answer combines recipients the question did not name
     (`_totals_across_recipients`), `None` when it does not.
     """
-    sentence = f'the figures for "{name}" sum the family\'s {count:,} indicators.'
+    sentence = f'the figures for "{name}" are the sum of {count:,} indicators.'
     if set_by is ReadingSetBy.RULE:
         sentence = f"By default, {sentence}"
     elif set_by is ResolvedBy.USER:
