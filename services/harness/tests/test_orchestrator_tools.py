@@ -47,6 +47,7 @@ from harness.chart_binding import (
     empty_select_refusal,
 )
 from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
+from harness.graph.plan_done import HandBack
 from harness.graph.state import (
     BUDGETS,
     ORCHESTRATOR_CALLS_KEY,
@@ -1742,6 +1743,65 @@ async def test_make_charts_stops_after_its_cap_of_calls_that_drew_nothing():
     assert _writes(executor) == writes
 
 
+class ScopedFrameExecutor(FakeExecutor):
+    """Serves `scoped_ref` for a fetch with a scope, as a narrower retrieval
+    states its own frame."""
+
+    def __init__(self, scoped_ref: dict[str, Any]) -> None:
+        super().__init__()
+        self.scoped_ref = scoped_ref
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        if tool == "get_data" and "scope" in args:
+            self.calls.append((tool, args))
+            return {"outcome": "ok", "frame_refs": [self.scoped_ref], "summary": "8 observations"}
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
+REF_NARROW = {"spec_id": SPEC_LIFE, "content_version": "cv_2"}
+
+
+async def _fetched(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A fetch with a different scope, whose `get_data` states `ref`."""
+    window = {"kind": "range", "start_year": 2015, "end_year": 2020}
+    await tools["fetch"](SPEC_LIFE, ctx, scope={"window": window})
+
+
+async def _handed_back(tools: dict[str, Any], ctx: Any, executor: FakeExecutor, ref: dict) -> None:
+    """A plan's hand-back of `ref`, listed as `plan_done` lists it."""
+    hand_back = HandBack(executor)
+    await hand_back.describe(ref, tool="aggregate", store_ref=None)
+    hand_back.listing(ctx.state, None)
+
+
+@pytest.mark.parametrize("arrive", [_fetched, _handed_back], ids=["fetch", "hand_back"])
+@pytest.mark.parametrize(
+    ("arriving", "draws"), [(REF_NARROW, True), (REF, False)], ids=["new_frame", "held_frame"]
+)
+async def test_make_charts_draws_a_frame_that_arrived_after_its_cap_of_calls_that_drew_nothing(
+    arrive, arriving, draws
+):
+    """A frame registered after the calls that drew nothing clears their
+    count; a registration of a frame already held leaves it spent."""
+    executor = ScopedFrameExecutor(scoped_ref=arriving)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    for _ in range(BUDGETS["make_charts_failed"]):
+        failed = await tools["make_charts"](_one_chart("f999999"), ctx)
+        assert "error" in failed["charts"][0]
+    spent = await tools["make_charts"](_one_chart(frame_id_for(REF)), ctx)
+    assert _stated(spent) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+
+    await arrive(tools, ctx, executor, arriving)
+    charted = await tools["make_charts"](_one_chart(frame_id_for(arriving)), ctx)
+
+    if draws:
+        assert "holds" in charted["charts"][0]
+    else:
+        assert _stated(charted) == (HarnessCode.TOOL_BUDGET_SPENT, "do_not_retry")
+    assert _writes(executor) == int(draws)
+
+
 @pytest.mark.parametrize(
     ("fails_on", "results", "counted"),
     [(1, ["error"], "make_charts_failed"), (2, ["holds", "error"], "make_charts")],
@@ -2872,32 +2932,49 @@ async def test_make_charts_keeps_the_cap_refusal_when_no_member_is_a_party(
     assert _writes(executor) == 0
 
 
+@pytest.mark.parametrize("plan_unspent", [False, True], ids=["plan_spent", "plan_unspent"])
 @pytest.mark.parametrize(
-    ("moves", "chart"),
-    [({}, {}), ({"rolling": True}, {}), ({}, {"latest_periods": 5})],
-    ids=["fixed", "rolling", "latest_periods"],
+    ("moves", "chart", "draws"),
+    [
+        ({}, {}, None),
+        ({"rolling": True}, {}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"latest_periods": 5}, MAX_SERIES_PER_COMPONENT),
+        ({}, {"type": "line_chart", "latest_periods": 5}, LINE_CHART_MAX_VALUES),
+    ],
+    ids=["fixed", "rolling", "latest_periods", "line_chart_latest_periods"],
 )
 async def test_make_charts_names_the_dimensions_of_a_select_over_the_cap_on_two(
-    monkeypatch: pytest.MonkeyPatch, moves: dict[str, Any], chart: dict[str, Any]
+    moves: dict[str, Any],
+    chart: dict[str, Any],
+    draws: int | None,
+    plan_unspent: bool,
 ) -> None:
     """A table that binds neither the six recipients nor the thirty providers
     is not narrowed: the model reads both dimensions and their counts. It is
     told a chart of the thirty alone is cut to its largest, except where the
     chart's period moves with the data: no cut is made there, so it is told
-    to list fewer or to rank with a limit."""
+    to list at most as many members as the chart type draws or to rank with
+    a limit."""
     view = copy.deepcopy(WIDE_VIEW) | moves
     view["dimensions"][2]["total_count"] = 6
 
-    executor, result = await _draw_wide(
-        monkeypatch, HeldFrames(), view=view, select_json="{}", **chart
-    )
+    executor = WideFrameExecutor(view=view)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    if not plan_unspent:
+        planned = tools["plan"](
+            "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+        )
+        assert planned[HANDED_OFF] == "plan"
+    result = await tools["make_charts"]([_wide_chart(select_json="{}", **chart)], ctx)
 
     error = result["charts"][0]["error"]
     assert "financingRecipient (6 values)" in error
     assert "financingProvider (30 values)" in error
     moving = bool(moves or chart)
     assert ("draws its largest members" in error) is not moving
-    assert ("ranking with a limit" in error) is moving
+    assert ("ranking with a limit" in error) is (moving and plan_unspent)
+    assert (f"at most {draws} members" in error) is moving
     assert _stated(result["charts"][0]) == (
         HarnessCode.SERIES_LIMIT_EXCEEDED,
         "correct_and_retry",
@@ -2993,7 +3070,7 @@ def test_periods_covered_counts_every_period_of_the_window_never_too_few(
     coverage: list[str], periods: int
 ) -> None:
     """Days count up to 31 a month: January to March is 91 days, counted 93."""
-    assert orchestrator_tools._periods_covered({"coverage": coverage}) == periods
+    assert chart_binding.periods_covered({"coverage": coverage}) == periods
 
 
 async def test_make_charts_keeps_a_drawable_select_when_ordering_would_break_it(
@@ -3239,16 +3316,37 @@ def _rank_positions() -> HeldFrames:
     return HeldFrames(trace=trace)
 
 
+class TwoUnitFrames(HeldFrames):
+    """The store, holding the frame with every other provider in euros."""
+
+    def rows(self) -> list[dict[str, Any]]:
+        return [
+            {**row, "unit": "EUR"} if int(row[self.role][-2:]) % 2 else row
+            for row in super().rows()
+        ]
+
+
+_UNIT_VIEW = copy.deepcopy(WIDE_VIEW)
+_UNIT_VIEW["dimensions"].append({"name": "unit", "values": [], "plural": True, "total_count": 2})
+
+
 @pytest.mark.parametrize(
-    ("store", "chart", "view", "warned"),
+    ("store", "chart", "view", "warned", "named"),
     [
-        (UnreadableFrames(), {}, None, True),
-        (FailingStore(), {}, None, True),
-        (HeldFrames(held=False), {}, None, True),
-        (UncountedFrames(), {}, None, True),
-        (_rank_positions(), {}, None, False),
-        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False),
-        (HeldFrames(), {"type": "line_chart", "latest_periods": 2}, None, False),
+        (UnreadableFrames(), {}, None, True, "could not be picked"),
+        (FailingStore(), {}, None, True, "could not be picked"),
+        (HeldFrames(held=False), {}, None, True, "could not be picked"),
+        (UncountedFrames(), {}, None, True, "could not be picked"),
+        (_rank_positions(), {}, None, False, "rank positions"),
+        (TwoUnitFrames(), {}, _UNIT_VIEW, False, "Bind unit to one value"),
+        (HeldFrames(), {}, {**WIDE_VIEW, "rolling": True}, False, "plan a ranking"),
+        (
+            HeldFrames(),
+            {"type": "line_chart", "latest_periods": 2},
+            None,
+            False,
+            f"at most {LINE_CHART_MAX_VALUES} ",
+        ),
     ],
     ids=[
         "unreadable",
@@ -3256,6 +3354,7 @@ def _rank_positions() -> HeldFrames:
         "not_held",
         "no_row_count",
         "rank_positions",
+        "two_units",
         "rolling",
         "latest_periods",
     ],
@@ -3267,27 +3366,84 @@ async def test_make_charts_keeps_the_cap_refusal_when_the_frame_cannot_be_ranked
     chart: dict[str, Any],
     view: Any,
     warned: bool,
+    named: str,
 ) -> None:
     """A frame the store cannot read, a plan's rank positions (where the
-    highest number is the worst), and a card whose period moves with the
-    data (a list picked today would not follow it) are never narrowed: the
-    refusal stands. A frame the store cannot read, does not hold or states no
-    row count for is logged as a warning."""
+    highest number is the worst), rows in two units, and a card whose period
+    moves with the data (a list picked today would not follow it) are never
+    narrowed: the refusal stands, says what to change with the count the
+    chart type draws, and names the dimension over the cap and its count in
+    `fix`. A frame the store cannot read, does not hold or states no row
+    count for is logged as a warning."""
     monkeypatch.setattr(orchestrator_tools, "read_derived_marker", _marker_of)
 
     with caplog.at_level(logging.WARNING, logger=orchestrator_tools.__name__):
         executor, result = await _draw_wide(monkeypatch, store, view=view, **chart)
 
-    assert "error" in result["charts"][0]
+    (refused,) = result["charts"]
+    assert named in refused["error"]
     assert _writes(executor) == 0
     assert (orchestrator_tools.__name__ in {record.name for record in caplog.records}) is warned
-    # A chart whose period moves is told what draws in place of a cut.
-    moving = bool(view and view.get("rolling")) or "latest_periods" in chart
-    assert ("ranking with a limit" in result["charts"][0]["error"]) is moving
-    assert _stated(result["charts"][0]) == (
-        HarnessCode.SERIES_LIMIT_EXCEEDED,
-        "correct_and_retry" if moving else "do_not_retry",
+    assert _stated(refused) == (HarnessCode.SERIES_LIMIT_EXCEEDED, "correct_and_retry")
+    assert refused["fix"] == {"dimension": "financingProvider", "values": 30}
+
+
+@pytest.mark.parametrize(
+    ("unranked", "plans"),
+    [
+        (orchestrator_tools._Unranked("rank_positions"), False),
+        (orchestrator_tools._Unranked("coordinates_differ", coordinates=("unit",)), False),
+        (orchestrator_tools._Unranked("not_ranked"), True),
+        (orchestrator_tools._Unranked("period_moves"), True),
+    ],
+    ids=["rank_positions", "coordinates_differ", "not_ranked", "period_moves"],
+)
+def test_over_cap_remedy_differs_with_each_reason_the_largest_were_not_picked(
+    unranked: Any, plans: bool
+) -> None:
+    """A plan is offered only beside a list of values and only while the plan
+    call is unspent, and the remedy names the coordinate the rows differ on,
+    or the dimension to list and how many the chart draws."""
+    spent, unspent = (
+        orchestrator_tools._over_cap_remedy(
+            dimension="financingProvider",
+            unranked=unranked,
+            draws=8,
+            plan_unspent=plan_unspent,
+        )
+        for plan_unspent in (False, True)
     )
+
+    assert (spent != unspent) is plans
+    assert "plan" not in spent
+    if unranked.coordinates:
+        assert "Bind unit to one value" in spent
+    else:
+        assert "financingProvider" in spent
+        assert re.search(r"at most 8\b", spent)
+
+
+@pytest.mark.parametrize(
+    ("store", "view"),
+    [(UnreadableFrames(), WIDE_VIEW), (HeldFrames(), {**WIDE_VIEW, "rolling": True})],
+    ids=["unranked", "rolling"],
+)
+async def test_make_charts_offers_a_plan_for_an_unranked_select_only_while_one_is_unspent(
+    monkeypatch: pytest.MonkeyPatch, store: Any, view: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: store)
+    tools, ctx = _tools(executor=WideFrameExecutor(view=copy.deepcopy(view)))
+    await tools["fetch"](SPEC_LIFE, ctx)
+
+    unspent = await tools["make_charts"]([_wide_chart()], ctx)
+    planned = tools["plan"](
+        "Rank the providers of aid to Kenya", ["the providers ranked by aid"], ctx
+    )
+    assert planned[HANDED_OFF] == "plan"
+    spent = await tools["make_charts"]([_wide_chart()], ctx)
+
+    assert "plan" in unspent["charts"][0]["error"]
+    assert "plan" not in spent["charts"][0]["error"]
 
 
 def _marker_of(trace: Any) -> Any:

@@ -226,7 +226,10 @@ _PENDING_ACTION = TypeAdapter(Annotated[PendingAsk | PendingPlan, Field(discrimi
 # every dataset read; a plan is one per turn, and a plan that failed gives it
 # back (`plan_done`) for a brief that avoids the failure. `make_charts` counts
 # the calls that drew at least one chart, `make_charts_failed` the calls that
-# drew none.
+# drew none since a frame last reached the turn. A registration that adds a
+# frame id clears it (`register_frames`). Each clear costs a spent `fetch` or
+# a plan hand-back (at most 2 with the plan given back), so a turn makes at
+# most 3 x (1 + 6 + 2) = 27 calls that draw nothing.
 # `invalid_arguments` counts the calls of any tool refused for malformed
 # arguments, which spend nothing of the tool's own budget.
 BUDGETS = {
@@ -285,24 +288,46 @@ type DescribedFrame = tuple[dict[str, Any], dict[str, Any], dict[str, Any] | Non
 
 
 def register_frames(
-    frames: dict[str, Any], described: Sequence[DescribedFrame]
+    state: SessionState,
+    described: Sequence[DescribedFrame],
+    *,
+    fetch_args: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Add each (frame ref, `describe_frame` view, store ref) to `frames`
-    under its id, and return the entries as the orchestrator reads them.
+    """Add each (frame ref, `describe_frame` view, store ref) to the frames in
+    `state` (`ORCHESTRATOR_FRAMES_KEY`) under its id, and return the entries
+    as the orchestrator reads them.
 
     The frame ref is the pair the frame is described and drawn by; the store
     ref is the pair the materialisation store holds it under, kept as the
     entry's `store_ref`. It is None for a frame whose executor states no
     store pair. The entry then carries no `store_ref` and is read by its
-    frame ref (`frame_store_ref`).
+    frame ref (`frame_store_ref`). `fetch_args` are the arguments of the
+    `fetch` that retrieved the frames, kept on each entry because
+    `make_charts` asks the same retrieval again for the frame's members' kinds.
+
+    A frame id the frames did not hold clears the turn's count of calls that
+    drew nothing (`make_charts_failed`), so a chart of a frame that arrived
+    after those calls is not refused for them. Synchronous, so no other tool
+    call runs between the read of the frames and the writes.
     """
+    frames = dict(state.get(ORCHESTRATOR_FRAMES_KEY) or {})
+    added = False
     entries = []
     for ref, view, store_ref in described:
         frame_id = frame_id_for(ref)
+        added = added or frame_id not in frames
         frames[frame_id] = {"ref": ref, "view": view}
         if store_ref is not None:
             frames[frame_id]["store_ref"] = store_ref
+        if fetch_args is not None:
+            frames[frame_id]["fetch_args"] = fetch_args
         entries.append({"frame": frame_id, "view": view})
+    state[ORCHESTRATOR_FRAMES_KEY] = frames
+    calls = state.get(ORCHESTRATOR_CALLS_KEY) or {}
+    if added and calls.get("make_charts_failed"):
+        state[ORCHESTRATOR_CALLS_KEY] = {
+            tool: count for tool, count in calls.items() if tool != "make_charts_failed"
+        }
     return entries
 
 

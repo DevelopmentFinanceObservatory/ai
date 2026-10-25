@@ -36,7 +36,6 @@ from harness.graph.seams import (
 )
 from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
-    ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
@@ -557,9 +556,8 @@ class HandBack:
     def listing(self, state: SessionState, asks: list[dict[str, Any]] | None) -> dict[str, Any]:
         """The frames, summaries, computation notes and asks the agent
         reads, the described frames registered in `state` under their ids."""
-        frames = dict(state.get(ORCHESTRATOR_FRAMES_KEY) or {})
         result: dict[str, Any] = {
-            "frames": register_frames(frames, self.described),
+            "frames": register_frames(state, self.described),
             "step_summaries": [_hand_back_text(summary) for summary in self.summaries],
             "totals": self.totals,
         }
@@ -567,7 +565,6 @@ class HandBack:
             result["frames_not_chartable"] = self.not_chartable
         if asks is not None:
             result["asks"] = asks
-        state[ORCHESTRATOR_FRAMES_KEY] = frames
         return result
 
 
