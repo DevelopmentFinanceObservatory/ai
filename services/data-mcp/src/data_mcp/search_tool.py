@@ -72,7 +72,12 @@ TIME_FORMS = (
 
 
 class SearchEntity(BaseModel):
-    """One entity mentioned in a part, with an optional relational phrase."""
+    """One entity mentioned in a part, with an optional relational phrase.
+
+    `name` or `dcid` says which entity `text` means, so two entities whose
+    words are alike ("aid from Congo to Congo") stay two rows. Search refuses
+    a row carrying both with `request_invalid`, so the model refuses it first.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -96,6 +101,30 @@ class SearchEntity(BaseModel):
             "set as one place: 'Africa' is {text: 'Africa'}"
         ),
     )
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_ENTITY_TEXT_CHARS,
+        description=(
+            "the entity's full name, when `text` could name more than one entity: "
+            "'aid from Congo to Congo' sends {text: 'Congo', name: 'Republic of the "
+            "Congo'}. Leave unset beside `dcid`"
+        ),
+    )
+    dcid: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "the graph dcid of the entity `text` names, e.g. 'country/COG', as a "
+            "search refusal's candidate lists it. Leave unset beside `name`"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _name_or_dcid(self) -> Self:
+        if self.name is not None and self.dcid is not None:
+            raise ValueError("set name or dcid, not both: a dcid already names the entity")
+        return self
 
 
 class SearchOperation(BaseModel):
@@ -330,6 +359,10 @@ def _wire_entity(entity: SearchEntity) -> dict[str, Any]:
         wire["role_text"] = entity.role
     if entity.members:
         wire["members"] = True
+    if entity.name is not None:
+        wire["name"] = entity.name
+    if entity.dcid is not None:
+        wire["dcid"] = entity.dcid
     return wire
 
 
@@ -570,6 +603,15 @@ async def search(
     measure, or the code itself when the user gives none. When Search reports
     the code ambiguous (`source_code_ambiguous`), retry with a `sources` entry
     naming one of the sources it lists.
+
+    Two entities written alike stay two rows when each carries its `name` or
+    `dcid`: "aid from Congo to Congo" sends `{"text": "Congo", "role": "from",
+    "name": "Democratic Republic of the Congo"}` and `{"text": "Congo", "role":
+    "to", "name": "Republic of the Congo"}`. A row takes `name` or `dcid`,
+    never both. When Search refuses `entity_ambiguous`, the digest lists each
+    ambiguous entity by number with its candidates' dcids: ask the user which
+    one is meant, then resend that row with the candidate's `dcid`, keeping
+    its `text` and `role`.
 
     A comparison of two categories of one measure ("health versus education
     aid") is one part per category, each with `separate: true`, and so is
