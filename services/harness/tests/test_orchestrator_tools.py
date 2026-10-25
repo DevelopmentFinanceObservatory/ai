@@ -86,6 +86,7 @@ from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
+from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
@@ -3903,22 +3904,92 @@ async def test_plan_carries_the_asks_put_across_years_by_number():
     assert pending_action(ctx.state) == PendingPlan(
         brief="Total debt service between 2015 and 2022",
         asks=["Debt service by creditor", "The total between 2015 and 2022"],
-        ask_breakdowns=[AskBreakdown(ask=0, by=("creditor",))],
+        ask_breakdowns=[
+            AskBreakdown(ask=0, by=("creditor",)),
+            AskBreakdown(ask=1, over=("creditor",)),
+        ],
         asks_across_years=[1],
     )
 
 
-async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across():
+@pytest.mark.parametrize(
+    "over",
+    [("creditor",), ("donor", "creditor")],
+    ids=["one-word", "two-words-for-one-side"],
+)
+async def test_plan_takes_a_party_the_search_held_open_that_an_ask_totals_across(
+    over: tuple[PartyRole, ...],
+):
     tools, ctx = await _searched(_BY_CREDITOR)
 
     recorded = tools["plan"](
-        "Total debt service", [{"text": "Total debt service", "over": ["creditor"]}], ctx
+        "Total debt service", [{"text": "Total debt service", "over": list(over)}], ctx
     )
 
     assert recorded[HANDED_OFF] == "plan"
     assert pending_action(ctx.state) == PendingPlan(
-        brief="Total debt service", asks=["Total debt service"]
+        brief="Total debt service",
+        asks=["Total debt service"],
+        ask_breakdowns=[AskBreakdown(ask=0, over=over)],
     )
+
+
+_US_SHARE_OF_KENYA = {
+    "variable": "ODA",
+    "entities": [{"text": "Kenya", "role": "to"}, {"text": "United States", "role": "from"}],
+    "operations": [
+        {"verb": "share_of", "phrase": "share from the United States", "over": "origin"}
+    ],
+}
+
+
+_EACH_DONORS_SHARE_OF_KENYA = {
+    **_US_SHARE_OF_KENYA,
+    "entities": [{"text": "Kenya", "role": "to"}],
+    "open_roles": ["donor"],
+}
+
+
+@pytest.mark.parametrize(
+    ("part", "ask", "taken"),
+    [
+        pytest.param(_US_SHARE_OF_KENYA, "US share of ODA to Kenya", False, id="no-party"),
+        pytest.param(
+            _US_SHARE_OF_KENYA,
+            {"text": "US share of ODA to Kenya", "by": ["donor"]},
+            False,
+            id="named-member-by",
+        ),
+        pytest.param(
+            _US_SHARE_OF_KENYA,
+            {"text": "US share of ODA to Kenya", "over": ["donor"]},
+            True,
+            id="named-member-over",
+        ),
+        pytest.param(
+            _EACH_DONORS_SHARE_OF_KENYA,
+            {"text": "each donor's share", "by": ["donor"]},
+            True,
+            id="held-open-by",
+        ),
+    ],
+)
+async def test_plan_holds_a_share_searchs_side_to_an_ask_totalling_across_it(
+    part: dict[str, Any], ask: str | dict[str, Any], taken: bool
+):
+    # The whole of a share over origin spans every donor, so the ask the
+    # share answers totals across them, which the plan then holds it to. A
+    # search holding donors open lists each, so `by` answers it too.
+    tools, ctx = await _searched(part)
+
+    recorded = tools["plan"]("brief", [ask], ctx)
+
+    if taken:
+        assert recorded[HANDED_OFF] == "plan"
+        return
+    assert recorded["invalid"] == [
+        {"loc": "asks", "type": "share_whole_unstated", "party": "donor/creditor/exporter"}
+    ]
 
 
 @pytest.mark.parametrize("by", ["creditor", "donor"], ids=["one-word", "two-words-for-one-side"])

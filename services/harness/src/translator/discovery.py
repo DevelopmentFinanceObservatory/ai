@@ -141,11 +141,9 @@ from planner.plan import (
     AggregateRequirement,
     DatasetRequirement,
     Entity,
-    EvidenceRequirement,
     Plan,
     PlanStatus,
     QuotientRequirement,
-    RequirementSide,
     SessionState,
     ShareOfRequirement,
     Unit,
@@ -159,6 +157,7 @@ from planner.plan import (
     recorded_identity,
     retrieves_period,
     save_plan,
+    side_entities,
     split_of,
     windowed_pins,
     with_authored_requirements,
@@ -2559,7 +2558,7 @@ def _divides_its_member_by_itself(
     True when a share_of or quotient_of of `plan` reads `requirement` as its
     denominator, directly or through aggregates (`_dividers`), and on a side
     `requirement.across` opens every entity `pinned` binds is one its
-    numerator names (`_numerator_entities`). Both are compared by graph ref:
+    numerator names (`planner.plan.side_entities`). Both are compared by graph ref:
     the numerator's names are resolved against `pinned` by label, by the refs
     Search bound for them or by the refs the graph resolved them to
     (`compiler.evidence.named_refs`), and a group the numerator names stands
@@ -2576,7 +2575,7 @@ def _divides_its_member_by_itself(
     by_id = {item.id: item for item in written.evidence_requirements}
     sides = {side for word in requirement.across if (side := flow_side(word)) is not None}
     for divider in _dividers(written, _origin_id(plan, requirement.id)):
-        members = named_refs(_numerator_entities(by_id, divider.numerator), pinned)
+        members = named_refs(side_entities(by_id, divider.numerator), pinned)
         for side in sides:
             bound = {entity.ref for entity in pinned.entities if flow_side(entity.role) == side}
             if bound and bound <= members:
@@ -2598,23 +2597,6 @@ def _dividers(
         elif isinstance(reader, AggregateRequirement):
             found.extend(_dividers(plan, reader.id))
     return tuple(found)
-
-
-def _numerator_entities(
-    by_id: Mapping[str, EvidenceRequirement], side: RequirementSide
-) -> tuple[Entity, ...]:
-    """The entities a numerator `side` names, its requirements looked up in `by_id`.
-
-    A side narrowed to one `entity` names that entity alone. Any other names
-    the entities of the dataset requirement it reads, directly or through
-    aggregates; a side reading through any other kind names none.
-    """
-    if side.entity is not None:
-        return (Entity(name=side.entity),)
-    item = by_id[side.input_id]
-    while isinstance(item, AggregateRequirement):
-        item = by_id[item.input_id]
-    return tuple(item.entities) if isinstance(item, DatasetRequirement) else ()
 
 
 def _summed_by_every_reader(plan: Plan, requirement_id: str) -> bool:

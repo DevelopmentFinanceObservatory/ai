@@ -326,6 +326,7 @@ def store_search(
     *,
     asked: Sequence[Sequence[str]] = (),
     held_open: Sequence[Sequence[str]] = (),
+    share_sides: Sequence[Sequence[str]] = (),
     origin: Origin = "search",
 ) -> list[dict[str, Any]]:
     """Store what a `resolver_digest` read in the orchestrator's session state,
@@ -336,8 +337,9 @@ def store_search(
     `ORCHESTRATOR_SPEC_WARNINGS_KEY`, where `fetch` finds them, and each part
     joins `ORCHESTRATOR_SEARCHES_KEY` as a `SearchReading` from `origin`.
     `asked` holds each part's asked flow parties by position, and
-    `held_open` those it asked to hold open; each is empty when no part's
-    are known.
+    `held_open` those it asked to hold open, and `share_sides` the sides
+    its `share_of` operations run over; each is empty when no part's are
+    known.
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -367,6 +369,8 @@ def store_search(
             facts["asked_roles"] = list(asked[index])
         if held_open:
             facts["open_roles"] = list(held_open[index])
+        if share_sides:
+            facts["share_over"] = list(share_sides[index])
         stored = SearchReading.from_part(
             {**reading, **facts}, skills=skill_ids, origin=origin, observed_at=observed_at
         )

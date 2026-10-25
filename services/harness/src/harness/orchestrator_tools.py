@@ -360,8 +360,8 @@ class AskedOutput(BaseModel):
 
         One ask is one output, whose flow has one party on each side, so
         "donor" beside "creditor" lists the parties of two flows, each an
-        ask of its own. `over` may hold both: it totals, and reaches no
-        plan.
+        ask of its own. `over` may hold both: it totals, and the plan
+        checks each word on its own (`planner.plan.AskBreakdown`).
         """
         if shared := words_for_one_party(self.by):
             raise ValueError(
@@ -1107,7 +1107,12 @@ def _breakdowns_missing(
 
     A party a settled reading asked to hold open (`SearchReading.open_roles`)
     is one the user asked to see one by one or to total across, so some ask
-    names it in `by` or in `over`. The turn's readings are of different
+    names it in `by` or in `over`. The side a reading's `share_of` runs over
+    (`SearchReading.share_over`) is one the share's whole totals across, so
+    some ask names it in `over`, which holds the plan's whole to every
+    member of it (`planner.plan.WholeIsItsMemberError`); a reading that also
+    held that side open, as each donor's share of every donor's total does,
+    is answered by `by` too. The turn's readings are of different
     sources, so a `PARTY_ROLES` word keeps its kind of flow: only that word
     names it, and a turn that held "donor" open for aid and "creditor" open
     for debt needs an ask naming each. A role column, held open by a word
@@ -1120,12 +1125,18 @@ def _breakdowns_missing(
     cannot call again without end.
     """
     named = [role for ask in asks for role in (*ask.by, *ask.over)]
+    totalled = [role for ask in asks for role in ask.over]
     held: dict[str, str] = {}
+    shared: dict[str, str] = {}
     for stored in tool_context.state.get(ORCHESTRATOR_SEARCHES_KEY) or []:
         reading = SearchReading.model_validate(stored)
         if reading.status in SETTLED_STATUSES and reading.spec_id:
+            text = reading.text or reading.spec_id
             for role in reading.open_roles:
-                held.setdefault(role, reading.text or reading.spec_id)
+                held.setdefault(role, text)
+            for column in reading.share_over:
+                if not party_among(column, reading.open_roles):
+                    shared.setdefault(column, text)
     problems = [
         (
             {"loc": "asks", "type": "breakdown_missing", "party": column_party_roles(role)},
@@ -1135,7 +1146,26 @@ def _breakdowns_missing(
         for role, text in held.items()
         if not (role in named if party_role(role) == role else party_among(role, named))
     ]
+    problems += [
+        (
+            {"loc": "asks", "type": "share_whole_unstated", "party": column_party_roles(column)},
+            f"asks: the whole of this turn's share for {text!r} spans every "
+            f"{column_party_roles(column)}, and no ask totals across it; {_share_repair(column)}",
+        )
+        for column, text in shared.items()
+        if not party_among(column, totalled)
+    ]
     return _invalid_arguments(tool_context, "plan", problems) if problems else None
+
+
+def _share_repair(column: str) -> str:
+    """What a `plan` call adds to its asks for a share whose whole spans the side `column` names."""
+    parties = ", ".join(f'"{party}"' for party in column_party_roles(column).split("/"))
+    return (
+        f"add the one of {parties} this flow has to the `over` of the ask the share answers, "
+        "since its whole totals across them; a share of named members lists them as "
+        "entities, not in `by`"
+    )
 
 
 def _held_party_repair(role: str) -> str:
@@ -1160,11 +1190,13 @@ def _held_party_repair(role: str) -> str:
 
 
 def _ask_breakdowns(asks: Sequence[AskedOutput]) -> list[AskBreakdown]:
-    """The parties each ask lists in `by`, by number, for the asks that list any."""
+    """The parties each ask lists in `by` and totals across in `over`, by number, for the asks that name any."""
     return [
-        AskBreakdown(ask=number, by=tuple(dict.fromkeys(ask.by)))
+        AskBreakdown(
+            ask=number, by=tuple(dict.fromkeys(ask.by)), over=tuple(dict.fromkeys(ask.over))
+        )
         for number, ask in enumerate(asks)
-        if ask.by
+        if ask.by or ask.over
     ]
 
 
@@ -1371,6 +1403,7 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             "departures": offered.departures,
             "asked_roles": offered.asked_roles,
             "open_roles": offered.open_roles,
+            "share_over": offered.share_over,
         }
         if sibling is not None:
             link = sibling[1]
@@ -1393,6 +1426,21 @@ def _open_roles(part: SearchPart) -> list[str]:
     "from" gives "origin".
     """
     return list(dict.fromkeys(role for word in part.open_roles or () if (role := open_party(word))))
+
+
+def _share_sides(part: SearchPart) -> list[str]:
+    """The role column of each side of the flow a `share_of` operation of `part` runs over.
+
+    A share over `origin` divides by a whole spanning every giving party:
+    "the United States' share of ODA to Kenya" is one.
+    """
+    return list(
+        dict.fromkeys(
+            operation.over
+            for operation in part.operations or ()
+            if operation.verb == "share_of" and operation.over in ("origin", "destination")
+        )
+    )
 
 
 def _offered_sibling(
@@ -1634,6 +1682,7 @@ def build_orchestrator_tools(
             digest,
             asked=[_asked_roles(part) for part in parts] if tied else [],
             held_open=[_open_roles(part) for part in parts] if tied else [],
+            share_sides=[_share_sides(part) for part in parts] if tied else [],
         )
         found: dict[str, Any] = {"kind": digest.get("kind") or "resolution", "parts": readings}
         if not readings:
