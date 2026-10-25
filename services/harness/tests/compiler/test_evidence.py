@@ -2501,8 +2501,9 @@ def test_a_recorded_retrieval_stating_no_axes_holds_nothing_on_the_open_donor_ax
 def test_a_retrieval_holding_two_entities_under_the_open_column_covers_the_population(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
-    # The approved axis counts 55 donors over every year, and the window may
-    # hold fewer, so two is the bar, as it is before approval.
+    # The approved axis counts 55 donors in the years the source was resolved
+    # for, which an amended period may not match, so two is the bar, as it is
+    # before approval.
     approved = source(entities=(KENYA_DESTINATION,), open_entity_axes=(DONORS,))
     evidence = evidence_from_manifest(
         _flow_manifest(), series_stats=_kenya_from("country/FRA", "country/DEU")

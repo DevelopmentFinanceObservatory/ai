@@ -44,7 +44,7 @@ from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
 from compiler.shapes import breakdown_level
-from compiler.sources import stat_var_count, stat_var_count_is_floor
+from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, role_party, singular
 from planner.phrasing import (
     among_phrase,
@@ -1081,10 +1081,11 @@ def _reading_clause(source: SelectedSource) -> str | None:
     on a role axis, so the retrieval can hold other members than it counts.
     Such a source, and one whose confirmed count `search` states as a floor
     or not at all, is counted by the family `served_count` counts, whatever
-    its years, as "summed over whichever of its 288 indicators hold data". A family counted at fewer than two members, or
-    only at a floor (`stat_var_count_is_floor`), is named without a count. Says when the
-    reading is the compiler's default (`ReadingSetBy.RULE`), so the user
-    knows the plan can be amended to read it the other way.
+    its years, as "summed over whichever of its 288 indicators hold data".
+    A family without that count, or counted at fewer than two members, is
+    named without a count. Says when the reading is the compiler's default
+    (`ReadingSetBy.RULE`), so the user knows the plan can be amended to read
+    it the other way.
 
     A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
@@ -1108,11 +1109,11 @@ def _reading_clause(source: SelectedSource) -> str | None:
             if summed
             else f"kept as {retrieved:,} separate indicators"
         )
-    elif retrieved is None and count > 1 and not stat_var_count_is_floor(source):
+    elif retrieved is None and (served := source.served_count or 0) > 1:
         clause = (
-            f"summed over whichever of its {count:,} indicators hold data"
+            f"summed over whichever of its {served:,} indicators hold data"
             if summed
-            else f"kept separate over whichever of its {count:,} indicators hold data"
+            else f"kept separate over whichever of its {served:,} indicators hold data"
         )
     else:
         clause = "summed over its indicators" if summed else "kept as separate indicators"

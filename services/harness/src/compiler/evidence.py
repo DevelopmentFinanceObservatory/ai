@@ -856,9 +856,9 @@ def _open_axis_issues(
     entities under the column it carries each covered axis in
     (`_retrieved_column`), the fewest a population has. Each axis holding
     fewer is its own finding. The count is not compared with the axis's
-    `member_count`: that counts the parties `search` found with data in the
-    years the source was resolved for, which a period amended or rolled
-    since no longer matches.
+    `member_count`: that counts the members (a flow side's parties, a place
+    axis's places) `search` found with data in the years the source was
+    resolved for, which a period amended or rolled since no longer matches.
     """
     open_entity_axes = (
         approved.open_entity_axes if approved is not None else evidence.open_entity_axes
