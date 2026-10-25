@@ -16,6 +16,7 @@ from harness.plan_display import (
     _label,
     operation_rows,
     requirement_rows,
+    share_wholes,
     shown_plan,
     step_rows,
 )
@@ -89,6 +90,13 @@ from planner.workflow import (
     WorkflowStep,
 )
 
+from .share_plan import (
+    ALL_DONORS,
+    DAC_DONORS,
+    US_DONOR,
+    us_share_of_kenya_oda,
+    us_share_per_recipient,
+)
 from .split_plan import SPEC_DEBT, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
@@ -2366,3 +2374,173 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
             copy_gap.replace("'debt_history'", "'debt'"),
         ),
     ]
+
+
+# --- The whole a share divides by ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("numerator", "whole", "wholes"),
+    [
+        (US_DONOR, DAC_DONORS, {"share": "from official donors (DAC)"}),
+        (US_DONOR, ALL_DONORS, {"share": "from all 140 donors"}),
+        # Official donors' share of every provider's ODA divides by every provider.
+        (DAC_DONORS, ALL_DONORS, {"share": "from all 140 donors"}),
+        # A share of official donors' ODA divides by the same donors, which it names.
+        (DAC_DONORS, DAC_DONORS, {}),
+    ],
+    ids=["dac_donors", "all_donors", "dac_of_all", "same_donors"],
+)
+def test_a_share_names_the_population_its_denominator_holds_and_its_numerator_does_not(
+    decision: DecisionFactory,
+    numerator: dict[str, Any],
+    whole: dict[str, Any],
+    wholes: dict[str, str],
+) -> None:
+    """The United States' share of ODA to Kenya divides by official donors
+    (DAC) over one source and by every provider over another, and the
+    source the denominator reads says which."""
+    donor = "United States" if numerator is US_DONOR else "official donors (DAC)"
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, donor=donor)
+
+    assert share_wholes(plan) == wholes
+
+
+@pytest.mark.parametrize(
+    ("whole", "parties"),
+    [(DAC_DONORS, "Kenya and official donors (DAC)"), (ALL_DONORS, "Kenya and all 140 donors")],
+    ids=["dac_donors", "all_donors"],
+)
+def test_the_approved_plan_names_the_parties_a_shares_denominator_source_holds(
+    decision: DecisionFactory, whole: dict[str, Any], parties: str
+) -> None:
+    """The denominator asks for every donor; the plan says what its source
+    holds, the official donors (DAC) its group stands for or the count of
+    donors it leaves open, in the fetch step's label and the share's sentence."""
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+
+    rows = {row["id"]: row for row in step_rows(plan)}
+
+    assert rows["all_oda"]["label"] == f"Fetch ODA gross disbursements for {parties}"
+    assert rows["share"]["description"].startswith(
+        "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
+        f"disbursements ({parties})."
+    )
+
+
+@pytest.mark.parametrize(
+    ("whole_across", "label"),
+    [
+        (("donor",), "Fetch ODA gross disbursements for Kenya and official donors (DAC)"),
+        # A fetch naming no donor leaves the set its source binds unsaid, as it did.
+        ((), "Fetch ODA gross disbursements for Kenya"),
+    ],
+    ids=["across_donors", "kenya_only"],
+)
+def test_a_bound_set_stands_only_for_an_across_word_on_its_side(
+    decision: DecisionFactory, whole_across: tuple[str, ...], label: str
+) -> None:
+    plan = us_share_of_kenya_oda(
+        decision, whole=DAC_DONORS, numerator=US_DONOR, whole_across=whole_across
+    )
+
+    rows = {row["id"]: row for row in step_rows(plan)}
+
+    assert rows["all_oda"]["label"] == label
+
+
+@pytest.mark.parametrize(
+    ("scope", "numerator_recipients", "whole"),
+    [
+        # Each recipient divides by its own total, so the recipients are no part of the whole.
+        (DenominatorScope.PER_AXIS, 120, "from official donors (DAC)"),
+        # Every recipient divides by one total across them, though the numerator holds as many.
+        (DenominatorScope.POOLED, 150, "from all 140 donors and to all 150 recipients"),
+    ],
+    ids=["per_axis", "pooled"],
+)
+def test_a_keyed_shares_whole_follows_its_denominator_scope(
+    decision: DecisionFactory, scope: DenominatorScope, numerator_recipients: int, whole: str
+) -> None:
+    plan = us_share_per_recipient(
+        decision, scope=scope, numerator_recipients=numerator_recipients, whole_recipients=150
+    )
+
+    assert share_wholes(plan) == {"share": whole}
+
+
+_LATER = (PeriodThreshold(op="gte", year=2020),)
+
+
+@pytest.mark.parametrize(
+    ("then", "wholes"),
+    [
+        (
+            (
+                FilterRequirement(id="later", input_id="share", predicates=_LATER),
+                FilterOperation(
+                    id="later", requirement_id="later", input="share", predicates=_LATER
+                ),
+            ),
+            {"share": "from official donors (DAC)", "later": "from official donors (DAC)"},
+        ),
+        (
+            (
+                AggregateRequirement(
+                    id="mean", input_id="share", reduction=Reduction.MEAN, group_by=()
+                ),
+                AggregateOperation(
+                    id="mean",
+                    requirement_id="mean",
+                    input="share",
+                    reduction=Reduction.MEAN,
+                    group_by=(),
+                ),
+            ),
+            {"share": "from official donors (DAC)", "mean": "from official donors (DAC)"},
+        ),
+        # A total of shares, or their change, is no share of the whole.
+        (
+            (
+                AggregateRequirement(
+                    id="total", input_id="share", reduction=Reduction.SUM, group_by=()
+                ),
+                AggregateOperation(
+                    id="total",
+                    requirement_id="total",
+                    input="share",
+                    reduction=Reduction.SUM,
+                    group_by=(),
+                ),
+            ),
+            {"share": "from official donors (DAC)"},
+        ),
+        (
+            (
+                GrowthRequirement(
+                    id="change",
+                    input_id="share",
+                    window_start=2015,
+                    window_end=2024,
+                    change=GrowthChange.ABSOLUTE,
+                ),
+                GrowthOperation(
+                    id="change",
+                    requirement_id="change",
+                    input="share",
+                    window_start=2015,
+                    window_end=2024,
+                    change=GrowthChange.ABSOLUTE,
+                ),
+            ),
+            {"share": "from official donors (DAC)"},
+        ),
+    ],
+    ids=["filter", "mean", "total", "growth"],
+)
+def test_a_step_keeping_its_inputs_shares_keeps_their_whole(
+    decision: DecisionFactory, then: tuple[EvidenceRequirement, Operation], wholes: dict[str, str]
+) -> None:
+    plan = us_share_of_kenya_oda(decision, whole=DAC_DONORS, numerator=US_DONOR, then=[then])
+
+    assert share_wholes(plan) == wholes

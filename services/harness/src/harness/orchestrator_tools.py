@@ -676,15 +676,27 @@ class _Narrowed:
 _CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
 
 
-def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
-    """A card's title: the model's `subject`, then the period the card shows,
-    then on a card cut to its largest members what the cut leaves out and the
-    period it ranked at. The subject is shortened so the title fits 120
-    characters."""
-    suffix = f", {period}" if period is not None else ""
+def _card_title(
+    subject: str, *, whole: str | None, period: str | None, cut: TopMembers | None
+) -> str:
+    """A card's title: the model's `subject`, then on a card of shares the
+    whole they divide by (`harness.plan_display.share_wholes`), then the
+    period the card shows, then on a card cut to its largest members what the
+    cut leaves out and the period it ranked at. The subject is shortened so
+    the title fits 120 characters."""
+    suffix = ""
+    if whole is not None:
+        suffix = _whole_clause(whole)
+    if period is not None:
+        suffix += f", {period}"
     if cut is not None:
         suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
     return f"{subject[: 120 - len(suffix)]}{suffix}"
+
+
+def _whole_clause(whole: str) -> str:
+    """The clause `_card_title` states a card's whole in."""
+    return f", of the total {whole}"
 
 
 def _covered_years(view: Mapping[str, Any]) -> list[str]:
@@ -2070,8 +2082,12 @@ def build_orchestrator_tools(
                     )
                     continue
                 # A title the model copied from a card already cut loses that
-                # suffix, so the card's own suffix is the only one.
+                # suffix, and one copied from a card of shares everything from
+                # the whole's clause on, its period included, so the card's own
+                # suffixes are the only ones.
                 subject = _CUT_SUFFIX.sub("", chart.title)
+                if (whole := frame.get("whole")) is not None:
+                    subject = subject.partition(_whole_clause(whole))[0]
                 if (refusal := _title_refusal(subject, frame["view"])) is not None:
                     drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
                     continue
@@ -2143,7 +2159,7 @@ def build_orchestrator_tools(
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
                 period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
-                title = _card_title(subject, period=period, cut=cut)
+                title = _card_title(subject, whole=whole, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],

@@ -2289,6 +2289,47 @@ async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
     assert result["charts"][0]["title"] == title
 
 
+@pytest.mark.parametrize(
+    ("title", "whole", "drawn"),
+    [
+        (
+            "US share of aid to Kenya",
+            "from official donors (DAC)",
+            "US share of aid to Kenya, of the total from official donors (DAC), 2023 to 2025",
+        ),
+        (
+            "US share of aid to Kenya",
+            "from all 140 donors",
+            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+        ),
+        # A title copied from a card of shares states the whole and the period once.
+        (
+            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+            "from all 140 donors",
+            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+        ),
+    ],
+    ids=["dac_donors", "all_donors", "copied"],
+)
+async def test_make_charts_writes_the_whole_a_card_of_shares_divides_by_into_its_title(
+    monkeypatch: pytest.MonkeyPatch, title: str, whole: str, drawn: str
+) -> None:
+    """A frame a plan handed back with the whole its shares divide by
+    (`plan_display.share_wholes`) is drawn with that whole in the card's
+    title, before the period."""
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = WideFrameExecutor(providers=10, view=copy.deepcopy(TEN_VIEW))
+    tools, ctx = _tools(executor=executor)
+    hand_back = HandBack(executor)
+    await hand_back.describe(WIDE_REF, tool="share_of", store_ref=None, whole=whole)
+    hand_back.listing(ctx.state, None)
+
+    result = await tools["make_charts"]([_wide_chart(title=title)], ctx)
+
+    (intent,) = _intents(executor)
+    assert intent["title"] == result["charts"][0]["title"] == drawn
+
+
 async def test_a_card_whose_frame_is_unread_names_no_period(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
