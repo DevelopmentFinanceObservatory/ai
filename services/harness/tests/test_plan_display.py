@@ -94,7 +94,9 @@ from .share_plan import (
     ALL_DONORS,
     DAC_DONORS,
     NAMED_DONORS,
+    UGANDA,
     US_DONOR,
+    USA_RECEIVING,
     us_share_of_kenya_oda,
     us_share_per_recipient,
 )
@@ -2662,6 +2664,8 @@ def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
 
 
 _UK_AND_US = ("United Kingdom", "United States")
+_TWO_RECIPIENTS = {"whole_recipients": ("Kenya", "Uganda")}
+_US_TO_TWO = {"entities": (*US_DONOR["entities"], UGANDA)}
 
 
 @pytest.mark.parametrize(
@@ -2672,13 +2676,38 @@ _UK_AND_US = ("United Kingdom", "United States")
         (
             NAMED_DONORS,
             _UK_AND_US,
-            {"from_whole": True},
+            {"narrowed_from": "all_oda"},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # Narrowed out of the two donors' ODA to Kenya, it holds Kenya alone.
+        (
+            {"entities": (*NAMED_DONORS["entities"], UGANDA)},
+            _UK_AND_US,
+            {
+                **_TWO_RECIPIENTS,
+                "numerator": NAMED_DONORS,
+                "us_donors": _UK_AND_US,
+                "narrowed_from": "us",
+            },
+            {"share": "from United Kingdom and United States and to Kenya and Uganda"},
+        ),
+        # A frame holding the United States on both sides narrows to the donor
+        # its requirement names.
+        (
+            {"entities": (*NAMED_DONORS["entities"], USA_RECEIVING)},
+            _UK_AND_US,
+            {"narrowed_from": "all_oda"},
             {"share": "from United Kingdom and United States"},
         ),
         # The denominator names the numerator's donor, by its words or by another
-        # name the graph resolves to the same ref.
-        (US_DONOR, ("United States",), {}, {}),
-        ({**US_DONOR, "entity_refs": {"usa": "country/USA"}}, ("USA",), {}, {}),
+        # name the graph resolves to the same ref, beside recipients it does not.
+        (_US_TO_TWO, ("United States",), _TWO_RECIPIENTS, {"share": "to Kenya and Uganda"}),
+        (
+            {**_US_TO_TWO, "entity_refs": {"usa": "country/USA"}},
+            ("USA",),
+            _TWO_RECIPIENTS,
+            {"share": "to Kenya and Uganda"},
+        ),
         # Donors giving at least $1bn of the two are not both of them.
         (
             NAMED_DONORS,
@@ -2693,7 +2722,15 @@ _UK_AND_US = ("United Kingdom", "United States")
             {},
         ),
     ],
-    ids=["named_donors", "narrowed_out_of_the_frame", "same_donor", "same_ref", "value_filter"],
+    ids=[
+        "named_donors",
+        "narrowed_out_of_the_frame",
+        "narrowed_out_of_another_frame",
+        "named_on_both_sides",
+        "same_donor",
+        "same_ref",
+        "value_filter",
+    ],
 )
 def test_a_share_of_named_donors_names_them_where_the_numerator_holds_others(
     decision: DecisionFactory,
@@ -2708,10 +2745,9 @@ def test_a_share_of_named_donors_names_them_where_the_numerator_holds_others(
     plan = us_share_of_kenya_oda(
         decision,
         whole=whole,
-        numerator=US_DONOR,
         whole_across=(),
         whole_donors=whole_donors,
-        **options,
+        **{"numerator": US_DONOR, **options},
     )
 
     assert share_wholes(plan) == wholes

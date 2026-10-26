@@ -72,6 +72,7 @@ from planner.plan import (
     Plan,
     QuotientRequirement,
     RankRequirement,
+    RequirementSide,
     ResolvedBy,
     ShareOfRequirement,
     SumOfRequirement,
@@ -81,6 +82,7 @@ from planner.plan import (
     copy_origins,
     frame_shapes,
     is_search_pin,
+    side_entities,
 )
 from planner.records import (
     Breakdown,
@@ -459,29 +461,31 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
     population (`_Population.same`) is left out, since a share of health ODA
     from every donor divides by the same donors. A share of one side by
     itself (`pools_its_own_axis`), or of one entity narrowed out of a frame
-    (`RequirementSide.entity`), divides by every population its denominator
-    holds. A keyed share's `axis` column follows its `denominator_scope`:
-    `per_axis` divides each member by its own total, so that column is no
-    part of the whole; `pooled` divides by the total across the column's
-    members, which is part of it whatever the numerator holds there.
+    its sources do not resolve, divides by every set and open axis its
+    denominator holds. A keyed share's `axis` column follows its
+    `denominator_scope`: `per_axis` divides each member by its own total, so
+    that column is no part of the whole; `pooled` divides by the total
+    across the column's members, which is part of it whatever the numerator
+    holds there.
 
     Off the axis, a column of named entities (`_Population.named`) is part
     of the whole only where the numerator is known to hold other entities
     there: the United States' share of the United Kingdom's and the United
     States' ODA divides "from United Kingdom and United States". The
-    numerator holds them by its own sources, or, narrowed to one entity of
-    the denominator's frame, holds that entity on its column and the
-    frame's entities on every other (`_narrowed_entity`). A numerator
-    narrowed by a step (`_reads_whole`) shows nothing to differ.
+    numerator holds what its own sources hold, and, narrowed to one entity
+    of its frame, that entity on its column (`_narrowed_entity`). A
+    numerator narrowed by a step (`_reads_whole`), or narrowed to an entity
+    its sources do not resolve, shows nothing to differ.
     """
-    denominator_input = plan.requirement(requirement.denominator.input_id)
-    denominator = _populations(denominator_input, plan)
+    denominator = _populations(plan.requirement(requirement.denominator.input_id), plan)
     if denominator is None:
         return None
-    if requirement.pools_its_own_axis or requirement.numerator.entity is not None:
-        numerator = _narrowed_entity(requirement, denominator_input, plan)
-    else:
+    numerator: dict[str, _Population] = {}
+    if not requirement.pools_its_own_axis:
         numerator = _populations(plan.requirement(requirement.numerator.input_id), plan) or {}
+        if requirement.numerator.entity is not None:
+            narrowed = _narrowed_entity(requirement.numerator, plan)
+            numerator = {} if narrowed is None else numerator | narrowed
     axis = None if requirement.axis is None else role_party(requirement.axis)
     clauses: list[str] = []
     for column, population in denominator.items():
@@ -498,24 +502,24 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
     return " and ".join(clauses) or None
 
 
-def _narrowed_entity(
-    requirement: ShareOfRequirement, denominator: EvidenceRequirement, plan: Plan
-) -> dict[str, _Population]:
-    """The one entity `requirement`'s numerator narrows the denominator's
-    frame to (`RequirementSide.entity`), as a population on its role column,
-    found among the entities the denominator's sources resolve
-    (`resolve_name`); empty for a numerator taking a whole frame, and for an
-    entity no source resolves."""
-    if requirement.numerator.entity is None:
-        return {}
-    entity = Entity(name=requirement.numerator.entity)
-    for dataset in datasets_of(denominator, plan):
-        source = _selected_source(dataset.id, plan)
-        resolved = None if source is None else resolve_name(entity, source)
-        if resolved is not None:
-            identity = ("named", frozenset({resolved.ref}))
-            return {resolved.role: _Population(entity.name, identity, named=True)}
-    return {}
+def _narrowed_entity(side: RequirementSide, plan: Plan) -> dict[str, _Population] | None:
+    """The one entity `side` narrows its frame to (`RequirementSide.entity`),
+    as a population on the role column its input's source resolves it on
+    (`resolve_name`), under the role the input's requirement states for the
+    name (`side_entities`); `None` when no source resolves it to one entity."""
+    requirements = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    named = side_entities(requirements, side)
+    found = {
+        (resolved.role, resolved.ref)
+        for dataset in datasets_of(plan.requirement(side.input_id), plan)
+        if (source := _selected_source(dataset.id, plan)) is not None
+        for entity in named
+        if (resolved := resolve_name(entity, source)) is not None
+    }
+    if len(found) != 1:
+        return None
+    ((column, ref),) = found
+    return {column: _Population(named[0].name, ("named", frozenset({ref})), named=True)}
 
 
 def _column_party(column: str) -> str:
