@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from harness.scope_choices import PartScope
 from harness.tool_contracts import graph_envelope, reading_facts
+from pydantic import ValidationError
 
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
 
@@ -95,6 +96,24 @@ def test_a_stored_reading_holds_the_parts_scope_choices_and_the_model_sees_none(
     shown = {key: value for key, value in summary.items() if key != "spec_block"}
     assert "scope" not in shown
     assert "scope_choices" not in json.dumps(shown)
+
+
+def test_a_field_search_adds_to_scope_choices_is_ignored_and_never_stored() -> None:
+    """A field a later dfo-apis release adds, on the record or inside an
+    option, leaves the part's scope choices readable and out of the stored
+    reading, which a strict read still takes back."""
+    added = _scope_choices()
+    added["rule_digest"] = "r1"
+    added["choices"][0]["options"][0]["availability"]["note"] = "new"
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert scope == PartScope.model_validate(_scope_choices()).model_dump(mode="json")
+    assert PartScope.model_validate(scope) == PartScope.from_search(added)
+    with pytest.raises(ValidationError):
+        PartScope.model_validate(added)
 
 
 def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(

@@ -36,8 +36,9 @@ current_conversation_key: ContextVar[tuple[str, str] | None] = ContextVar(
 )
 
 
-# The user's message for the current turn as `ConversationState.turn_user_message`
-# holds it, amendments and answers included; `None` outside a Studio turn.
+# The user's words for the current turn as `ConversationState.turn_user_words`
+# holds them, amendments and answers included and plan-card switches left
+# out; `None` outside a Studio turn.
 current_user_message: ContextVar[str | None] = ContextVar("studio_user_message", default=None)
 
 

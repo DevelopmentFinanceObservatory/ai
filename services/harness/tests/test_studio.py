@@ -4385,13 +4385,19 @@ _SHOWN_CHOICE = _PendingChoice(
 )
 
 
-async def _plan_with_a_choice(app: FastAPI, client: httpx2.AsyncClient) -> dict[str, Any]:
-    """Open a turn pausing on its plan card, and keep `_SHOWN_CHOICE` on the
-    pause as a card showing it would; the plan.proposed frame."""
+async def _plan_with_a_choice(
+    app: FastAPI,
+    client: httpx2.AsyncClient,
+    *,
+    choices: dict[str, _PendingChoice] | None = None,
+) -> dict[str, Any]:
+    """Open a turn pausing on its plan card, and keep `choices`
+    (`_SHOWN_CHOICE` by default) on the pause as a card showing them would;
+    the plan.proposed frame."""
     first = await _stream(client, "/api/studio/turn", _turn_body())
     plan = _frame(first, "plan.proposed")
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
-    conversation.pending[plan["interrupt_id"]].choices = {_CHOICE_ID: _SHOWN_CHOICE}
+    conversation.pending[plan["interrupt_id"]].choices = choices or {_CHOICE_ID: _SHOWN_CHOICE}
     await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
     return plan
 
@@ -4455,6 +4461,45 @@ async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None
     assert again["revision"] == plan["revision"]
     assert "nothing changed" in _frame(second, "message.complete")["text"]
     assert conversation.turn_user_message.endswith("(then: count health and population)")
+
+
+async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() -> None:
+    """A switch to grant equivalents that changes nothing (the plan states
+    no scope choice) stays in the turn's record, and a search after the plan
+    runs sends the user's own words alone, so Search reads no basis the user
+    did not state."""
+    basis_id = "spec_" + "b" * 32 + ":measure_basis"
+    basis = _PendingChoice(
+        active="measure_basis:gross",
+        options={
+            "measure_basis:gross": _PendingOption(label="gross disbursements", status="available"),
+            "measure_basis:grant_equivalent": _PendingOption(
+                label="grant equivalents", status="available"
+            ),
+        },
+    )
+    search = _search()
+    app = _app(
+        *_plan("q with forks", search_call("aid", "aid"), _text("Done.")),
+        resolver=search,
+        tool_surface=ScriptedSurface(),
+    )
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client, choices={basis_id: basis})
+        switched = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _switch_body(plan, choice_id=basis_id, option_id="measure_basis:grant_equivalent"),
+        )
+        again = _frame(switched, "plan.proposed")
+        final = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(again["interrupt_id"], "approve")
+        )
+
+    assert _events(final)[-1] == "done"
+    assert [call["context"].user_message for call in search.calls] == ["kenya oda 2023"]
+    (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+    assert record["user"] == "kenya oda 2023\n(then: count grant equivalents)"
 
 
 async def test_answers_to_a_plan_are_refused() -> None:

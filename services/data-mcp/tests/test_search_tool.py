@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -26,6 +27,7 @@ from data_mcp.search_tool import (
 from data_mcp.server import mcp
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import TypeAdapter, ValidationError
 
 from .conftest import (
@@ -240,26 +242,57 @@ async def _search_with_meta(meta: dict[str, object]) -> tuple[CallToolResult, li
 
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_the_context_in_meta_reaches_search_only_when_the_setting_is_on(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    exported_spans: InMemorySpanExporter,
+    enabled: bool,
 ) -> None:
+    """A context the setting drops is logged at debug and marked on the call's span."""
     monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", str(enabled).lower())
     context = {"user_message": "now Ghana", "carried_entries": [CARRIED_SECTOR]}
 
-    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: context})
+    with caplog.at_level(logging.DEBUG, logger="data_mcp.search_tool"):
+        result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: context})
 
     assert result.is_error is False
     members = context if enabled else {}
     assert [body["input"] for body in sent] == [
         {"kind": "parsed", "parts": [{"variable_text": "aid"}], **members}
     ]
+    dropped = [
+        span
+        for span in exported_spans.get_finished_spans()
+        if (span.attributes or {}).get("dfo.search.context_dropped")
+    ]
+    assert len(dropped) == (0 if enabled else 1)
+    assert any("context dropped" in r.getMessage() for r in caplog.records) is not enabled
 
 
+_MALFORMED_ENTRIES = {
+    "unknown-axis": {**CARRIED_SECTOR, "axis": "donor_type"},
+    "undeclared-field": {**CARRIED_SECTOR, "weight": 2},
+    "option-of-no-axis": {**CARRIED_SECTOR, "option_id": "120"},
+    "no-origin": {key: value for key, value in CARRIED_SECTOR.items() if key != "origin"},
+    "not-an-entry": "sector:120",
+}
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param({"message": "now Ghana"}, id="undeclared-member"),
+        *(
+            pytest.param({"carried_entries": [CARRIED_SECTOR, entry]}, id=name)
+            for name, entry in _MALFORMED_ENTRIES.items()
+        ),
+    ],
+)
 async def test_a_context_of_the_wrong_shape_is_refused_before_search_is_called(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, context: dict[str, object]
 ) -> None:
     monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "true")
 
-    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: {"message": "now Ghana"}})
+    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: context})
 
     assert result.is_error
     assert result.structured_content is not None

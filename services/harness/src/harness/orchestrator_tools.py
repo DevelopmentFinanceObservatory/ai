@@ -132,7 +132,6 @@ from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
@@ -142,6 +141,7 @@ from harness.graph.state import (
     DescribedFrame,
     PendingAsk,
     PendingPlan,
+    conversation_readings,
     count_call,
     frame_store_ref,
     pending_action,
@@ -1598,12 +1598,10 @@ def _search_context(state: SessionState) -> SearchContext:
     (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
     (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`).
     """
-    readings = [
-        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-    ]
     scopes = [
-        PartScope.model_validate(reading["scope"]) for reading in readings if reading.get("scope")
+        PartScope.model_validate(reading["scope"])
+        for reading in conversation_readings(state)
+        if reading.get("scope")
     ]
     return SearchContext(
         user_message=current_user_message.get() or None,

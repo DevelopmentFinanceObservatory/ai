@@ -23,6 +23,7 @@ from typing import Annotated, Any, Literal, Self
 
 from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
+from opentelemetry import trace
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -59,6 +60,7 @@ _MAX_SOURCE_REF_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
 _MAX_USER_MESSAGE_CHARS = 4000
 _MAX_CARRIED_ENTRIES = 16
+_MAX_ENTRY_ID_CHARS = 200
 _MAX_PART_OPERATIONS = 8
 _MAX_OPERATION_PHRASE_CHARS = 200
 _MAX_FORECAST_TARGET_YEAR = 2200
@@ -313,22 +315,58 @@ class SearchPart(BaseModel):
     )
 
 
+class _TextOrigin(BaseModel):
+    """The words of the user's message an entry was read from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["text"]
+    text: str = Field(max_length=_MAX_USER_MESSAGE_CHARS)
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+
+
+class _ChoiceOrigin(BaseModel):
+    """The scope choice an entry was switched or carried from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["choice"]
+    choice_id: str = Field(min_length=1, max_length=_MAX_ENTRY_ID_CHARS)
+
+
+class CarriedEntry(BaseModel):
+    """One scope entry in Search's `Entry` shape: an option asked for on one
+    axis, the concept it was made for, and where it came from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    axis: Literal["sector", "region", "measure_basis", "provider"]
+    option_id: str = Field(
+        pattern=r"^(sector|region|measure_basis|provider):[A-Za-z0-9_+]+$",
+        max_length=_MAX_ENTRY_ID_CHARS,
+    )
+    provenance: Literal["explicit", "carried"]
+    concept: str | None = Field(default=None, min_length=1, max_length=_MAX_ENTRY_ID_CHARS)
+    origin: Annotated[_TextOrigin | _ChoiceOrigin, Field(discriminator="kind")]
+
+
 class SearchContext(BaseModel):
     """The conversation a search is made in, sent by the harness in the request's
     `_meta` under `SEARCH_CONTEXT_META_KEY`.
 
-    `user_message` is the user's own message for the turn, amendments
-    included, from which Search reads intent and explicit scope.
+    `user_message` is the user's own words for the turn, amendments and
+    answers included, from which Search reads intent and explicit scope.
     `carried_entries` are the scope entries the conversation settled on
-    earlier parts, oldest first, each with provenance `carried`, as Search's
-    `Entry` writes them. Search attaches each to a part by axis and concept, and
-    validates them.
+    earlier parts, oldest first, each with provenance `carried`, in Search's
+    `Entry` shape (`CarriedEntry`). Search attaches each to a part by axis
+    and concept.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     user_message: str | None = Field(default=None, min_length=1)
-    carried_entries: list[dict[str, Any]] = Field(default_factory=list)
+    carried_entries: list[CarriedEntry] = Field(default_factory=list)
 
 
 def to_wire_request(
@@ -355,7 +393,10 @@ def to_wire_request(
         if context is not None and context.user_message is not None:
             input_block["user_message"] = context.user_message[-_MAX_USER_MESSAGE_CHARS:]
         if context is not None and context.carried_entries:
-            input_block["carried_entries"] = context.carried_entries[-_MAX_CARRIED_ENTRIES:]
+            input_block["carried_entries"] = [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in context.carried_entries[-_MAX_CARRIED_ENTRIES:]
+            ]
     else:
         if raw_query is None:
             raise ValueError("a search with no parts needs raw_query, the question Search reads")
@@ -724,7 +765,9 @@ async def search(
                 detail=f"the search context is not a SearchContext: {exc}",
             )
         )
-    if not Settings().search_sends_conversation_context:
+    if context is not None and not Settings().search_sends_conversation_context:
+        logger.debug("search context dropped: search_sends_conversation_context is off")
+        trace.get_current_span().set_attribute("dfo.search.context_dropped", True)
         context = None
     wire = to_wire_request(parts, raw_query, context=context)
     envelope = await resolve_and_register(wire)

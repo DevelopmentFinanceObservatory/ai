@@ -220,6 +220,20 @@ class PartScope(StrictModel):
     compiled: CompiledScope
     ledger: tuple[LedgerStep, ...] = ()
 
+    @classmethod
+    def from_search(cls, raw: object) -> PartScope:
+        """Read a part's `resolved.scope_choices` as Search wrote it.
+
+        A field Search added that this mirror does not declare, anywhere in
+        the record, is ignored, so an additive dfo-apis release leaves the
+        part's scope choices readable. The record keeps the declared fields
+        alone, and a stored one is read back with no field ignored.
+
+        Raises:
+            ValidationError: If a declared field is missing or does not fit.
+        """
+        return cls.model_validate(raw, extra="ignore")
+
 
 def carried_entries(scopes: Iterable[PartScope]) -> list[Entry]:
     """The entries a later search carries from `scopes`, oldest first.
@@ -317,11 +331,15 @@ def _sentence(clause: str) -> str:
 
 class ServedRole(StrictModel):
     """The entities a served frame binds on one role: how many are members,
-    and which are the part's regional residual buckets."""
+    which are the part's regional residual buckets, and whether the fetch
+    `narrowed` the role to fewer members than the part's compiled identity
+    binds (a fetch of one country of a region), when no option of the part
+    describes what it served."""
 
     role: str
     members: int
     residuals: tuple[str, ...] = Field(default=(), exclude_if=lambda refs: not refs)
+    narrowed: bool = Field(default=False, exclude_if=lambda narrowed: not narrowed)
 
 
 class ServedComponent(StrictModel):
@@ -351,7 +369,9 @@ class ServedScope(StrictModel):
     def of(cls, facts: Mapping[str, Any], *, scope: PartScope) -> ServedScope:
         """Compact `served_facts(...)` against the part's `scope`: a bound
         entity is a residual when one of the scope's options adds it beside
-        the members (`EntitiesBinding.add`), and a member otherwise."""
+        the members (`EntitiesBinding.add`), and a member otherwise. A role
+        is narrowed when it leaves out a member the scope's compiled
+        identity binds on it (`CompiledScope.identity["entities"]`)."""
         residual_refs = {
             ref
             for choice in scope.choices
@@ -359,11 +379,18 @@ class ServedScope(StrictModel):
             if isinstance(option.binding, EntitiesBinding)
             for ref in option.binding.add
         }
+        compiled = scope.compiled.identity.get("entities") or {}
         roles = []
         for role, refs in facts["entities"].items():
             residuals = tuple(ref for ref in refs if ref in residual_refs)
+            members = {ref for ref in compiled.get(role) or () if ref not in residual_refs}
             roles.append(
-                ServedRole(role=role, members=len(refs) - len(residuals), residuals=residuals)
+                ServedRole(
+                    role=role,
+                    members=len(refs) - len(residuals),
+                    residuals=residuals,
+                    narrowed=not members <= set(refs),
+                )
             )
         return cls(
             spec_id=facts["spec_id"],
@@ -374,6 +401,10 @@ class ServedScope(StrictModel):
                 ServedComponent.model_validate(component) for component in facts["components"]
             ),
         )
+
+    def narrowed(self, role: str) -> bool:
+        """Whether the fetch bound fewer of `role`'s members than the part compiles to."""
+        return any(served.role == role and served.narrowed for served in self.roles)
 
     def residuals(self, role: str) -> frozenset[str]:
         """The residual buckets served on `role`; empty for a role the frame does not bind."""

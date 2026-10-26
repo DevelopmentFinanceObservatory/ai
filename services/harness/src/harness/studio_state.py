@@ -524,7 +524,12 @@ class ConversationState:
     # updates this).
     timed_out_calls: set[str] = field(default_factory=set)
     # The current turn's record-in-progress; reset by begin_turn.
+    # `turn_user_message` is the history record's text: the message, each
+    # amendment and answer, and each switch on a plan card (`add_to_turn`).
+    # `turn_user_words` holds the user's own words alone, the switches left
+    # out, and is what the turn's searches send Search as `user_message`.
     turn_user_message: str = ""
+    turn_user_words: str = ""
     turn_final_text: str = ""
     turn_components: list[dict[str, Any]] = field(default_factory=list)
     # The turn's plan records and search readings as JSON, and the spec
@@ -820,6 +825,15 @@ class ConversationState:
             text = [render_readings(readings, budget=_RECALL_TEXT_BUDGET).text]
         return {"part": part, "turn": turn, "user": record["user"], "text": text}
 
+    def add_to_turn(self, line: str, *, user_words: bool) -> None:
+        """Add `line` to the turn's record as `(then: line)`, and to
+        `turn_user_words` too when the user wrote it (an amendment, an
+        answer). A switch's line names an option's label, which Search would
+        read as scope the user stated, so it goes in the record only."""
+        self.turn_user_message += f"\n(then: {line})"
+        if user_words:
+            self.turn_user_words += f"\n(then: {line})"
+
     def close_turn(self, *, final_text: str, error: str | None = None) -> None:
         """Append the turn's record, once -- the resume protocol can end a
         turn from more than one code path. The turn's telemetry span ends
@@ -1009,6 +1023,7 @@ class ConversationState:
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
         self.turn_user_message = ""
+        self.turn_user_words = ""
         self.turn_final_text = ""
         self.turn_components = []
         self.turn_plans = []
@@ -1062,6 +1077,7 @@ _KEY_SEGMENT = "studio:segment"
 _KEY_AUTO_ADD = "studio:auto_add"
 _KEY_TIMED_OUT_CALLS = "studio:timed_out_calls"
 _KEY_TURN_USER_MESSAGE = "studio:turn_user_message"
+_KEY_TURN_USER_WORDS = "studio:turn_user_words"
 _KEY_TURN_FINAL_TEXT = "studio:turn_final_text"
 _KEY_TURN_COMPONENTS = "studio:turn_components"
 _KEY_TURN_RECORDED = "studio:turn_recorded"
@@ -1279,6 +1295,7 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_AUTO_ADD: state.auto_add,
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
+        _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
         _KEY_TURN_COMPONENTS: state.turn_components,
         _KEY_TURN_RECORDED: state.turn_recorded,
@@ -1337,6 +1354,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.timed_out_calls = set(value)
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
+        elif key == _KEY_TURN_USER_WORDS:
+            state.turn_user_words = value
         elif key == _KEY_TURN_FINAL_TEXT:
             state.turn_final_text = value
         elif key == _KEY_TURN_COMPONENTS:

@@ -580,7 +580,7 @@ def _scope(spec_id: object, scope: object) -> dict[str, Any] | None:
     if scope is None:
         return None
     try:
-        return PartScope.model_validate(scope).model_dump(mode="json")
+        return PartScope.from_search(scope).model_dump(mode="json")
     except ValidationError as exc:
         logger.warning("scope choices of %s left unread: %s", spec_id, exc)
         return None

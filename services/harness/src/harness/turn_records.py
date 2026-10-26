@@ -8,8 +8,10 @@ revision, the outputs, and one line per step. `SearchReading` is one part of
 a `search` result as `harness.tool_contracts._part_summary` builds it, plus
 the facts a later `fetch` of its spec_id adds.
 
-A family of StatVars appears as a count. Neither record holds a StatVar
-dcid, so no rendering of either can inline one.
+A family of StatVars appears as a count, and no rendering of either record
+inlines a StatVar dcid. The identities a record keeps for later pins
+(`PlanSource.identity`, a scope's identities) can name one, and no
+rendering reads them.
 
 `PlanRecord.render` and `render_readings` are deterministic and take a
 character budget. Over budget they shed detail in the fixed order each
@@ -133,6 +135,10 @@ class PlanSource(StrictModel):
     `elected_measure` is the source's `SelectedSource.elected_measure`, so a
     later turn's reading of the source states how it is counted
     (`source_readings`); left out when the source carried none.
+    `windowed_from` is the spec_id a windowed copy was copied from
+    (`planner.plan.WindowedPin.windowed_from`), the one the turn's search
+    read, so the basis line finds that reading; left out for a source
+    retrieved as it was found.
 
     A record ignores keys it does not declare, since the conversation ledger
     holds records written before a field was removed: `stat_vars`, the
@@ -160,6 +166,7 @@ class PlanSource(StrictModel):
     elected_measure: ElectedMeasure | None = Field(
         default=None, exclude_if=lambda elected: elected is None
     )
+    windowed_from: str | None = Field(default=None, exclude_if=lambda origin: origin is None)
 
 
 class RecordedIdentity(StrictModel):
@@ -276,6 +283,7 @@ class PlanRecord(StrictModel):
         searched: Collection[str] = (),
         failed_steps: Collection[str] = (),
         run_id: str | None = None,
+        windowed_from: Mapping[str, str] | None = None,
     ) -> PlanRecord:
         """Build the record of compiled `plan`.
 
@@ -284,6 +292,8 @@ class PlanRecord(StrictModel):
             searched: Spec ids the turn's `search` calls returned.
             failed_steps: The ids of the steps the run's stop landed on, if any.
             run_id: The run the plan executed as, if the ledger admitted one.
+            windowed_from: The spec_id each windowed copy the plan pins was
+                copied from, by the copy's spec_id (`planner.plan.windowed_pins`).
 
         A source's origin is `search` when `searched` names it, else
         `translator`.
@@ -307,7 +317,7 @@ class PlanRecord(StrictModel):
             revision=plan_revision(plan),
             approved_revision=plan.approved_revision,
             periods=_periods(shown),
-            sources=_sources(shown, searched=searched),
+            sources=_sources(shown, searched=searched, windowed_from=windowed_from or {}),
             decisions=tuple(
                 PlanDecision(
                     slot=decision.slot,
@@ -916,8 +926,7 @@ def loose_match_notes(
 
     A reading is a loose match when it carries a `closest_match` departure,
     or `retrieval_score_weak` and is no `definite` reading. The turn used it
-    when a fetch of its spec_id returned data or a plan record names it as a
-    source. The sentence
+    as `_used_readings` reads it. The sentence
     names what was asked and the series' heading and byline
     (`harness.tool_contracts.series_description` of its block in `specs`,
     the reading's resolved sentence when the block is missing), then what
@@ -942,20 +951,44 @@ def loose_match_notes(
         specs: The spec blocks the turn's searches returned, by spec_id.
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
+    notes: dict[str, str] = {}
+    for reading in _used_readings(readings, plans=plans):
+        assert reading.spec_id is not None
+        if reading.spec_id not in notes and _loose(reading):
+            notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
+    return list(notes.values())
+
+
+def _used_readings(
+    readings: Sequence[Mapping[str, Any]], *, plans: Sequence[Mapping[str, Any]]
+) -> list[SearchReading]:
+    """The turn's readings of parts it used, in order.
+
+    The turn used a part when a fetch of its spec_id returned data, or a
+    plan record names it as a source, directly or as the spec_id a windowed
+    copy was copied from (`PlanSource.windowed_from`).
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        plans: The turn's plan records, as `PlanRecord` JSON.
+    """
     planned = {
-        source.get("spec_id")
+        spec_id
         for plan in plans
         for source in plan.get("sources") or ()
         if isinstance(source, Mapping)
+        for spec_id in (source.get("spec_id"), source.get("windowed_from"))
+        if spec_id is not None
     }
-    notes: dict[str, str] = {}
-    for reading in (SearchReading.model_validate(r) for r in readings):
-        if reading.spec_id is None or reading.spec_id in notes or not _loose(reading):
-            continue
-        fetched = reading.fetch is not None and reading.fetch.refusal_code is None
-        if fetched or reading.spec_id in planned:
-            notes[reading.spec_id] = _loose_match_note(reading, specs.get(reading.spec_id))
-    return list(notes.values())
+    return [
+        reading
+        for reading in (SearchReading.model_validate(r) for r in readings)
+        if reading.spec_id is not None
+        and (
+            (reading.fetch is not None and reading.fetch.refusal_code is None)
+            or reading.spec_id in planned
+        )
+    ]
 
 
 def _loose(reading: SearchReading) -> bool:
@@ -1040,8 +1073,7 @@ def basis_line(
     """One line on how the turn's figures were counted, from its stored readings.
 
     `None` when the turn used no part with scope choices. A part is used as
-    `loose_match_notes` reads it: a fetch of its spec_id returned data, or a
-    plan record names it as a source; its newest reading speaks for it. Each
+    `_used_readings` reads it; its newest reading speaks for it. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them; otherwise each part's clauses follow
@@ -1056,21 +1088,8 @@ def basis_line(
         readings: The turn's search readings, as `SearchReading` JSON.
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
-    planned = {
-        source.get("spec_id")
-        for plan in plans
-        for source in plan.get("sources") or ()
-        if isinstance(source, Mapping)
-    }
     used = [
-        reading
-        for reading in (SearchReading.model_validate(r) for r in readings)
-        if reading.scope is not None
-        and reading.spec_id is not None
-        and (
-            (reading.fetch is not None and reading.fetch.refusal_code is None)
-            or reading.spec_id in planned
-        )
+        reading for reading in _used_readings(readings, plans=plans) if reading.scope is not None
     ]
     parts: dict[tuple[str, ...], list[str]] = {}
     for reading in newest_per_spec_id(used):
@@ -1128,10 +1147,19 @@ def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | Non
     hold another option of the choice: then that option's label, or the
     active label with `SERVED_OTHERWISE` when they match none. A partial
     active option adds why (`REASON_COPY`) and the years it covers. `None`
-    when the record lists no option by the active id.
+    when the record lists no option by the active id, or when the active
+    option adds entities to a role the fetch narrowed (`ServedRole.narrowed`):
+    figures for some of a region's places hold none of its options.
     """
     active = choice.active_option
     if active is None:
+        return None
+    binding = active.binding
+    if (
+        served is not None
+        and isinstance(binding, EntitiesBinding)
+        and served.narrowed(binding.role)
+    ):
         return None
     if served is not None and _serves(active, served) is False:
         other = next(
@@ -1157,14 +1185,15 @@ def _serves(option: Option, served: ServedScope) -> bool | None:
     """Whether the served figures hold `option`; `None` when the record cannot tell.
 
     An entities option holds when the residual buckets served on its role
-    are the ones it adds; a measure option when the served measure and
+    are the ones it adds, and cannot be told on a role the fetch narrowed;
+    a measure option when the served measure and
     netting are its own; a provider option when imputed multilateral aid is
     a served component exactly when it is inclusive. The record holds no
     what/how slot, so a slot option cannot be told.
     """
     binding = option.binding
     if isinstance(binding, EntitiesBinding):
-        if all(role.role != binding.role for role in served.roles):
+        if all(role.role != binding.role for role in served.roles) or served.narrowed(binding.role):
             return None
         return frozenset(binding.add) == served.residuals(binding.role)
     if isinstance(binding, ShapeBinding):
@@ -1447,7 +1476,9 @@ def _periods(plan: Plan) -> tuple[PlanPeriod, ...]:
     )
 
 
-def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]:
+def _sources(
+    plan: Plan, *, searched: Collection[str], windowed_from: Mapping[str, str]
+) -> tuple[PlanSource, ...]:
     """One entry per distinct spec_id the workflow retrieves, in binding order."""
     assert plan.workflow is not None
     measures = {
@@ -1485,6 +1516,7 @@ def _sources(plan: Plan, *, searched: Collection[str]) -> tuple[PlanSource, ...]
             identity=source.identity,
             groups=source.groups,
             elected_measure=source.elected_measure,
+            windowed_from=windowed_from.get(source.spec_id),
         )
     return tuple(seen.values())
 

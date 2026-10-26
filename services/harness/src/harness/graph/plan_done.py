@@ -26,6 +26,7 @@ from planner.plan import (
     authored_text,
     copy_origins,
     load_asks,
+    windowed_pins,
 )
 
 from harness import plan_display
@@ -626,6 +627,7 @@ def record_plan(
         },
         failed_steps=frozenset(stopped.values()),
         run_id=run_id,
+        windowed_from={copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()},
     )
     state[ORCHESTRATOR_PLAN_RECORDS_KEY] = [
         *(state.get(ORCHESTRATOR_PLAN_RECORDS_KEY) or []),

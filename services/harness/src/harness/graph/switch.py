@@ -50,9 +50,8 @@ from translator.discovery import RESOLVE_DEFINITION
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
-    ORCHESTRATOR_PRIOR_LEDGER_KEY,
-    ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    conversation_readings,
     readable_plan,
     store_search,
 )
@@ -253,12 +252,8 @@ async def _switched_plan(
 
 def _readings(ctx: Context) -> list[SearchReading]:
     """The conversation's stored readings, newest first: this turn's, then earlier turns'."""
-    raw = [
-        *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
-        *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
-    ]
     readings: list[SearchReading] = []
-    for item in reversed(raw):
+    for item in reversed(conversation_readings(ctx.state)):
         try:
             readings.append(SearchReading.model_validate(item))
         except ValidationError:
@@ -347,7 +342,7 @@ async def _resubmit(
     block = cast(dict[str, Any], spec)
     resolved = block.get("resolved")
     try:
-        after = PartScope.model_validate(
+        after = PartScope.from_search(
             resolved.get("scope_choices") if isinstance(resolved, dict) else None
         )
     except ValidationError as exc:

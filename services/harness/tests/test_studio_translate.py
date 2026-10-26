@@ -1666,7 +1666,10 @@ def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line(
 
     def carried() -> list[dict[str, Any]]:
         state = {ORCHESTRATOR_PRIOR_LEDGER_KEY: conversation.prior_ledger_state()}
-        return _search_context(cast("SessionState", state)).carried_entries or []
+        context = _search_context(cast("SessionState", state))
+        return [
+            entry.model_dump(mode="json", exclude_none=True) for entry in context.carried_entries
+        ]
 
     stated = conversation.turns[-1]["assistant"]
     with_line = carried()

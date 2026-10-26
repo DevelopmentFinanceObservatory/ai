@@ -1075,6 +1075,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
             conversation.turn_user_message = body.message
+            conversation.turn_user_words = body.message
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is
@@ -1084,7 +1085,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
-            current_user_message.set(conversation.turn_user_message)
+            current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
             # This request's model-call bounds, read by every model call the
@@ -1477,7 +1478,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The turn's history record must carry the answers or the
                 # next turn's digest shows only the un-refined ask.
                 for line in _answered_lines(pending, given):
-                    conversation.turn_user_message += f"\n(then: {line})"
+                    conversation.add_to_turn(line, user_words=True)
         elif body.decision is InterruptDecision.APPROVE:
             # The plan is keyed on its revision hash (`plan_revision`), and
             # the approval dated by the record of its first answer, so a
@@ -1503,16 +1504,17 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
             }
             label = pending.choices[body.choice_id].options[body.option_id].label
-            conversation.turn_user_message += f"\n(then: count {label})"
+            conversation.add_to_turn(f"count {label}", user_words=False)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
             # carries it.
-            conversation.turn_user_message += f"\n(then: {body.payload})"
+            conversation.add_to_turn(str(body.payload), user_words=True)
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
-        # The amended message, so a search after the resume reads the refined ask.
-        current_user_message.set(conversation.turn_user_message)
+        # The user's words as amended, so a search after the resume reads the
+        # refined ask and no switch's label.
+        current_user_message.set(conversation.turn_user_words)
         current_earlier_block.set(conversation.earlier_block)
         current_recorded_identity.set(conversation.recorded_identity)
         start_turn_budget(settings)

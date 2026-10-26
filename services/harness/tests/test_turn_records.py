@@ -757,12 +757,21 @@ def _manifest(identity: dict[str, Any], *, spec_id: str = "spec_served") -> dict
     }
 
 
-def _served_identity(*, residuals: bool = True, netting: str | None = "Gross", **shape: str):
+def _served_identity(
+    *,
+    residuals: bool = True,
+    places: list[str] | None = None,
+    netting: str | None = "Gross",
+    **shape: str,
+):
     """The example part's identity as a fetch served it: with or without the
-    regional bucket, on `netting`, and `shape` over its measure."""
+    regional bucket, narrowed to `places` when given, on `netting`, and
+    `shape` over its measure."""
     identity = copy.deepcopy(_example_part()["scope"]["base"]["identity"])
     if not residuals:
         identity["entities"]["destination"] = ["country/GHA", "country/KEN"]
+    if places is not None:
+        identity["entities"]["destination"] = places
     identity["slots"] = [s for s in identity["slots"] if s["property"] != "nettingBasis"]
     if netting is not None:
         identity["slots"].append(
@@ -816,6 +825,12 @@ def test_a_fetch_keeps_how_its_figures_were_served_on_a_reading_with_scope_choic
             "Africa's countries only · "
             "gross disbursements, current USD.",
             id="buckets-dropped",
+        ),
+        pytest.param(
+            _served_identity(places=["country/GHA"]),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "gross disbursements, current USD.",
+            id="fetched-one-country-of-the-region",
         ),
         pytest.param(
             _served_identity(netting="Net"),
@@ -878,6 +893,24 @@ def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used()
 
     assert basis_line([searched, refused.model_dump(mode="json"), unscoped], plans=[]) is None
     assert basis_line([searched], plans=[planned]) == _EXAMPLE_LINE
+
+
+def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() -> None:
+    """A search over 2024 found the part, and the plan reads 2015 to 2024
+    from a windowed copy of it: the copy's source names the reading it was
+    copied from, so the basis line speaks for that reading."""
+    plan = _plan("guatemala_top_donors")
+    (copy_id,) = (source.spec_id for source in PlanRecord.from_plan(plan).sources)
+    searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
+    origin = _example_part()["spec_id"]
+
+    windowed = PlanRecord.from_plan(plan, windowed_from={copy_id: origin})
+    unmapped = PlanRecord.from_plan(plan)
+
+    assert [source.windowed_from for source in windowed.sources] == [origin]
+    assert "windowed_from" not in unmapped.model_dump(mode="json")["sources"][0]
+    assert basis_line([searched], plans=[windowed.model_dump(mode="json")]) == _EXAMPLE_LINE
+    assert basis_line([searched], plans=[unmapped.model_dump(mode="json")]) is None
 
 
 def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause() -> None:

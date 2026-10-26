@@ -407,6 +407,16 @@ def store_search(
     return readings
 
 
+def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
+    """The conversation's stored search readings as JSON, oldest first: the
+    earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`)."""
+    return [
+        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+    ]
+
+
 def state_json(ctx: Context, key: str, default: Any = None) -> Any:
     """Decode a JSON blob out of session state, `default` when absent."""
     raw = ctx.state.get(key)

@@ -47,7 +47,7 @@ from executor.run import (
 )
 from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
-from planner.plan import SessionState, plan_revision
+from planner.plan import SessionState, plan_revision, windowed_pins
 
 from harness import plan_display
 from harness.conversation import conversation_of
@@ -85,18 +85,23 @@ def record_served_scopes(
     (`_RecordingSurface.retrieval_manifest`, looked up via `getattr` like
     `link_evidence`) gives its `served_facts`, which every reading of the
     record's spec_id with scope choices keeps on its fetch
-    (`SearchReading.with_served`), as a `fetch` of it would. The readings
-    are written back only when one changed.
+    (`SearchReading.with_served`), as a `fetch` of it would. A record of a
+    windowed copy (`planner.plan.windowed_pins`) serves the readings of the
+    spec_id it was copied from too, the ones the turn's search read. The
+    readings are written back only when one changed.
     """
     manifest_of = getattr(tool_surface, "retrieval_manifest", None)
     if manifest_of is None:
         return
+    origin_of = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
     served: dict[str, dict[str, Any]] = {}
     for record in outcome.evidence:
         manifest = manifest_of(frame_ref=record.frame_ref.model_dump())
         facts = served_facts(manifest) if manifest is not None else None
         if facts is not None:
             served[record.spec_id] = facts
+            if record.spec_id in origin_of:
+                served[origin_of[record.spec_id]] = facts
     if not served:
         return
     readings = [
