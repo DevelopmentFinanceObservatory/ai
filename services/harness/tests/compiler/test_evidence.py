@@ -19,6 +19,7 @@ from compiler.evidence import (
     errors,
     evidence_from_manifest,
     evidence_from_source,
+    left_out_entities,
     open_axes_for,
     opens_place_axis,
     resolve_entity,
@@ -1293,6 +1294,33 @@ def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_on
         for issue in issues
         if issue.code is EvidenceIssueCode.ENTITY_MISSING and issue.required == "Ghana"
     ] == [severity]
+
+
+def test_a_left_out_entity_with_a_role_and_no_dcid_dumps_its_finding_unchanged(
+    requirement: RequirementFactory, wide_source: SourceFactory
+) -> None:
+    # The finding enters the workflow hash, so it keeps the shape plans
+    # approved before entities carried a dcid were hashed with.
+    asked = requirement(entities=[Entity(name=name, role=role) for name, role in _DEBTORS])
+    retrieval = evidence_from_manifest(
+        _manifest(),
+        series_stats=_series_stats(
+            _stat("DebtServicePaid", entities=[{"role": "recipient", "ref": "country/KEN"}])
+        ),
+    )
+
+    found = left_out_entities(asked, retrieval, wide_source())
+
+    assert [issue.model_dump(mode="json") for issue in found.values()] == [
+        {
+            "code": "entity_missing",
+            "severity": "warning",
+            "requirement_id": asked.id,
+            "detail": "the retrieval holds no series for 'Ghana', so it is left out",
+            "found": ["country/KEN"],
+            "required": "Ghana",
+        }
+    ]
 
 
 def test_an_identity_other_than_the_approved_one_is_drift(
@@ -3306,6 +3334,14 @@ _NAMED_BOTH_FROM = [
             [Entity(name="country/COD", role="donor"), Entity(name="country/COG", role="donor")],
         ),
         (
+            _PINNED_BOTH_FROM,
+            (_COD, _COG.model_copy(update={"role": "origin"})),
+            [
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+                Entity(name="Congo", role="donor", dcid="country/COG"),
+            ],
+        ),
+        (
             _NAMED_BOTH_FROM,
             (_COD, _COG.model_copy(update={"role": "origin"})),
             [
@@ -3324,7 +3360,13 @@ _NAMED_BOTH_FROM = [
             [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")],
         ),
     ],
-    ids=["pinned-other-columns", "pinned-one-column", "named-one-column", "named-beside-unnamed"],
+    ids=[
+        "pinned-other-columns",
+        "pinned-one-column",
+        "planner-pinned-one-column",
+        "named-one-column",
+        "named-beside-unnamed",
+    ],
 )
 def test_two_entities_written_alike_each_resolve_to_their_own_row(
     requirement: RequirementFactory,
@@ -3361,6 +3403,47 @@ def test_a_retrieval_meets_each_entity_written_alike_by_its_own_rows_ref(
 
     codes = [issue.code for issue in errors(issues)]
     assert codes.count(EvidenceIssueCode.ENTITY_MISSING) == missing
+
+
+@pytest.mark.parametrize(
+    ("held", "left_out"),
+    [
+        (("country/COG", "country/USA"), ("country/COD",)),
+        (("country/USA",), ("country/COD", "country/COG")),
+    ],
+    ids=["one-congo", "both-congos"],
+)
+def test_each_entity_left_out_is_the_one_pinned_to_the_node_the_retrieval_lacks(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    held: tuple[str, ...],
+    left_out: tuple[str, ...],
+) -> None:
+    # A donor the retrieval holds keeps each Congo it lacks a gap, not an error.
+    usa = ResolvedEntity(role="origin", ref="country/USA", label="United States")
+    cog = _COG.model_copy(update={"role": "origin"})
+    part = {
+        "restatement": {
+            "entities": [*_PINNED_BOTH_FROM, {"text": "United States", "role_text": "from"}]
+        },
+        "entity_refs": [{"text": one.label, "refs": [one.ref]} for one in (_COD, cog, usa)],
+    }
+    approved = source(entities=(_COD, cog, usa), bound_refs=bound_refs(part), identity=None)
+    asked = requirement(
+        entities=[
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            Entity(name="United States", role="donor"),
+        ]
+    )
+
+    issues = check_evidence(asked, _g7_retrieval(*held), approved=approved)
+
+    gaps = [issue for issue in issues if issue.code is EvidenceIssueCode.ENTITY_MISSING]
+    assert [gap.severity for gap in gaps] == [Severity.WARNING] * len(left_out)
+    found = left_out_entities(asked, _g7_retrieval(*held), approved)
+    assert [entity.ref for entity in found] == list(left_out)
+    assert list(found.values()) == gaps
 
 
 @pytest.mark.parametrize("exclude", [False, True])
