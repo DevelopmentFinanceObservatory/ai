@@ -98,14 +98,17 @@ def us_share_of_kenya_oda(
     numerator: Mapping[str, Any],
     donor: str = "United States",
     whole_across: tuple[str, ...] = ("donor",),
+    whole_donors: tuple[str, ...] = (),
+    whole_reduction: Reduction = Reduction.SUM,
     every_donor: bool = False,
     narrowing: Sequence[Then] = (),
     then: Sequence[Then] = (),
 ) -> Plan:
     """The first plan of the module docstring, `all_oda` read from a source
-    stating `whole`'s fields over the donors `whole_across` covers and
-    narrowed by `narrowing` before its total, and `us` from one stating
-    `numerator`'s for the donor named `donor`. With `every_donor`, `us` reads
+    stating `whole`'s fields for the donors `whole_donors` names and those
+    `whole_across` covers, narrowed by `narrowing` before its total, which
+    reduces by `whole_reduction`, and `us` from one stating `numerator`'s
+    for the donor named `donor`. With `every_donor`, `us` reads
     every donor's ODA and totals it by year, as a share of one sector's ODA
     does."""
     kenya = Entity(name="Kenya", role="recipient")
@@ -125,11 +128,12 @@ def us_share_of_kenya_oda(
             id="all_oda",
             decision_ids=["measure"],
             measure="ODA gross disbursements",
-            entities=[kenya],
+            entities=[*(Entity(name=name, role="donor") for name in whole_donors), kenya],
             across=whole_across,
             period=_PERIOD,
         ),
         group_by=(GroupBy.PERIOD,),
+        reduction=whole_reduction,
         sources={"us": numerator, "all_oda": whole},
         numerator_by_year=every_donor,
         narrowing=narrowing,
@@ -203,6 +207,7 @@ def _compiled(
     numerator: DatasetRequirement,
     whole: DatasetRequirement,
     group_by: tuple[GroupBy, ...] | None,
+    reduction: Reduction = Reduction.SUM,
     sources: Mapping[str, Mapping[str, Any]],
     axis: str | None = None,
     scope: DenominatorScope | None = None,
@@ -212,18 +217,18 @@ def _compiled(
 ) -> Plan:
     """`numerator`'s share of `whole`, narrowed by each of `narrowing` in turn
     and totalled by `group_by` (`all_by_year`), or of `whole` itself when
-    `group_by` is None. The numerator is totalled by year first
+    `group_by` is None, reducing by `reduction`. The numerator is totalled by year first
     (`us_by_year`) when `numerator_by_year`. The share is keyed by `axis` and
     divided by `scope` when given, then read by each of `then`, and the plan
     compiled with each dataset read from a source stating `sources`' fields."""
     steps: list[Then] = [*narrowing]
     divisor = narrowing[-1][0].id if narrowing else whole.id
     if group_by is not None:
-        steps.append(_total("all_by_year", divisor, group_by))
+        steps.append(_total("all_by_year", divisor, group_by, reduction))
         divisor = "all_by_year"
     share_of = numerator.id
     if numerator_by_year:
-        steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,)))
+        steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,), Reduction.SUM))
         share_of = "us_by_year"
     decisions = [decision()]
     if scope is not None:
@@ -287,21 +292,24 @@ def _compiled(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-def _total(step_id: str, input_id: str, group_by: tuple[GroupBy, ...]) -> Then:
-    """A total of `input_id` grouped by `group_by`, as a requirement and its operation."""
+def _total(
+    step_id: str, input_id: str, group_by: tuple[GroupBy, ...], reduction: Reduction
+) -> Then:
+    """`input_id` reduced by `reduction` grouped by `group_by`, as a requirement
+    and its operation."""
     return (
         AggregateRequirement(
             id=step_id,
             decision_ids=["measure"],
             input_id=input_id,
-            reduction=Reduction.SUM,
+            reduction=reduction,
             group_by=group_by,
         ),
         AggregateOperation(
             id=step_id,
             requirement_id=step_id,
             input=input_id,
-            reduction=Reduction.SUM,
+            reduction=reduction,
             group_by=group_by,
         ),
     )
