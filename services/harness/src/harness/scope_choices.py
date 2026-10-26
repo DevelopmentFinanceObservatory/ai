@@ -29,7 +29,7 @@ line's words for reason codes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from typing import Annotated, Any, Literal
 
 from planner.records import OptionStatus, ScopeAxis, StrictModel
@@ -235,18 +235,45 @@ class PartScope(StrictModel):
         return cls.model_validate(raw, extra="ignore")
 
 
-def carried_entries(scopes: Iterable[PartScope]) -> list[Entry]:
+# The key a spec block carries when the planner compiled it to put a
+# calculation's inputs on one measure basis (`planner.agent.compile_on_basis`):
+# its explicit basis entry is the planner's, never the user's. The block is
+# the one source of truth. `harness.tool_contracts.reading_facts` copies it to
+# the stored reading (`harness.turn_records.SearchReading.aligned_basis`),
+# which `carried_entries`' callers read, and `submission.service.
+# _aligned_bases` reads it off the pin's block. A block Search answers afresh
+# carries none, so a switch of the basis drops it; a switch of another axis
+# keeps it (`harness.graph.switch`).
+ALIGNED_BASIS_BLOCK_KEY = "_aligned_basis"
+
+
+def mark_aligned_basis(digest: dict[str, Any]) -> None:
+    """Mark each spec block of `digest`, a `harness.tool_contracts.resolver_digest`,
+    as compiled by the planner to align a basis (`ALIGNED_BASIS_BLOCK_KEY`)."""
+    for holder in (digest, *(digest.get("part_digests") or ())):
+        if isinstance(holder.get("spec_block"), Mapping):
+            holder["spec_block"] = {**holder["spec_block"], ALIGNED_BASIS_BLOCK_KEY: True}
+
+
+def carried_entries(scopes: Iterable[PartScope], *, aligned: Collection[str] = ()) -> list[Entry]:
     """The entries a later search carries from `scopes`, oldest first.
 
     Every choice an explicit or carried entry settled becomes a `carried`
     entry for its active option, with the concept of the entry that settled
     it and a `choice` origin naming the choice. A choice a declared default
-    settled carries nothing. The newest choice per axis and concept wins.
+    settled carries nothing, and neither does the measure basis of a scope
+    whose compiled spec_id is in `aligned`: the planner compiled it to put a
+    calculation's inputs on one basis (`harness.turn_records.SearchReading.
+    aligned_basis`), so that entry is its own, and that scope's other
+    choices, the user's, still carry. The newest choice per axis and
+    concept wins.
     """
     newest: dict[tuple[str, str | None], Entry] = {}
     for scope in scopes:
         for choice in scope.choices:
-            if choice.provenance == "default":
+            if choice.provenance == "default" or (
+                choice.axis == "measure_basis" and scope.compiled.spec_id in aligned
+            ):
                 continue
             concept = next(
                 (

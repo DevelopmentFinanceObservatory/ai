@@ -670,7 +670,11 @@ class SearchReading(StrictModel):
     offering reading's own in other prices. `scope` is how search counted
     the part (`harness.scope_choices.PartScope`), its scope choices with
     their options and the entries that settled them; `None` when the part's
-    block carries none. `observed_at` is stored and not rendered.
+    block carries none. `aligned_basis` marks a part the planner compiled to
+    put a calculation's inputs on one measure basis
+    (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`, copied from its block):
+    its explicit basis entry is the planner's, never the user's. `observed_at` is stored and not
+    rendered.
     """
 
     text: str | None
@@ -711,6 +715,7 @@ class SearchReading(StrictModel):
     )
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
     scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
+    aligned_basis: bool = Field(default=False, exclude_if=lambda aligned: not aligned)
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -751,7 +756,7 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them. A `no_data` part's `reason` is the reading's
+        among them, `aligned_basis` too. A `no_data` part's `reason` is the reading's
         `refusal_code`, and `counted_as`,
         `alternatives` and `other_prices` are
         `harness.tool_contracts.measure_choice`'s.
@@ -818,6 +823,7 @@ class SearchReading(StrictModel):
             alternatives=_offers(part.get("alternatives")),
             other_prices=_offers(part.get("other_prices")),
             scope=part.get("scope"),
+            aligned_basis=part.get("aligned_basis") is True,
             origin=origin,
             observed_at=observed_at,
         )

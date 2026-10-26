@@ -89,6 +89,7 @@ above that. These are character counts of the brief alone.
 from __future__ import annotations
 
 import contextvars
+import copy
 import json
 import logging
 import time
@@ -108,7 +109,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
-from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_first_years
+from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_source_reads
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -145,8 +146,8 @@ from planner.plan import (
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
+from submission.service import ALIGNED_PINS_STATE_KEY, Proposal, aligned_pins, submit
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
-from submission.service import Proposal, submit
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import USER_DECIDES
@@ -159,6 +160,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    store_search,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
@@ -687,6 +689,7 @@ class PlannerSeam:
             # node's own `NodeRunner` performs on the way to reporting the
             # pause (see `_persist_durable`'s own docstring).
             try:
+                store_aligned_readings(ctx, cast(SessionState, ctx.session.state))
                 self._persist_durable(ctx)
             finally:
                 current_cut_calls.reset(cut_calls_token)
@@ -748,10 +751,11 @@ class PlannerSeam:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
-        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
+        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY` and
+        # `ALIGNED_PINS_STATE_KEY` too.
         # The declines an ask-the-user resume still owes or may make, the
-        # failures it may repeat, and the amendment that opened it are this
-        # entry's own.
+        # failures it may repeat, the amendment that opened it and the pins
+        # compiled for its proposals are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -759,6 +763,7 @@ class PlannerSeam:
             REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
+            ALIGNED_PINS_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -775,7 +780,8 @@ class PlannerSeam:
 
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
-        each first year it needs (`planner.agent.with_first_years`), then
+        each first year it needs and compiling each input a calculation needs
+        on another basis (`planner.agent.with_source_reads`), then
         the translation, and the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
@@ -795,7 +801,7 @@ class PlannerSeam:
         proposal = Proposal(
             evidence_requirements=list(evidence_requirements), amends_version=prior.version
         )
-        recorded = await with_first_years(
+        recorded = await with_source_reads(
             lambda: submit(
                 view,
                 proposal,
@@ -806,6 +812,7 @@ class PlannerSeam:
             state=state,
             surface=self._surface,
         )
+        store_aligned_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
             return self._refused(recorded)
         answer = declare_ready({**recorded, "translation": await self._translate(ctx)}, ctx)
@@ -1602,6 +1609,52 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
     )
+
+
+def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
+    """Store each pin compiled to put a calculation's inputs on one basis as a reading of the conversation.
+
+    `planner_state` holds the pins (`submission.service.aligned_pins`), each
+    with Search's answer as a digest. A pin no reading of the conversation
+    names yet joins this turn's readings through `store_search`, as the
+    `switch` node stores a switched one: under the words of the reading it
+    was compiled from, keeping that reading's asked, held-open and share
+    roles, with its compiled scope on `SearchReading.scope`. Its block is
+    marked as the planner's (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`),
+    so the reading reads `SearchReading.aligned_basis` and its basis entry is
+    never carried as the user's (`harness.scope_choices.carried_entries`).
+    Later turns then find it among the readings, and a switch on its
+    plan-card row finds its scope (`harness.graph.switch`).
+    """
+    held = aligned_pins(planner_state)
+    if not held:
+        return
+    readings = [
+        SearchReading.model_validate(reading)
+        for reading in (
+            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+        )
+    ]
+    stored = {reading.spec_id for reading in readings}
+    for pin in held:
+        if pin.spec_id in stored:
+            continue
+        origin = next(
+            (reading for reading in reversed(readings) if reading.spec_id == pin.origin), None
+        )
+        digest = copy.deepcopy(pin.digest)
+        if origin is not None:
+            (part,) = digest["part_digests"]
+            part["variable"] = origin.text
+        store_search(
+            cast(SessionState, ctx.state),
+            digest,
+            asked=[origin.asked_roles] if origin is not None else (),
+            held_open=[origin.open_roles] if origin is not None else (),
+            share_sides=[origin.share_over] if origin is not None else (),
+        )
+        stored.add(pin.spec_id)
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

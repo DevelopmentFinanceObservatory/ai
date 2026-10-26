@@ -56,7 +56,13 @@ from harness.graph.state import (
     store_search,
 )
 from harness.plan_display import listed_together
-from harness.scope_choices import PartScope, ScopeChoice, moved_choices, switch_entries
+from harness.scope_choices import (
+    PartScope,
+    ScopeChoice,
+    mark_aligned_basis,
+    moved_choices,
+    switch_entries,
+)
 from harness.tool_contracts import resolver_digest
 from harness.turn_records import SearchReading
 
@@ -187,7 +193,7 @@ async def _switched_plan(
     )
     drafting = _drafting_state(ctx)
     moved_to = {item.pin: item.spec_id for item in switched}
-    digests = [_reading_digest(item) for item in switched]
+    digests = [_reading_digest(item, axis=axis) for item in switched]
     save_pin_sources(
         state,
         {
@@ -359,15 +365,21 @@ async def _resubmit(
     )
 
 
-def _reading_digest(item: _Switched) -> dict[str, Any]:
-    """The digest `store_search` stores for `item`'s answer, under the text of the reading it replaces.
+def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
+    """The digest `store_search` stores for `item`'s answer, switched on `axis`, under the text of the reading it replaces.
 
     Search echoes the spec_id data-mcp posts as the part's text, so the
-    reading keeps the words the user's search used.
+    reading keeps the words the user's search used. A reading the planner
+    compiled to align a basis (`SearchReading.aligned_basis`) keeps that
+    mark through a switch of another axis, since its basis entry is still
+    the planner's; a switch of the basis is the user's and drops it
+    (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`).
     """
     digest = resolver_digest(item.envelope)
     (part,) = digest.get("part_digests") or [{}]
     part["variable"] = item.reading.text
+    if item.reading.aligned_basis and axis != "measure_basis":
+        mark_aligned_basis(digest)
     return digest
 
 

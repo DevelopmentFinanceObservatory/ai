@@ -48,6 +48,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+from compiler.sources import block_groups
 from compiler.surface import ToolSurface
 from data_mcp.definition_writes import windowed_identity
 from google.adk.agents import LlmAgent
@@ -59,15 +60,24 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.scope_choices import mark_aligned_basis, switch_entries
+from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     Admission,
+    AlignedPin,
     Combination,
     Proposal,
+    Realignment,
+    aligned_pins,
+    basis_unservable,
     identity_on_record,
+    part_scope,
+    realignments_wanted,
+    save_aligned_pin,
     submit,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
@@ -103,6 +113,7 @@ from planner.plan import (
     record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
+    save_pin_sources,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
@@ -1280,30 +1291,158 @@ def _first_year_unreadable(
     )
 
 
-async def with_first_years(
+# The seconds one compile of a pin on another basis may take
+# (`compile_on_basis`), for the reason `FIRST_YEAR_READ_DEADLINE_SECONDS` gives.
+BASIS_COMPILE_DEADLINE_SECONDS = 10.0
+
+
+async def compile_on_basis(
+    surface: ToolSurface,
+    realignment: Realignment,
+    *,
+    state: SessionState,
+    deadline_s: float = BASIS_COMPILE_DEADLINE_SECONDS,
+) -> dict[str, object] | None:
+    """Compile `realignment`'s pin on its calculation's basis and hold the pin Search answers.
+
+    Posts the pin's base identity with its scope entries and the basis as an
+    explicit entry from its choice, the resubmit a switch on the plan card
+    posts (`harness.scope_choices.switch_entries`), with the part's entity
+    groups, through data-mcp's `resolve_definition`, which stores the
+    definition it answers. The answer is shown to the planner as a source
+    of its own (`planner.plan.save_pin_sources`), settled as the pin it was
+    compiled from, and held as a `submission.service.AlignedPin` with the
+    answer's digest (`harness.tool_contracts.resolver_digest`), its block
+    marked as compiled here (`harness.scope_choices.mark_aligned_basis`),
+    so the next
+    proposal pins it and the planner seam stores it as a reading of the
+    conversation (`harness.planner_seam.store_aligned_readings`).
+
+    Returns `None` once the pin is held, or the refusal the proposal
+    answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
+    `OPERATION_UNSUPPORTED` when it refuses the basis or answers with no
+    one dataset.
+    """
+    sources = pin_sources(state)
+    source = sources.get(realignment.spec_id)
+    block = source.spec_block(realignment.spec_id) if source is not None else None
+    scope = part_scope(realignment.spec_id, block)
+    choice = (
+        next((c for c in scope.choices if c.axis == "measure_basis"), None)
+        if scope is not None
+        else None
+    )
+
+    def unservable(reason: str) -> dict[str, object]:
+        return basis_unservable(
+            realignment,
+            reason=reason,
+            record=lambda operation: record_unsupported(state, operation),
+            proposer=PROPOSE_PLAN_PROPOSER,
+        )
+
+    if source is None or block is None or scope is None or choice is None:
+        return unservable(f"{realignment.requirement_id!r}'s dataset has no basis on record")
+    entries = [
+        entry.model_dump(mode="json", exclude_none=True)
+        for entry in switch_entries(scope, choice=choice, option_id=realignment.option_id)
+    ]
+    try:
+        async with asyncio.timeout(deadline_s):
+            part = await resolve_definition(
+                surface,
+                spec_id=scope.base.spec_id,
+                identity=scope.base.identity,
+                groups=block_groups(block),
+                scope_entries=entries,
+            )
+    except TimeoutError:
+        return _basis_uncompiled(realignment, f"Search did not answer in {deadline_s:.0f} s")
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            return _basis_uncompiled(realignment, str(exc))
+        return unservable(
+            f"Search does not count {realignment.requirement_id!r}'s dataset on the basis its "
+            f"calculation's other inputs share ({exc.code or 'refused'})"
+        )
+    spec = part.get("spec") if part.get("status") == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
+    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
+        return unservable(
+            f"Search holds no one dataset counting {realignment.requirement_id!r} on the "
+            "basis its calculation's other inputs share"
+        )
+    digest = resolver_digest({"parts": [dict(part)]})
+    mark_aligned_basis(digest)
+    compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
+    save_pin_sources(state, {**sources, spec_id: compiled})
+    save_aligned_pin(
+        state,
+        AlignedPin(
+            origin=realignment.spec_id,
+            option_id=realignment.option_id,
+            spec_id=spec_id,
+            digest=digest,
+        ),
+    )
+    return None
+
+
+def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis that did not complete.
+
+    The same proposal can succeed later, so nothing in it needs changing.
+    """
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"{realignment.requirement_id!r} could not be counted on the basis the other inputs of "
+        f"{realignment.step_id!r} share: {cause}. The plan is sound and nothing was recorded; "
+        "propose it again.",
+        outcome=Outcome.REFUSED,
+        detail={"basis": realignment._asdict()},
+    )
+
+
+async def with_source_reads(
     propose: Callable[[], dict[str, object]], *, state: SessionState, surface: ToolSurface
 ) -> dict[str, object]:
-    """`propose`'s answer, once the first year of each dataset it refused for want of is read.
+    """`propose`'s answer, once every read of a source it was refused for is made.
 
-    A refusal records nothing, so `propose` runs again once the read is held
-    (`planner.plan.save_full_history`). One read serves every requirement,
-    and every later proposal of the turn, that pins the dataset; an answer
+    A refusal records nothing, so `propose` runs again once the read is held.
+    Two refusals ask for one. A plan rolling from a dataset's first year
+    needs that first year (`read_full_history`, held by
+    `planner.plan.save_full_history`): one read serves every requirement, and
+    every later proposal of the turn, that pins the dataset; an answer
     stating no first year is held too, and the next refusal says so
-    (`first_year_read_failed`).
+    (`first_year_read_failed`). A calculation whose inputs are counted on
+    different measure bases needs each input it names compiled on their
+    shared basis (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
+    compiled is never asked for twice, so a refusal naming one is answered
+    as it stands.
     """
     while True:
         result = propose()
         pin = _first_year_wanted(result)
-        if pin is None or pin in full_histories(state):
+        if pin is not None:
+            if pin in full_histories(state):
+                return result
+            identity = _first_year_identity(pin, pin_sources(state))
+            if identity is None:
+                return result
+            try:
+                history = await read_full_history(surface, identity)
+            except DefinitionNotResolvedError as exc:
+                return _first_year_unreadable(result, exc)
+            save_full_history(state, pin, history)
+            continue
+        wanted = realignments_wanted(result)
+        held = {(pin.origin, pin.option_id) for pin in aligned_pins(state)}
+        if not wanted or any((item.spec_id, item.option_id) in held for item in wanted):
             return result
-        identity = _first_year_identity(pin, pin_sources(state))
-        if identity is None:
-            return result
-        try:
-            history = await read_full_history(surface, identity)
-        except DefinitionNotResolvedError as exc:
-            return _first_year_unreadable(result, exc)
-        save_full_history(state, pin, history)
+        for item in wanted:
+            refused = await compile_on_basis(surface, item, state=state)
+            if refused is not None:
+                return refused
 
 
 def build_planner_tools(
@@ -1465,16 +1604,14 @@ def build_planner_tools(
 
     @functools.wraps(propose_plan)
     async def propose_plan_reading(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, reading each first year it refuses for want of.
+        """`propose_plan`, making each source read it refuses for want of (`with_source_reads`).
 
         A refusal records nothing, so the proposal is made again once the
-        read is held (`planner.plan.save_full_history`). One read serves
-        every requirement, and every later proposal of the turn, that pins
-        the dataset; an answer stating no first year is held too, and the
-        next refusal says so (`first_year_read_failed`).
+        read is held: a dataset's first year, or a calculation's input
+        compiled on the basis its other inputs share.
         """
         assert surface is not None
-        return await with_first_years(
+        return await with_source_reads(
             lambda: propose_plan(**arguments),
             state=arguments["tool_context"].state,
             surface=surface,

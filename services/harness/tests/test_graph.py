@@ -79,6 +79,7 @@ from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
+    ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
@@ -88,6 +89,7 @@ from harness.graph.state import (
     frame_id_for,
     frame_store_ref,
 )
+from harness.scope_choices import ALIGNED_BASIS_BLOCK_KEY
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
@@ -3200,12 +3202,18 @@ class _RevisingSeam(_Seam):
 
 
 async def _switch_runner(
-    real_schemas: list[ToolSchema], search: SearchStub, revised: dict[str, Any] | None = None
+    real_schemas: list[ToolSchema],
+    search: SearchStub,
+    revised: dict[str, Any] | None = None,
+    *,
+    option_id: str = "sector:120+130",
+    aligned: bool = False,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
-    reading stored, then answered with a switch of its sector to CRS 120 and
-    130 through `search`. Returns the runner, the seam, the plan, the scope
-    and the resumed turn's events."""
+    reading stored (marked as one the planner compiled to align a basis when
+    `aligned`), then answered with a switch to `option_id`, by default its
+    sector to CRS 120 and 130, through `search`. Returns the runner, the
+    seam, the plan, the scope and the resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _scoped_plan(pin, scope, schemas=real_schemas)
@@ -3221,14 +3229,20 @@ async def _switch_runner(
     )
     await _start(runner)
     reading = SearchReading.from_part(
-        {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
+        {
+            "variable": "health aid",
+            "status": "definite",
+            "spec_id": pin,
+            "scope": scope,
+            "aligned_basis": aligned,
+        }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
-    sector = f"{scope['id']}:sector"
+    choice_id = f"{scope['id']}:{option_id.split(':', maxsplit=1)[0]}"
     events = await _resume(
         runner,
         APPROVE_INTERRUPT,
-        {"approved": None, "switch": {"choice_id": sector, "option_id": "sector:120+130"}},
+        {"approved": None, "switch": {"choice_id": choice_id, "option_id": option_id}},
     )
     return runner, seam, plan, scope, events
 
@@ -3290,6 +3304,44 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
             "reason": "It conflicts with another choice.",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("option_id", "kept"),
+    [("sector:120+130", True), ("measure_basis:grant_equivalent", False)],
+    ids=["another-axis", "the-basis"],
+)
+async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_basis(
+    real_schemas: list[ToolSchema], option_id: str, kept: bool
+) -> None:
+    """A reading the planner compiled to align a basis keeps that mark, on the
+    new reading, its stored block and its pin's block, through a switch of its
+    sector, since its basis entry is still the planner's; a switch of the basis
+    is the user's and drops it."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, *_ = await _switch_runner(
+        real_schemas,
+        search,
+        {"plan": revised.model_dump(mode="json"), "summary": {}},
+        option_id=option_id,
+        aligned=True,
+    )
+
+    state = _session_state(runner)
+    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert (stored.spec_id, stored.aligned_basis) == (new_pin, kept)
+    assert state[ORCHESTRATOR_SPECS_KEY][new_pin].get(ALIGNED_BASIS_BLOCK_KEY, False) is kept
+    pinned = state["planner:pin_sources"][new_pin]["block"]
+    assert pinned.get(ALIGNED_BASIS_BLOCK_KEY, False) is kept
 
 
 @pytest.mark.parametrize("refused_by", ["search", "revision"])

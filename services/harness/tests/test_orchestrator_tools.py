@@ -618,6 +618,43 @@ async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conve
     assert "context" not in raw
 
 
+@pytest.mark.parametrize(
+    ("aligned", "axes"),
+    [(True, ["sector", "region"]), (False, ["sector", "region", "measure_basis"])],
+    ids=["compiled-by-the-planner", "switched-by-the-user"],
+)
+async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_switched_is(
+    aligned: bool, axes: list[str]
+):
+    """A reading whose gross basis came from an explicit entry on the plan card:
+    the planner's, compiled to put a share's inputs on one basis, carries no basis
+    to a later "US total ODA" search, while its user-stated sector and region
+    still carry; the same entry from the user's own switch carries."""
+    reading = SearchReading.from_part(_scoped_part()).model_dump(mode="json")
+    basis = reading["scope"]["choices"][2]
+    basis["provenance"] = "explicit"
+    reading["scope"]["entries"].append(
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        }
+    )
+    if aligned:
+        reading["aligned_basis"] = True
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    ctx.state["orchestrator:searches"] = [
+        SearchReading.model_validate(reading).model_dump(mode="json")
+    ]
+
+    await tools["search"]("US total ODA", ctx, [{"variable": "US total ODA"}])
+
+    (parsed,) = resolver.calls
+    assert [entry.axis for entry in parsed["context"].carried_entries] == axes
+
+
 @pytest.mark.parametrize("parts", [None, []])
 async def test_as_text_without_parts_reads_the_query_without_attaching_asked_roles(parts):
     resolver = _resolver(_digest({"variable": "aid", "status": "no_data"}))

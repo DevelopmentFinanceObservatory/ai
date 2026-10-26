@@ -1596,17 +1596,21 @@ def _search_context(state: SessionState) -> SearchContext:
     turn (`current_user_message`) and the entries carried from the scope
     choices of every earlier search, the earlier turns' readings
     (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
-    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`).
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`), less
+    the basis the planner compiled on a reading marked `aligned_basis`.
     """
-    scopes = [
-        PartScope.model_validate(reading["scope"])
-        for reading in conversation_readings(state)
-        if reading.get("scope")
-    ]
+    scoped = [reading for reading in conversation_readings(state) if reading.get("scope")]
+    scopes = [PartScope.model_validate(reading["scope"]) for reading in scoped]
+    aligned = {
+        scope.compiled.spec_id
+        for scope, reading in zip(scopes, scoped, strict=True)
+        if reading.get("aligned_basis")
+    }
     return SearchContext(
         user_message=current_user_message.get() or None,
         carried_entries=[
-            entry.model_dump(mode="json", exclude_none=True) for entry in carried_entries(scopes)
+            entry.model_dump(mode="json", exclude_none=True)
+            for entry in carried_entries(scopes, aligned=aligned)
         ],
     )
 

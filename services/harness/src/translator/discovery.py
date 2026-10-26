@@ -2038,6 +2038,7 @@ async def resolve_definition(
     spec_id: str,
     identity: Mapping[str, Any],
     groups: Sequence[ResolvedGroup] = (),
+    scope_entries: Sequence[Mapping[str, Any]] = (),
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
 
@@ -2053,6 +2054,11 @@ async def resolve_definition(
     members-bound set with no node, such as the G7 read as its members, is
     dropped: its places still bind, and its name is lost.
 
+    `scope_entries`, the explicit and carried entries of a part's stored
+    scope choices (`harness.scope_choices.Entry` as JSON), are posted beside
+    a part's base identity, and Search answers with the identity they
+    compile to, under that identity's own spec_id.
+
     data-mcp stores the definition the part carries, on the service `surface`
     reaches, which is the one whose `get_data` retrieves it. The part is
     Search's own, and `resolved_spec` judges whether it is the dataset
@@ -2065,6 +2071,8 @@ async def resolve_definition(
     arguments: dict[str, object] = {"spec_id": spec_id, "identity": dict(identity)}
     if groups:
         arguments["entity_groups"] = wire_groups(groups)
+    if scope_entries:
+        arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
 
     def call() -> Awaitable[ToolCallResult]:
         return _call_within_entry(

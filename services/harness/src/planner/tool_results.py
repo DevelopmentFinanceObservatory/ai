@@ -96,6 +96,10 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    # A calculation's inputs are counted on different measure bases, and an
+    # input still needs compiling on the basis they share
+    # (`submission.service._aligned_bases`).
+    BASES_UNALIGNED = "bases_unaligned"
 
 
 class Action(StrictModel):
