@@ -2591,7 +2591,7 @@ class _Run:
             findings = with_series_labels(findings, await _series_labels(self.label_refs, refs))
         self.left_out[step.id] = {
             (entity.role, entity.ref): issue
-            for entity, issue in left_out_entities(requirement, findings, approved).items()
+            for entity, issue in left_out_entities(requirement, evidence, approved).items()
         }
         return EvidenceRecord(
             requirement_id=requirement.id,

@@ -391,9 +391,11 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
     ("block", "clause"),
     [
         pytest.param(_place_open(), None, id="one-confirmed-no-open-axis"),
+        # Search confirms members at probe places, so a retrieval over every
+        # place can hold others, and no served count states the family's size.
         pytest.param(
             _place_open(member_count=3, member_count_exact=True),
-            "kept as 3 separate indicators by default",
+            "kept as separate indicators by default",
             id="three-confirmed",
         ),
         # Search counts the members it confirmed as a floor, so the mint may
@@ -410,7 +412,7 @@ def test_a_floor_of_one_over_a_summable_axis_is_summed(
         ),
         pytest.param(
             _stating_no_summable(_donor_open(confirmed=2, served=2)),
-            "kept as 2 separate indicators by default",
+            "kept separate over whichever of its 2 indicators hold data by default",
             id="two-served",
         ),
         pytest.param(

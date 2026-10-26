@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from compiler.sources import (
     total_reading,
     wire_groups,
 )
-from planner.records import Period
+from planner.records import EntityCandidate, EntityKey, Period
 from planner.workflow import BoundEntity, OpenEntityAxis
 
 SPEC_KENYA = "spec_" + "a" * 32
@@ -305,6 +306,174 @@ def test_no_data_carries_a_reason_this_service_does_not_yet_recognise() -> None:
 
     assert outcome.status is DiscoveryStatus.NO_DATA
     assert outcome.reason == "entity_set_too_large"
+
+
+_CONGO_CANDIDATES = [
+    {"ref": "country/COD", "label": "Democratic Republic of the Congo", "kind": "country"},
+    {"ref": "country/COG", "label": "Republic of the Congo", "kind": "country"},
+]
+
+
+def _entity_ambiguous(*rows: dict[str, Any]) -> dict[str, Any]:
+    """Search's `entity_ambiguous` answer to the parsed door's `rows`, as C50c and C50e state it.
+
+    Rows sent by text alone share one identity, so every "Congo" row is one
+    group, and each option pins all of them to its candidate. Every option
+    also pins a row that resolved to one node, here "France".
+    """
+
+    def pinned(row: dict[str, Any], ref: str) -> dict[str, Any]:
+        return {**row, "dcid": ref if row["text"] == "Congo" else "country/FRA"}
+
+    return {
+        "reason": "entity_ambiguous",
+        "category": "unresolved",
+        "ambiguous_entities": [{"text": "Congo", "candidates": _CONGO_CANDIDATES}],
+        "options": [
+            {
+                "mentions": ["Congo"],
+                "label": candidate["label"],
+                "entity_choice": 0,
+                "data_query": {
+                    "parts": [
+                        {
+                            "variable": "aid",
+                            "entities": [pinned(row, candidate["ref"]) for row in rows],
+                        }
+                    ]
+                },
+            }
+            for candidate in _CONGO_CANDIDATES
+        ],
+    }
+
+
+_FROM_CONGO = {"text": "Congo", "role_text": "donor"}
+_TO_CONGO = {"text": "Congo", "role_text": "recipient"}
+_TO_FRANCE = {"text": "France", "role_text": "recipient"}
+
+
+@pytest.mark.parametrize(
+    ("rows", "pinned"),
+    [
+        ((_FROM_CONGO, _TO_CONGO), (0, 1)),
+        ((_FROM_CONGO, _TO_FRANCE), (0,)),
+    ],
+    ids=["both_ends", "one_end"],
+)
+def test_no_data_reads_an_ambiguous_wording_once_per_entity_it_pins(
+    rows: tuple[dict[str, Any], ...], pinned: tuple[int, ...]
+) -> None:
+    entities = [EntityKey(name=row["text"], role=row["role_text"]) for row in rows]
+
+    outcome = outcome_from_envelope(
+        _envelope("no_data", no_data=_entity_ambiguous(*rows)), entities=entities
+    )
+
+    # One reading per entity the group pins, each its own choice.
+    readings = outcome.ambiguous_entities
+    assert [reading.entity for reading in readings] == [entities[i] for i in pinned]
+    for reading in readings:
+        assert reading.text == "Congo"
+        assert reading.candidates == (
+            EntityCandidate(ref="country/COD", label="Democratic Republic of the Congo"),
+            EntityCandidate(ref="country/COG", label="Republic of the Congo"),
+        )
+
+
+def _no_option_settles_the_group(no_data: dict[str, Any]) -> None:
+    for option in no_data["options"]:
+        option["entity_choice"] = 1
+
+
+def _an_option_drops_a_row(no_data: dict[str, Any]) -> None:
+    no_data["options"][0]["data_query"]["parts"][0]["entities"].pop()
+
+
+def _the_options_pin_alike(no_data: dict[str, Any]) -> None:
+    no_data["options"][1] = no_data["options"][0]
+
+
+def _a_candidate_has_no_ref(no_data: dict[str, Any]) -> None:
+    del no_data["ambiguous_entities"][0]["candidates"][0]["ref"]
+
+
+@pytest.mark.parametrize(
+    "malform",
+    [
+        _no_option_settles_the_group,
+        _an_option_drops_a_row,
+        _the_options_pin_alike,
+        _a_candidate_has_no_ref,
+    ],
+)
+def test_an_ambiguous_entity_group_pinning_no_sent_row_is_refused(
+    malform: Callable[[dict[str, Any]], None],
+) -> None:
+    no_data = _entity_ambiguous(_FROM_CONGO, _TO_CONGO)
+    malform(no_data)
+    entities = [EntityKey(name="Congo", role="donor"), EntityKey(name="Congo", role="recipient")]
+
+    with pytest.raises(ValueError, match=r"ambiguous entity group|ref"):
+        outcome_from_envelope(_envelope("no_data", no_data=no_data), entities=entities)
+
+
+_CENTRAL_AFRICA = [
+    {"ref": "region/UN_CentralAfrica", "label": "Central Africa (UN)", "kind": "group"},
+    {"ref": "region/AU_CentralAfrica", "label": "Central Africa (AU)", "kind": "region"},
+    {"ref": "region/WB_CentralAfrica", "label": "Central Africa (WB)", "kind": "region"},
+]
+
+
+def _members_ambiguous(*options: dict[str, Any]) -> dict[str, Any]:
+    """Search's answer to one row asked for its members (`"members": true`), as
+    `conjoin._entity_options` builds its options: a group node posts the group's
+    registered name and no dcid, any other candidate its dcid."""
+    return {
+        "reason": "entity_ambiguous",
+        "category": "unresolved",
+        "ambiguous_entities": [{"text": "Central Africa", "candidates": _CENTRAL_AFRICA}],
+        "options": [
+            {
+                "mentions": ["Central Africa"],
+                "label": label,
+                "entity_choice": 0,
+                "data_query": {
+                    "parts": [{"variable": "aid", "entities": [{**row, "members": True}]}]
+                },
+            }
+            for label, row in options
+        ],
+    }
+
+
+_BY_GROUP_NAME = ("Central Africa (UN)", {"text": "Central Africa (UN)"})
+_AU = ("Central Africa (AU)", {"text": "Central Africa", "dcid": "region/AU_CentralAfrica"})
+_WB = ("Central Africa (WB)", {"text": "Central Africa", "dcid": "region/WB_CentralAfrica"})
+
+
+def test_a_members_row_offers_only_the_candidates_its_options_pin_by_dcid() -> None:
+    entities = [EntityKey(name="Central Africa", role="recipient")]
+
+    outcome = outcome_from_envelope(
+        _envelope("no_data", no_data=_members_ambiguous(_BY_GROUP_NAME, _AU, _WB)),
+        entities=entities,
+    )
+
+    (reading,) = outcome.ambiguous_entities
+    assert [candidate.ref for candidate in reading.candidates] == [
+        "region/AU_CentralAfrica",
+        "region/WB_CentralAfrica",
+    ]
+    assert reading.entity == entities[0]
+
+
+def test_a_members_row_left_one_candidate_a_dcid_can_state_is_refused() -> None:
+    with pytest.raises(ValueError, match="ambiguous entity group 0 offers 1 candidate"):
+        outcome_from_envelope(
+            _envelope("no_data", no_data=_members_ambiguous(_BY_GROUP_NAME, _AU)),
+            entities=[EntityKey(name="Central Africa", role="recipient")],
+        )
 
 
 def test_unsupported_carries_the_detail_and_names_no_source() -> None:
@@ -651,20 +820,32 @@ def test_both_open_flow_sides_are_read_and_an_uncounted_one_stays_unknown() -> N
     )
 
 
-def test_a_scope_and_a_role_axis_fact_on_one_column_keep_the_scopes_count() -> None:
-    # The scope lists the members it counts; the fact only counts them.
-    donors = [
-        {"ref": ref, "label": ref, "entity_type": "Country", "role": "origin"}
-        for ref in ("country/FRA", "country/GBR", "country/USA")
+@pytest.mark.parametrize(
+    ("column", "fact_count", "count"),
+    [
+        # On a flow side the fact counts the parties and the scope also lists
+        # group totals, which a flow retrieval does not return.
+        pytest.param("origin", 2, 2, id="flow-side-fact-counts-parties"),
+        pytest.param("origin", None, 3, id="flow-side-uncounted-fact-keeps-scope"),
+        # On the place axis the scope lists the members it counts.
+        pytest.param("observationAbout", 55, 3, id="place-axis-keeps-scope"),
+    ],
+)
+def test_a_scope_and_a_role_axis_fact_on_one_column_count_parties_on_a_flow_side(
+    column: str, fact_count: int | None, count: int
+) -> None:
+    members = [
+        {"ref": ref, "label": ref, "entity_type": "Country", "role": column}
+        for ref in ("country/FRA", "country/GBR", "DACCountries")
     ]
     block = _spec(
         entities=[],
-        scope={"axis": "origin", "members": donors},
-        role_axis_facts=[{"role": "origin", "member_count": 55, "members_available": True}],
+        scope={"axis": column, "members": members},
+        role_axis_facts=[{"role": column, "member_count": fact_count, "members_available": True}],
     )
 
     assert source_from_spec_block(block).open_entity_axes == (
-        OpenEntityAxis(column="origin", member_count=3),
+        OpenEntityAxis(column=column, member_count=count),
     )
 
 
