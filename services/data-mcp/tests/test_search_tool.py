@@ -183,6 +183,29 @@ def test_a_parsed_request_carries_the_context_members_that_are_set(
     assert wire["input"] == {"kind": "parsed", "parts": [{"variable_text": "aid"}], **members}
 
 
+def test_a_long_message_is_sent_as_its_newest_4000_characters() -> None:
+    message = "q" * 3990 + "\n(then: now Ghana)"
+
+    wire = to_wire_request(
+        [SearchPart(variable="aid")], raw_query=None, context=SearchContext(user_message=message)
+    )
+
+    assert wire["input"]["user_message"] == message[-4000:]
+    assert wire["input"]["user_message"].endswith("(then: now Ghana)")
+
+
+def test_at_most_the_16_newest_carried_entries_are_sent() -> None:
+    entries = [{**CARRIED_SECTOR, "concept": f"concept-{index}"} for index in range(20)]
+
+    wire = to_wire_request(
+        [SearchPart(variable="aid")],
+        raw_query=None,
+        context=SearchContext(carried_entries=entries),
+    )
+
+    assert wire["input"]["carried_entries"] == entries[4:]
+
+
 def test_the_raw_text_door_takes_no_context() -> None:
     context = SearchContext(user_message="now Ghana", carried_entries=[CARRIED_SECTOR])
 

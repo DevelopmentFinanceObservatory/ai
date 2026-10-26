@@ -57,6 +57,8 @@ _MAX_PART_SOURCES = 8
 _MAX_SOURCE_TEXT_CHARS = 120
 _MAX_SOURCE_REF_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
+_MAX_USER_MESSAGE_CHARS = 4000
+_MAX_CARRIED_ENTRIES = 16
 _MAX_PART_OPERATIONS = 8
 _MAX_OPERATION_PHRASE_CHARS = 200
 _MAX_FORECAST_TARGET_YEAR = 2200
@@ -318,8 +320,8 @@ class SearchContext(BaseModel):
     `user_message` is the user's own message for the turn, amendments
     included, from which Search reads intent and explicit scope.
     `carried_entries` are the scope entries the conversation settled on
-    earlier parts, each with provenance `carried`, as Search's `Entry`
-    writes them. Search attaches each to a part by axis and concept, and
+    earlier parts, oldest first, each with provenance `carried`, as Search's
+    `Entry` writes them. Search attaches each to a part by axis and concept, and
     validates them.
     """
 
@@ -340,8 +342,10 @@ def to_wire_request(
     question itself.
 
     A parsed body carries `context`'s user message and carried entries as
-    the input's `user_message` and `carried_entries`, each when set. The
-    raw-text door takes neither.
+    the input's `user_message` and `carried_entries`, each when set, within
+    the door's limits: the message's last 4,000 characters, since a turn's
+    amendments and answers are appended to it, and the 16 newest entries,
+    the list being oldest first. The raw-text door takes neither.
     """
     input_block: dict[str, Any]
     if parts:
@@ -349,9 +353,9 @@ def to_wire_request(
         if raw_query is not None:
             input_block["raw_query"] = raw_query
         if context is not None and context.user_message is not None:
-            input_block["user_message"] = context.user_message
+            input_block["user_message"] = context.user_message[-_MAX_USER_MESSAGE_CHARS:]
         if context is not None and context.carried_entries:
-            input_block["carried_entries"] = context.carried_entries
+            input_block["carried_entries"] = context.carried_entries[-_MAX_CARRIED_ENTRIES:]
     else:
         if raw_query is None:
             raise ValueError("a search with no parts needs raw_query, the question Search reads")
