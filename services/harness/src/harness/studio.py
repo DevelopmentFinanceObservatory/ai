@@ -114,6 +114,7 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
     StepStatus,
@@ -174,15 +175,27 @@ def _elicitation_refusal(pending: _PendingInterrupt, body: InterruptResponse) ->
 
 
 def _interrupt_refusal(
-    pending: _PendingInterrupt | None, body: InterruptResponse
+    pending_by_id: dict[str, _PendingInterrupt], body: InterruptResponse
 ) -> JSONResponse | None:
     """Everything that can be wrong with an interrupt.response, as one HTTP
     refusal: unknown id, a decision foreign to the interrupt kind, an
     elicitation's answers (`_elicitation_refusal`), the plan payload
     discipline (delta 12: amend carries the text it acts on, the other
-    decisions must not smuggle one), and a switch's revision and option
-    (`_switch_refusal`)."""
+    decisions must not smuggle one), an approve's revision, and a switch's
+    revision and option (`_switch_refusal`).
+
+    An answer naming a plan revision that is not the one awaiting an answer
+    gets that plan's card back (`_stale_plan_refusal`), including when its
+    interrupt is gone because a later card replaced it."""
+    pending = pending_by_id.get(body.interrupt_id)
     if pending is None:
+        current = _current_plan(pending_by_id)
+        if (
+            body.plan_revision is not None
+            and current is not None
+            and body.plan_revision != current.plan_revision
+        ):
+            return _stale_plan_refusal(current)
         return _tool_error_response(
             ToolError(
                 error=ErrorCode.NOT_FOUND,
@@ -217,6 +230,8 @@ def _interrupt_refusal(
         detail = f"decision {body.decision.value!r} does not take a payload"
     elif body.decision is InterruptDecision.SWITCH:
         return _switch_refusal(pending, body)
+    elif body.plan_revision is not None and body.plan_revision != pending.plan_revision:
+        return _stale_plan_refusal(pending)
     if detail is None:
         return None
     return _tool_error_response(
@@ -240,16 +255,7 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
     `switch_option_unavailable`. `detail` is copy the card shows.
     """
     if body.plan_revision != pending.plan_revision:
-        return _tool_error_response(
-            ToolError(
-                error=ErrorCode.EDIT_CONFLICT,
-                retry=RetryMode.REFRESH_THEN_RETRY,
-                constraint_id="plan_revision_stale",
-                detail="This plan has changed since you chose. Choose again on the plan shown now.",
-                fix="reload the conversation and switch on its current plan",
-            ),
-            status_code=409,
-        )
+        return _stale_plan_refusal(pending)
     choice = pending.choices.get(body.choice_id or "")
     option = choice.options.get(body.option_id or "") if choice is not None else None
     if choice is None:
@@ -271,6 +277,36 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
             fix="choose an option the plan card offers",
         ),
         status_code=422,
+    )
+
+
+def _current_plan(pending_by_id: dict[str, _PendingInterrupt]) -> _PendingInterrupt | None:
+    """The plan pause awaiting an answer, or `None`: the latest plan entry
+    no segment is resuming."""
+    return next(
+        (
+            pending
+            for pending in reversed(pending_by_id.values())
+            if pending.kind == "plan" and pending.resuming_segment is None
+        ),
+        None,
+    )
+
+
+def _stale_plan_refusal(current: _PendingInterrupt) -> JSONResponse:
+    """409 `plan_revision_stale`: the answer names a plan the user is no
+    longer being asked about. The body carries `current`'s card as the
+    stream sent it, for the client to show in place of the one answered."""
+    return _tool_error_response(
+        PlanRevisionStaleError(
+            error=ErrorCode.EDIT_CONFLICT,
+            retry=RetryMode.REFRESH_THEN_RETRY,
+            constraint_id="plan_revision_stale",
+            detail="This plan has changed since you chose. Choose again on the plan shown now.",
+            fix="answer the plan in current_plan",
+            current_plan=current.card,
+        ),
+        status_code=409,
     )
 
 
@@ -1305,7 +1341,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
             pending = conversation.pending.get(body.interrupt_id)
-            refusal = _interrupt_refusal(pending, body)
+            refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:
                 lock.release()
                 return refusal

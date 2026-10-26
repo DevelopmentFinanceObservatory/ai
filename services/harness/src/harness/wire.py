@@ -891,8 +891,10 @@ class InterruptResponse(_WireModel):
     for a plan's `amend`. Both are absent for approve, reject, skip and
     switch. A plan's `switch` carries `choice_id` (a `PlanDecision.choice_id`),
     `option_id` (one of that decision's options) and `plan_revision` (the
-    `PlanProposed.revision` the user saw), all three; every other decision
-    carries none of them. The response to this POST is a NEW SSE stream
+    `PlanProposed.revision` the user saw), all three. An `approve` may carry
+    `plan_revision` alone, and is refused when it is not the paused plan's;
+    without one it approves the paused plan, as older clients do. Every
+    other decision carries none of them. The response to this POST is a NEW SSE stream
     continuing the same turn (delta 1).
     """
 
@@ -908,14 +910,16 @@ class InterruptResponse(_WireModel):
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
     # A plan's `switch`: the scope choice, the option it moves to, and the
-    # revision of the plan the user switched on.
+    # revision of the plan the user switched on. An `approve` may carry the
+    # revision alone.
     choice_id: str | None = Field(default=None, min_length=1)
     option_id: str | None = Field(default=None, min_length=1)
     plan_revision: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
-        """Refuse a `switch` missing one of its three members, and any other decision carrying one."""
+        """Refuse a `switch` missing one of its three members, and any other
+        decision carrying one, save an `approve`'s `plan_revision`."""
         members = {
             "choice_id": self.choice_id,
             "option_id": self.option_id,
@@ -926,6 +930,8 @@ class InterruptResponse(_WireModel):
             if missing:
                 raise ValueError(f"decision 'switch' requires {', '.join(missing)}")
             return self
+        if self.decision is InterruptDecision.APPROVE:
+            del members["plan_revision"]
         stated = [name for name, value in members.items() if value is not None]
         if stated:
             raise ValueError(f"decision {self.decision.value!r} does not take {', '.join(stated)}")
@@ -1201,6 +1207,16 @@ class PlanProposed(_WireModel):
     asks: list[PlanAsk] | None = None
     # On the plan a switch offers: each other scope choice the switch moved.
     moved: list[PlanMoved] | None = None
+
+
+class PlanRevisionStaleError(ToolError):
+    """The 409 `plan_revision_stale` body of POST /api/studio/interrupt: a
+    ToolError plus `current_plan`, the `plan.proposed` frame the stream sent
+    for the plan now awaiting an answer, exactly as sent (its `seq`
+    included). The client replaces the card the user answered with it.
+    Absent only for a pause stored before cards were kept."""
+
+    current_plan: PlanProposed | None = None
 
 
 class PlanVersioned(_WireModel):

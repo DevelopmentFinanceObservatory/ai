@@ -1714,31 +1714,30 @@ class _Translator:
                 if decision.get("slot") in shown_slots
             ]
             choices = _switchable(decisions)
-            frames.append(
-                PlanProposed(
-                    event="plan.proposed",
-                    seq=conversation.next_seq(),
-                    interrupt_id=wire_id,
-                    plan_version_id=plan_version_id,
-                    version=version,
-                    title="Research plan",
-                    steps=steps,
-                    decisions=decisions,
-                    actions=[
-                        PlanAction.APPROVE,
-                        PlanAction.AMEND,
-                        PlanAction.REJECT,
-                        *([PlanAction.SWITCH] if choices else []),
-                    ],
-                    revision=revision,
-                    requirements=requirements,
-                    operations=operations,
-                    asks=asks or None,
-                    moved=[PlanMoved.model_validate(moved) for moved in payload["moved"]]
-                    if payload.get("moved")
-                    else None,
-                )
+            card = PlanProposed(
+                event="plan.proposed",
+                seq=conversation.next_seq(),
+                interrupt_id=wire_id,
+                plan_version_id=plan_version_id,
+                version=version,
+                title="Research plan",
+                steps=steps,
+                decisions=decisions,
+                actions=[
+                    PlanAction.APPROVE,
+                    PlanAction.AMEND,
+                    PlanAction.REJECT,
+                    *([PlanAction.SWITCH] if choices else []),
+                ],
+                revision=revision,
+                requirements=requirements,
+                operations=operations,
+                asks=asks or None,
+                moved=[PlanMoved.model_validate(moved) for moved in payload["moved"]]
+                if payload.get("moved")
+                else None,
             )
+            frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(
                 adk_id=adk_id,
                 kind="plan",
@@ -1747,6 +1746,7 @@ class _Translator:
                 step_order=tuple(step_order),
                 step_labels=step_labels,
                 choices=choices,
+                card=card,
             )
             return frames
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`

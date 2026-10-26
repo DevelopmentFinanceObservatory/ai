@@ -224,18 +224,18 @@ for the dataset again.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
-| Field             | Type                                                                           | Notes                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `kind`            | `"interrupt.response"`                                                         | required                                                                                               |
-| `schema_version`  | `1`                                                                            | required                                                                                               |
-| `conversation_id` | string                                                                         | required                                                                                               |
-| `interrupt_id`    | string                                                                         | required; copy it from the pausing frame; it is opaque and single-use                                  |
-| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"switch"` \| `"answer"` \| `"skip"` | required                                                                                               |
-| `payload`         | string \| null                                                                 | required for `amend`; for `answer` only on an elicitation paused before delta 21; forbidden otherwise  |
-| `answers`         | object \| null                                                                 | required for `answer` (except as above): question id → answer; forbidden otherwise                     |
-| `choice_id`       | string \| null                                                                 | required for `switch`: the decision's `choice_id`; forbidden otherwise                                 |
-| `option_id`       | string \| null                                                                 | required for `switch`: one of that decision's `options[].option_id`; forbidden otherwise               |
-| `plan_revision`   | string \| null                                                                 | required for `switch`: the `revision` of the `plan.proposed` the user switched on; forbidden otherwise |
+| Field             | Type                                                                           | Notes                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `kind`            | `"interrupt.response"`                                                         | required                                                                                                                    |
+| `schema_version`  | `1`                                                                            | required                                                                                                                    |
+| `conversation_id` | string                                                                         | required                                                                                                                    |
+| `interrupt_id`    | string                                                                         | required; copy it from the pausing frame; it is opaque and single-use                                                       |
+| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"switch"` \| `"answer"` \| `"skip"` | required                                                                                                                    |
+| `payload`         | string \| null                                                                 | required for `amend`; for `answer` only on an elicitation paused before delta 21; forbidden otherwise                       |
+| `answers`         | object \| null                                                                 | required for `answer` (except as above): question id → answer; forbidden otherwise                                          |
+| `choice_id`       | string \| null                                                                 | required for `switch`: the decision's `choice_id`; forbidden otherwise                                                      |
+| `option_id`       | string \| null                                                                 | required for `switch`: one of that decision's `options[].option_id`; forbidden otherwise                                    |
+| `plan_revision`   | string \| null                                                                 | required for `switch`, optional for `approve`: the `revision` of the `plan.proposed` the user answered; forbidden otherwise |
 
 Each answer in `answers` is one of:
 
@@ -264,9 +264,22 @@ Rules the server enforces with HTTP 422:
 - `approve`, `amend`, `reject`, `switch` apply only to a `plan.proposed` pause.
 - `switch` carries no `payload`. Its `option_id` must be one the decision
   offers as `available` or `partial`, other than its `active_option_id`; any
-  other is refused with `constraint_id: "switch_option_unavailable"`. A
-  `plan_revision` other than the paused plan's is refused with HTTP 409 and
-  `constraint_id: "plan_revision_stale"`. Both carry a `detail` to show.
+  other is refused with `constraint_id: "switch_option_unavailable"`.
+- Send `plan_revision` with every `approve`, set to the `revision` of the
+  card the user approved. An `approve` without one approves whatever plan
+  is paused, so an approval sent from an out-of-date card cannot be told
+  apart.
+- A `switch` or `approve` whose `plan_revision` is not the paused plan's is
+  refused with HTTP 409 and `constraint_id: "plan_revision_stale"`. So is
+  one naming an `interrupt_id` a later card replaced, when its
+  `plan_revision` differs from that card's. The body is a ToolError plus
+  `current_plan`: the `plan.proposed` frame the stream sent for the plan
+  awaiting an answer, `seq` included. Replace the answered card with it,
+  show `detail`, and let the user answer again; do not feed the frame to
+  your `seq` ordering. `current_plan` is absent only for a pause stored
+  before cards were kept. Nothing is approved or switched.
+- `switch_option_unavailable` and `plan_revision_stale` both carry a
+  `detail` to show.
 - `answer`, `skip` apply only to an `elicitation.request` pause.
 - `answers` names every question id of the frame exactly once, and an
   `option_id` must be one that question offered.
@@ -559,7 +572,7 @@ decision, payload or answers than the one that actually resumed answers 409
 
 The `error` field of an `error` frame, and the body of every non-200
 response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, and the 422s in
-section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`. Two framework responses have a
+section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`; the 409 `plan_revision_stale` body adds `current_plan` (section 4.2). Two framework responses have a
 different shape: 401 is `{"detail": "..."}`, and a request body that fails
 schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).
 

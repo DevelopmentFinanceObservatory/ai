@@ -512,6 +512,27 @@ def test_switch_members_come_together_and_only_with_switch(change: dict[str, Any
         STUDIO_REQUEST_ADAPTER.validate_python({**_SWITCH, **change})
 
 
+@pytest.mark.parametrize(
+    ("decision", "accepted"),
+    [("approve", True), ("amend", False), ("reject", False)],
+)
+def test_only_an_approve_may_name_the_plan_revision_alone(decision: str, accepted: bool) -> None:
+    body = {
+        **_SWITCH,
+        "decision": decision,
+        "choice_id": None,
+        "option_id": None,
+        "payload": "x" if decision == "amend" else None,
+    }
+    if accepted:
+        parsed = STUDIO_REQUEST_ADAPTER.validate_python(body)
+        assert isinstance(parsed, InterruptResponse)
+        assert parsed.plan_revision == "rev_1"
+    else:
+        with pytest.raises(ValidationError):
+            STUDIO_REQUEST_ADAPTER.validate_python(body)
+
+
 _ANSWER = {
     "kind": "interrupt.response",
     "schema_version": 1,

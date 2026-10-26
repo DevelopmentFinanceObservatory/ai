@@ -82,6 +82,7 @@ from harness.wire import (
     CompositionManifest,
     ErrorCode,
     PinOp,
+    PlanProposed,
     RemoveOp,
     ReorderOp,
     RetryMode,
@@ -386,6 +387,10 @@ class _PendingInterrupt:
     # this card may name. Empty for an elicitation, a plan with none, and a
     # plan paused before choices were kept.
     choices: dict[str, _PendingChoice] = field(default_factory=dict)
+    # A plan's `plan.proposed` frame as the stream sent it: the card a
+    # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
+    # None for an elicitation and a plan paused before cards were kept.
+    card: PlanProposed | None = None
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -1219,6 +1224,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
+            "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
         }
         for interrupt_id, p in pending.items()
     }
@@ -1244,6 +1250,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             )
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
+        card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
     )
     if "questions" in entry:
         pending.questions = tuple(

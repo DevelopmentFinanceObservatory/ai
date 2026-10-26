@@ -1602,7 +1602,8 @@ async def test_a_stale_plan_card_cannot_approve_a_later_plan(
     number, through the served path. Card 1's interrupt id is consumed by
     the amend that requested card 2, so
     replaying it 404s rather than reaching for whatever plan is now pending,
-    and only card 2's own id approves card 2."""
+    and only card 2's own id approves card 2. A replay naming card 1's
+    revision is refused 409 with card 2 to show in its place."""
     planner = _UnrelatedPlansPlanner(["first measure", "second measure"], real_schemas)
     app = _app(
         *_plan(),
@@ -1632,6 +1633,18 @@ async def test_a_stale_plan_card_cannot_approve_a_later_plan(
             headers=AUTH,
         )
         assert replay.status_code == 404
+
+        stale = await client.post(
+            "/api/studio/interrupt",
+            json={
+                **_interrupt_body(card1["interrupt_id"], "approve"),
+                "plan_revision": card1["revision"],
+            },
+            headers=AUTH,
+        )
+        assert stale.status_code == 409
+        assert stale.json()["constraint_id"] == "plan_revision_stale"
+        assert stale.json()["current_plan"] == card2
 
         third = await _stream(
             client, "/api/studio/interrupt", _interrupt_body(card2["interrupt_id"], "approve")
@@ -4440,8 +4453,35 @@ async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() ->
         (status, constraint) for _, status, constraint in cases
     ]
     assert all(r.json()["detail"] for r in answers)
+    assert answers[0].json()["current_plan"] == plan
     assert answers[-1].json()["error"] == "binding_invalid"
     assert conversation.approvals == []
+
+
+async def test_a_stale_approve_gets_the_current_card_and_the_shown_revision_approves() -> None:
+    """An approve naming a revision other than the paused plan's is refused
+    409 with the card the stream sent, approves nothing, and leaves the
+    pause; one naming the card's own revision approves it."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        approve = _interrupt_body(plan["interrupt_id"], "approve")
+        stale = await client.post(
+            "/api/studio/interrupt", json={**approve, "plan_revision": "0" * 64}, headers=AUTH
+        )
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        assert conversation.approvals == []
+        approved = await _stream(
+            client, "/api/studio/interrupt", {**approve, "plan_revision": plan["revision"]}
+        )
+
+    assert stale.status_code == 409
+    assert stale.json()["constraint_id"] == "plan_revision_stale"
+    assert stale.json()["detail"]
+    assert stale.json()["current_plan"] == plan
+    assert _events(approved)[-1] == "done"
+    assert [record.revision for record in conversation.approvals] == [plan["revision"]]
 
 
 async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None:
@@ -5170,7 +5210,8 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
     that never built this plan, answers `/interrupt` and completes the
     turn, restoring the plan's step order into its own `_RecordingSurface`
     from the ledger's `_PendingInterrupt.step_order` before resuming. A
-    second `/turn` on B then continues the same conversation: the turn
+    stale approve on B first gets back the card A sent, read from the
+    ledger. A second `/turn` on B then continues the same conversation: the turn
     index advances past what A claimed, and the digest carries A's turn."""
     session_service = sqlite_session_service(tmp_path / "shared.db")
     app_a = _app(
@@ -5187,6 +5228,13 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
         first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
         plan = _frame(first, "plan.proposed")
         assert app_b.state.studio.surface_recorder.step_order(f"{PRINCIPAL}/{CONVERSATION}") == []
+        stale = await client_b.post(
+            "/api/studio/interrupt",
+            json={**_interrupt_body(plan["interrupt_id"], "approve"), "plan_revision": "0" * 64},
+            headers=AUTH,
+        )
+        assert stale.status_code == 409
+        assert stale.json()["current_plan"] == plan
 
         resumed = await _stream(
             client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
