@@ -66,6 +66,8 @@ from harness.conversation import (
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
+    APPLY_CHOICE_STATE_KEY,
+    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -97,10 +99,12 @@ from harness.studio_translate import (
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
+from harness.turn_records import stored_choice
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     ActivityStep,
     AddOp,
+    ApplyChoice,
     CancelRequest,
     ComponentRefIntent,
     CompositionActor,
@@ -275,6 +279,51 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
             constraint_id="switch_option_unavailable",
             detail=detail,
             fix="choose an option the plan card offers",
+        ),
+        status_code=422,
+    )
+
+
+def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSONResponse:
+    """The label of the option a chip moves to, or the HTTP refusal of a chip that cannot apply.
+
+    The chip's choice is read on the conversation's newest stored reading
+    holding it (`harness.turn_records.stored_choice`). A choice no reading
+    holds, or one already on the chip's option, is refused 422
+    `scope_choice_stale`: the chip came from an answer the conversation has
+    moved past. An option the choice does not offer, or one Search cannot
+    serve, is refused 422 `switch_option_unavailable`, as a plan card's switch
+    is. `detail` is copy the client shows.
+    """
+    readings = [reading for turn in conversation.turns for reading in turn.get("readings") or ()]
+    found = stored_choice(readings, pick.choice_id)
+    choice = found[1] if found is not None else None
+    option = (
+        next((o for o in choice.options if o.option_id == pick.option_id), None)
+        if choice is not None
+        else None
+    )
+    if choice is None or (option is not None and pick.option_id == choice.active):
+        constraint, detail = (
+            "scope_choice_stale",
+            "This answer has changed since that suggestion was offered, so nothing changed.",
+        )
+    elif option is None:
+        constraint, detail = "switch_option_unavailable", "That option is not offered here."
+    elif option.availability.status == "unavailable":
+        constraint, detail = (
+            "switch_option_unavailable",
+            f"{option.label} cannot be counted for this answer.",
+        )
+    else:
+        return option.label
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id=constraint,
+            detail=detail,
+            pointer="/apply_choice",
         ),
         status_code=422,
     )
@@ -601,8 +650,8 @@ async def _sse_stream(
 
 
 def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
-    """Keep the plan records, search readings and spec blocks `event` writes
-    to the turn's session state, for `ConversationState.close_turn` to store
+    """Keep the plan records, search readings, spec blocks and applied chip
+    `event` writes to the turn's session state, for `ConversationState.close_turn` to store
     with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
     closes."""
@@ -613,6 +662,8 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
         conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+    if ORCHESTRATOR_APPLIED_KEY in delta:
+        conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
 
 async def _unwind(pending: asyncio.Future[Any]) -> None:
@@ -1072,9 +1123,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                if body.component_ref is not None:
-                    # The client refers to state (a card to edit, or to
-                    # follow up on) this store never had.
+                if body.component_ref is not None or body.apply_choice is not None:
+                    # The client refers to state (a card to edit or to follow
+                    # up on, or a chip under an answer) this store never had.
                     lock.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
@@ -1108,10 +1159,25 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     status_code=404,
                 )
+            chip_label: str | None = None
+            if (pick := body.apply_choice) is not None:
+                label = _chip_label(conversation, pick)
+                if isinstance(label, JSONResponse):
+                    lock.release()
+                    return label
+                chip_label = label
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
-            conversation.turn_user_message = body.message
-            conversation.turn_user_words = body.message
+            if pick is None or chip_label is None:
+                conversation.turn_user_message = body.message
+                conversation.turn_user_words = body.message
+            else:
+                # The history record names the option the chip counts. Search
+                # would read its label as scope the user stated, so the words
+                # later searches send leave it out, as a plan card's switch does.
+                conversation.turn_user_message = f"count {chip_label}"
+                conversation.turn_user_words = ""
+                conversation.turn_applied_choice = pick.model_dump()
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is
@@ -1214,6 +1280,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             elif body.seed_spec is not None:
                 # One reference, the reserved shape: `graph.seed` reports it unused.
                 state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
+            if body.apply_choice is not None:
+                # `graph.seed` applies the chip, and the turn neither searches nor plans.
+                state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
             try:
                 await studio._ensure_session(
                     user_id=principal, session_id=conversation.session_id, state=state
@@ -1223,7 +1292,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
-            message = types.Content(role="user", parts=[types.Part.from_text(text=body.message)])
+            text = body.message if chip_label is None else f"Count {chip_label}."
+            message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(

@@ -794,6 +794,14 @@ class Seed(_WireModel):
     operations: list[SeedOperation] = Field(default_factory=list, max_length=MAX_SEED_OPERATIONS)
 
 
+class ApplyChoice(_WireModel):
+    """A suggestion chip the user clicked (`ApplyChoiceSuggestion`): the scope
+    choice of a stored reading and the option it moves to."""
+
+    choice_id: str = Field(min_length=1)
+    option_id: str = Field(min_length=1)
+
+
 class TurnRequest(_WireModel):
     """POST /api/studio/turn -- start or continue a turn.
 
@@ -813,12 +821,17 @@ class TurnRequest(_WireModel):
     so it seeds nothing: the turn runs from the question, as it did while
     the member was reserved, and the `seed` node reports the unused
     reference as a failed step.
+
+    `apply_choice` carries a chip's choice and option, with no message text:
+    the turn applies the option to the reading the answer used, with no
+    search (`harness.graph.switch.apply_stored_choice`). It cannot come with
+    a message, seeds or a card reference.
     """
 
     kind: Literal["turn.request"]
     schema_version: Literal[1]
     conversation_id: str = _CONVERSATION_ID
-    message: str
+    message: str = ""
     surface: Surface = Surface.STUDIO
     component_ref: ComponentRef | None = None
     seed_spec: (
@@ -828,6 +841,25 @@ class TurnRequest(_WireModel):
     # but are NOT appended to the composition; the client adds them later
     # with a composition.mutate "add" op (the Auto-add toggle).
     auto_add: bool = True
+    apply_choice: ApplyChoice | None = None
+
+    @model_validator(mode="after")
+    def _a_chip_comes_alone(self) -> TurnRequest:
+        """Refuse an `apply_choice` beside message text, seeds or a card reference."""
+        if self.apply_choice is None:
+            return self
+        stated = [
+            name
+            for name, value in (
+                ("message", self.message),
+                ("seed_spec", self.seed_spec),
+                ("component_ref", self.component_ref),
+            )
+            if value
+        ]
+        if stated:
+            raise ValueError(f"apply_choice does not take {', '.join(stated)}")
+        return self
 
     @model_validator(mode="after")
     def _seeds_start_a_turn_not_an_edit(self) -> TurnRequest:
@@ -1410,17 +1442,31 @@ class ElicitationRequest(_WireModel):
 
 
 class SuggestionItem(_WireModel):
+    """A chip that sends `prompt` as the user's next message."""
+
     label: str
     prompt: str
 
 
+class ApplyChoiceSuggestion(_WireModel):
+    """A chip that moves one scope choice of the answer's readings to another
+    option: a click sends a `TurnRequest` with `apply_choice {choice_id,
+    option_id}` and no message. `label` is the option's label."""
+
+    kind: Literal["apply_choice"]
+    label: str
+    choice_id: str
+    option_id: str
+
+
 class Suggestions(_WireModel):
-    """Follow-up chips. May be empty in v1 (delta 8 -- the frame is
-    additive)."""
+    """Follow-up chips. Empty unless the answer used readings with scope
+    choices, which give one `ApplyChoiceSuggestion` per other option it can
+    serve (`harness.turn_records.scope_chips`)."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)
-    items: list[SuggestionItem]
+    items: list[SuggestionItem | ApplyChoiceSuggestion]
 
 
 class ErrorFrame(_WireModel):

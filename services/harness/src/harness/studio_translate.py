@@ -47,6 +47,7 @@ from typing import Any, cast
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
 from common.refusal import refusal_code
+from common.telemetry import record_event
 from compiler.surface import (
     ProgressCallback,
     ToolCallResult,
@@ -84,6 +85,7 @@ from harness.graph.state import (
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
 )
+from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
 from harness.orchestrator_tools import HANDED_OFF
 from harness.provenance import (
@@ -107,9 +109,10 @@ from harness.studio_state import (
     land_component as state_land_component,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.turn_records import basis_line, loose_match_notes
+from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
 from harness.wire import (
     ActivityStep,
+    ApplyChoiceSuggestion,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -199,6 +202,7 @@ _TOOL_LABELS = {
     "describe_component": "Reading a card",
     "write_component": "Adding a chart",
     SEED_STEP_TOOL: "Receive the datasets from Search",
+    APPLY_CHOICE_STEP_TOOL: "Count your choice",
 }
 # A tool with no label above is never shown by its machine name.
 _UNNAMED_TOOL_LABEL = "Working on your request"
@@ -942,6 +946,9 @@ def _refused_detail(record: _ExecutorRecord) -> str:
     if record.tool == SEED_STEP_TOOL:
         return _SEEDS_UNUSED if record.step_id == SEEDS_STEP_ID else _SEED_UNUSED
     refusal = record.result.get("refusal")
+    if record.tool == APPLY_CHOICE_STEP_TOOL and isinstance(refusal, Mapping):
+        # The note a plan card's switch shows (`harness.graph.switch`).
+        return str(refusal.get("message"))
     return failure_detail(refusal if isinstance(refusal, Mapping) else {})
 
 
@@ -2154,6 +2161,58 @@ class _Translator:
                     return str(reading["text"])
         return None
 
+    def _record_chips(self, chips: list[ApplyChoiceSuggestion]) -> None:
+        """Record the turn's chip events in telemetry, each a `scope_choice.*` event.
+
+        `applied` or `not_applied` for a turn asked to apply a chip
+        (`ConversationState.turn_applied_choice`), by whether the `seed` node
+        applied it; `kept` or `reversed` when the turn before applied one, by
+        whether this turn moved its choice back
+        (`harness.turn_records.chip_kept`); and `chips_shown` when the answer
+        offers `chips`.
+        """
+        asked = self._conversation.turn_applied_choice
+        if asked:
+            outcome = "applied" if asked.get("spec_id") else "not_applied"
+            logger.info("scope choice %s: choice_id=%s", outcome, asked.get("choice_id"))
+            record_event(
+                f"scope_choice.{outcome}",
+                level="DEFAULT",
+                metadata={key: str(value) for key, value in asked.items()},
+            )
+        self._record_chip_kept()
+        if chips:
+            logger.info("scope chips shown: %d", len(chips))
+            record_event(
+                "scope_choice.chips_shown",
+                level="DEFAULT",
+                metadata={
+                    "count": len(chips),
+                    "choice_ids": ",".join(dict.fromkeys(chip.choice_id for chip in chips)),
+                    "option_ids": ",".join(chip.option_id for chip in chips),
+                },
+            )
+
+    def _record_chip_kept(self) -> None:
+        """Record whether this turn kept the chip the turn before it applied
+        (`harness.turn_records.chip_kept`), as `scope_choice.kept` or
+        `scope_choice.reversed`. Nothing when that turn applied none."""
+        turns = self._conversation.turns
+        applied = turns[-1].get("applied_choice") if turns else None
+        if not applied or not applied.get("spec_id"):
+            return
+        kept = chip_kept(applied, self._conversation.turn_readings)
+        outcome = "kept" if kept else "reversed"
+        logger.info("scope choice %s: choice_id=%s", outcome, applied.get("choice_id"))
+        record_event(
+            f"scope_choice.{outcome}",
+            level="DEFAULT",
+            metadata={
+                "choice_id": str(applied.get("choice_id")),
+                "option_id": str(applied.get("option_id")),
+            },
+        )
+
     def finish(self) -> list[Any]:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
@@ -2208,8 +2267,19 @@ class _Translator:
                     text=self._final_text,
                 )
             )
+        chips = (
+            [
+                ApplyChoiceSuggestion(kind="apply_choice", **chip._asdict())
+                for chip in scope_chips(self._conversation.turn_readings)
+            ]
+            if self._final_text
+            else []
+        )
+        self._record_chips(chips)
         self._conversation.close_turn(final_text=answer, match_notes=notes, basis_line=basis)
-        frames.append(Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=[]))
+        frames.append(
+            Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
+        )
         frames.append(
             Done(
                 event="done",

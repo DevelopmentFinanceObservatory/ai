@@ -548,6 +548,12 @@ class ConversationState:
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
+    # by `harness.studio`; once the graph's `seed` node applied it, as that
+    # node wrote it, with `from_option_id` and `spec_id`
+    # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
+    # with the turn's record as `applied_choice`.
+    turn_applied_choice: dict[str, Any] | None = None
     turn_recorded: bool = False
     # The current turn's telemetry root span, opened by `begin_turn` on the
     # freshly minted `trace_id`, kept open across a pause for approval, and
@@ -883,6 +889,8 @@ class ConversationState:
             record["error"] = error
         if self.turn_plans:
             record["plans"] = list(self.turn_plans)
+        if self.turn_applied_choice:
+            record["applied_choice"] = dict(self.turn_applied_choice)
         # A source only the translator or the canvas found is read here too,
         # so a later turn's planner is shown it beside the ones a search
         # returned (`prior_ledger_state`).
@@ -1053,6 +1061,7 @@ class ConversationState:
         self.turn_plans = []
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_applied_choice = None
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1107,6 +1116,7 @@ _KEY_TURN_COMPONENTS = "studio:turn_components"
 _KEY_TURN_RECORDED = "studio:turn_recorded"
 _KEY_TURN_PLANS = "studio:turn_plans"
 _KEY_TURN_READINGS = "studio:turn_readings"
+_KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -1327,6 +1337,7 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_TURN_RECORDED: state.turn_recorded,
         _KEY_TURN_PLANS: state.turn_plans,
         _KEY_TURN_READINGS: state.turn_readings,
+        _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -1392,6 +1403,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_plans = list(value)
         elif key == _KEY_TURN_READINGS:
             state.turn_readings = list(value)
+        elif key == _KEY_TURN_APPLIED_CHOICE:
+            state.turn_applied_choice = dict(value) if value else None
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):

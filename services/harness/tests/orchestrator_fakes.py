@@ -340,6 +340,7 @@ def orchestrator_app(
     served: Sequence[Mapping[str, Any]] = (),
     publisher: Any = scripted_publish_result,
     run_ledger: Any = None,
+    definition_surface: Any = None,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the orchestrator topology, and the agent's model.
 
@@ -353,7 +354,8 @@ def orchestrator_app(
     (`harness.scripted.ScriptedExecutor` by default). `planner` drafts
     plans (`ScriptedPlannerModel` by default). `tool_surface` runs an
     approved plan's steps, and with `None` `execute` refuses. `served` are
-    the seeds or Spec blocks data-mcp's definition lookup answers with.
+    the seeds or Spec blocks data-mcp's definition lookup answers with, and
+    `definition_surface` replaces that lookup whole.
     `publisher` publishes a run's derived results, all at once by default,
     and `run_ledger` keeps its runs, the workflow's in-memory ledger by
     default.
@@ -380,7 +382,7 @@ def orchestrator_app(
             orchestrator=agent,
             executor=recorder,
             tool_surface=surface_recorder,
-            definition_surface=DataMcpDefinitions(served=served),
+            definition_surface=definition_surface or DataMcpDefinitions(served=served),
             publisher=publisher,
             run_ledger=run_ledger,
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,

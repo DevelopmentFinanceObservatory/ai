@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any, cast
 
 from compiler.surface import ToolSurface
 from executor.completion import ResultPublisher
@@ -14,6 +16,7 @@ from executor.run import (
     default_label_refs,
 )
 from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
 from google.adk.workflow import START, BaseNode, Edge, Workflow, node
 
 from harness.conversation import current_conversation_id
@@ -67,6 +70,19 @@ def planner_entry(planner: PlannerModel) -> PlannerEntry:
     )
 
 
+def _fetch_tool(orchestrator: LlmAgent) -> Callable[..., Awaitable[dict[str, Any]]] | None:
+    """The function of the `fetch` tool among `orchestrator`'s tools
+    (`harness.orchestrator_tools`); `None` without one."""
+    return next(
+        (
+            cast(Callable[..., Awaitable[dict[str, Any]]], tool.func)
+            for tool in orchestrator.tools
+            if isinstance(tool, FunctionTool) and tool.name == "fetch"
+        ),
+        None,
+    )
+
+
 def create_root_workflow(
     *,
     planner: PlannerModel,
@@ -97,11 +113,13 @@ def create_root_workflow(
     derived results with their replay recipes before it completes
     (`executor.completion`); it also carries no default, and with `None` a
     run with a derived result never completes. The `seed` node carries on the
-    runs an earlier turn left unfinished (`harness.graph.resume`).
+    runs an earlier turn left unfinished (`harness.graph.resume`), and applies
+    a chip the user clicked, fetching its data with the orchestrator's own
+    `fetch` tool (`harness.graph.switch.apply_stored_choice`).
     `definition_surface` reaches the data-mcp the `seed` node resolves each seed's identity again through
     (`translator.discovery.resolve_definition`), a call the Activity feed
-    does not show, and the `switch` node posts a switched scope choice
-    through (`harness.graph.switch`). `max_concurrent_steps` bounds how many of one plan's
+    does not show, and the `switch` node and the `seed` node's chip post a
+    switched scope choice through (`harness.graph.switch`). `max_concurrent_steps` bounds how many of one plan's
     wave's tool calls the `execute` node's run may hold in flight against
     `tool_surface` at once (`executor.run.execute_approved_plan`'s own
     keyword of the same name). `fetch_series_stats` and `label_refs` are
@@ -117,6 +135,7 @@ def create_root_workflow(
     receive_seeds = seed_node(
         executor=executor,
         definition_surface=definition_surface,
+        fetch=_fetch_tool(orchestrator),
         resume=run_resumer(
             run_ledger=ledger,
             publisher=publisher,

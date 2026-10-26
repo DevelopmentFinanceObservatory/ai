@@ -83,6 +83,7 @@ EVENT_FIXTURES = {
     "event-12-done.json": Done,
     "event-13-elicitation-skippable.json": ElicitationRequest,
     "event-14-elicitation-questions.json": ElicitationRequest,
+    "event-15-suggestions-apply-choice.json": Suggestions,
 }
 
 REQUEST_FIXTURES = {
@@ -98,6 +99,7 @@ REQUEST_FIXTURES = {
     "request-10-cancel.json": CancelRequest,
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
+    "request-13-turn-apply-choice.json": TurnRequest,
 }
 
 
@@ -468,6 +470,34 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_CHIP = {
+    "kind": "turn.request",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "apply_choice": {"choice_id": "spec_base:sector", "option_id": "sector:120"},
+}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"message": "health aid"}, id="with-message"),
+        pytest.param(
+            {"component_ref": {"component_id": "cmp_1", "intent": "follow_up"}}, id="with-card"
+        ),
+        pytest.param({"apply_choice": {"choice_id": "spec_base:sector"}}, id="without-option"),
+        pytest.param({"apply_choice": {"choice_id": "", "option_id": "x"}}, id="empty-choice"),
+    ],
+)
+def test_a_chip_comes_alone_with_its_choice_and_option(change: dict[str, Any]) -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_CHIP)
+
+    assert isinstance(accepted, TurnRequest)
+    assert accepted.apply_choice is not None and accepted.message == ""
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_CHIP, **change})
 
 
 _SWITCH = {

@@ -18,6 +18,12 @@ A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
 the unchanged plan again with a note saying so, and leaves the planner's
 drafting state as it was.
+
+A chip under an answer applies one option the same way, with no plan
+(`apply_stored_choice`): the `seed` node posts the stored reading's base
+identity with the switched entries, stores the reading Search compiles,
+fetches it through the orchestrator's `fetch` tool and hands the result to
+the agent, which answers from it with no search.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -38,6 +44,7 @@ from planner.plan import (
     PinSource,
     SessionState,
     authored,
+    earlier_block,
     is_scope_choice,
     pin_sources,
     plan_revision,
@@ -50,6 +57,7 @@ from translator.discovery import RESOLVE_DEFINITION
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
+    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_SPECS_KEY,
     conversation_readings,
     readable_plan,
@@ -64,7 +72,7 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.tool_contracts import resolver_digest
-from harness.turn_records import SearchReading
+from harness.turn_records import SearchReading, stored_choice
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +82,13 @@ _SCOPE_REFUSALS = frozenset({"requested_option_unavailable", "conflicting_reques
 # The state the planner seam and the translator keep while drafting, which a
 # revision that fails leaves as it found.
 _DRAFTING_PREFIXES = ("planner:", "translator:")
+
+
+# The tool name and step id the Activity feed shows a chip's application under.
+APPLY_CHOICE_STEP_TOOL = "apply_choice"
+# The code that step fails with when the chip cannot be applied; its message
+# is the note `SwitchFailedError` carries.
+SCOPE_CHOICE_NOT_APPLIED = "scope_choice_not_applied"
 
 
 class SwitchFailedError(Exception):
@@ -416,3 +431,138 @@ def _restore(ctx: Context, drafting: Mapping[str, Any]) -> None:
             ctx.state[key] = None
     for key, value in drafting.items():
         ctx.state[key] = value
+
+
+async def apply_stored_choice(
+    ctx: Context,
+    *,
+    choice_id: str,
+    option_id: str,
+    surface: ToolSurface,
+    fetch: Callable[..., Awaitable[dict[str, Any]]],
+    record_step: Callable[..., None] | None,
+) -> dict[str, str]:
+    """Apply a chip: move choice `choice_id` of the conversation's newest
+    reading holding it to `option_id`, fetch what Search compiles, and return
+    the hand-back the agent answers from.
+
+    The reading's base identity is posted with its entries and the switch
+    (`switch_entries`) through `surface` (`_resubmit`), the reading Search
+    compiles is stored as the plan-card switch stores it, and its spec_id is
+    fetched with the orchestrator's `fetch` tool, so its frames, served
+    scope and step reach the turn as any fetch's do. The chip applied is
+    recorded under `ORCHESTRATOR_APPLIED_KEY`, with the option it moved from
+    and the spec_id Search compiled.
+
+    A chip that cannot be applied, because no reading holds the choice, the
+    option is not one Search can serve, or Search refuses or fails the
+    resubmit, fetches nothing: the hand-back carries the note a plan-card
+    switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
+    `SCOPE_CHOICE_NOT_APPLIED`.
+
+    Returns:
+        `{"status", "text"}` for the `orchestrate` node.
+    """
+    args = {"choice_id": choice_id, "option_id": option_id}
+    reading, choice = stored_choice(conversation_readings(ctx.state), choice_id) or (None, None)
+    option = next((o for o in choice.options if o.option_id == option_id), None) if choice else None
+    label = option.label if option is not None else option_id
+    try:
+        if reading is None or choice is None:
+            raise SwitchFailedError("That choice is no longer on this answer, so nothing changed.")
+        if (
+            option is None
+            or option_id == choice.active
+            or option.availability.status == "unavailable"
+        ):
+            raise SwitchFailedError(
+                f"Search does not offer {label} for this source, so nothing changed."
+            )
+        assert reading.scope is not None and reading.spec_id is not None
+        pin = reading.spec_id
+        switched = await _resubmit(
+            surface,
+            pin=pin,
+            reading=reading,
+            scope=reading.scope,
+            entries=[
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in switch_entries(reading.scope, choice=choice, option_id=option_id)
+            ],
+            block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
+            label=label,
+        )
+    except SwitchFailedError as exc:
+        note = str(exc)
+        logger.info("scope choice not applied: choice_id=%s option_id=%s", choice_id, option_id)
+        _apply_step(
+            record_step,
+            args=args,
+            result={
+                "outcome": "refusal",
+                "refusal": {
+                    "code": SCOPE_CHOICE_NOT_APPLIED,
+                    "retry_mode": "do_not_retry",
+                    "fix": None,
+                    "message": note,
+                },
+            },
+        )
+        return {
+            "status": f"Counting {label}",
+            "text": (
+                f"The user asked to count {label}, and it was not applied: {note} Tell the "
+                "user so in a sentence. The earlier answer stands."
+            ),
+        }
+    assert reading.scope is not None
+    store_search(
+        ctx.state,
+        _reading_digest(switched, axis=choice.axis),
+        asked=[reading.asked_roles],
+        held_open=[reading.open_roles],
+        share_sides=[reading.share_over],
+    )
+    ctx.state[ORCHESTRATOR_APPLIED_KEY] = {
+        **args,
+        "from_option_id": choice.active,
+        "spec_id": switched.spec_id,
+    }
+    logger.info(
+        "scope choice applied: choice_id=%s option_id=%s from=%s",
+        choice_id,
+        option_id,
+        choice.active,
+    )
+    _apply_step(
+        record_step,
+        args=args,
+        result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
+    )
+    fetched = await fetch(spec_id=switched.spec_id, tool_context=ctx)
+    held = choice.active_option
+    moved = [
+        f"Search also moved {entry['from_label']} to {entry['to_label']}: {entry['reason']}"
+        for entry in moved_choices(reading.scope, switched.after, switched=choice.axis)
+    ]
+    lead = (
+        f'The user chose to count "{reading.text or reading.sentence or pin}" as {label}'
+        f"{f' in place of {held.label}' if held is not None else ''}. Search counted it again "
+        f"as {switched.spec_id}, and its data was fetched for you below. Answer the user's last "
+        "question again from these figures and say what the change did to them. Search and "
+        "plan are not available this turn."
+    )
+    return {
+        "status": f"Counting {label}",
+        "text": "\n".join([lead, *moved, json.dumps(fetched)]),
+    }
+
+
+def _apply_step(
+    record_step: Callable[..., None] | None, *, args: dict[str, Any], result: dict[str, Any]
+) -> None:
+    """Record the `APPLY_CHOICE_STEP_TOOL` step, when the executor records steps."""
+    if record_step is not None:
+        record_step(
+            tool=APPLY_CHOICE_STEP_TOOL, args=args, result=result, step_id=APPLY_CHOICE_STEP_TOOL
+        )

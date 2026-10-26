@@ -56,6 +56,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow._errors import NodeInterruptedError
 from google.adk.workflow.utils._workflow_hitl_utils import create_request_input_event
 from google.genai import types
+from harness import scripted
 from harness.chart_binding import (
     LINE_CHART_MAX_VALUES,
     covers_every_row,
@@ -75,9 +76,11 @@ from harness.graph.execute import (
 from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
     APPROVE_INTERRUPT,
+    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
@@ -89,6 +92,7 @@ from harness.graph.state import (
     frame_id_for,
     frame_store_ref,
 )
+from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED
 from harness.scope_choices import ALIGNED_BASIS_BLOCK_KEY
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
@@ -135,7 +139,9 @@ from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .orchestrator_fakes import (
     ScriptLlm,
     approve_answer,
+    call,
     create_request_input_response,
+    frame_for,
     handed_back,
     open_session,
     orchestrator_runner,
@@ -3386,3 +3392,119 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+# --- a chip under an answer, applied with no search ----------------------------
+
+
+class _RecordingExecutor(scripted.ScriptedExecutor):
+    """`harness.scripted.ScriptedExecutor`, recording each call and each step a node records."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.steps: list[dict[str, Any]] = []
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        self.calls.append({"tool": tool, "args": args})
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+    def record_step(self, **step: Any) -> None:
+        self.steps.append(step)
+
+
+async def _chip_turn(
+    search: SearchStub, *, option_id: str = "sector:120+130"
+) -> tuple[Runner, ScriptLlm, _RecordingExecutor, dict[str, Any]]:
+    """A turn applying a chip that moves the US health aid answer's
+    `option_id` axis to `option_id`, its reading stored by an earlier turn,
+    resubmitted through `search`. Its model tries to search, then answers."""
+    scope = _hashed_scope()
+    reading = SearchReading.from_part(
+        {
+            "variable": "health aid",
+            "status": "definite",
+            "spec_id": scope["compiled"]["spec_id"],
+            "scope": scope,
+        }
+    ).model_dump(mode="json")
+    executor = _RecordingExecutor()
+    runner, model = orchestrator_runner(
+        call("search", query="health aid", parts=[{"variable": "health aid"}]),
+        executor=executor,
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    axis = option_id.split(":", maxsplit=1)[0]
+    await open_session(
+        runner,
+        apply_choice=json.dumps({"choice_id": f"{scope['id']}:{axis}", "option_id": option_id}),
+        **{ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [reading], "warnings": {}, "spec_ids": []}},
+    )
+    await run_turn(runner, types.UserContent("Count health and population."))
+    return runner, model, executor, scope
+
+
+async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never_searches() -> None:
+    """The `seed` node posts the stored reading's base identity with the
+    switched entries, stores the reading Search compiles, fetches its spec_id
+    and hands the agent the result; the agent's own search is refused unsent."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, model, executor, scope = await _chip_turn(search)
+
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
+    assert entry["identity"] == scope["base"]["identity"]
+    assert entry["scope_entries"][-1]["option_id"] == "sector:120+130"
+    assert [c["args"]["spec_id"] for c in executor.calls if c["tool"] == "get_data"] == [new_pin]
+    state = _session_state(runner)
+    stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
+    assert (stored.text, stored.spec_id) == ("health aid", new_pin)
+    assert stored.fetch is not None and stored.fetch.refusal_code is None
+    assert state[ORCHESTRATOR_APPLIED_KEY] == {
+        "choice_id": f"{scope['id']}:sector",
+        "option_id": "sector:120+130",
+        "from_option_id": "sector:120",
+        "spec_id": new_pin,
+    }
+    first = request_text(model.requests[0])
+    assert f"counted it again as {new_pin}" in first
+    assert frame_for(new_pin) in first
+    searched = model.requests[1].contents[-1].parts[0].function_response.response
+    assert searched["code"] == "tool_budget_spent"
+    assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
+
+
+async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing() -> None:
+    scope = _hashed_scope()
+    search = SearchStub(
+        refuse={
+            scope["id"]: {
+                "code": "requested_option_unavailable",
+                "title": "Requested Option Unavailable",
+                "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
+                "pointer": "/input/entries/0/scope_entries/1",
+                "retryable": False,
+            }
+        }
+    )
+
+    runner, model, executor, _ = await _chip_turn(search)
+
+    note = (
+        "Search cannot count health (CRS 120) and population and reproductive health "
+        "(CRS 130) for this source, so nothing changed."
+    )
+    assert note in request_text(model.requests[0])
+    (step,) = executor.steps
+    assert step["result"]["refusal"] == {
+        "code": SCOPE_CHOICE_NOT_APPLIED,
+        "retry_mode": "do_not_retry",
+        "fix": None,
+        "message": note,
+    }
+    assert not any(c["tool"] == "get_data" for c in executor.calls)
+    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)

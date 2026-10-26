@@ -1,0 +1,18 @@
+{
+  "event": "suggestions",
+  "seq": 9,
+  "items": [
+    {
+      "kind": "apply_choice",
+      "label": "health, CRS 120 alone",
+      "choice_id": "spec_6176d83382fca6c596e00cb242a06803:sector",
+      "option_id": "sector:120"
+    },
+    {
+      "kind": "apply_choice",
+      "label": "Africa's countries only",
+      "choice_id": "spec_6176d83382fca6c596e00cb242a06803:region",
+      "option_id": "region:members_only"
+    }
+  ]
+}

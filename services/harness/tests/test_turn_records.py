@@ -28,12 +28,15 @@ from harness.scope_choices import (
 from harness.turn_records import (
     PlanAsk,
     PlanRecord,
+    ScopeChip,
     SearchReading,
     WindowReading,
     basis_line,
+    chip_kept,
     loose_match_notes,
     open_prices,
     render_readings,
+    scope_chips,
 )
 from planner.plan import (
     CUT_MARKER,
@@ -894,6 +897,75 @@ def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used()
 
     assert basis_line([searched, refused.model_dump(mode="json"), unscoped], plans=[]) is None
     assert basis_line([searched], plans=[planned]) == _EXAMPLE_LINE
+
+
+def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve() -> None:
+    """Health as CRS 120 alone and gross disbursements give one chip each for
+    CRS 120 and 130 and grant equivalents; net, out of reach beside CRS 120
+    alone, gives none. A reading the turn did not fetch, or a plan step
+    retrieved, offers no chip."""
+    scope = _switchable_scope()
+    scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
+    part = {**_scoped_part(), "scope": scope}
+    searched = SearchReading.from_part(part)
+    facts = served_facts(_manifest(_served_identity()))
+    assert facts is not None
+    planned = searched.with_served(facts)
+
+    chips = scope_chips([_fetched(part)])
+
+    assert chips == [
+        ScopeChip(
+            label="health (CRS 120) and population and reproductive health (CRS 130)",
+            choice_id=f"{scope['id']}:sector",
+            option_id="sector:120+130",
+        ),
+        ScopeChip(
+            label="grant equivalents",
+            choice_id=f"{scope['id']}:measure_basis",
+            option_id="measure_basis:grant_equivalent",
+        ),
+    ]
+    assert scope_chips([searched.model_dump(mode="json")]) == []
+    assert scope_chips([planned.model_dump(mode="json")]) == []
+
+
+def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_four() -> None:
+    health = _fetched(_scoped_part())
+    education = _fetched({**_scoped_part(), "variable": "education aid", "spec_id": "spec_edu"})
+
+    chips = scope_chips([health, education])
+
+    assert [(chip.label.split(":")[0], chip.option_id) for chip in chips] == [
+        ('"health aid"', "sector:120+130"),
+        ('"education aid"', "sector:120+130"),
+        ('"health aid"', "region:members_and_residuals"),
+        ('"education aid"', "region:members_and_residuals"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("active", "kept"),
+    [("sector:120+130", True), ("sector:120", False)],
+    ids=["kept", "switched-back"],
+)
+def test_the_turn_after_a_chip_reverses_it_only_by_moving_its_choice_back(
+    active: str, kept: bool
+) -> None:
+    """A chip moved health from CRS 120 alone to CRS 120 and 130. The next turn
+    reverses it when its newest reading of that choice is back on CRS 120,
+    and keeps it otherwise, a turn that read no part with the choice included."""
+    part = _scoped_part()
+    scope = part["scope"]
+    scope["choices"][0]["active"] = active
+    applied = {
+        "choice_id": f"{scope['id']}:sector",
+        "option_id": "sector:120+130",
+        "from_option_id": "sector:120",
+    }
+
+    assert chip_kept(applied, [SearchReading.from_part(part).model_dump(mode="json")]) is kept
+    assert chip_kept(applied, []) is True
 
 
 def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() -> None:

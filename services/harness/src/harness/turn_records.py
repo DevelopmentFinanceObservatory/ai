@@ -49,7 +49,7 @@ from planner.records import (
     StrictModel,
 )
 from planner.workflow import ElectedMeasure, MeasureAlternative, ResolvedGroup
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
@@ -1164,6 +1164,117 @@ def basis_line(
         )
         + "."
     )
+
+
+# The order chips take by axis, and how many an answer offers.
+_CHIP_AXES: tuple[str, ...] = ("sector", "region", "provider", "measure_basis")
+MAX_SCOPE_CHIPS = 4
+
+
+class ScopeChip(NamedTuple):
+    """One other option of a scope choice the answer's figures were counted on."""
+
+    label: str
+    choice_id: str
+    option_id: str
+
+
+def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
+    """The chips an answer offers: one per other option of each scope choice
+    on the parts its fetches used, at most `MAX_SCOPE_CHIPS`.
+
+    A part is used when a `fetch` of its spec_id returned data; its newest
+    reading speaks for it. A plan step's retrieval is no fetch: the plan card
+    switches those. Each choice offers every option other than its active
+    one that Search can serve (`available` or `partial`), labelled with the
+    option's label, quoted after the part's text when several parts offer
+    chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
+    whose active option adds entities to a role the fetch narrowed offers
+    none, as it states none in the basis line (`_choice_clause`).
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+    """
+    used = newest_per_spec_id(
+        [
+            reading
+            for reading in (SearchReading.model_validate(r) for r in readings)
+            if reading.scope is not None
+            and reading.fetch is not None
+            and reading.fetch.refusal_code is None
+            and not reading.fetch.plan_step
+        ]
+    )
+    offered: list[tuple[int, SearchReading, ScopeChoice, Option]] = []
+    for reading in used:
+        assert reading.scope is not None
+        served = reading.fetch.served if reading.fetch is not None else None
+        for choice in reading.scope.choices:
+            active = choice.active_option
+            if (
+                served is not None
+                and active is not None
+                and isinstance(active.binding, EntitiesBinding)
+                and served.narrowed(active.binding.role)
+            ):
+                continue
+            rank = _CHIP_AXES.index(choice.axis) if choice.axis in _CHIP_AXES else len(_CHIP_AXES)
+            offered.extend(
+                (rank, reading, choice, option)
+                for option in choice.options
+                if option.option_id != choice.active and option.availability.status != "unavailable"
+            )
+    offered.sort(key=lambda item: item[0])
+    several = len({id(reading) for _, reading, _, _ in offered}) > 1
+    return [
+        ScopeChip(
+            label=f"{_part_name(reading)}: {option.label}" if several else option.label,
+            choice_id=choice.id,
+            option_id=option.option_id,
+        )
+        for _, reading, choice, option in offered[:MAX_SCOPE_CHIPS]
+    ]
+
+
+def stored_choice(
+    readings: Sequence[Mapping[str, Any]], choice_id: str
+) -> tuple[SearchReading, ScopeChoice] | None:
+    """The newest of `readings` whose scope holds the choice `choice_id`, with that choice.
+
+    A choice keeps its id through a switch (`"<base spec_id>:<axis>"`), so
+    the newest reading holds the option it is on now. A reading this release
+    cannot read is passed over.
+
+    Args:
+        readings: Stored readings, oldest first, as `SearchReading` JSON.
+    """
+    for raw in reversed(readings):
+        try:
+            reading = SearchReading.model_validate(raw)
+        except ValidationError:
+            continue
+        if reading.scope is None or reading.spec_id is None:
+            continue
+        choice = next((c for c in reading.scope.choices if c.id == choice_id), None)
+        if choice is not None:
+            return reading, choice
+    return None
+
+
+def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the turn after one that applied a chip kept it.
+
+    `applied` is the earlier turn's `applied_choice` record
+    (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). The turn reversed it
+    when its newest reading holding the chip's choice is back on the option
+    the chip moved from, by a chip or a plan card's switch; it kept it
+    otherwise, a turn that read no part with that choice included.
+
+    Args:
+        readings: The later turn's search readings, as `SearchReading` JSON.
+    """
+    found = stored_choice(readings, str(applied.get("choice_id")))
+    return found is None or found[1].active != applied.get("from_option_id")
 
 
 def _part_name(reading: SearchReading) -> str:

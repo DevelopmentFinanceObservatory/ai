@@ -130,6 +130,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 
+from .data_mcp_definitions import DataMcpDefinitions, SearchStub
 from .failure_text import classed_sentence, is_user_sentence
 from .orchestrator_fakes import (
     AUTH,
@@ -151,6 +152,7 @@ from .orchestrator_fakes import (
 )
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
+from .test_graph import _hashed_scope, _switched_answer
 
 SPEC_A = "spec_" + "a" * 32
 REF_A = {"spec_id": SPEC_A, "content_version": "cv_" + "1" * 32}
@@ -455,6 +457,7 @@ def _app(
     session_service: BaseSessionService | None = None,
     store: StudioStore | None = None,
     served: Sequence[Mapping[str, Any]] = (),
+    definition_surface: Any = None,
 ) -> FastAPI:
     """`orchestrator_app` over this test's session backend, its agent's
     model answering from `script` and kept as `app.state.model`. The
@@ -473,6 +476,7 @@ def _app(
         settings=settings,
         edit_model=edit_model,
         served=served,
+        definition_surface=definition_surface,
     )
     app.state.model = model
     return app
@@ -4540,6 +4544,129 @@ async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() 
     assert [call["context"].user_message for call in search.calls] == ["kenya oda 2023"]
     (record,) = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
     assert record["user"] == "kenya oda 2023\n(then: count grant equivalents)"
+
+
+def _scoped_envelope(scope: dict[str, Any]) -> dict[str, Any]:
+    """A search envelope with one definite part, "health aid", compiled as `scope` states."""
+    pin = scope["compiled"]["spec_id"]
+    block = {
+        "spec_id": pin,
+        "sentence": "US health aid to Africa",
+        "definition": {
+            "schema_version": 1,
+            "spec_id": pin,
+            "identity": scope["compiled"]["identity"],
+        },
+        "resolved": {"scope_choices": scope},
+    }
+    part = {"status": "definite", "variable_text": "health aid", "spec": block}
+    return {"schema_version": 1, "status": "definite", "parts": [part]}
+
+
+def _chip_body(choice_id: str, option_id: str) -> dict[str, Any]:
+    return {
+        "kind": "turn.request",
+        "schema_version": 1,
+        "conversation_id": CONVERSATION,
+        "apply_choice": {"choice_id": choice_id, "option_id": option_id},
+    }
+
+
+def _chip_app(*script: types.Part) -> tuple[FastAPI, dict[str, Any], SearchStub]:
+    """An app whose first turn searches US health aid to Africa, fetches it and
+    answers, then runs `script`; Search answers a chip moving its sector to
+    CRS 120 and 130. Returns the app, the scope and the Search stub."""
+    scope = _hashed_scope()
+    search = SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
+    app = _app(
+        search_call("health aid to Africa", "health aid"),
+        fetch_call(scope["compiled"]["spec_id"]),
+        _text("Health aid to Africa was this much."),
+        *script,
+        resolver=CannedSearch(_scoped_envelope(scope)),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    return app, scope, search
+
+
+async def test_a_chip_that_no_longer_applies_is_refused_with_its_constraint() -> None:
+    """A chip whose choice no stored answer holds, or that is already on its
+    option, is stale; an option the choice does not offer or Search cannot
+    serve is unavailable. Each is a 422 before any stream, and a chip on a
+    conversation the store never had is unknown."""
+    app, scope, search = _chip_app()
+    sector, basis = f"{scope['id']}:sector", f"{scope['id']}:measure_basis"
+    cases = [
+        ((f"{scope['id']}:provider", "provider:inclusive"), "scope_choice_stale"),
+        ((sector, "sector:120"), "scope_choice_stale"),
+        ((sector, "sector:999"), "switch_option_unavailable"),
+        ((basis, "measure_basis:net"), "switch_option_unavailable"),
+    ]
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        answers = [
+            await client.post("/api/studio/turn", json=_chip_body(*pick), headers=AUTH)
+            for pick, _ in cases
+        ]
+        unknown = await client.post(
+            "/api/studio/turn",
+            json={**_chip_body(sector, "sector:120+130"), "conversation_id": "conv_other"},
+            headers=AUTH,
+        )
+        turns = len(app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns)
+
+    assert [(r.status_code, r.json()["constraint_id"]) for r in answers] == [
+        (422, constraint) for _, constraint in cases
+    ]
+    assert all(r.json()["pointer"] == "/apply_choice" and r.json()["detail"] for r in answers)
+    assert unknown.status_code == 404
+    assert search.posted == []
+    assert turns == 1
+
+
+async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
+    """The first answer offers a chip per other option of its reading's
+    choices. Clicking one applies it with no search and answers from the data
+    it fetched, with the basis line; the turn after it, which moves nothing
+    back, keeps it. The telemetry holds each step."""
+    app, scope, search = _chip_app(_text("Now with population."), _text("Glad to help."))
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        chips = _frame(first, "suggestions")["items"]
+        (chip,) = [c for c in chips if c["option_id"] == "sector:120+130"]
+        applied = await _stream(
+            client, "/api/studio/turn", _chip_body(chip["choice_id"], chip["option_id"])
+        )
+        await _stream(client, "/api/studio/turn", _turn_body("thanks"))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    new_pin = _switched_answer(scope)[0]
+    assert [(c["kind"], c["option_id"]) for c in chips] == [
+        ("apply_choice", "sector:120+130"),
+        ("apply_choice", "region:members_and_residuals"),
+        ("apply_choice", "measure_basis:grant_equivalent"),
+    ]
+    assert chip == {
+        "kind": "apply_choice",
+        "label": "health (CRS 120) and population and reproductive health (CRS 130)",
+        "choice_id": f"{scope['id']}:sector",
+        "option_id": "sector:120+130",
+    }
+    assert len(search.posted) == 1
+    assert len(app.state.model.requests) == 5  # search, fetch, answer; the chip; thanks
+    text = _frame(applied, "message.complete")["text"]
+    assert text.startswith("Now with population.\n\nCounted as: ")
+    assert turns[1]["user"] == "count " + chip["label"]
+    assert turns[1]["applied_choice"]["spec_id"] == new_pin
+    events = [event.name for span in otlp_spans.get_finished_spans() for event in span.events]
+    assert [name for name in events if name.startswith("scope_choice.")] == [
+        "scope_choice.chips_shown",
+        "scope_choice.applied",
+        "scope_choice.chips_shown",
+        "scope_choice.kept",
+    ]
 
 
 async def test_answers_to_a_plan_are_refused() -> None:

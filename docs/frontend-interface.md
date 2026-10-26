@@ -109,11 +109,12 @@ The server answers `/turn` and `/interrupt` with Server-Sent Events.
 | `kind`            | `"turn.request"`                        | required                                                        |
 | `schema_version`  | `1`                                     | required                                                        |
 | `conversation_id` | string                                  | required (`session_id` is a deprecated alias; do not send both) |
-| `message`         | string                                  | required; the user's text                                       |
+| `message`         | string                                  | the user's text; required unless `apply_choice` is set          |
 | `surface`         | `"studio"` \| `"download"` \| `"embed"` | optional; default `"studio"`                                    |
 | `component_ref`   | object \| null                          | optional; see section 8                                         |
 | `seed_spec`       | list of `Seed` \| null                  | optional; 1 to 6 Search results to start from; see 4.1.1        |
 | `auto_add`        | boolean                                 | optional; default `true`; see section 9                         |
+| `apply_choice`    | `{choice_id, option_id}` \| null        | optional; a clicked suggestion chip; see 4.1.2                  |
 
 #### 4.1.1 Seeds from Search
 
@@ -221,6 +222,37 @@ retrieves anything. The seed's `seed-<n>` step fails with code
 name, `dataset <n> from Search` (its position in `seed_spec`, from 1),
 and Search's reason, and its reply tells the user and suggests searching
 for the dataset again.
+
+#### 4.1.2 Chips
+
+After an answer whose figures came from a fetch, `suggestions.items` can
+hold up to four chips of kind `apply_choice`:
+`{kind: "apply_choice", label, choice_id, option_id}`. Each moves one
+scope choice of the data the answer used (the sector's codes, a region's
+members, the provider scope or the measure basis) to another option
+Search can serve, such as "health, CRS 120 alone" or "including imputed
+multilateral". `label` is the option's label, quoted after the part's
+words when the answer used several parts. Chips run sector first, then
+region, provider and measure basis. An option Search cannot serve has no
+chip, and an answer from a plan has none: its card carries the switch.
+
+A click sends a `turn.request` with `apply_choice: {choice_id, option_id}`
+copied from the chip and no `message`, `seed_spec` or `component_ref`;
+one beside any of them gets a 422. The turn re-counts the stored data
+with that option through the Search API, retrieves it, and answers from
+it with the usual basis line, without searching or planning. The
+Activity feed shows a "Count your choice" step and the retrieval. When
+Search cannot serve the option, the step fails with the note a plan
+card's switch shows, the agent says so, and the earlier answer stands.
+
+A chip that no longer applies gets a 422 `constraint_violation` before
+any stream starts, with `pointer: "/apply_choice"` and a `detail` to
+show:
+
+- `scope_choice_stale`: no stored answer holds the choice, or the choice
+  is already on that option.
+- `switch_option_unavailable`: the choice does not offer the option, or
+  Search cannot serve it.
 
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
@@ -356,7 +388,7 @@ Every frame has `event` and `seq`. The other fields per type:
 | `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                                        | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
 | `composition.updated` | `manifest`                                                                                                                                                 | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                                        | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `suggestions`         | `items[]`                                                                                                                                                  | Follow-up chips. The list is empty in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `suggestions`         | `items[]`                                                                                                                                                  | Follow-up chips: `apply_choice` chips (4.1.2), or none.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `error`               | `error` (a ToolError object)                                                                                                                               | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `done`                | `trace_id`, `composition?`                                                                                                                                 | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
 
@@ -685,7 +717,7 @@ from (`min_catalog_version` currently equals it).
 
 ## 11. Known limits in this version
 
-- `suggestions.items` is always empty.
+- `suggestions.items` holds only `apply_choice` chips (4.1.2).
 - Some searches refuse with `capability_unavailable` ("identity does not
   reproduce spec_id"). This is a known upstream data gap. The search step
   shows `failed` and the agent answers without that data; a retry will not
