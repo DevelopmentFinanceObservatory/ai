@@ -1139,7 +1139,10 @@ _CLAUSE_JOIN = " · "
 
 
 def basis_line(
-    readings: Sequence[Mapping[str, Any]], *, plans: Sequence[Mapping[str, Any]]
+    readings: Sequence[Mapping[str, Any]],
+    *,
+    specs: Mapping[str, Mapping[str, Any]],
+    plans: Sequence[Mapping[str, Any]],
 ) -> str | None:
     """One line on how the turn's figures were counted, from its stored readings.
 
@@ -1148,7 +1151,7 @@ def basis_line(
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them; otherwise each part's clauses follow
-    its quoted text:
+    its name (`_part_name`):
 
         Counted as: health incl. population and reproductive health
         (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
@@ -1157,6 +1160,7 @@ def basis_line(
 
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
+        specs: The spec blocks the turn's searches returned, by spec_id.
         plans: The turn's plan records, as `PlanRecord` JSON.
     """
     used = [
@@ -1166,7 +1170,9 @@ def basis_line(
     for reading in newest_per_spec_id(used):
         clauses = _scope_clauses(reading)
         if clauses:
-            parts.setdefault(clauses, []).append(_part_name(reading))
+            parts.setdefault(clauses, []).append(
+                _part_name(reading, specs.get(reading.spec_id or ""))
+            )
     if not parts:
         return None
     if len(parts) == 1:
@@ -1194,7 +1200,9 @@ class ScopeChip(NamedTuple):
     option_id: str
 
 
-def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
+def scope_chips(
+    readings: Sequence[Mapping[str, Any]], *, specs: Mapping[str, Mapping[str, Any]]
+) -> list[ScopeChip]:
     """The chips an answer offers: one per other option of each scope choice
     on the parts its fetches used, at most `MAX_SCOPE_CHIPS`.
 
@@ -1202,7 +1210,7 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     reading speaks for it. A plan step's retrieval is no fetch, and the plan card
     switches those. Each choice offers every option other than its active
     one that Search can serve (`available` or `partial`), labelled with the
-    option's label, quoted after the part's text when several parts offer
+    option's label, after the part's name (`_part_name`) when several parts offer
     chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
     fetch named its own places (`entities` in the scope of any of
@@ -1211,6 +1219,8 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
 
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
+        specs: The spec blocks the turn's searches returned, by spec_id,
+            which name a part `_part_name` does not name by its words.
     """
     used = newest_per_spec_id(
         [
@@ -1240,7 +1250,11 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     several = len({id(reading) for _, reading, _, _ in offered}) > 1
     return [
         ScopeChip(
-            label=f"{_part_name(reading)}: {option.label}" if several else option.label,
+            label=(
+                f"{_part_name(reading, specs.get(reading.spec_id or ''))}: {option.label}"
+                if several
+                else option.label
+            ),
             choice_id=choice.id,
             option_id=option.option_id,
         )
@@ -1289,9 +1303,41 @@ def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]])
     return found is None or found[1].active != applied.get("from_option_id")
 
 
-def _part_name(reading: SearchReading) -> str:
-    """The part's own words, quoted, for a basis line naming several parts."""
+def _part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
+    """The part's name, for a basis line naming several parts.
+
+    The part's own words, quoted, while they describe the pin it was served
+    from. They do not once the pin was compiled again from one of its scope
+    choices, by a switch on the plan card (`harness.graph.switch`) or onto
+    its calculation's basis (`planner.agent.compile_on_basis`), each an
+    explicit entry from a choice (`ChoiceOrigin`): the reading keeps the
+    words written for the pin it replaced. Nor do they when an option they
+    stated is not the one the part's choice on that axis holds. Then the
+    part is named by Search's label for its block (`_served_name`), unquoted,
+    or by Search's sentence for the pin when the block yields no label.
+    """
+    scope = reading.scope
+    assert scope is not None
+    active = {choice.axis: choice.active for choice in scope.choices}
+    stated = [*scope.entries, *(dropped.entry for dropped in scope.dropped_entries)]
+    repinned = any(
+        entry.provenance == "explicit" and entry.origin.kind == "choice" for entry in scope.entries
+    )
+    contradicted = any(
+        entry.origin.kind == "text" and active.get(entry.axis) != entry.option_id
+        for entry in stated
+    )
+    if repinned or contradicted:
+        return _served_name(block) or reading.sentence or str(reading.spec_id)
     return f'"{reading.text or reading.sentence or reading.spec_id}"'
+
+
+def _served_name(block: Mapping[str, Any] | None) -> str | None:
+    """Search's name for what `block` measures, `resolved.shape.label` as
+    written: the `measure` the search digest shows the model
+    (`data_mcp.digest`). `None` when the block states none."""
+    label = (((block or {}).get("resolved") or {}).get("shape") or {}).get("label")
+    return label if isinstance(label, str) and label else None
 
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:

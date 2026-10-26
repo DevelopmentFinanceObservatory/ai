@@ -1367,7 +1367,7 @@ async def test_fetch_keeps_how_its_data_was_served_on_the_readings_and_from_the_
         frozenset(),
     ]
     assert "served" not in first and "served" not in again
-    assert basis_line(ctx.state["orchestrator:searches"], plans=[]) == (
+    assert basis_line(ctx.state["orchestrator:searches"], specs={}, plans=[]) == (
         "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
         "Africa's countries only · "
         "gross disbursements, current USD."
