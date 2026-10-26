@@ -3460,7 +3460,7 @@ def _aligned_bases(
     unknown until a dataset is pinned. An input of a calculation another of
     whose inputs carries a basis or provider choice, with no search of it
     held yet, answers `BASIS_UNKNOWN`, naming each to search for
-    (`Unpinned`): `planner.agent.with_source_reads` searches for them and
+    (`Unpinned`). `planner.agent.with_source_reads` searches for them and
     proposes again.
     One whose search settled on no one dataset answers
     `OPERATION_UNSUPPORTED`, since one basis or provider scope cannot be
@@ -3472,7 +3472,7 @@ def _aligned_bases(
     (bilateral flows alone, or with imputed multilateral flows), it
     contrasts its inputs only when the user stated different options on
     them (explicit entries naming different options, an entry this planner
-    compiled excluded: `_InputBasis.stated`). Otherwise its dataset inputs
+    compiled excluded, as `_InputBasis.stated` reads them). Otherwise its dataset inputs
     with a choice on the axis are counted on one option: the one the user
     stated on any of them, else the one the narrowest part is counted on
     (`_part_rank`), the first such input in plan order on a tie. A sum whose
@@ -3484,7 +3484,7 @@ def _aligned_bases(
     to the pin compiled from its origin on the option it moves to
     (`aligned`), and the requirement is restated under it, appended when
     only the plan this call amends states it. An input with no such pin yet
-    answers `BASES_UNALIGNED`, naming each to compile (`Realignment`):
+    answers `BASES_UNALIGNED`, naming each to compile (`Realignment`).
     `planner.agent.with_source_reads` compiles them and proposes again. An
     input whose choice does not offer the option, or offers it unavailable,
     an input two calculations want on different options, and an input that

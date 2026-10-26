@@ -1629,8 +1629,8 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     was compiled from, keeping that reading's asked, held-open and share
     roles, with its compiled scope on `SearchReading.scope`. Its block marks
     the axis it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
-    so the reading reads it in `SearchReading.planner_axes` and that entry is
-    never carried as the user's (`harness.scope_choices.carried_entries`).
+    so the reading reads it in `SearchReading.planner_axes` and
+    `harness.scope_choices.carried_entries` leaves that entry out.
     Later turns then find it among the readings, and a switch on its
     plan-card row finds its scope (`harness.graph.switch`).
 

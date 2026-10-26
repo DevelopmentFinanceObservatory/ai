@@ -2223,7 +2223,7 @@ class _Translator:
         `message.complete` text and the stored turn keeps them. The turn
         record keeps the notes and the line apart from the answer
         (`ConversationState.close_turn`), so a later turn's model reads the
-        answer without them and never restates them."""
+        answer alone, with no text of the code's own to restate."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
