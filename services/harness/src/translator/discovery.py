@@ -1077,7 +1077,7 @@ def current_draft(tool_context: ToolContext) -> Plan | dict[str, object]:
 def requirement_revision(requirement: DatasetRequirement) -> str:
     """Return the content hash identifying this dataset requirement's own searched content.
 
-    Covers exactly what `_search_part` sends to `search` -- `measure`,
+    Covers exactly what `search_part` sends to `search` -- `measure`,
     `entities`, `period`, `unit`, the open role `across` asks for
     (`requirement_open_roles`), the `source` the question names and the
     `source_code`, each stated only when there is one -- plus `source_spec_id`,
@@ -1197,7 +1197,7 @@ def _unit_phrase(unit: Unit) -> str:
     return f"current {unit.currency}"
 
 
-def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, object]:
+def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, object]:
     """One `search` part, built from `requirement`'s own fields plus `variable`.
 
     Sends the named entities, and the side of a flow `across` covers as an
@@ -2888,7 +2888,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         plan, requirement, revision, key = started
 
         variable = requirement.measure
-        part = _search_part(requirement, variable)
+        part = search_part(requirement, variable)
 
         async def _finish(
             record: DiscoveryRecord, sources: Sequence[SelectedSource] = ()

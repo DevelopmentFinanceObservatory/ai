@@ -155,7 +155,12 @@ from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import OpenEntityAxis, ResolvedGroup, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
-from translator.discovery import load_log, requirement_open_roles, requirement_revision
+from translator.discovery import (
+    load_log,
+    requirement_open_roles,
+    requirement_revision,
+    search_part,
+)
 from translator.referral import USER_DECIDES, Referral, ReferralKind, load_referral
 from translator.tool import authored_answer
 
@@ -410,6 +415,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         evidence_requirements,
         shown=pins,
         aligned=aligned,
+        searched=searched_pins(view.state),
         view=view,
         proposer=proposer,
     )
@@ -3238,6 +3244,85 @@ def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
 
 
+# The session slot holding each search code made for a calculation's input
+# the planner pinned no dataset for (`SearchedPin`), which `_aligned_bases`
+# reads and `planner.agent.with_source_reads` writes.
+SEARCHED_PINS_STATE_KEY = "planner:searched_pins"
+
+
+class SearchedPin(StrictModel):
+    """Search's answer for a dataset requirement the planner pinned no dataset for.
+
+    `requirement_key` is the requirement's searched content
+    (`translator.discovery.requirement_revision`), so a requirement restated
+    with other words, parties or years is searched again. `spec_id` is the
+    dataset Search settled on and `digest` its answer as a search's digest
+    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    as a reading of the conversation; both are `None` when Search settled on
+    no one dataset, and the requirement is then left to the translator's own
+    discovery. `asked_roles` and `open_roles` are the parties the search
+    named and held open.
+    """
+
+    requirement_key: str
+    spec_id: str | None = None
+    digest: dict[str, Any] | None = None
+    asked_roles: tuple[str, ...] = ()
+    open_roles: tuple[str, ...] = ()
+
+
+def searched_pins(state: SessionState) -> tuple[SearchedPin, ...]:
+    """The searches `SEARCHED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(
+        SearchedPin.model_validate(raw) for raw in state.get(SEARCHED_PINS_STATE_KEY) or ()
+    )
+
+
+def save_searched_pin(state: SessionState, pin: SearchedPin) -> None:
+    """Hold `pin`, in place of any search of the same requirement content."""
+    kept = [held for held in searched_pins(state) if held.requirement_key != pin.requirement_key]
+    state[SEARCHED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+
+
+class Unpinned(StrictModel):
+    """One input of a calculation the planner pinned no dataset for, to search for in code.
+
+    `requirement_id` is the dataset requirement and `step_id` the
+    calculation whose inputs it joins. `requirement_key` is its searched
+    content (`translator.discovery.requirement_revision`), `part` the
+    `search` part the translator's own discovery sends for it
+    (`translator.discovery.search_part`), and `asked_roles` and `open_roles`
+    the parties that part names and holds open.
+    """
+
+    requirement_id: str
+    step_id: str
+    requirement_key: str
+    part: dict[str, Any]
+    asked_roles: tuple[str, ...]
+    open_roles: tuple[str, ...]
+
+
+def _unpinned(requirement: DatasetRequirement, step_id: str) -> Unpinned:
+    """The search for `requirement`, an unpinned input of `step_id`."""
+    return Unpinned(
+        requirement_id=requirement.id,
+        step_id=step_id,
+        requirement_key=requirement_revision(requirement),
+        part=search_part(requirement, requirement.measure),
+        asked_roles=tuple(entity.role for entity in requirement.entities if entity.role),
+        open_roles=tuple(requirement_open_roles(requirement)),
+    )
+
+
+def unpinned_wanted(result: Mapping[str, object]) -> list[Unpinned]:
+    """The inputs a `BASIS_UNKNOWN` refusal asks to search for; empty for any other answer."""
+    if result.get("code") != ProblemCode.BASIS_UNKNOWN.value:
+        return []
+    detail = cast("Mapping[str, Any]", result.get("detail") or {})
+    return [Unpinned.model_validate(entry) for entry in detail.get("search") or ()]
+
+
 class Realignment(NamedTuple):
     """One input a calculation needs compiled on another measure basis.
 
@@ -3349,10 +3434,18 @@ def _aligned_bases(
     *,
     shown: Mapping[str, PinSource],
     aligned: Sequence[AlignedPin],
+    searched: Sequence[SearchedPin],
     view: SessionView,
     proposer: Proposer,
 ) -> list[EvidenceRequirement] | dict[str, object]:
     """This call's requirements with every input of a calculation pinned on one measure basis, or the refusal that stops the plan.
+
+    A dataset input the planner pinned no dataset for is pinned first to the
+    dataset Search settled on for it (`searched`), since its basis is
+    unknown until a dataset is pinned. An input of a calculation another of
+    whose inputs carries a basis choice, with no search of it held yet,
+    answers `BASIS_UNKNOWN`, naming each to search for (`Unpinned`):
+    `planner.agent.with_source_reads` searches for them and proposes again.
 
     A calculation reading several inputs (a comparison, sum, share, quotient
     or join) contrasts sector, region and provider, and keeps those as
@@ -3379,22 +3472,49 @@ def _aligned_bases(
         evidence_requirements: This call's own requirements.
         shown: The datasets the planner was shown (`planner.plan.pin_sources`).
         aligned: The pins compiled so far (`aligned_pins`).
+        searched: The searches made so far for unpinned inputs (`searched_pins`).
         view: The session, where an `unsupported` answer is recorded.
         proposer: The tool a refusal's `action` names.
     """
+    held = {pin.requirement_key: pin for pin in searched}
+    found = {
+        requirement.id: pin.spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is None
+        and (pin := held.get(requirement_revision(requirement))) is not None
+        and pin.spec_id is not None
+    }
+    unsearched = {
+        requirement.id: requirement
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is None
+        and requirement_revision(requirement) not in held
+    }
+    requirements = [_pinned(requirement, found) for requirement in requirements]
+    evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
     origins = {pin.spec_id: pin.origin for pin in aligned}
     compiled = {(pin.origin, pin.option_id): pin.spec_id for pin in aligned}
     bases = _input_bases(requirements, shown=shown, origins=origins)
-    if len(bases) < 2:
-        return list(evidence_requirements)
     reads: dict[str, Sequence[str]] = {
         input_id: () for requirement in requirements for input_id in inputs_of(requirement)
     }
     reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
+    steps = [step for step in requirements if len(inputs_of(step)) >= 2]
+    unpinned: dict[str, Unpinned] = {}
+    for step in steps:
+        under = reached(step.id, reads)
+        if bases.keys() & under:
+            for requirement_id in sorted(unsearched.keys() & under):
+                if requirement_id not in unpinned:
+                    unpinned[requirement_id] = _unpinned(unsearched[requirement_id], step.id)
+    if unpinned:
+        return _basis_unknown(list(unpinned.values()))
+    if len(bases) < 2:
+        return _with_found(evidence_requirements, requirements, found)
     targets: dict[str, tuple[str, str]] = {}
-    for step in requirements:
-        if len(inputs_of(step)) < 2:
-            continue
+    for step in steps:
         under = reached(step.id, reads)
         inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
         stated = {basis.choice.active for basis in inputs if basis.stated}
@@ -3445,19 +3565,51 @@ def _aligned_bases(
             repinned[requirement_id] = pin
     if wanted:
         return _bases_unaligned(wanted, bases)
-    restated = [
-        requirement.model_copy(update={"source_spec_id": repinned[requirement.id]})
-        if requirement.id in repinned
-        else requirement
-        for requirement in evidence_requirements
-    ]
+    return _with_found(evidence_requirements, requirements, {**found, **repinned})
+
+
+def _pinned(requirement: EvidenceRequirement, pins: Mapping[str, str]) -> EvidenceRequirement:
+    """`requirement` pinned to the dataset `pins` names for it, or as it stands."""
+    if isinstance(requirement, DatasetRequirement) and requirement.id in pins:
+        return requirement.model_copy(update={"source_spec_id": pins[requirement.id]})
+    return requirement
+
+
+def _with_found(
+    evidence_requirements: Sequence[EvidenceRequirement],
+    requirements: Sequence[EvidenceRequirement],
+    pins: Mapping[str, str],
+) -> list[EvidenceRequirement]:
+    """This call's requirements, each pinned as `pins` says, then every other requirement `pins` re-pins, restated.
+
+    The others are requirements only the plan this call amends states.
+    """
+    restated = [_pinned(requirement, pins) for requirement in evidence_requirements]
     own = {requirement.id for requirement in evidence_requirements}
     restated.extend(
-        requirement.model_copy(update={"source_spec_id": repinned[requirement.id]})
+        _pinned(requirement, pins)
         for requirement in requirements
-        if requirement.id in repinned and requirement.id not in own
+        if requirement.id in pins and requirement.id not in own
     )
     return restated
+
+
+def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
+    """Return the `BASIS_UNKNOWN` problem naming each unpinned input of a calculation to search for.
+
+    `planner.agent.with_source_reads` answers it by searching for each and
+    proposing again, so the planner sees it only where no tool surface
+    reaches Search.
+    """
+    named = "; ".join(f"{item.requirement_id!r}, an input of {item.step_id!r}" for item in unpinned)
+    return problem(
+        ProblemCode.BASIS_UNKNOWN,
+        f"A calculation's inputs must share one measure basis, and these pin no dataset, so "
+        f"their basis is unknown: {named}. Search is asked for each before the plan is "
+        "recorded, and could not be reached to do so; propose the plan again.",
+        outcome=Outcome.REFUSED,
+        detail={"search": [item.model_dump(mode="json") for item in unpinned]},
+    )
 
 
 def _bases_unaligned(

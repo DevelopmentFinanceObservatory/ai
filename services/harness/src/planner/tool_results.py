@@ -100,6 +100,10 @@ class ProblemCode(StrEnum):
     # input still needs compiling on the basis they share
     # (`submission.service._aligned_bases`).
     BASES_UNALIGNED = "bases_unaligned"
+    # An input of a calculation pins no dataset while another input carries
+    # a basis choice, so the input is searched for before the plan records
+    # (`submission.service._aligned_bases`).
+    BASIS_UNKNOWN = "basis_unknown"
 
 
 class Action(StrictModel):

@@ -146,7 +146,14 @@ from planner.plan import (
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
-from submission.service import ALIGNED_PINS_STATE_KEY, Proposal, aligned_pins, submit
+from submission.service import (
+    ALIGNED_PINS_STATE_KEY,
+    SEARCHED_PINS_STATE_KEY,
+    Proposal,
+    aligned_pins,
+    searched_pins,
+    submit,
+)
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
@@ -751,8 +758,8 @@ class PlannerSeam:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
-        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY` and
-        # `ALIGNED_PINS_STATE_KEY` too.
+        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
+        # `ALIGNED_PINS_STATE_KEY` and `SEARCHED_PINS_STATE_KEY` too.
         # The declines an ask-the-user resume still owes or may make, the
         # failures it may repeat, the amendment that opened it and the pins
         # compiled for its proposals are this entry's own.
@@ -764,6 +771,7 @@ class PlannerSeam:
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
             ALIGNED_PINS_STATE_KEY,
+            SEARCHED_PINS_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
@@ -1625,9 +1633,15 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     never carried as the user's (`harness.scope_choices.carried_entries`).
     Later turns then find it among the readings, and a switch on its
     plan-card row finds its scope (`harness.graph.switch`).
+
+    Each dataset Search settled on for a calculation's input the planner
+    pinned none for (`submission.service.searched_pins`) joins them the same
+    way, under the words it was searched as, with the parties the search
+    named and held open.
     """
     held = aligned_pins(planner_state)
-    if not held:
+    searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
+    if not held and not searched:
         return
     readings = [
         SearchReading.model_validate(reading)
@@ -1655,6 +1669,16 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
             share_sides=[origin.share_over] if origin is not None else (),
         )
         stored.add(pin.spec_id)
+    for found in searched:
+        if found.spec_id in stored or found.digest is None:
+            continue
+        store_search(
+            cast(SessionState, ctx.state),
+            found.digest,
+            asked=[found.asked_roles],
+            held_open=[found.open_roles],
+        )
+        stored.add(found.spec_id)
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

@@ -26,6 +26,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
+from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
 from harness.orchestrator_tools import _search_context
@@ -1629,10 +1630,18 @@ def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
     return translator, translator.finish()
 
 
-def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_leaves_it_out() -> None:
-    """The reply and the stored turn keep the line; the digest a later turn's
-    model reads holds the answer alone, so the model has no line to restate
-    before the code appends its own."""
+@pytest.mark.parametrize("noted", [False, True], ids=["line-alone", "notes-and-line"])
+def test_the_answer_closes_with_the_code_text_and_the_next_turns_history_leaves_it_out(
+    monkeypatch: pytest.MonkeyPatch, noted: bool
+) -> None:
+    """The reply and the stored turn keep the loose-match notes and the basis
+    line the code appends; the digest a later turn's model reads holds the
+    answer alone, so the model has none of that text to restate before the
+    code appends its own."""
+    note = "The series used for health aid is a close match only."
+    monkeypatch.setattr(
+        studio_translate_module, "loose_match_notes", lambda *_, **__: [note] if noted else []
+    )
     translator, frames = _answered([_fetched(_example_part())])
     conversation = translator._conversation
 
@@ -1640,14 +1649,20 @@ def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_leaves
     complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
     digest = conversation.conversation_digest_state()
 
-    assert complete.text == f"The US gave $7.9bn.\n\n{_EXAMPLE_LINE}"
+    notes = f"\n\n{note}" if noted else ""
+    assert complete.text == f"The US gave $7.9bn.{notes}\n\n{_EXAMPLE_LINE}"
     assert "The US gave $7.9bn." + "".join(deltas) == complete.text
     assert conversation.turn_final_text == complete.text
     stored = conversation.turns[-1]
-    assert (stored["assistant"], stored["basis_line"]) == ("The US gave $7.9bn.", _EXAMPLE_LINE)
+    assert (stored["assistant"], stored.get("match_notes"), stored["basis_line"]) == (
+        "The US gave $7.9bn.",
+        note if noted else None,
+        _EXAMPLE_LINE,
+    )
     assert digest is not None
     assert digest["turns"][-1]["assistant"] == "The US gave $7.9bn."
     assert "Counted as" not in json.dumps(digest)
+    assert note not in json.dumps(digest)
 
 
 def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:

@@ -88,10 +88,13 @@ def basis_block(
 class BasisCompiles:
     """A tool surface whose `resolve_definition` compiles the US donor total on the
     basis its explicit entry posts, gross disbursements as `TOTAL_GROSS` and net
-    as `TOTAL_NET`, over the base identity and entries posted, recording each call."""
+    as `TOTAL_NET`, over the base identity and entries posted, and whose `search`
+    answers the US donor total as `TOTAL`, counted as grant equivalents by
+    default, recording each call's tool and arguments in `calls`."""
 
     def __init__(self) -> None:
         self.calls: list[Mapping[str, Any]] = []
+        self.tools: list[str] = []
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -100,8 +103,15 @@ class BasisCompiles:
         self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
     ) -> ToolCallResult:
         del on_progress
-        assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
+        self.tools.append(tool.name)
+        if tool.name == "search":
+            searched = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")
+            part = {"status": "definite", "spec": searched}
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
+            )
+        assert tool.name == "resolve_definition", tool
         (basis,) = [
             e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "measure_basis"
         ]

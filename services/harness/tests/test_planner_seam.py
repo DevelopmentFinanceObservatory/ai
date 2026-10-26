@@ -4373,31 +4373,49 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
 _HEALTH_SWITCHED = f"spec_{'5' * 32}"
 
 
+_NET_SWITCH = basis_block(
+    _HEALTH_SWITCHED, narrow=True, active="measure_basis:net", provenance="explicit"
+)
+
+
 @pytest.mark.parametrize(
-    ("switched", "total_after", "compiles"),
+    ("total_pin", "switched", "total_after", "tools"),
     [
         (
-            basis_block(
-                _HEALTH_SWITCHED, narrow=True, active="measure_basis:net", provenance="explicit"
-            ),
+            TOTAL,
+            _NET_SWITCH,
             TOTAL_NET,
-            2,
+            ["resolve_definition", "resolve_definition"],
         ),
         (
+            TOTAL,
             basis_block(_HEALTH_SWITCHED, narrow=True, active="measure_basis:gross"),
             TOTAL_GROSS,
-            1,
+            ["resolve_definition"],
+        ),
+        (
+            None,
+            _NET_SWITCH,
+            TOTAL_NET,
+            ["search", "resolve_definition", "resolve_definition"],
         ),
     ],
-    ids=["basis-moves-both-inputs", "sector-moves-health-alone"],
+    ids=["basis-moves-both-inputs", "sector-moves-health-alone", "unpinned-total-moves-too"],
 )
 async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
-    decision: Any, switched: dict[str, Any], total_after: str, compiles: int
+    decision: Any,
+    total_pin: str | None,
+    switched: dict[str, Any],
+    total_after: str,
+    tools: list[str],
 ) -> None:
     """US health aid in 2023 as a share of the US total, the total compiled on
     the health aid's gross basis. A switch of the health aid's basis to net
     compiles the total on net too; a switch of its sector alone leaves the
-    total on the gross pin compiled for it."""
+    total on the gross pin compiled for it. A total the planner pinned no
+    dataset for, as in a plan whose translator found it, is searched for in
+    the translator's words and pinned before the plan records, so the switch
+    moves it too, and the search joins the turn's readings."""
 
     def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
         return DatasetRequirement(
@@ -4416,7 +4434,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         decisions=[decision()],
         evidence_requirements=[
             health,
-            dataset("total", TOTAL),
+            dataset("total", TOTAL).model_copy(update={"source_spec_id": total_pin}),
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure"],
@@ -4429,7 +4447,11 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
         basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
     )
-    shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks}
+    shown = {
+        block["spec_id"]: PinSource(block=block, settled=True)
+        for block in blocks
+        if total_pin is not None or block["spec_id"] != TOTAL
+    }
 
     async def translate(tool_context: Any) -> dict[str, object]:
         del tool_context
@@ -4472,6 +4494,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         after = load_plan(state)
         assert after is not None and after.version == aligned.version + 1
         return {
+            "read": [r["spec_id"] for r in ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []],
             "pins": {
                 r.id: r.source_spec_id
                 for r in after.evidence_requirements
@@ -4502,6 +4525,11 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     ]
 
     assert result["pins"] == {"health": _HEALTH_SWITCHED, "total": total_after}
-    assert len(surface.calls) == compiles
+    assert surface.tools == tools
+    if total_pin is None:
+        (part,) = surface.calls[0]["parts"]
+        assert part["variable"] == "total"
+        assert part["entities"] == [{"text": "United States", "role": "donor"}]
+        assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]

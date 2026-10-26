@@ -840,25 +840,32 @@ class ConversationState:
             self.turn_user_words += f"\n(then: {line})"
 
     def close_turn(
-        self, *, final_text: str, error: str | None = None, basis_line: str | None = None
+        self,
+        *,
+        final_text: str,
+        error: str | None = None,
+        match_notes: str | None = None,
+        basis_line: str | None = None,
     ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
         turn from more than one code path. The turn's telemetry span ends
         with the user's message and the reply as its input and output, and
         at level `ERROR` naming the `error` code when there is one.
 
-        `basis_line` is the line on how the turn's figures were counted that
-        closes the reply after `final_text` (`harness.turn_records.basis_line`).
-        The record keeps it under its own key, beside the answer, so the
+        `match_notes` (`harness.turn_records.loose_match_notes`) and
+        `basis_line` (`harness.turn_records.basis_line`) are the text the code
+        appends to the reply after the model's `final_text`, in that order.
+        The record keeps each under its own key, beside the answer, so the
         conversation digest (`_history_turn`) shows a later turn's model the
-        answer alone, and that model has no line of the code's own to copy."""
+        answer alone, and that model has no text of the code's own to copy."""
         if self.turn_recorded:
             return
         self.turn_recorded = True
+        appended = [text for text in (match_notes, basis_line) if text]
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
-            response=f"{final_text}\n\n{basis_line}" if basis_line else final_text,
+            response="\n\n".join([final_text, *appended]) if appended else final_text,
             error=error,
         )
         self._telemetry_span = None
@@ -866,6 +873,8 @@ class ConversationState:
             "user": self.turn_user_message,
             "assistant": final_text,
         }
+        if match_notes:
+            record["match_notes"] = match_notes
         if basis_line:
             record["basis_line"] = basis_line
         if self.turn_components:

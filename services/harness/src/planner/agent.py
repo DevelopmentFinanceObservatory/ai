@@ -49,8 +49,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from compiler.sources import block_groups
-from compiler.surface import ToolSurface
+from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
@@ -72,16 +73,21 @@ from submission.service import (
     Combination,
     Proposal,
     Realignment,
+    SearchedPin,
+    Unpinned,
     aligned_pins,
     basis_unservable,
     identity_on_record,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
+    save_searched_pin,
     submit,
+    unpinned_wanted,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
+    SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
     resolve_definition,
@@ -1388,6 +1394,60 @@ async def compile_on_basis(
     return None
 
 
+async def pin_by_search(
+    surface: ToolSurface,
+    unpinned: Unpinned,
+    *,
+    state: SessionState,
+    deadline_s: float = BASIS_COMPILE_DEADLINE_SECONDS,
+) -> dict[str, object] | None:
+    """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
+
+    Posts the `search` part the translator's own discovery sends for the
+    requirement (`translator.discovery.search_part`). A `definite` answer
+    is shown to the planner as a source of its own
+    (`planner.plan.save_pin_sources`) and held as a
+    `submission.service.SearchedPin` with its digest, so the next proposal
+    pins it and the planner seam stores it as a reading of the conversation
+    (`harness.planner_seam.store_aligned_readings`). Any other answer, a
+    refusal included, is held as a search that settled on nothing, and the
+    requirement is left to the translator's discovery as before.
+
+    Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
+    Search did not answer and can later.
+    """
+    try:
+        async with asyncio.timeout(deadline_s):
+            answer = await surface.call_tool(tool=SEARCH, arguments={"parts": [unpinned.part]})
+    except (TimeoutError, ToolSurfaceUnavailableError) as exc:
+        return problem(
+            ProblemCode.SURFACE_UNAVAILABLE,
+            f"{unpinned.requirement_id!r}, an input of {unpinned.step_id!r}, pins no dataset, "
+            f"and Search could not be asked for one: {exc or 'no answer in time'}. The plan is "
+            "sound and nothing was recorded; propose it again.",
+            outcome=Outcome.REFUSED,
+            detail={"search": unpinned.model_dump(mode="json")},
+        )
+    envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
+    parts = envelope.get("parts") if isinstance(envelope, dict) else None
+    part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
+    spec = part.get("spec") if isinstance(part, dict) and part.get("status") == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, dict) else None
+    searched = SearchedPin(
+        requirement_key=unpinned.requirement_key,
+        asked_roles=unpinned.asked_roles,
+        open_roles=unpinned.open_roles,
+    )
+    if not isinstance(spec_id, str) or not isinstance(envelope, dict):
+        save_searched_pin(state, searched)
+        return None
+    digest = resolver_digest(cast(dict[str, Any], envelope))
+    shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
+    save_pin_sources(state, {**pin_sources(state), spec_id: shown})
+    save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+    return None
+
+
 def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
     """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis that did not complete.
 
@@ -1414,7 +1474,10 @@ async def with_source_reads(
     `planner.plan.save_full_history`): one read serves every requirement, and
     every later proposal of the turn, that pins the dataset; an answer
     stating no first year is held too, and the next refusal says so
-    (`first_year_read_failed`). A calculation whose inputs are counted on
+    (`first_year_read_failed`). A calculation one of whose inputs pins no
+    dataset while another carries a basis choice needs that input searched
+    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
+    requirement's content is never made twice. A calculation whose inputs are counted on
     different measure bases needs each input it names compiled on their
     shared basis (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
     compiled is never asked for twice, so a refusal naming one is answered
@@ -1434,6 +1497,13 @@ async def with_source_reads(
             except DefinitionNotResolvedError as exc:
                 return _first_year_unreadable(result, exc)
             save_full_history(state, pin, history)
+            continue
+        unpinned = unpinned_wanted(result)
+        if unpinned:
+            for item in unpinned:
+                refused = await pin_by_search(surface, item, state=state)
+                if refused is not None:
+                    return refused
             continue
         wanted = realignments_wanted(result)
         held = {(pin.origin, pin.option_id) for pin in aligned_pins(state)}
