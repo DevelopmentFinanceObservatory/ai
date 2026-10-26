@@ -709,3 +709,31 @@ class AmbiguousSourceReading(StrictModel):
 
     text: str
     candidates: tuple[SourceNameCandidate, ...]
+
+
+class EntityCandidate(StrictModel):
+    """A graph node Search offers for ambiguous entity wording: its dcid and label."""
+
+    ref: str
+    label: str
+
+
+class EntityKey(StrictModel):
+    """A requirement entity as `(name, role)`, the entity an ambiguous reading is about."""
+
+    name: str
+    role: str | None = None
+
+
+class AmbiguousEntityReading(StrictModel):
+    """One requirement entity whose words Search cannot tie to one graph node,
+    with the nodes it offers.
+
+    Each reading is one decision. Discovery sends rows by text alone, so rows
+    written alike share one identity and one Search group: "aid from Congo to
+    Congo" is one group, read as two readings, one per end.
+    """
+
+    text: str
+    candidates: tuple[EntityCandidate, ...]
+    entity: EntityKey

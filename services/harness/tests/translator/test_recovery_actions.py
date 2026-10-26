@@ -674,7 +674,9 @@ _US_TO_KENYA = {
             {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
         ],
     ),
-    "_bound_refs": {"united states": ["country/USA"]},
+    "_bound_refs": [
+        {"identity": "United States", "text": "United States", "refs": ["country/USA"]}
+    ],
 }
 _G7_TO_KENYA = _spec(
     "spec_9c7a11e2" + "0" * 24,
@@ -699,7 +701,10 @@ _US_AND_UK_TO_KENYA = {
             {"role": "destination", "label": "Kenya", "ref": "country/KEN"},
         ],
     ),
-    "_bound_refs": {"united states": ["country/USA"], "united kingdom": ["country/GBR"]},
+    "_bound_refs": [
+        {"identity": "United States", "text": "United States", "refs": ["country/USA"]},
+        {"identity": "United Kingdom", "text": "United Kingdom", "refs": ["country/GBR"]},
+    ],
 }
 _KEEP_G7 = "name 'G7' as donor in `entities` and drop 'donor' from `across`"
 

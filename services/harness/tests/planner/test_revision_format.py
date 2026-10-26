@@ -215,20 +215,22 @@ def test_a_rolling_period_enters_the_revision_once_stated() -> None:
         assert "period_end_open" not in unset
 
 
-def test_an_entity_asking_for_a_sets_members_enters_the_revision_once_set() -> None:
+@pytest.mark.parametrize(("field", "value"), [("members", True), ("dcid", "country/COD")])
+def test_an_entity_field_enters_the_revision_once_set(field: str, value: object) -> None:
     plan = Plan.model_validate(_RECORDED["aggregate"]["plan"])
     content = plan.model_dump(mode="json")
     dataset = next(r for r in content["evidence_requirements"] if r["kind"] == "dataset")
-    dataset["entities"][0]["members"] = True
+    dataset["entities"][0][field] = value
 
-    members = Plan.model_validate(content)
+    stated = Plan.model_validate(content)
 
-    assert plan_revision(members) != plan_revision(plan)
-    (asked,) = (r for r in members.evidence_requirements if isinstance(r, DatasetRequirement))
+    assert plan_revision(stated) != plan_revision(plan)
+    (asked,) = (r for r in stated.evidence_requirements if isinstance(r, DatasetRequirement))
     (kept,) = (r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
     assert requirement_revision(asked) != requirement_revision(kept)
-    assert revision_content(asked)["entities"][0]["members"] is True
-    assert "members" not in json.dumps(revision_content(kept))
+    assert revision_content(asked)["entities"][0][field] == value
+    assert f'"{field}"' not in json.dumps(revision_content(kept))
+    assert f'"{field}"' not in plan.model_dump_json()
 
 
 def test_a_sets_published_total_enters_the_revision_once_set() -> None:

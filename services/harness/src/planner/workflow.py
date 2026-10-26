@@ -112,6 +112,24 @@ class ResolvedGroup(StrictModel):
         return self.total is not None or bool(self.whole_of)
 
 
+class BoundEntity(StrictModel):
+    """One entity row of a search part's restatement and the refs Search bound for it.
+
+    `identity` is the row's identity within the part, as Search keys it:
+    the `dcid` the row pins, else its `name`, else its `text`. `text` is
+    the row's words and `role` its `role_text`, `None` when it states
+    none. `refs` are the part's `entity_refs` entry at the row's position:
+    a place's node, a set's own node or published total, or a set's ref
+    followed by its members. Two rows written alike, "Congo" pinned to
+    `country/COD` and to `country/COG`, are two entities.
+    """
+
+    identity: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    role: str | None = None
+    refs: tuple[str, ...] = Field(min_length=1)
+
+
 class OpenAxis(StrictModel):
     """One constraint property a source's family of StatVars varies along.
 
@@ -288,10 +306,11 @@ class SelectedSource(StrictModel):
     (`compiler.evidence.named_members`). Empty until that resolve runs, and
     for a source whose names all match by label.
 
-    `bound_refs` maps each entity text of the search part, case-folded, to
-    the refs Search states it bound (the part's `entity_refs`,
-    `compiler.sources.bound_refs`), so "G7" names the set Search labels
-    "Group of Seven" by its ref `GroupOfSeven`
+    `bound_refs` holds one `BoundEntity` for each entity row of the search
+    part that Search bound refs for, in row order (the part's
+    `entity_refs`, `compiler.sources.bound_refs`), so "G7" names the set
+    Search labels "Group of Seven" by its ref `GroupOfSeven`, and two rows
+    written "Congo" each name the Congo they pin
     (`compiler.evidence.named_members`). Empty for a part stating no
     `entity_refs`, and for a source read from a block no search part
     carried: a pin copied over another window
@@ -356,8 +375,8 @@ class SelectedSource(StrictModel):
     )
     # Left out of every dump while empty, so a source saved without it keeps
     # its serialised form.
-    bound_refs: Annotated[dict[str, tuple[str, ...]], HASHED_WHEN_SET] = Field(
-        default_factory=dict, exclude_if=lambda refs: not refs
+    bound_refs: Annotated[tuple[BoundEntity, ...], HASHED_WHEN_SET] = Field(
+        default=(), exclude_if=lambda refs: not refs
     )
     # Left out of every dump while empty, so a source saved without it keeps
     # its serialised form.

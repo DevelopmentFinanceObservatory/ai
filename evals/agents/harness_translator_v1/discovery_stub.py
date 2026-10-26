@@ -4,7 +4,10 @@ The eval sets and the tests that run translation grade what translation does
 with what discovery finds, not the search backend, so `search` here answers by
 the ask: one debt service source, one population source, one exports source,
 one official development assistance source, two aid candidates, and nothing for
-anything else. Every answer resolves exactly the entities the search part named -- role
+anything else. A part naming "Congo" bare is answered with the ambiguity
+between its two graph nodes, as the parsed door answers it, and a row
+carrying one of them as its `dcid` resolves to that node under its graph
+label. Every other answer resolves exactly the entities the search part named -- role
 and label as they were sent, `ref` as `country/<code>` -- the way the real
 server resolves what it is asked about, so a plan naming Kenya gets Kenya's
 frame and one naming Kenya and Ghana gets both. Its `describe` answers
@@ -67,6 +70,13 @@ _COUNTRY_CODES = {
     "uganda": "UGA",
     "tanzania": "TZA",
 }
+# The two graph nodes the bare word "Congo" can name. Search answers a part
+# naming it bare with an ambiguity over these, and a row carrying one of
+# them as its `dcid` with that node.
+_CONGOS = {
+    "country/COD": "Democratic Republic of the Congo",
+    "country/COG": "Republic of the Congo",
+}
 # The role column a source resolves an entity under when the part named no
 # role. `recipient` because that is what the graph actually answers with for
 # an unqualified country, and what the non-eval canned server uses: a stub
@@ -94,11 +104,15 @@ def _resolved_entities(part: Mapping[str, Any], *, unroled: str) -> list[dict[st
     resolved: list[dict[str, str]] = []
     for entity in part.get("entities", []):
         text = str(entity.get("text", "")).strip()
+        role = str(entity.get("role") or unroled)
+        dcid = entity.get("dcid")
+        if dcid in _CONGOS:
+            resolved.append({"role": role, "label": _CONGOS[dcid], "ref": dcid})
+            continue
         code = _COUNTRY_CODES.get(text.casefold())
         if code is None:
             return None
-        role = entity.get("role") or unroled
-        resolved.append({"role": str(role), "label": text, "ref": f"country/{code}"})
+        resolved.append({"role": role, "label": text, "ref": f"country/{code}"})
     return resolved
 
 
@@ -140,7 +154,10 @@ def _spec(
 STAT_VARS = frozenset(
     {"DebtServicePaid", "Population", "AidDisbursements", "AidReceived", "OdaReceived", "Exports"}
 )
-_COUNTRY_NAMES = {f"country/{code}": name.title() for name, code in _COUNTRY_CODES.items()}
+_COUNTRY_NAMES = {
+    **{f"country/{code}": name.title() for name, code in _COUNTRY_CODES.items()},
+    **_CONGOS,
+}
 NAMED_IDS = STAT_VARS | {str(_USD["ref"])} | _COUNTRY_NAMES.keys()
 
 
@@ -152,6 +169,45 @@ def _envelope(status: str, **payload: Any) -> dict[str, Any]:
 
 def _no_data(reason: str) -> dict[str, Any]:
     return _envelope("no_data", no_data={"reason": reason, "category": "unresolved"})
+
+
+def _bare_congo(entity: Mapping[str, Any]) -> bool:
+    return str(entity.get("text", "")).strip().casefold() == "congo" and not entity.get("dcid")
+
+
+def _congo_ambiguous(part: Mapping[str, Any]) -> dict[str, Any]:
+    """The parsed door's answer for a part naming "Congo" bare: one group, whose
+    options pin every bare "Congo" row, since rows sent alike share one identity."""
+    candidates = [{"ref": ref, "label": label, "kind": "country"} for ref, label in _CONGOS.items()]
+    sent = list(part.get("entities", []))
+    options = [
+        {
+            "mentions": ["Congo"],
+            "label": candidate["label"],
+            "entity_choice": 0,
+            "data_query": {
+                "parts": [
+                    {
+                        "variable": part.get("variable"),
+                        "entities": [
+                            {**row, "dcid": candidate["ref"]} if _bare_congo(row) else row
+                            for row in sent
+                        ],
+                    }
+                ]
+            },
+        }
+        for candidate in candidates
+    ]
+    return _envelope(
+        "no_data",
+        no_data={
+            "category": "unresolved",
+            "reason": "entity_ambiguous",
+            "ambiguous_entities": [{"text": "Congo", "candidates": candidates}],
+            "options": options,
+        },
+    )
 
 
 def _specs_for(variable: str, entities: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -280,7 +336,9 @@ def make_discovery() -> FastMCP:
         variable = str(part.get("variable", "")).casefold()
         unroled = _POPULATION_UNROLED if _POPULATION.search(variable) else _UNROLED
         entities = _resolved_entities(part, unroled=unroled)
-        if entities is None:
+        if any(_bare_congo(entity) for entity in part.get("entities", [])):
+            envelope = _congo_ambiguous(part)
+        elif entities is None:
             envelope = _no_data("an entity named is not a country this graph holds")
         else:
             specs = _specs_for(variable, entities)

@@ -1702,6 +1702,12 @@ def build_orchestrator_tools(
         "members": true}`, and an explicitly named country stays an entity,
         independently of the ranking axis. Do not add "World" as a stand-in for
         an open population; retain it when the user asks for the World total.
+        Two entities written alike stay two rows when each carries its `name`
+        or `dcid`, never both: "aid from Congo to Congo" sends `{"text":
+        "Congo", "role": "from", "name": "Democratic Republic of the Congo"}`
+        and `{"text": "Congo", "role": "to", "name": "Republic of the Congo"}`,
+        and an `entity_ambiguous` row is resent with the chosen candidate's
+        `dcid`, keeping its `text` and `role`.
 
         A comparison of two categories of one measure ("health versus
         education aid") is one part per category, each with `separate:

@@ -99,3 +99,24 @@ def test_captured_aid_envelope_names_the_elected_measure_and_its_sibling() -> No
         "donor and recipient country or region. Covers its measures, multilateral agencies "
         "reporting…"
     )
+
+
+def test_captured_congo_to_congo_refusal_lists_each_ambiguous_entity_by_number() -> None:
+    """`resolve_aid_congo_to_congo.json` is a real dev `entity_ambiguous` refusal with two
+    groups sharing the text "Congo" (its `comment` says how it was recorded). The digest
+    keeps the groups apart by number and role and names each candidate's dcid, so a model
+    can resend the right row with the dcid the user picks.
+    """
+    envelope = _load_captured_envelope("resolve_aid_congo_to_congo.json")
+
+    assert render_digest(envelope) == (
+        "The ask could not be resolved (reason: entity_ambiguous).\n\n"
+        '"Congo" (from) and "Congo" (to) each match more than one entity: "Congo [DRC]" '
+        'and "Congo [Republic]". Be more specific.\n\n'
+        'Entity 1, "Congo" (from), could mean: Congo [DRC] (country/COD, country); '
+        "Congo [Republic] (country/COG, country).\n\n"
+        'Entity 2, "Congo" (to), could mean: Congo [DRC] (country/COD, country); '
+        "Congo [Republic] (country/COG, country).\n\n"
+        "Ask the user which one each entity means, then resend its row with the chosen "
+        "candidate's dcid as `dcid`, keeping its `text` and `role`."
+    )
