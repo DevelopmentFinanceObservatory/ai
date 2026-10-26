@@ -45,7 +45,7 @@ from collections.abc import Collection, Mapping, Sequence
 
 from compiler.evidence import open_axes_for
 from compiler.shapes import breakdown_level
-from compiler.sources import stat_var_count, stat_var_count_is_floor
+from compiler.sources import stat_var_count
 from planner.parties import across_party, flow_side, role_party, singular
 from planner.phrasing import (
     among_phrase,
@@ -455,7 +455,7 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
 
     The whole is the population the denominator's selected sources hold on
     each role column (`_populations`): "from official donors (DAC)" for a
-    source binding that group's total, "from all 140 donors" for one leaving
+    source binding that group's total, "from every donor" for one leaving
     the donors open. A denominator narrowed to fewer members than its
     sources hold, or to one entity (`RequirementSide.entity`), has no whole.
     A column where the numerator holds the same population
@@ -531,7 +531,8 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
 
     A named set a source binds (`SelectedSource.groups`) is named by its
     label, and an axis a source leaves open for an `across` word reads as
-    `entities_phrase` writes it, with the source's count of its members. A
+    `entities_phrase` writes it, uncounted: the whole sits in a card title that
+    names a period, which an all-years count would read as. A
     column holding only named entities holds no population and has no entry.
     """
     datasets = _reads_whole(requirement, plan)
@@ -551,8 +552,7 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
         if isinstance(axes, str):
             continue
         for word, axis in zip(dataset.across, axes, strict=True):
-            counts = {} if axis.member_count is None else {word: axis.member_count}
-            phrase = entities_phrase((), across=(word,), member_counts=counts)
+            phrase = entities_phrase((), across=(word,))
             identity = (
                 None
                 if axis.member_count is None or source.identity is None
@@ -1093,13 +1093,20 @@ def _reading_clause(source: SelectedSource) -> str | None:
     """How the retrieval reads `source`'s family of StatVars, or `None` for a source binding one.
 
     The user reads a StatVar as an indicator, the noun the card attribution
-    counts them by. Counts the family as the source does (`stat_var_count`).
-    A family counted at fewer than two members, or at a floor
-    (`stat_var_count_is_floor`), is named without a count: its retrieval
-    holds every member with data, which can be more or fewer than the
-    members `search` confirmed. Says when the reading is the compiler's
-    default (`ReadingSetBy.RULE`), so the user knows the plan can be amended
-    to read it the other way.
+    counts them by. For a source binding every entity, the count is the one
+    the answer shows: the members `search` confirmed to hold data at those
+    entities in the plan's years (`stat_var_member_count`), the series the
+    retrieval holds, as "summed over its 13 indicators". On a source leaving
+    an entity axis open (`open_entity_axes`) `search` confirms members at
+    probe places on a place axis, and over group totals as well as parties
+    on a role axis, so the retrieval can hold other members than it counts.
+    Such a source, and one whose confirmed count `search` states as a floor
+    or not at all, is counted by the family `served_count` counts, whatever
+    its years, as "summed over whichever of its 288 indicators hold data".
+    A family without that count, or counted at fewer than two members, is
+    named without a count. Says when the reading is the compiler's default
+    (`ReadingSetBy.RULE`), so the user knows the plan can be amended to read
+    it the other way.
 
     A family read separately states no clause when it counts one StatVar and
     varies along no open axis: the card names one indicator, and there is
@@ -1112,14 +1119,25 @@ def _reading_clause(source: SelectedSource) -> str | None:
     if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
     summed = source.stat_var_reading is StatVarReading.SUM
-    if count < 2 or stat_var_count_is_floor(source):
-        clause = "summed over its indicators" if summed else "kept as separate indicators"
-    else:
+    retrieved = (
+        source.stat_var_member_count
+        if source.stat_var_member_count_exact is not False and not source.open_entity_axes
+        else None
+    )
+    if retrieved is not None and retrieved > 1:
         clause = (
-            f"summed over its {count:,} indicators"
+            f"summed over its {retrieved:,} indicators"
             if summed
-            else f"kept as {count:,} separate indicators"
+            else f"kept as {retrieved:,} separate indicators"
         )
+    elif retrieved is None and (served := source.served_count or 0) > 1:
+        clause = (
+            f"summed over whichever of its {served:,} indicators hold data"
+            if summed
+            else f"kept separate over whichever of its {served:,} indicators hold data"
+        )
+    else:
+        clause = "summed over its indicators" if summed else "kept as separate indicators"
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 
 

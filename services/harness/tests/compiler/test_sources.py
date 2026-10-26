@@ -820,20 +820,32 @@ def test_both_open_flow_sides_are_read_and_an_uncounted_one_stays_unknown() -> N
     )
 
 
-def test_a_scope_and_a_role_axis_fact_on_one_column_keep_the_scopes_count() -> None:
-    # The scope lists the members it counts; the fact only counts them.
-    donors = [
-        {"ref": ref, "label": ref, "entity_type": "Country", "role": "origin"}
-        for ref in ("country/FRA", "country/GBR", "country/USA")
+@pytest.mark.parametrize(
+    ("column", "fact_count", "count"),
+    [
+        # On a flow side the fact counts the parties and the scope also lists
+        # group totals, which a flow retrieval does not return.
+        pytest.param("origin", 2, 2, id="flow-side-fact-counts-parties"),
+        pytest.param("origin", None, 3, id="flow-side-uncounted-fact-keeps-scope"),
+        # On the place axis the scope lists the members it counts.
+        pytest.param("observationAbout", 55, 3, id="place-axis-keeps-scope"),
+    ],
+)
+def test_a_scope_and_a_role_axis_fact_on_one_column_count_parties_on_a_flow_side(
+    column: str, fact_count: int | None, count: int
+) -> None:
+    members = [
+        {"ref": ref, "label": ref, "entity_type": "Country", "role": column}
+        for ref in ("country/FRA", "country/GBR", "DACCountries")
     ]
     block = _spec(
         entities=[],
-        scope={"axis": "origin", "members": donors},
-        role_axis_facts=[{"role": "origin", "member_count": 55, "members_available": True}],
+        scope={"axis": column, "members": members},
+        role_axis_facts=[{"role": column, "member_count": fact_count, "members_available": True}],
     )
 
     assert source_from_spec_block(block).open_entity_axes == (
-        OpenEntityAxis(column="origin", member_count=3),
+        OpenEntityAxis(column=column, member_count=count),
     )
 
 

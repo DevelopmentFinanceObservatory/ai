@@ -12,7 +12,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from harness import plan_display
 from harness.plan_display import (
     _label,
     operation_rows,
@@ -36,7 +35,6 @@ from planner.operations import (
     SumOfOperation,
     Translation,
 )
-from planner.phrasing import entities_phrase
 from planner.plan import (
     AggregateRequirement,
     ComparisonRequirement,
@@ -2046,13 +2044,36 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
             },
             "summed over its 1,554 indicators by default",
         ),
+        # The US health share of Kenya in 2022: the family serves 288, and the
+        # answer sums the 13 that hold data.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over its 13 indicators",
+        ),
+        # With the donors left open, Search's count also covers group totals,
+        # which the retrieval leaves out.
+        (
+            {
+                "served_count": 288,
+                "stat_var_member_count": 13,
+                "open_entity_axes": (_DONORS,),
+                "stat_var_reading": StatVarReading.SUM,
+                "stat_var_reading_set_by": ReadingSetBy.PLAN,
+            },
+            "summed over whichever of its 288 indicators hold data",
+        ),
         (
             {
                 "served_count": 3,
                 "stat_var_reading": StatVarReading.SUM,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "summed over its 3 indicators",
+            "summed over whichever of its 3 indicators hold data",
         ),
         (
             {
@@ -2060,7 +2081,7 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
                 "stat_var_reading": StatVarReading.SEPARATE,
                 "stat_var_reading_set_by": ReadingSetBy.PLAN,
             },
-            "kept as 2 separate indicators",
+            "kept separate over whichever of its 2 indicators hold data",
         ),
         (
             {
@@ -2092,6 +2113,8 @@ def test_the_args_on_a_step_are_the_workflow_steps_args_dict_unchanged(
     ],
     ids=[
         "summed-by-the-rule",
+        "confirmed-within-a-served-family",
+        "confirmed-over-an-open-donor-axis",
         "summed-by-the-plan",
         "separate-by-the-plan",
         "one-confirmed-summed",
@@ -2385,9 +2408,9 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
     ("numerator", "whole", "wholes"),
     [
         (US_DONOR, DAC_DONORS, {"share": "from official donors (DAC)"}),
-        (US_DONOR, ALL_DONORS, {"share": "from all 140 donors"}),
+        (US_DONOR, ALL_DONORS, {"share": "from every donor"}),
         # Official donors' share of every provider's ODA divides by every provider.
-        (DAC_DONORS, ALL_DONORS, {"share": "from all 140 donors"}),
+        (DAC_DONORS, ALL_DONORS, {"share": "from every donor"}),
         # A share of official donors' ODA divides by the same donors, which it names.
         (DAC_DONORS, DAC_DONORS, {}),
     ],
@@ -2457,7 +2480,7 @@ def test_a_bound_set_stands_only_for_an_across_word_on_its_side(
         # Each recipient divides by its own total, so the recipients are no part of the whole.
         (DenominatorScope.PER_AXIS, 120, "from official donors (DAC)"),
         # Every recipient divides by one total across them, though the numerator holds as many.
-        (DenominatorScope.POOLED, 150, "from all 140 donors and to all 150 recipients"),
+        (DenominatorScope.POOLED, 150, "from every donor and to every recipient"),
     ],
     ids=["per_axis", "pooled"],
 )
@@ -2549,7 +2572,7 @@ def test_a_step_keeping_its_inputs_shares_keeps_their_whole(
 
 
 _AT_LEAST_1BN = (ValueThreshold(op="gte", value=1e9),)
-_POOLED_WHOLE = "from all 140 donors and to all 150 recipients"
+_POOLED_WHOLE = "from every donor and to every recipient"
 
 
 def _narrowed(requirement: FilterRequirement | RankRequirement) -> tuple[Any, Any]:
@@ -2613,7 +2636,7 @@ _OVER_ROWS = (
         # Keeping some years keeps every donor.
         (
             FilterRequirement(id="later", input_id="all_oda", predicates=_LATER),
-            {"share": "from all 140 donors"},
+            {"share": "from every donor"},
             "Share of ODA gross disbursements as one figure overall, divided by ODA gross "
             "disbursements (Kenya and all 140 donors).",
         ),
@@ -2640,7 +2663,7 @@ def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
 @pytest.mark.parametrize(
     ("reduction", "wholes"),
     [
-        (Reduction.SUM, {"share": "from all 140 donors"}),
+        (Reduction.SUM, {"share": "from every donor"}),
         # The mean or the largest donor's flow each year is no total of every donor's.
         (Reduction.MEAN, {}),
         (Reduction.MAX, {}),
@@ -2763,42 +2786,28 @@ def _every_donor(
     }
 
 
-_EVERY_DONOR_WORDS = ("from all 140 donors", "from every donor")
-
-
-@pytest.mark.parametrize("counted", [True, False], ids=["counted_words", "uncounted_words"])
 @pytest.mark.parametrize(
     ("numerator", "whole", "whole_words"),
     [
         (_every_donor(140, window=2020), _every_donor(140), None),
-        (_every_donor(120), _every_donor(140), _EVERY_DONOR_WORDS),
+        (_every_donor(120), _every_donor(140), "from every donor"),
         # As many donors in another dataset may be other donors.
-        (_every_donor(140, dataset="CRS"), _every_donor(140), _EVERY_DONOR_WORDS),
-        (_every_donor(140, dataset=None), _every_donor(140, dataset=None), _EVERY_DONOR_WORDS),
+        (_every_donor(140, dataset="CRS"), _every_donor(140), "from every donor"),
+        (_every_donor(140, dataset=None), _every_donor(140, dataset=None), "from every donor"),
     ],
     ids=["same_donors", "fewer_donors", "other_dataset", "unidentified"],
 )
 def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_words(
     decision: DecisionFactory,
-    monkeypatch: pytest.MonkeyPatch,
     numerator: dict[str, Any],
     whole: dict[str, Any],
-    whole_words: tuple[str, str] | None,
-    counted: bool,
+    whole_words: str | None,
 ) -> None:
-    """120 donors are not the 140 the denominator holds, even in words
-    that state no count, as `uncounted_words` writes them, and 140 donors
-    are the same 140 only in the same dataset, over whatever years."""
-    if not counted:
-        monkeypatch.setattr(
-            plan_display,
-            "entities_phrase",
-            lambda entities, *, across, member_counts=None, level=None: entities_phrase(
-                entities, across=across, level=level
-            ),
-        )
+    """120 donors are not the 140 the denominator holds, though both read
+    "every donor", and 140 donors are the same 140 only in the same dataset,
+    over whatever years."""
     plan = us_share_of_kenya_oda(decision, whole=whole, numerator=numerator, every_donor=True)
 
     wholes = share_wholes(plan)
 
-    assert wholes == ({} if whole_words is None else {"share": whole_words[not counted]})
+    assert wholes == ({} if whole_words is None else {"share": whole_words})

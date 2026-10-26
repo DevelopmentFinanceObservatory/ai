@@ -2306,14 +2306,14 @@ _LONG_WHOLE = (
         ),
         (
             "US share of aid to Kenya",
-            "from all 140 donors",
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
         ),
         # A title copied from a card of shares states the whole and the period once.
         (
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
-            "from all 140 donors",
-            "US share of aid to Kenya, of the total from all 140 donors, 2023 to 2025",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
+            "from every donor",
+            "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
         ),
         # A whole too long for the title is stated in the card's note.
         ("US share of aid to Kenya", _LONG_WHOLE, "US share of aid to Kenya, 2023 to 2025"),
