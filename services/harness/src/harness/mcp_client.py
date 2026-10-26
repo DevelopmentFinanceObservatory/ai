@@ -158,6 +158,7 @@ from harness.rolling_cards import (
     resolved_basis,
     written_title_refusal,
 )
+from harness.scope_choices import served_facts
 from harness.settings import Settings
 from harness.tool_contracts import (
     _PRESENTATION_TOOLS,
@@ -863,6 +864,8 @@ class McpExecutor:
                 "opened in the materialisation store by the pair dfo-apis serves it under",
                 (manifest.get("definition") or {}).get("spec_id"),
             )
+        # `served` is how the frame was counted (`served_facts`), which the
+        # `fetch` tool keeps on the readings of the spec_id; no model reads it.
         return {
             "outcome": "ok",
             "frame_refs": [ref],
@@ -871,6 +874,7 @@ class McpExecutor:
             "rows": coverage.get("rows"),
             "warnings": manifest.get("warnings") or [],
             **({"period_note": note} if (note := period_note(coverage)) else {}),
+            **({"served": served} if (served := served_facts(manifest)) is not None else {}),
         }
 
     async def _presentation(

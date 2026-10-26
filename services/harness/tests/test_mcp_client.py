@@ -59,6 +59,7 @@ from mcp.types import INVALID_PARAMS, REQUEST_TIMEOUT, ErrorData
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
 
 from .resolved_revision import resolved_revision
+from .test_turn_records import _manifest, _served_identity
 
 
 class _StopAtConnectError(Exception):
@@ -599,6 +600,32 @@ async def test_a_card_on_a_fetched_place_types_retrieval_is_drawn_on_the_pair_df
     assert store.get(conversation=conversation, **typed) == store.get(
         conversation=conversation, **minted
     )
+
+
+async def test_a_fetch_states_how_its_frame_was_counted_from_the_manifest(
+    scripted_presentation_client: Callable[[list[Any]], _ScriptedMcpClient],
+) -> None:
+    """`get_data` hands on the minted definition's entities, measure and
+    netting and the covered window as `served`, for the `fetch` tool to keep."""
+    spec_id = "spec_" + "1" * 32
+    identity = _served_identity(residuals=False)
+    manifest = {
+        **_manifest(identity, spec_id=spec_id),
+        "content_version": "cv_" + "1" * 32,
+        "trace": {},
+    }
+    scripted_presentation_client([_tool_result(manifest)])
+    executor = McpExecutor(settings=Settings(), provenance=ProvenanceStore())
+
+    fetched = await executor(tool="get_data", args={"spec_id": spec_id})
+
+    assert fetched["served"] == {
+        "spec_id": spec_id,
+        "entities": {"origin": ["country/USA"], "destination": ["country/GHA", "country/KEN"]},
+        "measured_property": "amount",
+        "netting_basis": "Gross",
+        "components": [{"role": "whole", "periods": [[2015, 2024]]}],
+    }
 
 
 async def test_a_fetch_that_states_no_frame_ref_logs_which_spec_was_read_by_its_served_pair(

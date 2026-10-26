@@ -39,6 +39,7 @@ from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
     Accepted,
+    EvidenceRecord,
     MethodChoiceNeeded,
     RediscoveryNeeded,
     RefusalKind,
@@ -66,6 +67,7 @@ from harness.graph.execute import (
     _planner_refusal,
     _replan_refusal,
     _start_relayed,
+    record_served_scopes,
 )
 from harness.graph.plan_done import frame_unavailable_reason, plan_done_node
 from harness.graph.state import (
@@ -73,6 +75,7 @@ from harness.graph.state import (
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_UNAVAILABLE_KEY,
     PLANNER_STARTED_KEY,
     STEP_PROGRESS_KEY,
@@ -86,6 +89,7 @@ from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
 from harness.studio_translate import _node_name
+from harness.turn_records import SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -131,6 +135,7 @@ from .orchestrator_fakes import (
     visited_nodes,
 )
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
+from .test_turn_records import _example_part, _manifest, _served_identity
 
 SPEC_A = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -287,6 +292,65 @@ def _pending_interrupt(events: list[Event]) -> str | None:
 def _output_of(events: list[Event], node: str) -> Any:
     outputs = [e.output for e in events if _node_name(e) == node and e.output is not None]
     return outputs[-1] if outputs else None
+
+
+# --- execute's served scopes ---------------------------------------------------
+
+
+class _ManifestSurface:
+    """Answers `retrieval_manifest` with `manifest` for the one frame it holds."""
+
+    def __init__(self, frame: FrameRef, manifest: dict[str, Any]) -> None:
+        self.frame = frame
+        self.manifest = manifest
+
+    def retrieval_manifest(self, *, frame_ref: Mapping[str, str | None]) -> dict[str, Any] | None:
+        return self.manifest if frame_ref == self.frame.model_dump() else None
+
+
+def test_a_runs_retrieval_keeps_how_it_was_served_on_the_turns_scoped_reading() -> None:
+    """A plan step's retrieval is kept on the reading of its spec_id with
+    scope choices, as a fetch of it would be; a reading without any, and
+    state no retrieval touched, are left as they are."""
+    scoped = SearchReading.from_part({**_example_part(), "spec_id": SPEC_A})
+    other = SearchReading(text="life", status="definite", spec_id="spec_" + "c" * 32)
+    frame = FrameRef(spec_id=SPEC_A, content_version="cv_" + "1" * 32)
+    outcome = Accepted(
+        revision="rev",
+        evidence=(
+            EvidenceRecord(
+                requirement_id="aid",
+                step_id="aid_op",
+                frame_ref=frame,
+                spec_id=SPEC_A,
+                stat_vars=(),
+                window=None,
+                gaps=(),
+                citation="CRS",
+            ),
+        ),
+        steps=(),
+        results={},
+    )
+    surface = _ManifestSurface(frame, _manifest(_served_identity(residuals=False)))
+    state: dict[str, Any] = {
+        ORCHESTRATOR_SEARCHES_KEY: [r.model_dump(mode="json") for r in (scoped, other)]
+    }
+    untouched: dict[str, Any] = {ORCHESTRATOR_SEARCHES_KEY: [other.model_dump(mode="json")]}
+
+    record_served_scopes(cast("Any", state), cast("Any", surface), outcome)
+    record_served_scopes(cast("Any", untouched), cast("Any", surface), outcome)
+
+    kept, unchanged = (SearchReading.model_validate(r) for r in state[ORCHESTRATOR_SEARCHES_KEY])
+    assert kept.fetch is not None and kept.fetch.served is not None
+    assert kept.fetch.served.residuals("destination") == frozenset()
+    assert unchanged == other
+    assert untouched == {ORCHESTRATOR_SEARCHES_KEY: [other.model_dump(mode="json")]}
+    assert basis_line(state[ORCHESTRATOR_SEARCHES_KEY], plans=[]) == (
+        "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+        "Africa's countries only · "
+        "gross disbursements, current USD."
+    )
 
 
 # --- execute's run: progress relay and cancellation ---------------------------

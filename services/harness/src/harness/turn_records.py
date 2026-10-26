@@ -51,7 +51,17 @@ from pydantic import ConfigDict, Field, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
-from harness.scope_choices import PartScope, ScopeChoice
+from harness.scope_choices import (
+    REASON_COPY,
+    SERVED_OTHERWISE,
+    EntitiesBinding,
+    Option,
+    PartScope,
+    ProviderBinding,
+    ScopeChoice,
+    ServedScope,
+    ShapeBinding,
+)
 from harness.tool_contracts import requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
@@ -599,10 +609,16 @@ class YearCount(StrictModel):
 
 
 class FetchReading(StrictModel):
-    """What a `fetch` of the reading's spec_id returned: its summary, or a refusal code."""
+    """What a retrieval of the reading's spec_id returned: a `fetch`'s summary
+    or refusal code, or, when `plan_step`, a plan step's retrieval, which the
+    planner's ledger text does not show (`render_readings`). `served` is how
+    the figures served were counted, kept for a reading with scope choices
+    whose retrieval stated it."""
 
     summary: str | None = None
     refusal_code: str | None = None
+    plan_step: bool = Field(default=False, exclude_if=lambda plan_step: not plan_step)
+    served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`
@@ -796,13 +812,30 @@ class SearchReading(StrictModel):
             observed_at=observed_at,
         )
 
-    def with_fetch(self, result: Mapping[str, Any]) -> SearchReading:
-        """This reading with the outcome of a `fetch` result for its spec_id."""
+    def with_fetch(
+        self, result: Mapping[str, Any], *, served: Mapping[str, Any] | None = None
+    ) -> SearchReading:
+        """This reading with the outcome of a `fetch` result for its spec_id,
+        and `served`, the retrieval's `harness.scope_choices.served_facts`,
+        when the reading has scope choices."""
         if result.get("code"):
             fetched = FetchReading(refusal_code=str(result["code"]))
         else:
             fetched = FetchReading(summary=_str_or_none(result.get("summary")))
-        return self.model_copy(update={"fetch": fetched})
+        reading = self.model_copy(update={"fetch": fetched})
+        return reading.with_served(served) if served is not None else reading
+
+    def with_served(self, served: Mapping[str, Any]) -> SearchReading:
+        """This reading with `served`, a retrieval's
+        `harness.scope_choices.served_facts`, kept on its fetch. A reading
+        no `fetch` reached gains a `plan_step` one. A reading with no scope
+        choices is returned as it is, since nothing reads the record without
+        them."""
+        if self.scope is None:
+            return self
+        fetched = self.fetch or FetchReading(plan_step=True)
+        record = ServedScope.of(served, scope=self.scope)
+        return self.model_copy(update={"fetch": fetched.model_copy(update={"served": record})})
 
 
 def _offers(offers: Sequence[Any] | None) -> tuple[CandidateReading, ...]:
@@ -996,6 +1029,157 @@ def _measures_money(block: Mapping[str, Any]) -> bool:
     )
 
 
+# How the basis line opens and joins one part's clauses.
+_BASIS_LEAD = "Counted as: "
+_CLAUSE_JOIN = " · "
+
+
+def basis_line(
+    readings: Sequence[Mapping[str, Any]], *, plans: Sequence[Mapping[str, Any]]
+) -> str | None:
+    """One line on how the turn's figures were counted, from its stored readings.
+
+    `None` when the turn used no part with scope choices. A part is used as
+    `loose_match_notes` reads it: a fetch of its spec_id returned data, or a
+    plan record names it as a source; its newest reading speaks for it. Each
+    scope choice of a used part gives one clause (`_choice_clause`), and
+    each carried entry search left out of the part another. Parts whose
+    clauses are the same share them; otherwise each part's clauses follow
+    its quoted text:
+
+        Counted as: health incl. population and reproductive health
+        (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
+
+        Counted as: "health aid": ... · ...; "education aid": ... · ....
+
+    Args:
+        readings: The turn's search readings, as `SearchReading` JSON.
+        plans: The turn's plan records, as `PlanRecord` JSON.
+    """
+    planned = {
+        source.get("spec_id")
+        for plan in plans
+        for source in plan.get("sources") or ()
+        if isinstance(source, Mapping)
+    }
+    used = [
+        reading
+        for reading in (SearchReading.model_validate(r) for r in readings)
+        if reading.scope is not None
+        and reading.spec_id is not None
+        and (
+            (reading.fetch is not None and reading.fetch.refusal_code is None)
+            or reading.spec_id in planned
+        )
+    ]
+    parts: dict[tuple[str, ...], list[str]] = {}
+    for reading in newest_per_spec_id(used):
+        clauses = _scope_clauses(reading)
+        if clauses:
+            parts.setdefault(clauses, []).append(_part_name(reading))
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return f"{_BASIS_LEAD}{_CLAUSE_JOIN.join(next(iter(parts)))}."
+    return (
+        _BASIS_LEAD
+        + "; ".join(
+            f"{' and '.join(names)}: {_CLAUSE_JOIN.join(clauses)}"
+            for clauses, names in parts.items()
+        )
+        + "."
+    )
+
+
+def _part_name(reading: SearchReading) -> str:
+    """The part's own words, quoted, for a basis line naming several parts."""
+    return f'"{reading.text or reading.sentence or reading.spec_id}"'
+
+
+def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
+    """The basis line's clauses for one used reading: one per scope choice
+    that names its active option, then one per dropped carried entry."""
+    scope = reading.scope
+    assert scope is not None
+    served = reading.fetch.served if reading.fetch is not None else None
+    clauses = [
+        clause for choice in scope.choices if (clause := _choice_clause(choice, served)) is not None
+    ]
+    for dropped in scope.dropped_entries:
+        label = next(
+            (
+                option.label
+                for choice in scope.choices
+                if choice.axis == dropped.entry.axis
+                for option in choice.options
+                if option.option_id == dropped.entry.option_id
+            ),
+            None,
+        )
+        why = REASON_COPY[dropped.code]
+        clauses.append(f"{why}: {label}" if label else why)
+    return tuple(clauses)
+
+
+def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | None:
+    """One scope choice in the basis line.
+
+    The active option's label, unless the served record says the figures
+    hold another option of the choice: then that option's label, or the
+    active label with `SERVED_OTHERWISE` when they match none. A partial
+    active option adds why (`REASON_COPY`) and the years it covers. `None`
+    when the record lists no option by the active id.
+    """
+    active = choice.active_option
+    if active is None:
+        return None
+    if served is not None and _serves(active, served) is False:
+        other = next(
+            (
+                option
+                for option in choice.options
+                if option.option_id != choice.active and _serves(option, served)
+            ),
+            None,
+        )
+        if other is None:
+            return f"{active.label} ({SERVED_OTHERWISE})"
+        return other.label
+    availability = active.availability
+    if availability.status != "partial" or availability.code is None:
+        return active.label
+    years = ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in availability.years or ())
+    why = REASON_COPY[availability.code]
+    return f"{active.label} ({why}: {years})" if years else f"{active.label} ({why})"
+
+
+def _serves(option: Option, served: ServedScope) -> bool | None:
+    """Whether the served figures hold `option`; `None` when the record cannot tell.
+
+    An entities option holds when the residual buckets served on its role
+    are the ones it adds; a measure option when the served measure and
+    netting are its own; a provider option when imputed multilateral aid is
+    a served component exactly when it is inclusive. The record holds no
+    what/how slot, so a slot option cannot be told.
+    """
+    binding = option.binding
+    if isinstance(binding, EntitiesBinding):
+        if all(role.role != binding.role for role in served.roles):
+            return None
+        return frozenset(binding.add) == served.residuals(binding.role)
+    if isinstance(binding, ShapeBinding):
+        if served.measured_property is None:
+            return None
+        return (binding.measured_property, binding.netting_basis) == (
+            served.measured_property,
+            served.netting_basis,
+        )
+    if isinstance(binding, ProviderBinding):
+        imputed = any(component.role == "imputed" for component in served.components)
+        return (binding.scope == "inclusive") == imputed
+    return None
+
+
 def named_spec_ids(reading: SearchReading) -> list[str]:
     """The reading's own spec_id, when it has one, and each candidate's."""
     own = [reading.spec_id] if reading.spec_id else []
@@ -1097,7 +1281,7 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         head += f" (from {reading.origin})"
     codes = _warning_codes(reading)
     if folded:
-        if reading.fetch is not None:
+        if reading.fetch is not None and not reading.fetch.plan_step:
             head += "; fetch refused" if reading.fetch.refusal_code else "; fetched"
         if refusal := _refusal_context(reading, detail=3):
             head += f"; {refusal}"
@@ -1128,7 +1312,7 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         lines.extend(f"   {_scope_text(choice, detail=detail)}" for choice in reading.scope.choices)
     if codes:
         lines.append(f"   warnings: {codes}")
-    if reading.fetch is not None:
+    if reading.fetch is not None and not reading.fetch.plan_step:
         if reading.fetch.refusal_code:
             lines.append(f"   fetch refused: {reading.fetch.refusal_code}")
         else:

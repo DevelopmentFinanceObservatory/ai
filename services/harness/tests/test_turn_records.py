@@ -13,15 +13,24 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from harness.plan_display import requirement_rows
+from harness.scope_choices import (
+    REASON_COPY,
+    ScopeReasonCode,
+    ServedComponent,
+    ServedRole,
+    ServedScope,
+    served_facts,
+)
 from harness.turn_records import (
     PlanAsk,
     PlanRecord,
     SearchReading,
     WindowReading,
+    basis_line,
     loose_match_notes,
     render_readings,
 )
@@ -684,6 +693,243 @@ def test_each_scope_choice_renders_one_line_that_sheds_its_label_with_the_detail
         "   scope region: region:members_only (carried; 1 of 1 other options available)",
         "   scope measure_basis: measure_basis:gross (default; 1 of 2 other options available)",
     ]
+
+
+# Reader labels, as dfo-apis writes them, for US health aid to Africa: health as
+# CRS 120 and 130, Africa with its regional buckets, gross disbursements.
+_EXAMPLE_LABELS = {
+    "sector:120+130": "health (CRS 120) and population and reproductive health (CRS 130)",
+    "sector:120": "health (CRS 120)",
+    "region:members_and_residuals": "Africa incl. regional buckets",
+    "region:members_only": "Africa's countries only",
+    "measure_basis:gross": "gross disbursements, current USD",
+    "measure_basis:net": "net disbursements",
+    "measure_basis:grant_equivalent": "grant equivalents",
+}
+_EXAMPLE_LINE = (
+    "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+    "Africa incl. regional buckets · gross disbursements, current USD."
+)
+
+
+def _example_part(variable: str = "health aid", **active: str) -> dict[str, Any]:
+    """`_scoped_part` settled by declared defaults alone: health as CRS 120
+    and 130, Africa with its regional buckets, gross disbursements, each
+    option labelled as `_EXAMPLE_LABELS` says. `active` replaces an axis's
+    active option."""
+    part = _scoped_part()
+    scope = part["scope"]
+    defaults = {
+        "sector": "sector:120+130",
+        "region": "region:members_and_residuals",
+        "measure_basis": "measure_basis:gross",
+    }
+    for choice in scope["choices"]:
+        choice["provenance"] = "default"
+        choice["active"] = active.get(choice["axis"], defaults[choice["axis"]])
+        for option in choice["options"]:
+            option["label"] = _EXAMPLE_LABELS[option["option_id"]]
+    scope["entries"] = []
+    return {**part, "variable": variable, "spec_id": scope["base"]["spec_id"]}
+
+
+def _manifest(identity: dict[str, Any], *, spec_id: str = "spec_served") -> dict[str, Any]:
+    """A `get_data` manifest minted for `identity`, covering 2015 to 2024."""
+    return {
+        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
+        "coverage": {
+            "rows": 30,
+            "dimensions": [],
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+    }
+
+
+def _served_identity(*, residuals: bool = True, netting: str | None = "Gross", **shape: str):
+    """The example part's identity as a fetch served it: with or without the
+    regional bucket, on `netting`, and `shape` over its measure."""
+    identity = copy.deepcopy(_example_part()["scope"]["base"]["identity"])
+    if not residuals:
+        identity["entities"]["destination"] = ["country/GHA", "country/KEN"]
+    identity["slots"] = [s for s in identity["slots"] if s["property"] != "nettingBasis"]
+    if netting is not None:
+        identity["slots"].append(
+            {"property": "nettingBasis", "binding": {"state": "value", "ref": netting}}
+        )
+    identity["shape"] |= shape
+    return identity
+
+
+def _fetched(part: dict[str, Any], identity: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`part`'s reading after a fetch returned data, served as `identity` when given."""
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"},
+        served=served_facts(_manifest(identity)) if identity is not None else None,
+    )
+    return reading.model_dump(mode="json")
+
+
+def test_a_fetch_keeps_how_its_figures_were_served_on_a_reading_with_scope_choices() -> None:
+    facts = served_facts(_manifest(_served_identity()))
+    assert facts is not None
+    scoped = SearchReading.from_part(_example_part()).with_fetch({"summary": "30"}, served=facts)
+    unscoped = SearchReading.from_part({**_example_part(), "scope": None}).with_fetch(
+        {"summary": "30"}, served=facts
+    )
+
+    assert scoped.fetch is not None
+    assert scoped.fetch.served == ServedScope(
+        spec_id="spec_served",
+        roles=(
+            ServedRole(role="origin", members=1),
+            ServedRole(role="destination", members=2, residuals=("DACAfricaUnallocated",)),
+        ),
+        measured_property="amount",
+        netting_basis="Gross",
+        components=(ServedComponent(role="whole", periods=((2015, 2024),)),),
+    )
+    assert SearchReading.model_validate_json(scoped.model_dump_json()) == scoped
+    assert unscoped.model_dump(mode="json")["fetch"] == {"summary": "30", "refusal_code": None}
+    assert served_facts({"coverage": {}}) is None
+
+
+@pytest.mark.parametrize(
+    ("identity", "line"),
+    [
+        pytest.param(None, _EXAMPLE_LINE, id="no-served-record"),
+        pytest.param(_served_identity(), _EXAMPLE_LINE, id="served-as-chosen"),
+        pytest.param(
+            _served_identity(residuals=False),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa's countries only · "
+            "gross disbursements, current USD.",
+            id="buckets-dropped",
+        ),
+        pytest.param(
+            _served_identity(netting="Net"),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · net disbursements.",
+            id="served-net",
+        ),
+        pytest.param(
+            _served_identity(netting=None, measured_property="commitment"),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · "
+            "gross disbursements, current USD (the figures served differ from this choice).",
+            id="served-on-no-listed-basis",
+        ),
+    ],
+)
+def test_the_basis_line_states_each_choice_as_the_figures_were_served(
+    identity: dict[str, Any] | None, line: str
+) -> None:
+    assert basis_line([_fetched(_example_part(), identity)], plans=[]) == line
+
+
+def test_the_basis_line_states_each_label_as_search_wrote_it() -> None:
+    """The line holds no copy of its own for an option: a label search wrote
+    as the option id is stated as written."""
+    part = _scoped_part()
+    for choice in part["scope"]["choices"]:
+        for option in choice["options"]:
+            option["label"] = option["option_id"]
+
+    assert basis_line([_fetched(part)], plans=[]) == (
+        "Counted as: sector:120 · region:members_only · measure_basis:gross."
+    )
+
+
+def test_a_plan_steps_served_record_leaves_the_planners_ledger_text_as_it_was() -> None:
+    """A reading a plan step retrieved keeps its served record for the basis
+    line, and the planner reads it as no fetch reached it."""
+    searched = SearchReading.from_part(_example_part())
+    retrieved = searched.with_served(served_facts(_manifest(_served_identity(residuals=False))))
+    planned = {"sources": [{"spec_id": searched.spec_id}]}
+
+    assert retrieved.fetch is not None and retrieved.fetch.served is not None
+    for budget in (10_000, 200):
+        assert (
+            render_readings([retrieved], budget=budget).text
+            == render_readings([searched], budget=budget).text
+        )
+    assert SearchReading.model_validate_json(retrieved.model_dump_json()) == retrieved
+    assert "Africa's countries only" in (
+        basis_line([retrieved.model_dump(mode="json")], plans=[planned]) or ""
+    )
+
+
+def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used() -> None:
+    searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
+    refused = SearchReading.from_part(_example_part()).with_fetch({"code": "over_ceiling"})
+    unscoped = _fetched({**_example_part(), "scope": None})
+    planned = {"sources": [{"spec_id": _example_part()["spec_id"]}]}
+
+    assert basis_line([searched, refused.model_dump(mode="json"), unscoped], plans=[]) is None
+    assert basis_line([searched], plans=[planned]) == _EXAMPLE_LINE
+
+
+def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause() -> None:
+    def ghana(**active: str) -> dict[str, Any]:
+        part = _example_part("health aid to Ghana", **active)
+        return {**part, "spec_id": "spec_ghana"}
+
+    alike = [_fetched(_example_part()), _fetched(ghana())]
+    differ = [_fetched(_example_part()), _fetched(ghana(sector="sector:120"))]
+
+    assert basis_line(alike, plans=[]) == _EXAMPLE_LINE
+    assert basis_line(differ, plans=[]) == (
+        'Counted as: "health aid": health (CRS 120) and population and reproductive health '
+        "(CRS 130) · Africa incl. regional buckets · gross disbursements, current USD; "
+        '"health aid to Ghana": health (CRS 120) · Africa incl. regional buckets · '
+        "gross disbursements, current USD."
+    )
+
+
+def test_a_partial_option_and_a_dropped_carried_entry_say_why() -> None:
+    part = _example_part()
+    scope = part["scope"]
+    basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
+    basis["options"][0]["availability"] = {
+        "status": "partial",
+        "years": [[2011, 2024]],
+        "code": "imputed_coverage",
+        "detail": {},
+    }
+    scope["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "region",
+                "option_id": "region:members_only",
+                "provenance": "carried",
+                "origin": {"kind": "choice", "choice_id": "earlier:region"},
+            },
+            "cause": "no_summed_region",
+        }
+    ]
+
+    assert basis_line([_fetched(part)], plans=[]) == (
+        "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+        "Africa incl. regional buckets · gross disbursements, current USD (imputed "
+        "multilateral aid covers only some years: 2011-2024) · an earlier choice did not "
+        "apply here: Africa's countries only."
+    )
+
+
+# Every reason code `resolved.scope_choices` names.
+_CONTRACT_REASON_CODES = {
+    "provider_not_offered",
+    "imputed_coverage",
+    "basis_not_published",
+    "residuals_need_summed_region",
+    "conflicts_with",
+    "carried_choice_not_applied",
+    "option_not_covered",
+}
+
+
+def test_every_reason_code_has_copy() -> None:
+    assert set(REASON_COPY) == set(get_args(ScopeReasonCode)) == _CONTRACT_REASON_CODES
+    assert all(REASON_COPY.values())
 
 
 def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
@@ -26,8 +26,10 @@ from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph.state import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
+from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
+from harness.orchestrator_tools import _search_context
 from harness.planner_seam import PlannerSeamError
+from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, failure_sentence
@@ -47,12 +49,13 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
-from harness.wire import CompositionActor, PlanAsk, StepStatus
+from harness.wire import CompositionActor, MessageComplete, MessageDelta, PlanAsk, StepStatus
 from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Plan,
+    SessionState,
     UnsupportedOperation,
     plan_revision,
 )
@@ -61,6 +64,13 @@ from planner.workflow import ToolId
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
 from .test_planner_seam import ScriptedPlannerLlm, _seam
+from .test_turn_records import (
+    _EXAMPLE_LINE,
+    _example_part,
+    _fetched,
+    _scoped_part,
+    _served_identity,
+)
 
 
 async def _dummy_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -1494,3 +1504,66 @@ def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> None:
         ("Reworking the draft", StepStatus.COMPLETE),
         ("Working on a plan", StepStatus.RUNNING),
     ]
+
+
+def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
+    """A translator that closed a turn answering with `readings` and the frames it sent."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    translator._conversation.turn_user_message = "total health aid from the US to Africa"
+    translator._conversation.turn_readings = readings
+    translator._final_text = "The US gave $7.9bn."
+    return translator, translator.finish()
+
+
+def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_keeps_it() -> None:
+    translator, frames = _answered([_fetched(_example_part())])
+    conversation = translator._conversation
+
+    deltas = [frame.text for frame in frames if isinstance(frame, MessageDelta)]
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    digest = conversation.conversation_digest_state()
+
+    assert complete.text == f"The US gave $7.9bn.\n\n{_EXAMPLE_LINE}"
+    assert "The US gave $7.9bn." + "".join(deltas) == complete.text
+    assert conversation.turns[-1]["assistant"] == complete.text
+    assert digest is not None
+    assert digest["turns"][-1]["assistant"] == complete.text
+
+
+def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:
+    unscoped = _fetched({**_example_part(), "scope": None})
+
+    _, frames = _answered([unscoped])
+
+    assert not any(isinstance(frame, MessageDelta) for frame in frames)
+    assert next(f for f in frames if isinstance(f, MessageComplete)).text == "The US gave $7.9bn."
+
+
+def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line() -> None:
+    """A fetch that left out the regional buckets makes the line say so, but
+    the region choice stored is the declared default, which carries nothing: the next search carries the entries of the stored
+    choices, whatever the stored answer says."""
+    part = _scoped_part()
+    region = next(c for c in part["scope"]["choices"] if c["axis"] == "region")
+    region |= {"active": "region:members_and_residuals", "provenance": "default"}
+    reading = _fetched(part, _served_identity(residuals=False))
+    translator, _ = _answered([reading])
+    conversation = translator._conversation
+    scope = PartScope.model_validate(reading["scope"])
+
+    def carried() -> list[dict[str, Any]]:
+        state = {ORCHESTRATOR_PRIOR_LEDGER_KEY: conversation.prior_ledger_state()}
+        return _search_context(cast("SessionState", state)).carried_entries or []
+
+    stated = conversation.turns[-1]["assistant"]
+    with_line = carried()
+    conversation.turns[-1]["assistant"] = "The US gave $7.9bn."
+
+    assert "Africa's countries only" in stated
+    assert (
+        with_line
+        == carried()
+        == [entry.model_dump(mode="json", exclude_none=True) for entry in carried_entries([scope])]
+    )
+    assert [entry["option_id"] for entry in with_line] == ["sector:120"]

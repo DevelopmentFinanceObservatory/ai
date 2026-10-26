@@ -104,7 +104,7 @@ from harness.studio_state import (
     land_component as state_land_component,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.turn_records import loose_match_notes
+from harness.turn_records import basis_line, loose_match_notes
 from harness.wire import (
     ActivityStep,
     ComponentCreated,
@@ -2090,9 +2090,10 @@ class _Translator:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
-        (`harness.turn_records.loose_match_notes`), sent as a last
-        `message.delta` so the deltas still add up to the `message.complete`
-        text."""
+        (`harness.turn_records.loose_match_notes`) and the line on how its
+        figures were counted (`harness.turn_records.basis_line`), sent as a
+        last `message.delta` so the deltas still add up to the
+        `message.complete` text and the stored turn keeps them."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
@@ -2111,12 +2112,15 @@ class _Translator:
                 specs=self._conversation.turn_specs,
                 plans=self._conversation.turn_plans,
             )
-            if notes:
-                coverage = "\n\n" + " ".join(notes)
-                self._final_text += coverage
+            basis = basis_line(
+                self._conversation.turn_readings, plans=self._conversation.turn_plans
+            )
+            closing = "".join(f"\n\n{block}" for block in (" ".join(notes), basis) if block)
+            if closing:
+                self._final_text += closing
                 frames.append(
                     MessageDelta(
-                        event="message.delta", seq=self._conversation.next_seq(), text=coverage
+                        event="message.delta", seq=self._conversation.next_seq(), text=closing
                     )
                 )
             self._conversation.turn_final_text = self._final_text

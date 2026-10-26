@@ -1436,8 +1436,12 @@ def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
-    """Add a `fetch` result to every stored search reading of its spec_id.
+def _attach_fetch(
+    tool_context: ToolContext, result: dict[str, Any], *, served: Mapping[str, Any] | None = None
+) -> None:
+    """Add a `fetch` result to every stored search reading of its spec_id,
+    with `served`, how `get_data` says the frame was counted
+    (`harness.scope_choices.served_facts`), when it said.
 
     A spec_id that no reading holds as its own, but one offered as a
     candidate, as another count (`SearchReading.alternatives`) or as the
@@ -1483,9 +1487,9 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             update |= {"sibling_of": link, "counted_as": counted_as}
         searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
-        (reading.with_fetch(result) if reading.spec_id == spec_id else reading).model_dump(
-            mode="json"
-        )
+        (
+            reading.with_fetch(result, served=served) if reading.spec_id == spec_id else reading
+        ).model_dump(mode="json")
         for reading in searches
     ]
 
@@ -1901,7 +1905,7 @@ def build_orchestrator_tools(
                     "same_data_as": earlier["spec_id"],
                 }
             )
-            _attach_fetch(tool_context, found)
+            _attach_fetch(tool_context, found, served=earlier.get("served"))
             return found
         try:
             data = await executor(tool="get_data", args=args)
@@ -1976,9 +1980,10 @@ def build_orchestrator_tools(
                 "summary": found["summary"],
                 **_period_note_entry(found),
                 "frames": [entry["frame"] for entry in found["frames"]],
+                **({"served": data["served"]} if data.get("served") else {}),
             }
             tool_context.state[_FETCHES_KEY] = fetches
-        _attach_fetch(tool_context, found)
+        _attach_fetch(tool_context, found, served=data.get("served"))
         return found
 
     def _canvas_series(tool_context: ToolContext) -> list[str]:

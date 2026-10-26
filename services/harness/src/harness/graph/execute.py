@@ -38,6 +38,7 @@ from executor.outcomes import (
     Refused,
     failed_step,
 )
+from executor.outcomes import RunOutcome as ExecutionOutcome
 from executor.run import (
     FetchSeriesStats,
     LabelRefs,
@@ -46,7 +47,7 @@ from executor.run import (
 )
 from google.adk import Context, Event
 from planner.plan import Plan as PlannerPlan
-from planner.plan import plan_revision
+from planner.plan import SessionState, plan_revision
 
 from harness import plan_display
 from harness.conversation import conversation_of
@@ -61,15 +62,53 @@ from harness.graph.answer import (
 from harness.graph.plan_done import StepSummary, authored_report
 from harness.graph.state import (
     ORCHESTRATOR_KEPT_ASKS_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
     STEP_PROGRESS_KEY,
     readable_plan,
 )
+from harness.scope_choices import served_facts
+from harness.turn_records import SearchReading
 
 logger = logging.getLogger(__name__)
 
 # Execution-triggered replans per turn. Each one is a new plan card and a new
 # approval; past this the turn closes and names the step that could not run.
 MAX_REPLANS = 1
+
+
+def record_served_scopes(
+    state: SessionState, tool_surface: ToolSurface, outcome: ExecutionOutcome
+) -> None:
+    """Keep on the turn's search readings how each retrieval of a run was counted.
+
+    Each evidence record's `get_data` manifest
+    (`_RecordingSurface.retrieval_manifest`, looked up via `getattr` like
+    `link_evidence`) gives its `served_facts`, which every reading of the
+    record's spec_id with scope choices keeps on its fetch
+    (`SearchReading.with_served`), as a `fetch` of it would. The readings
+    are written back only when one changed.
+    """
+    manifest_of = getattr(tool_surface, "retrieval_manifest", None)
+    if manifest_of is None:
+        return
+    served: dict[str, dict[str, Any]] = {}
+    for record in outcome.evidence:
+        manifest = manifest_of(frame_ref=record.frame_ref.model_dump())
+        facts = served_facts(manifest) if manifest is not None else None
+        if facts is not None:
+            served[record.spec_id] = facts
+    if not served:
+        return
+    readings = [
+        SearchReading.model_validate(stored)
+        for stored in state.get(ORCHESTRATOR_SEARCHES_KEY) or []
+    ]
+    updated = [
+        reading.with_served(served[reading.spec_id]) if reading.spec_id in served else reading
+        for reading in readings
+    ]
+    if updated != readings:
+        state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json") for reading in updated]
 
 
 def _replan_refusal(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
@@ -379,7 +418,8 @@ def execute_node(
         reads what came back and maps it onto the graph's two outgoing edges.
         Before the run, the plan is stored in `run_ledger` under its revision
         (`store_run_plan`), so a later turn that completes the run lists its
-        notes.
+        notes. After it, the turn's search readings keep how each retrieval
+        was served (`record_served_scopes`), for the answer's basis line.
         An `Accepted` run routes "ok" with its presentable terminal steps'
         frame refs (`answer_frames`) and summaries (`presentable_steps`) and,
         when the ledger holds it, the run's standing under `run`
@@ -484,6 +524,7 @@ def execute_node(
         finally:
             await _stop(task)
         ctx.state["plan"] = finished.model_dump_json()
+        record_served_scopes(ctx.state, tool_surface, outcome)
         workflow = plan.workflow
         assert workflow is not None, "an approved plan always carries a workflow"
         run: RunRecord | None = None

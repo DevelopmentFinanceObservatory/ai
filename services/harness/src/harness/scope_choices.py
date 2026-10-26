@@ -13,11 +13,18 @@ posts them back byte for byte.
 entries a later search posts as `carried_entries`. Search attaches each to
 a part by axis and concept and reports those it drops in
 `PartScope.dropped_entries`; the harness never matches an entry to a part.
+
+`ServedScope` is how the figures a retrieval served were counted, read from
+its `get_data` manifest (`served_facts`): the entities bound on each role,
+the measure basis and the components. `harness.turn_records.basis_line`
+states the turn's choices in their options' labels, correcting each from
+it where the served figures hold another option. `REASON_COPY` holds that
+line's words for reason codes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Annotated, Any, Literal
 
 from planner.records import StrictModel
@@ -35,6 +42,7 @@ ScopeReasonCode = Literal[
     "residuals_need_summed_region",
     "conflicts_with",
     "carried_choice_not_applied",
+    "option_not_covered",
 ]
 
 # "<axis>:<value>": `sector:120+130`, `region:members_and_residuals`,
@@ -236,3 +244,130 @@ def carried_entries(scopes: Iterable[PartScope]) -> list[Entry]:
                 origin=ChoiceOrigin(choice_id=choice.id),
             )
     return list(newest.values())
+
+
+class ServedRole(StrictModel):
+    """The entities a served frame binds on one role: how many are members,
+    and which are the part's regional residual buckets."""
+
+    role: str
+    members: int
+    residuals: tuple[str, ...] = Field(default=(), exclude_if=lambda refs: not refs)
+
+
+class ServedComponent(StrictModel):
+    """One series the served figures were drawn from, with the years its
+    frame covers; `periods` is `None` when the manifest states no window."""
+
+    role: ComponentRole
+    periods: tuple[YearSpan, ...] | None = None
+
+
+class ServedScope(StrictModel):
+    """How the figures one retrieval served were counted.
+
+    `spec_id` is the definition the frame was minted for, which a fetch
+    narrowed by places or period mints apart from the part's own.
+    `measured_property` and `netting_basis` are the served identity's
+    measure and netting slot, `None` when it binds none.
+    """
+
+    spec_id: str
+    roles: tuple[ServedRole, ...]
+    measured_property: str | None = None
+    netting_basis: str | None = None
+    components: tuple[ServedComponent, ...]
+
+    @classmethod
+    def of(cls, facts: Mapping[str, Any], *, scope: PartScope) -> ServedScope:
+        """Compact `served_facts(...)` against the part's `scope`: a bound
+        entity is a residual when one of the scope's options adds it beside
+        the members (`EntitiesBinding.add`), and a member otherwise."""
+        residual_refs = {
+            ref
+            for choice in scope.choices
+            for option in choice.options
+            if isinstance(option.binding, EntitiesBinding)
+            for ref in option.binding.add
+        }
+        roles = []
+        for role, refs in facts["entities"].items():
+            residuals = tuple(ref for ref in refs if ref in residual_refs)
+            roles.append(
+                ServedRole(role=role, members=len(refs) - len(residuals), residuals=residuals)
+            )
+        return cls(
+            spec_id=facts["spec_id"],
+            roles=tuple(roles),
+            measured_property=facts.get("measured_property"),
+            netting_basis=facts.get("netting_basis"),
+            components=tuple(
+                ServedComponent.model_validate(component) for component in facts["components"]
+            ),
+        )
+
+    def residuals(self, role: str) -> frozenset[str]:
+        """The residual buckets served on `role`; empty for a role the frame does not bind."""
+        return frozenset(
+            ref for served in self.roles if served.role == role for ref in served.residuals
+        )
+
+
+_NETTING_SLOT = "nettingBasis"
+
+
+def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What a `get_data` manifest says the frame was counted as, for `ServedScope.of`.
+
+    Read from the minted definition's identity (`definition.identity`): the
+    refs bound on each entity role, the shape's measured property and the
+    `nettingBasis` slot's bound value. The frame is one `whole` component
+    over the manifest's covered window (`coverage.window`). JSON only, so a
+    `get_data` result can carry it. `None` for a manifest naming no
+    definition.
+    """
+    definition = manifest.get("definition") or {}
+    spec_id = definition.get("spec_id")
+    if not isinstance(spec_id, str):
+        return None
+    identity = definition.get("identity") or {}
+    shape = identity.get("shape") or {}
+    netting = next(
+        (
+            binding.get("ref")
+            for slot in identity.get("slots") or ()
+            if slot.get("property") == _NETTING_SLOT
+            and (binding := slot.get("binding") or {}).get("state") in ("value", "exact")
+        ),
+        None,
+    )
+    window = (manifest.get("coverage") or {}).get("window") or {}
+    start, end = window.get("start_year"), window.get("end_year")
+    periods = [[start, end]] if isinstance(start, int) and isinstance(end, int) else None
+    measured = shape.get("measured_property")
+    return {
+        "spec_id": spec_id,
+        "entities": {
+            str(role): [str(ref) for ref in refs]
+            for role, refs in (identity.get("entities") or {}).items()
+        },
+        "measured_property": measured if isinstance(measured, str) else None,
+        "netting_basis": netting if isinstance(netting, str) else None,
+        "components": [{"role": "whole", "periods": periods}],
+    }
+
+
+# What a basis line says when the served figures match no option of a choice.
+SERVED_OTHERWISE = "the figures served differ from this choice"
+
+
+# What each scope reason code says to a reader, one clause.
+REASON_COPY: dict[str, str] = {
+    "provider_not_offered": "imputed multilateral aid is not offered for this question",
+    "imputed_coverage": "imputed multilateral aid covers only some years",
+    "basis_not_published": "this basis is not published for these figures",
+    "residuals_need_summed_region": "regional buckets apply only to a summed region",
+    "conflicts_with": "it conflicts with another choice",
+    "carried_choice_not_applied": "an earlier choice did not apply here",
+    "option_not_covered": "the data holds no series for this option",
+}

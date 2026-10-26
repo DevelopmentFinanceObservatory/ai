@@ -68,6 +68,7 @@ from harness.orchestrator_tools import (
 )
 from harness.reply_figures import card_result, drawn_series
 from harness.rolling_cards import CardWithheld, RollingCards
+from harness.scope_choices import served_facts
 from harness.studio_edit import _revised_frames
 from harness.studio_state import (
     ConversationState,
@@ -83,7 +84,7 @@ from harness.tool_contracts import (
     reading_facts,
     resolver_digest,
 )
-from harness.turn_records import SearchReading, loose_match_notes, render_readings
+from harness.turn_records import SearchReading, basis_line, loose_match_notes, render_readings
 from harness.wire import AddOp, CompositionActor, MutationOp
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
@@ -104,7 +105,13 @@ from . import drawn_cards
 from . import test_rolling_cards as rolling_scene
 from .resolved_revision import resolved_revision
 from .search_results import search_result_parts
-from .test_turn_records import _scoped_part, _top_donors
+from .test_turn_records import (
+    _example_part,
+    _manifest,
+    _scoped_part,
+    _served_identity,
+    _top_donors,
+)
 
 SPEC_AID = "spec_" + "a" * 32
 SPEC_LIFE = "spec_" + "b" * 32
@@ -1274,6 +1281,55 @@ async def test_fetch_of_the_same_data_twice_in_a_turn_retrieves_it_once(
     assert len([tool for tool, _ in executor.calls if tool == "get_data"]) == calls
     assert again["frames"] == first["frames"]
     assert again.get("same_data_as") == (SPEC_AID if calls == 1 else None)
+
+
+class _ServedExecutor(FakeExecutor):
+    """Answers every `get_data` with how its frame was served: the example
+    part's identity with its regional bucket left out."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.served = served_facts(_manifest(_served_identity(residuals=False)))
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], on_progress: Any = None):
+        outcome = await super().__call__(tool=tool, args=args, on_progress=on_progress)
+        if tool == "get_data":
+            outcome["served"] = self.served
+        return outcome
+
+
+async def test_fetch_keeps_how_its_data_was_served_on_the_readings_and_from_the_turns_cache():
+    """A fetch keeps the served record on its spec_id's reading, and a fetch
+    of the same data again keeps the cached one, though `get_data` runs once
+    and the model reads none of it."""
+    executor = _ServedExecutor()
+    tools, ctx = _tools(executor=executor)
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _role_open_block(SPEC_AID),
+        SPEC_LIFE: _role_open_block(SPEC_LIFE, requested_window={"kind": "latest"}),
+    }
+    ctx.state["orchestrator:searches"] = [
+        SearchReading.from_part({**_example_part(), "spec_id": spec_id}).model_dump(mode="json")
+        for spec_id in (SPEC_AID, SPEC_LIFE)
+    ]
+
+    first = await tools["fetch"](SPEC_AID, ctx, scope={"window": WINDOW_2023})
+    again = await tools["fetch"](SPEC_LIFE, ctx, scope={"window": WINDOW_2023})
+
+    readings = [SearchReading.model_validate(r) for r in ctx.state["orchestrator:searches"]]
+    assert len([tool for tool, _ in executor.calls if tool == "get_data"]) == 1
+    assert [
+        r.fetch.served.residuals("destination") for r in readings if r.fetch and r.fetch.served
+    ] == [
+        frozenset(),
+        frozenset(),
+    ]
+    assert "served" not in first and "served" not in again
+    assert basis_line(ctx.state["orchestrator:searches"], plans=[]) == (
+        "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+        "Africa's countries only · "
+        "gross disbursements, current USD."
+    )
 
 
 class _NotedExecutor(FakeExecutor):
