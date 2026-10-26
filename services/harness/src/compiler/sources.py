@@ -26,13 +26,17 @@ from typing import cast
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityCandidate,
+    EntityKey,
     Period,
     ResolvedSourceMention,
     StatVarReading,
     StrictModel,
 )
 from planner.workflow import (
+    BoundEntity,
     ElectedMeasure,
     MeasureAlternative,
     OpenAxis,
@@ -103,6 +107,8 @@ class DiscoveryOutcome(StrictModel):
     `diagnostics.warnings` followed by the part's own -- the one upstream
     signal that a role or time phrase was dropped from the search. Discovery
     sends one part per call, so a request-level warning bears on it.
+    `ambiguous_sources` and `ambiguous_entities` are a `no_data` answer's
+    choices between source references and between graph nodes.
     """
 
     status: DiscoveryStatus
@@ -111,6 +117,7 @@ class DiscoveryOutcome(StrictModel):
     reason: str | None = None
     warnings: tuple[PartWarning, ...] = ()
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = ()
 
 
 def resolved_source_mentions(part: Mapping[str, object]) -> tuple[ResolvedSourceMention, ...]:
@@ -143,34 +150,57 @@ def source_constraint_matches(
     )
 
 
-def bound_refs(part: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
-    """The refs Search bound for each entity text of `part`, by the text case-folded.
+def bound_refs(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
+    """The refs Search bound for each entity row of `part`, one `BoundEntity` per row, in row order.
 
-    Search states, beside the part's `restatement`, one `entity_refs` row
-    per entity text it restates: the text and the refs it finally bound.
-    "G7" binds `GroupOfSeven`, whatever label Search gives the set. A text
-    bound to nothing, being ambiguous, not held or not found, states no
-    refs and is left out, and so is every text of a part without
-    `entity_refs`, from a Search that predates the field. Such a name is
-    matched by label or through the graph's resolve door. A text stated
-    twice binds every ref either row states.
+    Search states one `entity_refs` entry per `restatement.entities` row,
+    at the row's position: the row's text and the refs it finally bound.
+    "G7" binds `GroupOfSeven`, whatever label Search gives the set. Each
+    entry is kept with its row's identity (`dcid`, else `name`, else
+    `text`) and `role_text`, so two rows written "Congo" pinned to
+    `country/COD` and to `country/COG` stay two entities. A row bound to
+    nothing, being ambiguous, not held or not found, states no refs and is
+    left out, and so is every row of a part whose `entity_refs` does not
+    hold one entry per row, as a Search that predates the field or states
+    one entry per text answers. Such a name is matched by label or through
+    the graph's resolve door.
     """
-    refs: dict[str, tuple[str, ...]] = {}
-    for row in _sequence(part.get("entity_refs")):
-        text, bound = _text(row.get("text")), _strings(row.get("refs"))
-        if text is not None and bound:
-            key = text.casefold()
-            refs[key] = tuple(dict.fromkeys((*refs.get(key, ()), *bound)))
-    return refs
+    rows = _sequence(_mapping(part.get("restatement")).get("entities"))
+    entries = _sequence(part.get("entity_refs"))
+    if len(entries) != len(rows):
+        return ()
+    bound: list[BoundEntity] = []
+    for row, entry in zip(rows, entries, strict=True):
+        text, refs = _text(row.get("text")), _strings(entry.get("refs"))
+        if text is None or not refs:
+            continue
+        identity = _text(row.get("dcid")) or _text(row.get("name")) or text
+        bound.append(
+            BoundEntity(
+                identity=identity,
+                text=text,
+                role=_text(row.get("role_text")),
+                refs=tuple(dict.fromkeys(refs)),
+            )
+        )
+    return tuple(bound)
 
 
-def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
+def outcome_from_envelope(
+    envelope: Mapping[str, object], *, entities: Sequence[EntityKey] = ()
+) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
+
+    `entities` keys the entity rows the part was sent with, in row order. A
+    `no_data` answer's `ambiguous_entities` names each reading's entity by
+    them.
 
     Raises:
         ValueError: If the envelope does not carry exactly one part, the part's
             status is not one `search` documents, a `definite` part names no
-            spec, or a spec block it carries is not usable as a source.
+            spec, a spec block it carries is not usable as a source, or an
+            ambiguous group of a `no_data` part is malformed or pins no row of
+            `entities`.
     """
     parts = _sequence(envelope.get("parts"))
     if len(parts) != 1:
@@ -217,6 +247,7 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
                 AmbiguousSourceReading.model_validate(group)
                 for group in _sequence(no_data.get("ambiguous_sources"))
             ),
+            ambiguous_entities=ambiguous_entities(no_data, entities=entities),
         )
     unsupported = _mapping(part.get("unsupported"))
     detail = " ".join(
@@ -225,6 +256,82 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
         if part
     )
     return DiscoveryOutcome(status=status, detail=detail or None, warnings=warnings)
+
+
+def ambiguous_entities(
+    no_data: Mapping[str, object], *, entities: Sequence[EntityKey]
+) -> tuple[AmbiguousEntityReading, ...]:
+    """Read a `no_data` block's `ambiguous_entities` groups, one reading per entity a group pins.
+
+    `entities` keys the rows the part was sent with, in row order. Each
+    option settling group `g` (`entity_choice == g`) is the sent part with
+    the group's rows pinned to one candidate, and every option pins the same
+    rows that resolved to one node. The group's rows are therefore the
+    positions where its options' rows differ, read with no matching of text
+    or role. A group pinning two rows gives two readings with its
+    candidates, one per entity, since each entity is its own choice.
+
+    A group's candidates are those whose option posts the candidate's ref as
+    the `dcid` of every row the group covers, since the planner states the
+    picked candidate as each covered entity's `dcid`. A row asked for its
+    members posts a group node by the group's name and no dcid, and a pin
+    cannot ask for a group's members, so that candidate is left out.
+
+    Raises:
+        ValueError: If a group or candidate is malformed, or a group has fewer
+            than two options holding one row per sent entity, its options
+            differ in no row, or fewer than two of its candidates have an
+            option pinning its rows by dcid.
+    """
+    options = _sequence(no_data.get("options"))
+    readings: list[AmbiguousEntityReading] = []
+    for index, group in enumerate(_sequence(no_data.get("ambiguous_entities"))):
+        rows = [_option_rows(option) for option in options if option.get("entity_choice") == index]
+        if len(rows) < 2 or any(len(option_rows) != len(entities) for option_rows in rows):
+            raise ValueError(
+                f"search's ambiguous entity group {index} has {len(rows)} option(s), not two or "
+                f"more each holding the {len(entities)} entity row(s) discovery sent"
+            )
+        positions = [
+            position
+            for position in range(len(entities))
+            if any(option_rows[position] != rows[0][position] for option_rows in rows)
+        ]
+        if not positions:
+            raise ValueError(f"search's ambiguous entity group {index} pins no entity row")
+        posted = {
+            dcids.pop()
+            for option_rows in rows
+            if len(dcids := {option_rows[position].get("dcid") for position in positions}) == 1
+        }
+        candidates = [
+            candidate
+            for candidate in (
+                EntityCandidate.model_validate(
+                    {"ref": candidate.get("ref"), "label": candidate.get("label")}
+                )
+                for candidate in _sequence(group.get("candidates"))
+            )
+            if candidate.ref in posted
+        ]
+        if len(candidates) < 2:
+            raise ValueError(
+                f"search's ambiguous entity group {index} offers {len(candidates)} candidate(s) "
+                "whose option pins every row it covers by dcid, not two or more"
+            )
+        readings.extend(
+            AmbiguousEntityReading.model_validate(
+                {"text": group.get("text"), "candidates": candidates, "entity": entities[position]}
+            )
+            for position in positions
+        )
+    return tuple(readings)
+
+
+def _option_rows(option: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """The entity rows of an option's one-part `data_query`."""
+    parts = _sequence(_mapping(option.get("data_query")).get("parts"))
+    return _sequence(parts[0].get("entities")) if len(parts) == 1 else []
 
 
 def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
@@ -243,10 +350,14 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
     `None`.
     `coverage.window` is a series window only when `coverage.kind` is
     `exact`; a `breadth` or `bare` coverage carries none.
+    The block's `_bound_refs`, the rows of the part that carried it
+    (`bound_refs`, written by `harness.tool_contracts.resolver_digest`),
+    are the source's `bound_refs`; a block without them binds none.
 
     Raises:
-        ValueError: If the block lacks a usable `spec_id`, or an entity it
-            resolves lacks its role, value or label.
+        ValueError: If the block lacks a usable `spec_id`, an entity it
+            resolves lacks its role, value or label, or its `_bound_refs`
+            are not a list of `BoundEntity` rows.
     """
     resolved = _mapping(block.get("resolved"))
     coverage = _mapping(resolved.get("coverage"))
@@ -271,11 +382,7 @@ def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
             shape_member_digest=_text(shape.get("member_digest")),
             entities=tuple(_entity(entity) for entity in _sequence(resolved.get("entities"))),
             groups=_groups(_mapping(resolved.get("entity_groups"))),
-            bound_refs={
-                text: tuple(refs)
-                for text, raw in _mapping(block.get("_bound_refs")).items()
-                if (refs := _strings(raw))
-            },
+            bound_refs=_BOUND_ENTITIES.validate_python(block.get("_bound_refs", ())),
             open_entity_axes=open_entity_axes_of(resolved),
             unit_ref=_text(unit.get("ref")),
             unit_label=_text(unit.get("label")),
@@ -1032,6 +1139,7 @@ def _strings(value: object) -> list[str]:
 
 
 _PARTY_CLASSES: TypeAdapter[tuple[PartyClass, ...]] = TypeAdapter(tuple[PartyClass, ...])
+_BOUND_ENTITIES: TypeAdapter[tuple[BoundEntity, ...]] = TypeAdapter(tuple[BoundEntity, ...])
 
 
 def _party_classes(value: object) -> tuple[PartyClass, ...]:

@@ -181,6 +181,11 @@ from harness.usage import log_usage
 
 logger = logging.getLogger(__name__)
 
+# What `PlannerSeam._stalled_referral` counts a referral by: its kind,
+# requirement, constraint, and the (name, role) of each entity it leaves
+# unsettled.
+type StallKey = tuple[str, str | None, str | None, tuple[tuple[str, str | None], ...]]
+
 # Insurance against a runaway tool loop inside one agent run. A healthy plan
 # takes well under this many tool calls (skill reads and proposals).
 _MAX_EVENTS = 60
@@ -334,7 +339,7 @@ class _RunTracker:
     """
 
     def __init__(self) -> None:
-        self.referral_counts: dict[tuple[str, str | None, str | None], int] = {}
+        self.referral_counts: dict[StallKey, int] = {}
         self.refused: dict[str, Any] | None = None
         self.ready_to_break = False
         # The `adk_request_input` call args the next generation is replaced
@@ -1152,14 +1157,16 @@ class PlannerSeam:
         return None
 
     @staticmethod
-    def _stalled_referral(
-        response: dict[str, Any] | None, counts: dict[tuple[str, str | None, str | None], int]
-    ) -> bool:
-        """Count one referral by its kind, its requirement and the compile
-        issue it names as its `constraint`, and answer whether that exact
+    def _stalled_referral(response: dict[str, Any] | None, counts: dict[StallKey, int]) -> bool:
+        """Count one referral by its kind, its requirement, the compile
+        issue it names as its `constraint` and the entities its
+        `ambiguous_entities` leave unsettled, and answer whether that exact
         referral has now come back a second time, which stops the run. Two
         different repairs on one requirement count apart, so a planner that
-        fixes one compile issue per round keeps going. A third repetition
+        fixes one compile issue per round keeps going, and an
+        `entity_name_ambiguous` referral covering fewer entities counts
+        apart, so a planner that settles one end of "aid from Congo to Congo"
+        per round keeps going too. A third repetition
         would carry nothing a model could act on that the second one did not
         already say. A referral marked `repeated` ends the entry instead
         (`_closing_refusal`). A transient referral is never counted: the same
@@ -1171,7 +1178,11 @@ class PlannerSeam:
         kind = referral.get("kind")
         if kind is None:
             return False
-        key = (kind, referral.get("requirement_id"), referral.get("constraint"))
+        unsettled = tuple(
+            (reading["entity"]["name"], reading["entity"].get("role"))
+            for reading in referral.get("ambiguous_entities") or ()
+        )
+        key = (kind, referral.get("requirement_id"), referral.get("constraint"), unsettled)
         counts[key] = counts.get(key, 0) + 1
         return counts[key] >= 2
 
