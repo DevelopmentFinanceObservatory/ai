@@ -163,7 +163,9 @@ from planner.plan import (
     with_authored_requirements,
 )
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityKey,
     GroupBy,
     Identifier,
     ResolvedSourceMention,
@@ -319,6 +321,9 @@ class DiscoveryRecord(StrictModel):
     variable_sent: str | None = None
     warnings: tuple[PartWarning, ...] = ()
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
     blocked_by: tuple[str, ...] = ()
     transport_failed: bool = False
 
@@ -1222,10 +1227,15 @@ def _search_part(requirement: DatasetRequirement, variable: str) -> dict[str, ob
     An entity with `members` set asks for each member of the set it names
     (`"members": true`). A set named without it goes as one entity, which
     search binds to the set's own published figure where the source has one.
+
+    An entity with a `dcid` sends it beside its words, so search binds that
+    graph node and keeps two entities written alike apart.
     """
     entities = []
     for entity in requirement.entities:
         sent: dict[str, object] = {"text": entity.name}
+        if entity.dcid is not None:
+            sent["dcid"] = entity.dcid
         if entity.role is not None and (role := party_role(entity.role)) is not None:
             sent["role"] = role
         if entity.members:
@@ -1530,9 +1540,15 @@ async def apply_definitions(state: SessionState, pairs: Sequence[DescribedPair])
 
 
 def _unmatched_names(requirement: DatasetRequirement, source: SelectedSource) -> tuple[str, ...]:
-    """The names `requirement` gives entities that name nothing `source` holds (`named_members`)."""
+    """The names `requirement` gives entities that name nothing `source` holds (`named_members`).
+
+    An entity with a `dcid` already names its node, and resolving its name
+    again would key `entity_refs` once for two entities written alike.
+    """
     return tuple(
-        entity.name for entity in requirement.entities if not named_members(entity, source)
+        entity.name
+        for entity in requirement.entities
+        if entity.dcid is None and not named_members(entity, source)
     )
 
 
@@ -2946,7 +2962,12 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                 raise ValueError(
                     f"the search result carries no envelope under _meta[{SEARCH_ENVELOPE_META_KEY!r}]"
                 )
-            outcome = outcome_from_envelope(cast("Mapping[str, object]", envelope))
+            outcome = outcome_from_envelope(
+                cast("Mapping[str, object]", envelope),
+                entities=[
+                    EntityKey(name=entity.name, role=entity.role) for entity in requirement.entities
+                ],
+            )
         except ValueError as exc:
             log = await _finish(record.model_copy(update={"detail": str(exc)}))
             return problem(
@@ -2973,6 +2994,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                     "detail": outcome.detail,
                     "reason": outcome.reason,
                     "ambiguous_sources": outcome.ambiguous_sources,
+                    "ambiguous_entities": outcome.ambiguous_entities,
                     "warnings": outcome.warnings,
                     "blocked_by": blocked_by,
                 }
@@ -3002,12 +3024,17 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         )
         # A refused `source_code` is not a missing pin: the pin's source was
         # read, and the code cannot be served under any dataset, so the
-        # answer's own hint reaches the planner.
+        # answer's own hint reaches the planner. Nor is a pin judged while
+        # Search cannot tell which node an entity names: the entity is
+        # settled first, and the pin read again with it.
         code_refused = (
             requirement.source_code is not None and outcome.reason in SOURCE_CODE_REFUSALS
         )
         pinned_not_found = (
-            requirement.source_spec_id is not None and not pin_honoured and not code_refused
+            requirement.source_spec_id is not None
+            and not pin_honoured
+            and not code_refused
+            and not outcome.ambiguous_entities
         )
 
         # An honoured pin has already settled this requirement --
@@ -3023,6 +3050,8 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             hint_kind = (
                 ReferralKind.SOURCE_NAME_AMBIGUOUS
                 if outcome.ambiguous_sources
+                else ReferralKind.ENTITY_NAME_AMBIGUOUS
+                if outcome.ambiguous_entities
                 else _HINT_KIND.get(outcome.status)
             )
             if hint_kind is not None:
@@ -3088,6 +3117,9 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             "detail": outcome.detail,
             "ambiguous_sources": [
                 group.model_dump(mode="json") for group in outcome.ambiguous_sources
+            ],
+            "ambiguous_entities": [
+                group.model_dump(mode="json") for group in outcome.ambiguous_entities
             ],
             "warnings": warnings,
             "budget_remaining": budget_remaining,

@@ -106,6 +106,7 @@ REFERRAL_REASONS: Mapping[ReferralKind, str] = {
     ReferralKind.SOURCE_NAME_AMBIGUOUS: (
         "the source named could be more than one publisher or table"
     ),
+    ReferralKind.ENTITY_NAME_AMBIGUOUS: "a place or party named could be more than one in the data",
     ReferralKind.NO_DATA: "no data was found for what was asked",
     ReferralKind.UNSUPPORTED_ASK: _CANNOT_ANSWER,
     ReferralKind.REQUIREMENT_UNMEETABLE: _NOT_COVERED,

@@ -120,18 +120,25 @@ names as an override.
 entity column; a wrong name costs one replan and one further approval, after
 which the turn closes naming the step that could not run.
 
-## 10. A part refused for its denominator names neither side (per-head questions)
+## 10. A part refused for its denominator does not say whose it is (per-head questions)
 
 Search answers "debt service per head" for Kenya `no_data` with reason
 `denominator_not_available`. The `no_data` block carries `reason`,
-`category`, `message`, `elected_count`, `entity_terms`,
-`ambiguous_entities` and `unbound_qualifiers`. It omits the
-measure search read once the per-capita phrasing is set aside and the
-denominator it looked for.
+`cause`, `category`, `message`, `nearest_real`, `gate`, `flagged_match`,
+`alternate_match`, `elected_count`, `entity_terms`, `ambiguous_entities`,
+`source_terms`, `ambiguous_sources`, `unit_alternatives`,
+`unbound_qualifiers`, `denominator` and `options`. On a
+`denominator_not_available` refusal after a series was elected,
+`denominator.asked` names the denominator the question named and
+`denominator.found` the one the flagged match divides by, and
+`nearest_real` holds the level to divide. Each `ambiguous_entities` group
+is settled by the options whose `entity_choice` is its index, so two
+groups written alike ("Congo" and "Congo") are told apart. The block
+still omits which of the part's entities the denominator is about.
 
-**Ask:** on `denominator_not_available`, return the measure's variable
-text without the normalising phrase, the denominator as a variable text
-or StatVar, and which of the part's entities the denominator is about.
-**Meanwhile:** the agent reads the `no_data` reason and has to work out
-the measure and the denominator itself before it can search for them as
-two parts.
+**Ask:** on `denominator_not_available`, say which of the part's
+entities the denominator is about.
+**Meanwhile:** data-mcp's digest shows the agent `nearest_real` but not
+`denominator`, so the agent works out the denominator and the entities it
+is about itself before it can search for the level and the denominator
+as two parts.

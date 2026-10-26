@@ -305,10 +305,14 @@ async def test_a_stored_role_reaches_search_as_the_party_word_it_stands_for(
             Entity(name="G7", role="donor", members=True),
             {"text": "G7", "role": "donor", "members": True},
         ),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            {"text": "Congo", "dcid": "country/COD", "role": "donor"},
+        ),
     ],
-    ids=["set-alone", "set-members", "party-set-members"],
+    ids=["set-alone", "set-members", "party-set-members", "pinned-node"],
 )
-async def test_a_set_reaches_search_as_its_members_only_when_the_plan_asks_for_them(
+async def test_an_entity_reaches_search_with_the_words_and_node_the_plan_states(
     surface: McpSurface,
     draft: DraftFactory,
     requirement: RequirementFactory,
@@ -2914,6 +2918,34 @@ async def test_names_no_label_matches_are_resolved_once_and_only_a_resolved_one_
     assert len(asked) == 1
 
 
+async def test_a_name_pinned_to_its_node_is_not_resolved_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[dict[str, list[str]]] = []
+
+    async def resolve(scope: dict[str, list[str]]) -> dict[str, dict[str, object]]:
+        asked.append({role: list(names) for role, names in scope.items()})
+        return {
+            role: {name: resolution.NotFound(near_matches=[]) for name in names}
+            for role, names in scope.items()
+        }
+
+    monkeypatch.setattr(resolution, "resolve_entities", resolve)
+    requirement = _members_requirement("Bermuda").model_copy(
+        update={"entities": (Entity(name="Bermuda", role="donor", dcid="country/BMU"),)}
+    )
+
+    await resolve_entity_refs(
+        DiscoveryLog(),
+        revision="rev",
+        requirements=[requirement],
+        requirement_keys={"oda": requirement_revision(requirement)},
+        sources={"oda": _g7_members_source()},
+    )
+
+    assert asked == []
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -3387,9 +3419,80 @@ async def test_discovery_preserves_source_name_candidates_for_the_referral(
     result = await _discover(surface, context)
     assert result["ambiguous_sources"] == groups
     assert result["action"]["arguments"]["kind"] == "source_name_ambiguous"
-    assert (
-        load_log(context.state).records[-1].ambiguous_sources[0].candidates[0].ref == "provenance/a"
+    record = load_log(context.state).records[-1]
+    assert record.ambiguous_sources[0].candidates[0].ref == "provenance/a"
+    # A record with no entity ambiguity is stored as it was before the field existed.
+    assert "ambiguous_entities" not in record.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+async def test_discovery_refers_an_ambiguous_entity_with_the_entities_it_pins(
+    draft, pinning_decision, requirement, derived_requirement, context_holding, pinned
+):
+    # The parsed door's two bare "Congo" rows share one identity, so Search
+    # answers one group whose options pin both rows. A pin is judged once the
+    # entity is settled, so a pinned requirement is referred the same way.
+    candidates = [
+        {"ref": "country/COD", "label": "Democratic Republic of the Congo", "kind": "country"},
+        {"ref": "country/COG", "label": "Republic of the Congo", "kind": "country"},
+    ]
+    sent = [{"text": "Congo", "role": "donor"}, {"text": "Congo", "role": "recipient"}]
+    envelope = {
+        "parts": [
+            {
+                "status": "no_data",
+                "no_data": {
+                    "category": "unresolved",
+                    "reason": "entity_ambiguous",
+                    "ambiguous_entities": [{"text": "Congo", "candidates": candidates}],
+                    "options": [
+                        {
+                            "mentions": ["Congo"],
+                            "label": candidate["label"],
+                            "entity_choice": 0,
+                            "data_query": {
+                                "parts": [
+                                    {
+                                        "variable": "aid",
+                                        "entities": [
+                                            {**row, "dcid": candidate["ref"]} for row in sent
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                        for candidate in candidates
+                    ],
+                },
+            }
+        ]
+    }
+    surface = FixtureSurface(
+        schemas=[],
+        responses={
+            "search": ToolCallResult(
+                is_error=False, structured_content={}, meta={SEARCH_ENVELOPE_META_KEY: envelope}
+            )
+        },
     )
+    congos = [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")]
+    ask = requirement(measure="aid", entities=congos, source_spec_id=SPEC_KENYA if pinned else None)
+    pins = {"decisions": [pinning_decision(SPEC_KENYA)]} if pinned else {}
+    context = context_holding(draft(evidence_requirements=[ask, derived_requirement()], **pins))
+
+    result = await _discover(surface, context)
+
+    assert result["action"]["arguments"]["kind"] == "entity_name_ambiguous"
+    readings = load_log(context.state).records[-1].ambiguous_entities
+    assert [(reading.entity.name, reading.entity.role) for reading in readings] == [
+        ("Congo", "donor"),
+        ("Congo", "recipient"),
+    ]
+    for reading in readings:
+        assert [candidate.ref for candidate in reading.candidates] == [
+            "country/COD",
+            "country/COG",
+        ]
 
 
 async def test_saved_alias_confirmation_survives_identity_resolution(

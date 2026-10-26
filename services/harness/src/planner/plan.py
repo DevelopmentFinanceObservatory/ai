@@ -372,6 +372,13 @@ class Entity(StrictModel):
             "figure. A set is named once, never listed member by member."
         ),
     )
+    dcid: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda dcid: dcid is None,
+        description="Graph node from an entity_name_ambiguous referral.",
+    )
 
 
 # Stated in the frame grammar's own `currency`, `prices` and `base_year`,
@@ -823,20 +830,25 @@ class DatasetRequirement(TaggedModel):
 
     @model_validator(mode="after")
     def _entities_are_unique(self) -> DatasetRequirement:
-        """Reject a requirement naming the same entity and role more than once."""
-        keys = [(entity.name, entity.role) for entity in self.entities]
-        seen: set[tuple[str, str | None]] = set()
+        """Reject a requirement naming the same entity, role and node more than once."""
+        keys = [(entity.name, entity.role, entity.dcid) for entity in self.entities]
+        seen: set[tuple[str, str | None, str | None]] = set()
         repeated = sorted(
-            {
-                f"{name}/{role}" if role else name
-                for name, role in keys
-                if (name, role) in seen or seen.add((name, role))
-            }
+            {"/".join(part for part in key if part) for key in keys if key in seen or seen.add(key)}
         )
         if repeated:
             raise ValueError(
-                f"every entity must be unique by name and role; repeated: {repeated!r}"
+                f"every entity must be unique by name, role and node; repeated: {repeated!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _nodes_are_unique(self) -> DatasetRequirement:
+        """Reject two entities stating one `dcid`: Search reads rows pinning one node
+        as one entity, so the second would lose its role or name the first again."""
+        dcids = [entity.dcid for entity in self.entities if entity.dcid is not None]
+        if repeated := sorted({dcid for dcid in dcids if dcids.count(dcid) > 1}):
+            raise ValueError(f"each entity's dcid must be its own node; repeated: {repeated!r}")
         return self
 
     @model_validator(mode="after")
