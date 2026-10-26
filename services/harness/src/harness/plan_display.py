@@ -38,6 +38,7 @@ same way.
 
 from __future__ import annotations
 
+import json
 import re
 import typing
 from collections.abc import Collection, Mapping, Sequence
@@ -79,6 +80,7 @@ from planner.plan import (
     authored,
     authored_text,
     copy_origins,
+    dataset_of,
     frame_shapes,
     is_search_pin,
 )
@@ -455,16 +457,19 @@ def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
     each role column (`_populations`): "from official donors (DAC)" for a
     source binding that group's total, "from every donor" for one leaving
     the donors open. A denominator narrowed to fewer members than its
-    sources hold has no whole. A column where the numerator holds the same
-    population (`_Population.same`) is left out, since a share of health ODA
-    from every donor divides by the same donors. A share of one side by
-    itself (`pools_its_own_axis`), or of one entity narrowed out of a frame
-    (`RequirementSide.entity`), divides by every population its denominator
-    holds. A keyed share's `axis` column follows its `denominator_scope`:
+    sources hold, or to one entity (`RequirementSide.entity`), has no whole.
+    A column where the numerator holds the same population
+    (`_Population.same`) is left out, since a share of health ODA from every
+    donor, read from the same dataset, divides by the same donors. A share
+    of one side by itself (`pools_its_own_axis`), or with a numerator of one
+    entity narrowed out of a frame, divides by every population its
+    denominator holds. A keyed share's `axis` column follows its `denominator_scope`:
     `per_axis` divides each member by its own total, so that column is no
     part of the whole; `pooled` divides by the total across the column's
     members, which is part of it whatever the numerator holds there.
     """
+    if requirement.denominator.entity is not None:
+        return None
     denominator = _populations(plan.requirement(requirement.denominator.input_id), plan)
     if denominator is None:
         return None
@@ -503,13 +508,17 @@ class _Population(typing.NamedTuple):
     """A population a source holds on one role column: its words, and what identifies it.
 
     `identity` is the named set's graph ref (its published total's, or its
-    label for a set the graph holds no node for), or an open axis's column
-    and the source's count of its members; `None` for an axis the source
-    did not count, which nothing shows equal to another.
+    label for a set the graph holds no node for), or an open axis's column,
+    the source's count of its members and the source's dataset over any
+    window (`planner.plan.dataset_of`): the source records no members, so
+    two sources holding as many members are known to hold the same ones
+    only when they are one dataset. `None` for an axis the source did not
+    count or a source stating no identity, which nothing shows equal to
+    another.
     """
 
     phrase: str
-    identity: tuple[str, str | int] | None
+    identity: tuple[str, ...] | None
 
     def same(self, other: _Population) -> bool:
         """Whether `other` is known to be this population."""
@@ -544,7 +553,15 @@ def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Pop
             continue
         for word, axis in zip(dataset.across, axes, strict=True):
             phrase = entities_phrase((), across=(word,))
-            identity = None if axis.member_count is None else (axis.column, axis.member_count)
+            identity = (
+                None
+                if axis.member_count is None or source.identity is None
+                else (
+                    axis.column,
+                    str(axis.member_count),
+                    json.dumps(dataset_of(source.identity), sort_keys=True),
+                )
+            )
             populations.setdefault(axis.column, _Population(phrase, identity))
     return populations
 
@@ -557,18 +574,22 @@ def _reads_whole(
 
     A total and a rank keeping every member pass their input's members on,
     as does a filter keeping some years only. A filter on any other field,
-    a rank keeping its top members (`limit`), and any other step narrow them
-    or read them in a way no population names.
+    a rank keeping its top members (`limit`), an aggregate or a rank
+    reducing by anything but a total (`Reduction.SUM`), whose values are no
+    total of the members, and any other step narrow them or read them in a
+    way no population names.
     """
     if isinstance(requirement, DatasetRequirement):
         return (requirement,)
     if isinstance(requirement, FilterRequirement):
         if not all(isinstance(predicate, PeriodThreshold) for predicate in requirement.predicates):
             return None
-    elif isinstance(requirement, RankRequirement):
-        if requirement.limit is not None:
+    elif isinstance(requirement, RankRequirement | AggregateRequirement):
+        if requirement.reduction not in (None, Reduction.SUM):
             return None
-    elif not isinstance(requirement, AggregateRequirement):
+        if isinstance(requirement, RankRequirement) and requirement.limit is not None:
+            return None
+    else:
         return None
     return _reads_whole(plan.requirement(requirement.input_id), plan)
 
