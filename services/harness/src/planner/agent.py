@@ -61,7 +61,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
-from harness.scope_choices import mark_aligned, option_axis, switch_entries
+from harness.scope_choices import mark_planner_axes, option_axis, planner_axes, switch_entries
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
@@ -1320,9 +1320,9 @@ async def compile_on_basis(
     of its own (`planner.plan.save_pin_sources`), settled as the pin it was
     compiled from, and held as a `submission.service.AlignedPin` with the
     answer's digest (`harness.tool_contracts.resolver_digest`), its block
-    marked as compiled here on that axis (`harness.scope_choices.mark_aligned`),
-    so the next
-    proposal pins it and the planner seam stores it as a reading of the
+    marking that axis as the planner's, beside any axis the origin's block
+    marks (`harness.scope_choices.mark_planner_axes`), so the next proposal
+    pins it and the planner seam stores it as a reading of the
     conversation (`harness.planner_seam.store_aligned_readings`).
 
     Returns `None` once the pin is held, or the refusal the proposal
@@ -1339,7 +1339,7 @@ async def compile_on_basis(
 
     def unservable(reason: str) -> dict[str, object]:
         return basis_unservable(
-            realignment,
+            realignment._asdict(),
             reason=reason,
             record=lambda operation: record_unsupported(state, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
@@ -1379,7 +1379,7 @@ async def compile_on_basis(
             "its calculation's other inputs share"
         )
     digest = resolver_digest({"parts": [dict(part)]})
-    mark_aligned(digest, axis=axis)
+    mark_planner_axes(digest, planner_axes(block) | {axis})
     compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
     save_pin_sources(state, {**sources, spec_id: compiled})
     save_aligned_pin(
@@ -1404,14 +1404,18 @@ async def pin_by_search(
     """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
 
     Posts the `search` part the translator's own discovery sends for the
-    requirement (`translator.discovery.search_part`). A `definite` answer
-    is shown to the planner as a source of its own
+    requirement (`translator.discovery.search_part`), in the planner's words
+    and with no message of the user's, so every axis an entry settled on
+    Search's answer is marked as the planner's
+    (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
+    shown to the planner as a source of its own
     (`planner.plan.save_pin_sources`) and held as a
     `submission.service.SearchedPin` with its digest, so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
     (`harness.planner_seam.store_aligned_readings`). Any other answer, a
-    refusal included, is held as a search that settled on nothing, and the
-    requirement is left to the translator's discovery as before.
+    refusal included, is held as a search that settled on nothing, under
+    Search's part status, and the next proposal is refused
+    (`submission.service._aligned_bases`).
 
     Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer and can later.
@@ -1431,10 +1435,12 @@ async def pin_by_search(
     envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
     parts = envelope.get("parts") if isinstance(envelope, dict) else None
     part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
-    spec = part.get("spec") if isinstance(part, dict) and part.get("status") == "definite" else None
+    status = part.get("status") if isinstance(part, dict) else None
+    spec = part.get("spec") if isinstance(part, dict) and status == "definite" else None
     spec_id = spec.get("spec_id") if isinstance(spec, dict) else None
     searched = SearchedPin(
         requirement_key=unpinned.requirement_key,
+        status=status if isinstance(status, str) else "unreadable",
         asked_roles=unpinned.asked_roles,
         open_roles=unpinned.open_roles,
     )
@@ -1442,6 +1448,13 @@ async def pin_by_search(
         save_searched_pin(state, searched)
         return None
     digest = resolver_digest(cast(dict[str, Any], envelope))
+    scope = part_scope(spec_id, digest["spec_block"])
+    mark_planner_axes(
+        digest,
+        (choice.axis for choice in scope.choices if choice.provenance != "default")
+        if scope is not None
+        else (),
+    )
     shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
     save_pin_sources(state, {**pin_sources(state), spec_id: shown})
     save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))

@@ -28,7 +28,7 @@ from compiler.sources import (
 from data_mcp.digest import source_codes
 from pydantic import ValidationError
 
-from harness.scope_choices import PartScope, aligned_axes
+from harness.scope_choices import PartScope, planner_axes
 from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
@@ -550,9 +550,8 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `bare`); `requested_window_kind` the identity's `requested_window.kind`
     (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
     `_wide_facts` reads them; `scope` is `resolved.scope_choices` as
-    `_scope` reads it, and `aligned_basis` and `aligned_provider` say the planner
-    compiled the block to align a basis or a provider scope
-    (`harness.scope_choices.ALIGNED_BLOCK_KEYS`). These are keys
+    `_scope` reads it, and `planner_axes` the axes the planner's own words
+    settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -569,8 +568,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "entity_roles": facts["entity_roles"],
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
-        "aligned_basis": "measure_basis" in aligned_axes(spec),
-        "aligned_provider": "provider" in aligned_axes(spec),
+        "planner_axes": sorted(planner_axes(spec)),
     }
 
 

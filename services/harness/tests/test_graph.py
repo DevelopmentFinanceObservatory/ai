@@ -93,7 +93,7 @@ from harness.graph.state import (
     frame_store_ref,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED
-from harness.scope_choices import ALIGNED_BASIS_BLOCK_KEY
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
@@ -3240,7 +3240,7 @@ async def _switch_runner(
             "status": "definite",
             "spec_id": pin,
             "scope": scope,
-            "aligned_basis": aligned,
+            "planner_axes": ["measure_basis"] if aligned else [],
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
@@ -3322,10 +3322,22 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
 ) -> None:
     """A reading the planner compiled to align a basis keeps that mark, on the
     new reading, its stored block and its pin's block, through a switch of its
-    sector, since its basis entry is still the planner's; a switch of the basis
-    is the user's and drops it."""
+    sector, since its basis entry is still the planner's, and the revised card
+    states that basis as the planner's; a switch of the basis is the user's and
+    drops it."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
+    answered = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
+    basis = answered["choices"][2]
+    basis["provenance"] = "explicit"
+    answered["entries"].append(
+        {
+            "axis": "measure_basis",
+            "option_id": basis["active"],
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        }
+    )
     revised = _scoped_plan(
         new_pin,
         envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
@@ -3344,10 +3356,15 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
 
     state = _session_state(runner)
     stored = SearchReading.model_validate(state[ORCHESTRATOR_SEARCHES_KEY][-1])
-    assert (stored.spec_id, stored.aligned_basis) == (new_pin, kept)
-    assert state[ORCHESTRATOR_SPECS_KEY][new_pin].get(ALIGNED_BASIS_BLOCK_KEY, False) is kept
+    marked = ["measure_basis"] if kept else []
+    assert (stored.spec_id, list(stored.planner_axes)) == (new_pin, marked)
+    assert state[ORCHESTRATOR_SPECS_KEY][new_pin].get(PLANNER_AXES_BLOCK_KEY, []) == marked
     pinned = state["planner:pin_sources"][new_pin]["block"]
-    assert pinned.get(ALIGNED_BASIS_BLOCK_KEY, False) is kept
+    assert pinned.get(PLANNER_AXES_BLOCK_KEY, []) == marked
+    card = scope_choice_decisions({new_pin: PinSource(block=pinned, settled=True)}).get(new_pin, ())
+    assert [
+        d.resolved_by for d in card if d.scope is not None and d.scope.axis == "measure_basis"
+    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [])
 
 
 @pytest.mark.parametrize("refused_by", ["search", "revision"])

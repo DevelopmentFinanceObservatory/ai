@@ -240,59 +240,57 @@ class PartScope(StrictModel):
         return cls.model_validate(raw, extra="ignore")
 
 
-# The key a spec block carries for each axis the planner compiled it on, to put
-# a calculation's inputs on one measure basis or one provider scope
-# (`planner.agent.compile_on_basis`): its explicit entry on that axis is the
-# planner's, never the user's. The block is the one source of truth.
-# `harness.tool_contracts.reading_facts` copies each to the stored reading
-# (`harness.turn_records.SearchReading.aligned_basis` and `aligned_provider`),
-# which `carried_entries`' callers read, and `submission.service._aligned_bases`
-# reads them off the pin's block (`aligned_axes`). A block Search answers afresh
-# carries none, so a switch of an aligned axis drops its key; a switch of another
-# axis keeps it (`harness.graph.switch`).
-ALIGNED_BLOCK_KEYS: dict[str, str] = {
-    "measure_basis": "_aligned_basis",
-    "provider": "_aligned_provider",
-}
-ALIGNED_BASIS_BLOCK_KEY = ALIGNED_BLOCK_KEYS["measure_basis"]
+# The key a spec block carries naming the scope axes whose entries the
+# planner's own words settled, so they are the planner's, never the user's:
+# the measure basis or provider scope of a pin compiled to put a
+# calculation's inputs on one basis or one provider scope
+# (`planner.agent.compile_on_basis`), and every axis an entry settled
+# on a pin searched for an input the planner pinned no dataset for, posted
+# with the planner's words and no message of the user's
+# (`planner.agent.pin_by_search`). The block is the one source of truth.
+# `harness.tool_contracts.reading_facts` copies it to the stored reading
+# (`harness.turn_records.SearchReading.planner_axes`), which
+# `carried_entries`' callers read; `submission.service._input_bases` and
+# `submission.service.scope_choice_decisions` read it off the pin's block. A
+# block Search answers afresh carries none, so a switch on the plan card
+# drops the switched axis from it and keeps the others (`harness.graph.switch`).
+PLANNER_AXES_BLOCK_KEY = "_planner_axes"
 
 
-def aligned_axes(block: Mapping[str, Any] | None) -> frozenset[str]:
-    """The axes `block`, a spec block, was compiled on by the planner (`ALIGNED_BLOCK_KEYS`)."""
-    return frozenset(
-        axis for axis, key in ALIGNED_BLOCK_KEYS.items() if (block or {}).get(key) is True
-    )
+def planner_axes(block: Mapping[str, Any] | None) -> frozenset[str]:
+    """The axes `block`, a spec block, marks as settled by the planner (`PLANNER_AXES_BLOCK_KEY`)."""
+    return frozenset((block or {}).get(PLANNER_AXES_BLOCK_KEY) or ())
 
 
-def mark_aligned(digest: dict[str, Any], *, axis: str) -> None:
+def mark_planner_axes(digest: dict[str, Any], axes: Iterable[str]) -> None:
     """Mark each spec block of `digest`, a `harness.tool_contracts.resolver_digest`,
-    as compiled by the planner on `axis` (`ALIGNED_BLOCK_KEYS`)."""
+    as settled by the planner on `axes` (`PLANNER_AXES_BLOCK_KEY`); no axes marks nothing."""
+    marked = sorted(set(axes))
+    if not marked:
+        return
     for holder in (digest, *(digest.get("part_digests") or ())):
         if isinstance(holder.get("spec_block"), Mapping):
-            holder["spec_block"] = {**holder["spec_block"], ALIGNED_BLOCK_KEYS[axis]: True}
+            holder["spec_block"] = {**holder["spec_block"], PLANNER_AXES_BLOCK_KEY: marked}
 
 
 def carried_entries(
-    scopes: Iterable[PartScope], *, aligned: Mapping[str, Collection[str]] | None = None
+    scopes: Iterable[PartScope], *, planner: Mapping[str, Collection[str]] | None = None
 ) -> list[Entry]:
     """The entries a later search carries from `scopes`, oldest first.
 
     Every choice an explicit or carried entry settled becomes a `carried`
     entry for its active option, with the concept of the entry that settled
     it and a `choice` origin naming the choice. A choice a declared default
-    settled carries nothing, and neither does a choice on an axis `aligned`
-    lists for the scope's compiled spec_id: the planner compiled it on that
-    axis to put a calculation's inputs on one measure basis or one provider
-    scope (`harness.turn_records.SearchReading.aligned_basis` and
-    `aligned_provider`), so that entry is its own, and that scope's other
-    choices, the user's, still carry. The newest choice per axis and
-    concept wins.
+    settled carries nothing, and neither does a choice on an axis `planner`
+    names for the scope's compiled spec_id (`PLANNER_AXES_BLOCK_KEY`): the
+    planner's words settled it, and the scope's other choices, the user's,
+    still carry. The newest choice per axis and concept wins.
     """
-    aligned = aligned or {}
+    planner = planner or {}
     newest: dict[tuple[str, str | None], Entry] = {}
     for scope in scopes:
         for choice in scope.choices:
-            if choice.provenance == "default" or choice.axis in aligned.get(
+            if choice.provenance == "default" or choice.axis in planner.get(
                 scope.compiled.spec_id, ()
             ):
                 continue

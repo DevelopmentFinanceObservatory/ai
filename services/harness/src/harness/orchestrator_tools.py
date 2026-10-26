@@ -1604,24 +1604,20 @@ def _search_context(state: SessionState) -> SearchContext:
     choices of every earlier search, the earlier turns' readings
     (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
     (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`), less
-    the basis or provider scope the planner compiled on a reading marked
-    `aligned_basis` or `aligned_provider`.
+    the axes the planner's own words settled on a reading (`planner_axes`).
     """
     scoped = [reading for reading in conversation_readings(state) if reading.get("scope")]
     scopes = [PartScope.model_validate(reading["scope"]) for reading in scoped]
-    aligned = {
-        scope.compiled.spec_id: [
-            axis
-            for axis, key in (("measure_basis", "aligned_basis"), ("provider", "aligned_provider"))
-            if reading.get(key)
-        ]
+    planner = {
+        scope.compiled.spec_id: reading["planner_axes"]
         for scope, reading in zip(scopes, scoped, strict=True)
+        if reading.get("planner_axes")
     }
     return SearchContext(
         user_message=current_user_message.get() or None,
         carried_entries=[
             entry.model_dump(mode="json", exclude_none=True)
-            for entry in carried_entries(scopes, aligned=aligned)
+            for entry in carried_entries(scopes, planner=planner)
         ],
     )
 

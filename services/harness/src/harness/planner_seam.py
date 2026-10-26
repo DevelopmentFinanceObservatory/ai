@@ -1627,17 +1627,18 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     names yet joins this turn's readings through `store_search`, as the
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
-    roles, with its compiled scope on `SearchReading.scope`. Its block is
-    marked as the planner's (`harness.scope_choices.ALIGNED_BLOCK_KEYS`), so the
-    reading reads `SearchReading.aligned_basis` or `aligned_provider` and its
-    entry on that axis is never carried as the user's (`harness.scope_choices.carried_entries`).
+    roles, with its compiled scope on `SearchReading.scope`. Its block marks
+    the axis it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
+    so the reading reads it in `SearchReading.planner_axes` and that entry is
+    never carried as the user's (`harness.scope_choices.carried_entries`).
     Later turns then find it among the readings, and a switch on its
     plan-card row finds its scope (`harness.graph.switch`).
 
     Each dataset Search settled on for a calculation's input the planner
     pinned none for (`submission.service.searched_pins`) joins them the same
     way, under the words it was searched as, with the parties the search
-    named and held open.
+    named and held open, its block marking every axis those words settled
+    as the planner's.
     """
     held = aligned_pins(planner_state)
     searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]

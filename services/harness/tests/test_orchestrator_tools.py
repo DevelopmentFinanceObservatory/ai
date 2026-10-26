@@ -621,9 +621,9 @@ async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conve
 @pytest.mark.parametrize(
     ("aligned", "axes"),
     [
-        ("aligned_basis", ["sector", "region"]),
+        ("measure_basis", ["sector", "region"]),
         (None, ["sector", "region", "measure_basis"]),
-        ("aligned_provider", ["sector", "region", "measure_basis"]),
+        ("provider", ["sector", "region", "measure_basis"]),
     ],
     ids=["compiled-by-the-planner", "switched-by-the-user", "provider-compiled-by-the-planner"],
 )
@@ -647,7 +647,7 @@ async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_sw
         }
     )
     if aligned is not None:
-        reading[aligned] = True
+        reading["planner_axes"] = [aligned]
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
     ctx.state["orchestrator:searches"] = [
