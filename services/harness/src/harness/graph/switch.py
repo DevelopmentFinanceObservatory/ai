@@ -449,8 +449,11 @@ async def apply_stored_choice(
     The reading's base identity is posted with its entries and the switch
     (`switch_entries`) through `surface` (`_resubmit`), the reading Search
     compiles is stored as the plan-card switch stores it, and its spec_id is
-    fetched with the orchestrator's `fetch` tool, so its frames, served
-    scope and step reach the turn as any fetch's do. The chip applied is
+    fetched with the orchestrator's `fetch` tool, with the arguments the
+    answer's own fetch of the reading was called with (`FetchReading.args`:
+    its places, period and reading of the family), so the chip changes the
+    chosen option alone. Its frames, served scope and step reach the turn as
+    any fetch's do. The chip applied is
     recorded under `ORCHESTRATOR_APPLIED_KEY`, with the option it moved from
     and the spec_id Search compiled.
 
@@ -539,7 +542,8 @@ async def apply_stored_choice(
         args=args,
         result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
     )
-    fetched = await fetch(spec_id=switched.spec_id, tool_context=ctx)
+    shaped = reading.fetch.args if reading.fetch is not None else {}
+    fetched = await fetch(spec_id=switched.spec_id, tool_context=ctx, **shaped)
     held = choice.active_option
     moved = [
         f"Search also moved {entry['from_label']} to {entry['to_label']}: {entry['reason']}"

@@ -1437,11 +1437,16 @@ def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _attach_fetch(
-    tool_context: ToolContext, result: dict[str, Any], *, served: Mapping[str, Any] | None = None
+    tool_context: ToolContext,
+    result: dict[str, Any],
+    *,
+    served: Mapping[str, Any] | None = None,
+    args: Mapping[str, Any] | None = None,
 ) -> None:
     """Add a `fetch` result to every stored search reading of its spec_id,
     with `served`, how `get_data` says the frame was counted
-    (`harness.scope_choices.served_facts`), when it said.
+    (`harness.scope_choices.served_facts`), when it said, and `args`, the
+    call's arguments that shape its frame (`FetchReading.args`).
 
     A spec_id that no reading holds as its own, but one offered as a
     candidate, as another count (`SearchReading.alternatives`) or as the
@@ -1488,7 +1493,9 @@ def _attach_fetch(
         searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
         (
-            reading.with_fetch(result, served=served) if reading.spec_id == spec_id else reading
+            reading.with_fetch(result, served=served, args=args)
+            if reading.spec_id == spec_id
+            else reading
         ).model_dump(mode="json")
         for reading in searches
     ]
@@ -1864,6 +1871,15 @@ def build_orchestrator_tools(
         spent = _spend(tool_context, "fetch")
         if spent:
             return spent
+        # The arguments that shape the frame, kept on the reading so a chip
+        # fetches the switched reading the same way.
+        shaped: dict[str, Any] = {}
+        if scope is not None:
+            shaped["scope"] = scope.model_dump(exclude_none=True)
+        if stat_vars is not None:
+            shaped["stat_vars"] = stat_vars
+        if breakdown is not None:
+            shaped["breakdown"] = breakdown.model_dump()
         args: dict[str, Any] = {"spec_id": spec_id}
         if scope is not None:
             args["scope"] = scope.model_dump(exclude_none=True)
@@ -1914,7 +1930,7 @@ def build_orchestrator_tools(
                     "same_data_as": earlier["spec_id"],
                 }
             )
-            _attach_fetch(tool_context, found, served=earlier.get("served"))
+            _attach_fetch(tool_context, found, served=earlier.get("served"), args=shaped)
             return found
         try:
             data = await executor(tool="get_data", args=args)
@@ -1992,7 +2008,7 @@ def build_orchestrator_tools(
                 **({"served": data["served"]} if data.get("served") else {}),
             }
             tool_context.state[_FETCHES_KEY] = fetches
-        _attach_fetch(tool_context, found, served=data.get("served"))
+        _attach_fetch(tool_context, found, served=data.get("served"), args=shaped)
         return found
 
     def _canvas_series(tool_context: ToolContext) -> list[str]:

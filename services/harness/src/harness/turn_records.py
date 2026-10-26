@@ -623,12 +623,16 @@ class FetchReading(StrictModel):
     or refusal code, or, when `plan_step`, a plan step's retrieval, which the
     planner's ledger text does not show (`render_readings`). `served` is how
     the figures served were counted, kept for a reading with scope choices
-    whose retrieval stated it."""
+    whose retrieval stated it. `args` are the arguments the `fetch` was called
+    with that shape its frame (`scope`, `stat_vars`, `breakdown`), as JSON,
+    so a chip fetches the switched reading the same way
+    (`harness.graph.switch.apply_stored_choice`)."""
 
     summary: str | None = None
     refusal_code: str | None = None
     plan_step: bool = Field(default=False, exclude_if=lambda plan_step: not plan_step)
     served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
+    args: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda args: not args)
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`
@@ -831,15 +835,22 @@ class SearchReading(StrictModel):
         )
 
     def with_fetch(
-        self, result: Mapping[str, Any], *, served: Mapping[str, Any] | None = None
+        self,
+        result: Mapping[str, Any],
+        *,
+        served: Mapping[str, Any] | None = None,
+        args: Mapping[str, Any] | None = None,
     ) -> SearchReading:
         """This reading with the outcome of a `fetch` result for its spec_id,
+        the `args` that shaped a fetch that returned data (`FetchReading.args`),
         and `served`, the retrieval's `harness.scope_choices.served_facts`,
         when the reading has scope choices."""
         if result.get("code"):
             fetched = FetchReading(refusal_code=str(result["code"]))
         else:
-            fetched = FetchReading(summary=_str_or_none(result.get("summary")))
+            fetched = FetchReading(
+                summary=_str_or_none(result.get("summary")), args=dict(args or {})
+            )
         reading = self.model_copy(update={"fetch": fetched})
         return reading.with_served(served) if served is not None else reading
 
@@ -1189,8 +1200,10 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     one that Search can serve (`available` or `partial`), labelled with the
     option's label, quoted after the part's text when several parts offer
     chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
-    whose active option adds entities to a role the fetch narrowed offers
-    none, as it states none in the basis line (`_choice_clause`).
+    whose options bind entities (a region's members) offers none when the
+    fetch named its own places (`entities` in `FetchReading.args`' scope):
+    the chip refetches with those places, which replace every role's
+    entities, so the choice would change nothing.
 
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
@@ -1208,15 +1221,10 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     offered: list[tuple[int, SearchReading, ScopeChoice, Option]] = []
     for reading in used:
         assert reading.scope is not None
-        served = reading.fetch.served if reading.fetch is not None else None
+        assert reading.fetch is not None
+        placed = "entities" in (reading.fetch.args.get("scope") or {})
         for choice in reading.scope.choices:
-            active = choice.active_option
-            if (
-                served is not None
-                and active is not None
-                and isinstance(active.binding, EntitiesBinding)
-                and served.narrowed(active.binding.role)
-            ):
+            if placed and any(isinstance(o.binding, EntitiesBinding) for o in choice.options):
                 continue
             rank = _CHIP_AXES.index(choice.axis) if choice.axis in _CHIP_AXES else len(_CHIP_AXES)
             offered.extend(

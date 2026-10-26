@@ -930,6 +930,30 @@ def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve(
     assert scope_chips([planned.model_dump(mode="json")]) == []
 
 
+@pytest.mark.parametrize(
+    ("scope", "region_chip"),
+    [
+        ({"window": {"kind": "range", "start_year": 2015, "end_year": 2020}}, True),
+        ({"entities": {"destination": ["Ghana", "Kenya"]}}, False),
+    ],
+    ids=["period-only", "places-named"],
+)
+def test_a_fetch_that_named_its_places_offers_no_region_chip(
+    scope: dict[str, Any], region_chip: bool
+) -> None:
+    """The chip refetches with the answer's places, which replace the region's
+    members, so a region option would change nothing; the other choices still
+    offer theirs. No served record is needed to tell."""
+    reading = SearchReading.from_part(_scoped_part()).with_fetch(
+        {"summary": "30 observations"}, args={"scope": scope}
+    )
+
+    options = [chip.option_id for chip in scope_chips([reading.model_dump(mode="json")])]
+
+    assert ("region:members_and_residuals" in options) is region_chip
+    assert "sector:120+130" in options
+
+
 def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_four() -> None:
     health = _fetched(_scoped_part())
     education = _fetched({**_scoped_part(), "variable": "education aid", "spec_id": "spec_edu"})
