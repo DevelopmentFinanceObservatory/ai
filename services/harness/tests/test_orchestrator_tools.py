@@ -3661,6 +3661,15 @@ async def test_search_names_the_count_it_chose_and_the_others_by_spec_id(constan
     assert part.get("other_prices") == (
         [{"spec_id": SPEC_CONSTANT, "label": "constant prices"}] if constant else None
     )
+    # The answer spans 1978 to 2024 in current US dollars, and the question
+    # named no prices, so the prices are open with the offered sibling or,
+    # when search offers none, constant prices.
+    assert part["open_prices"] == [
+        {"label": "current prices"},
+        {"spec_id": SPEC_CONSTANT, "label": "constant prices"}
+        if constant
+        else {"label": "constant prices"},
+    ]
 
 
 SPEC_NET = "spec_" + "c" * 32

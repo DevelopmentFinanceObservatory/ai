@@ -32,6 +32,7 @@ from harness.turn_records import (
     WindowReading,
     basis_line,
     loose_match_notes,
+    open_prices,
     render_readings,
 )
 from planner.plan import (
@@ -1353,3 +1354,91 @@ def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> No
     assert [(warning.code, warning.requirement_id) for warning in record.warnings] == [
         ("window_short", "debt")
     ]
+
+
+_USD = {"basis": "fallback", "ref": "CurrencyUSD", "label": "US Dollar", "currency": "USD"}
+_CONSTANT_OFFER = {"spec_id": "spec_c", "label": "constant prices"}
+_SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
+
+
+@pytest.mark.parametrize(
+    ("window", "unit", "unit_request", "other_prices", "options"),
+    [
+        (
+            _SEVERAL_YEARS,
+            _USD,
+            None,
+            [],
+            [{"label": "current prices"}, {"label": "constant prices"}],
+        ),
+        (
+            _SEVERAL_YEARS,
+            _USD,
+            None,
+            [_CONSTANT_OFFER],
+            [{"label": "current prices"}, _CONSTANT_OFFER],
+        ),
+        (
+            _SEVERAL_YEARS,
+            {
+                **_USD,
+                "basis": "bound",
+                "request_basis": {"currency": "bound", "prices": "fallback"},
+            },
+            {"currency": "EUR", "prices": "current"},
+            [],
+            [{"label": "current prices"}, {"label": "constant prices"}],
+        ),
+        ({"start": 2023, "end": 2023, "source": "requested"}, _USD, None, [_CONSTANT_OFFER], []),
+        (
+            _SEVERAL_YEARS,
+            {
+                "basis": "bound",
+                "ref": "ConstantUSD_2022",
+                "label": "Constant US Dollar",
+                "request_basis": {"currency": "bound", "prices": "bound", "base_year": "bound"},
+            },
+            {"currency": "USD", "prices": "constant", "base_year": 2022},
+            [],
+            [],
+        ),
+        (
+            _SEVERAL_YEARS,
+            {**_USD, "basis": "bound", "request_basis": {"currency": "bound", "prices": "bound"}},
+            {"currency": "USD", "prices": "current"},
+            [],
+            [],
+        ),
+        (_SEVERAL_YEARS, {"basis": "fallback", "ref": "Year", "label": "Years"}, None, [], []),
+        (_SEVERAL_YEARS, {"basis": "fallback", "ref": "ConstantUSD_2022"}, None, [], []),
+        (None, _USD, None, [], []),
+    ],
+    ids=[
+        "several-years-unstated",
+        "several-years-unstated-with-offer",
+        "currency-stated-prices-unstated",
+        "one-year",
+        "stated-constant",
+        "stated-current",
+        "not-money",
+        "native-constant",
+        "no-window",
+    ],
+)
+def test_prices_are_open_over_several_years_of_current_money_the_user_left_unpriced(
+    window: dict[str, Any] | None,
+    unit: dict[str, Any],
+    unit_request: dict[str, Any] | None,
+    other_prices: list[dict[str, str]],
+    options: list[dict[str, str]],
+) -> None:
+    identity: dict[str, Any] = {}
+    if unit_request is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": unit_request}}
+    block = {
+        "spec_id": "spec_a",
+        "definition": {"identity": identity},
+        "resolved": {"facets": {"unit": unit}},
+    }
+
+    assert open_prices(block, window=window, other_prices=other_prices) == options

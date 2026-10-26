@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Any, Literal, NamedTuple, cast
 
 from common.place_type import FLOW_ROLE_COLUMNS
-from compiler.evidence import read_unit_currency
+from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
@@ -875,6 +875,54 @@ def newest_per_spec_id(readings: Sequence[SearchReading]) -> list[SearchReading]
         for index, reading in enumerate(readings)
         if reading.spec_id is None or last[reading.spec_id] == index
     ]
+
+
+# How `open_prices` words the prices search read, and the prices it offers
+# when search lists no other prices of its own.
+CURRENT_PRICES = "current prices"
+CONSTANT_PRICES = "constant prices"
+
+
+def open_prices(
+    block: Mapping[str, Any],
+    *,
+    window: Mapping[str, Any] | None,
+    other_prices: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """The options of the prices choice a `definite` part leaves open, empty when its prices are settled.
+
+    Prices are open when the part's `window` (`harness.tool_contracts._window`)
+    spans more than one year, its spec block's unit is money in current
+    prices, and the request did not bind the prices. The unit's prices are
+    the request's (`definition.identity.facets.unit.request.prices`) when
+    search bound the unit through the request form, and otherwise the
+    native unit's own: a currency unit id with no constant base year
+    (`compiler.evidence.read_unit_dcid` on `resolved.facets.unit.ref`). The
+    request bound the prices when `resolved.facets.unit.request_basis.prices`
+    is `bound`.
+
+    The first option is the prices search read, with no spec_id. Each of
+    the part's `other_prices` offers (`harness.tool_contracts.measure_choice`)
+    follows with its spec_id, or constant prices with none when search
+    offers no other prices.
+    """
+    if not isinstance(window, Mapping) or window.get("start") == window.get("end"):
+        return []
+    unit = ((block.get("resolved") or {}).get("facets") or {}).get("unit") or {}
+    if (unit.get("request_basis") or {}).get("prices") == "bound":
+        return []
+    identity = (block.get("definition") or {}).get("identity") or {}
+    request = ((identity.get("facets") or {}).get("unit") or {}).get("request")
+    if isinstance(request, Mapping) and request.get("prices") is not None:
+        current = request["prices"] == "current"
+    else:
+        ref = unit.get("ref")
+        reading = read_unit_dcid(ref if isinstance(ref, str) else None)
+        current = reading.currency not in (None, "PPP") and reading.prices != "constant"
+    if not current:
+        return []
+    others = [dict(offer) for offer in other_prices] or [{"label": CONSTANT_PRICES}]
+    return [{"label": CURRENT_PRICES}, *others]
 
 
 def measure_choice_text(

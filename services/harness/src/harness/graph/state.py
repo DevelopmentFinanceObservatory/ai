@@ -30,7 +30,7 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_valid
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn_records import Origin, SearchReading
+from harness.turn_records import Origin, SearchReading, open_prices
 
 # The ADK app name every stored conversation's sessions are keyed under.
 AGENT_NAME = "dfo_analyst_graph"
@@ -364,7 +364,9 @@ def store_search(
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
-    known.
+    known. A `definite` part whose prices are open over several years reads
+    with `open_prices`, the options of its prices question
+    (`harness.turn_records.open_prices`).
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -383,6 +385,12 @@ def store_search(
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
             facts = reading_facts(part["spec_block"])
+            if prices := open_prices(
+                part["spec_block"],
+                window=part.get("window"),
+                other_prices=part.get("other_prices") or (),
+            ):
+                reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):
             blocks = {
                 spec_id: {**block, "_resolved_sources": mentions}

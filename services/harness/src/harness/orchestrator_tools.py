@@ -1757,9 +1757,12 @@ def build_orchestrator_tools(
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
         with other counts under `alternatives` and the same count in other
-        prices under `other_prices`, each with its spec_id and label, and
-        lists the `source_codes` of the indicators it found, each with the
-        publisher that issues it when search names one. And
+        prices under `other_prices`, each with its spec_id and label. A
+        definite part whose prices the user left open over several years
+        lists `open_prices`, the options of a prices question, the prices
+        search read first. A definite part lists the `source_codes` of the
+        indicators it found, each with the publisher that issues it when
+        search names one. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
