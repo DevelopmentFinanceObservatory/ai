@@ -1199,14 +1199,14 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     on the parts its fetches used, at most `MAX_SCOPE_CHIPS`.
 
     A part is used when a `fetch` of its spec_id returned data; its newest
-    reading speaks for it. A plan step's retrieval is no fetch: the plan card
+    reading speaks for it. A plan step's retrieval is no fetch, and the plan card
     switches those. Each choice offers every option other than its active
     one that Search can serve (`available` or `partial`), labelled with the
     option's label, quoted after the part's text when several parts offer
     chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
     fetch named its own places (`entities` in the scope of any of
-    `FetchReading.args`): the chip refetches with those places, which replace
+    `FetchReading.args`). The chip refetches with those places, which replace
     every role's entities, so the choice would change nothing.
 
     Args:

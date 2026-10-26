@@ -27,7 +27,7 @@ _COMPONENTS_KEY = "components"
 
 def frame_components(trace: StoredFrameTrace) -> list[dict[str, object]]:
     """The components `trace`'s frame was composed from, each as its role and how many
-    member StatVars it holds, in dfo-apis' order; empty for a frame of one table."""
+    member StatVars it holds, in dfo-apis' order, and empty for a frame of one table."""
     listed = trace.upstream_trace.get(_COMPONENTS_KEY)
     if not isinstance(listed, Sequence):
         return []

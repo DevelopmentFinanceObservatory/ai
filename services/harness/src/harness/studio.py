@@ -290,8 +290,8 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
     The chip's choice is read on the conversation's newest stored reading
     holding it (`harness.turn_records.stored_choice`). A choice no reading
     holds, or one already on the chip's option, is refused 422
-    `scope_choice_stale`: the chip came from an answer the conversation has
-    moved past. An option the choice does not offer, or one Search cannot
+    `scope_choice_stale`, since the chip came from an answer the conversation
+    has moved past. An option the choice does not offer, or one Search cannot
     serve, is refused 422 `switch_option_unavailable`, as a plan card's switch
     is. `detail` is copy the client shows.
     """
