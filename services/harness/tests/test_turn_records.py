@@ -851,7 +851,7 @@ def test_a_fetch_keeps_how_its_figures_were_served_on_a_reading_with_scope_choic
 def test_the_basis_line_states_each_choice_as_the_figures_were_served(
     identity: dict[str, Any] | None, line: str
 ) -> None:
-    assert basis_line([_fetched(_example_part(), identity)], plans=[]) == line
+    assert basis_line([_fetched(_example_part(), identity)], specs={}, plans=[]) == line
 
 
 def test_the_basis_line_states_each_label_as_search_wrote_it() -> None:
@@ -862,7 +862,7 @@ def test_the_basis_line_states_each_label_as_search_wrote_it() -> None:
         for option in choice["options"]:
             option["label"] = option["option_id"]
 
-    assert basis_line([_fetched(part)], plans=[]) == (
+    assert basis_line([_fetched(part)], specs={}, plans=[]) == (
         "Counted as: sector:120 · region:members_only · measure_basis:gross."
     )
 
@@ -882,7 +882,7 @@ def test_a_plan_steps_served_record_leaves_the_planners_ledger_text_as_it_was() 
         )
     assert SearchReading.model_validate_json(retrieved.model_dump_json()) == retrieved
     assert "Africa's countries only" in (
-        basis_line([retrieved.model_dump(mode="json")], plans=[planned]) or ""
+        basis_line([retrieved.model_dump(mode="json")], specs={}, plans=[planned]) or ""
     )
 
 
@@ -892,8 +892,11 @@ def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used()
     unscoped = _fetched({**_example_part(), "scope": None})
     planned = {"sources": [{"spec_id": _example_part()["spec_id"]}]}
 
-    assert basis_line([searched, refused.model_dump(mode="json"), unscoped], plans=[]) is None
-    assert basis_line([searched], plans=[planned]) == _EXAMPLE_LINE
+    assert (
+        basis_line([searched, refused.model_dump(mode="json"), unscoped], specs={}, plans=[])
+        is None
+    )
+    assert basis_line([searched], specs={}, plans=[planned]) == _EXAMPLE_LINE
 
 
 def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() -> None:
@@ -910,8 +913,10 @@ def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() ->
 
     assert [source.windowed_from for source in windowed.sources] == [origin]
     assert "windowed_from" not in unmapped.model_dump(mode="json")["sources"][0]
-    assert basis_line([searched], plans=[windowed.model_dump(mode="json")]) == _EXAMPLE_LINE
-    assert basis_line([searched], plans=[unmapped.model_dump(mode="json")]) is None
+    assert (
+        basis_line([searched], specs={}, plans=[windowed.model_dump(mode="json")]) == _EXAMPLE_LINE
+    )
+    assert basis_line([searched], specs={}, plans=[unmapped.model_dump(mode="json")]) is None
 
 
 def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause() -> None:
@@ -922,12 +927,59 @@ def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause()
     alike = [_fetched(_example_part()), _fetched(ghana())]
     differ = [_fetched(_example_part()), _fetched(ghana(sector="sector:120"))]
 
-    assert basis_line(alike, plans=[]) == _EXAMPLE_LINE
-    assert basis_line(differ, plans=[]) == (
+    assert basis_line(alike, specs={}, plans=[]) == _EXAMPLE_LINE
+    assert basis_line(differ, specs={}, plans=[]) == (
         'Counted as: "health aid": health (CRS 120) and population and reproductive health '
         "(CRS 130) · Africa incl. regional buckets · gross disbursements, current USD; "
         '"health aid to Ghana": health (CRS 120) · Africa incl. regional buckets · '
         "gross disbursements, current USD."
+    )
+
+
+def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
+    """The spec block Search returns for US ODA counted on `netting`, with
+    the label it names the measure by, as dfo-apis writes it."""
+    label = f"{netting.lower()} disbursements (official development assistance)"
+    return {"spec_id": spec_id, "resolved": {"shape": {"label": label}}}
+
+
+@pytest.mark.parametrize(
+    ("switched", "total_name"),
+    [
+        pytest.param(
+            True, "net disbursements (official development assistance)", id="switched-to-net"
+        ),
+        pytest.param(False, '"ODA gross disbursements"', id="unswitched"),
+    ],
+)
+def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_serves(
+    switched: bool, total_name: str
+) -> None:
+    """A share of US aid to health: a switch of the total's basis to net
+    re-pins it, and the reading keeps the words written for the gross pin.
+    Search's label for the net pin names it instead. An unswitched total
+    keeps its words."""
+    total = _example_part("ODA gross disbursements", measure_basis="measure_basis:gross")
+    total["spec_id"] = "spec_total"
+    if switched:
+        basis = next(c for c in total["scope"]["choices"] if c["axis"] == "measure_basis")
+        basis["active"] = "measure_basis:net"
+        total["scope"]["entries"] = [
+            {
+                "axis": "measure_basis",
+                "option_id": "measure_basis:net",
+                "provenance": "explicit",
+                "origin": {"kind": "choice", "choice_id": basis["id"]},
+            }
+        ]
+    specs = {"spec_total": _total_block("spec_total", "Net" if switched else "Gross")}
+    readings = [_fetched(_example_part(sector="sector:120")), _fetched(total)]
+
+    assert basis_line(readings, specs=specs, plans=[]) == (
+        'Counted as: "health aid": health (CRS 120) · Africa incl. regional buckets · '
+        f"gross disbursements, current USD; {total_name}: health (CRS 120) and population "
+        "and reproductive health (CRS 130) · Africa incl. regional buckets · "
+        + ("net disbursements." if switched else "gross disbursements, current USD.")
     )
 
 
@@ -967,7 +1019,7 @@ def test_a_partial_option_and_a_dropped_entry_say_why(
     }
     scope["dropped_entries"] = [dropped if code is None else {**dropped, "code": code}]
 
-    assert basis_line([_fetched(part)], plans=[]) == (
+    assert basis_line([_fetched(part)], specs={}, plans=[]) == (
         "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
         "Africa incl. regional buckets · gross disbursements, current USD (imputed "
         f"multilateral aid covers only some years: 2011-2024) · {why}: Africa's countries only."

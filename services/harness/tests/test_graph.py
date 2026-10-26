@@ -356,7 +356,7 @@ def test_a_runs_retrieval_keeps_how_it_was_served_on_the_turns_scoped_reading() 
     assert kept.fetch.served.residuals("destination") == frozenset()
     assert unchanged == other
     assert untouched == {ORCHESTRATOR_SEARCHES_KEY: [other.model_dump(mode="json")]}
-    assert basis_line(state[ORCHESTRATOR_SEARCHES_KEY], plans=[]) == (
+    assert basis_line(state[ORCHESTRATOR_SEARCHES_KEY], specs={}, plans=[]) == (
         "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
         "Africa's countries only · "
         "gross disbursements, current USD."
@@ -398,7 +398,7 @@ def test_a_windowed_copys_retrieval_is_kept_on_the_reading_it_was_copied_from() 
     record_served_scopes(cast("Any", state), cast("Any", surface), outcome)
 
     plan = {"sources": [{"spec_id": copy_id, "windowed_from": SPEC_A}]}
-    assert basis_line(state[ORCHESTRATOR_SEARCHES_KEY], plans=[plan]) == (
+    assert basis_line(state[ORCHESTRATOR_SEARCHES_KEY], specs={}, plans=[plan]) == (
         "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
         "Africa's countries only · "
         "gross disbursements, current USD."

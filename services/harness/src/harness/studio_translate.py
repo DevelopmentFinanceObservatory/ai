@@ -2190,7 +2190,9 @@ class _Translator:
                 or None
             )
             basis = basis_line(
-                self._conversation.turn_readings, plans=self._conversation.turn_plans
+                self._conversation.turn_readings,
+                specs=self._conversation.turn_specs,
+                plans=self._conversation.turn_plans,
             )
             closing = "".join(f"\n\n{block}" for block in (notes, basis) if block)
             if closing:
