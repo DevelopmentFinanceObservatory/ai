@@ -111,6 +111,7 @@ def us_share_of_kenya_oda(
     whole_donors: Sequence[str] = (),
     whole_recipients: Sequence[str] = ("Kenya",),
     us_donors: Sequence[str] | None = None,
+    whole_reduction: Reduction = Reduction.SUM,
     every_donor: bool = False,
     narrowed_from: str | None = None,
     narrowing: Sequence[Then] = (),
@@ -119,12 +120,12 @@ def us_share_of_kenya_oda(
     """The first plan of the module docstring, `all_oda` read from a source
     stating `whole`'s fields for the donors named `whole_donors` and the
     recipients named `whole_recipients`, and over those `whole_across`
-    covers, and narrowed by `narrowing` before its total, and `us` from one
-    stating `numerator`'s for the donors named `us_donors`, by default
-    `donor` alone. With `every_donor`, `us` reads every donor's ODA and
-    totals it by year, as a share of one sector's ODA does. With
-    `narrowed_from`, the share's numerator is `donor` narrowed out of that
-    retrieval, `us` or `all_oda`."""
+    covers, and narrowed by `narrowing` before its total, which reduces by
+    `whole_reduction`, and `us` from one stating `numerator`'s for the
+    donors named `us_donors`, by default `donor` alone. With `every_donor`,
+    `us` reads every donor's ODA and totals it by year, as a share of one
+    sector's ODA does. With `narrowed_from`, the share's numerator is
+    `donor` narrowed out of that retrieval, `us` or `all_oda`."""
     kenya = Entity(name="Kenya", role="recipient")
     named = (donor,) if us_donors is None else us_donors
     donors = (
@@ -153,6 +154,7 @@ def us_share_of_kenya_oda(
             period=_PERIOD,
         ),
         group_by=(GroupBy.PERIOD,),
+        reduction=whole_reduction,
         sources={"us": numerator, "all_oda": whole},
         numerator_by_year=every_donor,
         narrowed_to=None if narrowed_from is None else (narrowed_from, donor),
@@ -227,6 +229,7 @@ def _compiled(
     numerator: DatasetRequirement,
     whole: DatasetRequirement,
     group_by: tuple[GroupBy, ...] | None,
+    reduction: Reduction = Reduction.SUM,
     sources: Mapping[str, Mapping[str, Any]],
     axis: str | None = None,
     scope: DenominatorScope | None = None,
@@ -237,20 +240,20 @@ def _compiled(
 ) -> Plan:
     """`numerator`'s share of `whole`, narrowed by each of `narrowing` in turn
     and totalled by `group_by` (`all_by_year`), or of `whole` itself when
-    `group_by` is None. The numerator is totalled by year first
-    (`us_by_year`) when `numerator_by_year`, or with `narrowed_to`, an input
-    id and an entity, is that entity narrowed out of that input. The share
-    is keyed by `axis` and divided by `scope` when given, then read by each
-    of `then`, and the plan compiled with each dataset read from a source
-    stating `sources`' fields."""
+    `group_by` is None, reducing by `reduction`. The numerator is totalled
+    by year first (`us_by_year`) when `numerator_by_year`, or with
+    `narrowed_to`, an input id and an entity, is that entity narrowed out of
+    that input. The share is keyed by `axis` and divided by `scope` when
+    given, then read by each of `then`, and the plan compiled with each
+    dataset read from a source stating `sources`' fields."""
     steps: list[Then] = [*narrowing]
     divisor = narrowing[-1][0].id if narrowing else whole.id
     if group_by is not None:
-        steps.append(_total("all_by_year", divisor, group_by))
+        steps.append(_total("all_by_year", divisor, group_by, reduction))
         divisor = "all_by_year"
     share_of = numerator.id
     if numerator_by_year:
-        steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,)))
+        steps.append(_total("us_by_year", numerator.id, (GroupBy.PERIOD,), Reduction.SUM))
         share_of = "us_by_year"
     numerator_entity = None
     if narrowed_to is not None:
@@ -317,21 +320,24 @@ def _compiled(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-def _total(step_id: str, input_id: str, group_by: tuple[GroupBy, ...]) -> Then:
-    """A total of `input_id` grouped by `group_by`, as a requirement and its operation."""
+def _total(
+    step_id: str, input_id: str, group_by: tuple[GroupBy, ...], reduction: Reduction
+) -> Then:
+    """`input_id` reduced by `reduction` grouped by `group_by`, as a requirement
+    and its operation."""
     return (
         AggregateRequirement(
             id=step_id,
             decision_ids=["measure"],
             input_id=input_id,
-            reduction=Reduction.SUM,
+            reduction=reduction,
             group_by=group_by,
         ),
         AggregateOperation(
             id=step_id,
             requirement_id=step_id,
             input=input_id,
-            reduction=Reduction.SUM,
+            reduction=reduction,
             group_by=group_by,
         ),
     )

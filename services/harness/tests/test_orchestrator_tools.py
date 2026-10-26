@@ -2289,6 +2289,13 @@ async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
     assert result["charts"][0]["title"] == title
 
 
+# A whole naming more donors than fit beside the subject in a title of 120 characters.
+_LONG_WHOLE = (
+    "from the United States, Saint Vincent and the Grenadines, the Democratic Republic of the "
+    "Congo and the Central African Republic"
+)
+
+
 @pytest.mark.parametrize(
     ("title", "whole", "drawn"),
     [
@@ -2308,15 +2315,18 @@ async def test_make_charts_writes_the_period_a_card_shows_into_its_title(
             "from every donor",
             "US share of aid to Kenya, of the total from every donor, 2023 to 2025",
         ),
+        # A whole too long for the title is stated in the card's note.
+        ("US share of aid to Kenya", _LONG_WHOLE, "US share of aid to Kenya, 2023 to 2025"),
     ],
-    ids=["dac_donors", "all_donors", "copied"],
+    ids=["dac_donors", "all_donors", "copied", "long_whole"],
 )
 async def test_make_charts_writes_the_whole_a_card_of_shares_divides_by_into_its_title(
     monkeypatch: pytest.MonkeyPatch, title: str, whole: str, drawn: str
 ) -> None:
     """A frame a plan handed back with the whole its shares divide by
     (`plan_display.share_wholes`) is drawn with that whole in the card's
-    title, before the period."""
+    title, before the period, or in its note when the title of 120
+    characters cannot hold it beside the subject."""
     monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
     executor = WideFrameExecutor(providers=10, view=copy.deepcopy(TEN_VIEW))
     tools, ctx = _tools(executor=executor)
@@ -2327,7 +2337,9 @@ async def test_make_charts_writes_the_whole_a_card_of_shares_divides_by_into_its
     result = await tools["make_charts"]([_wide_chart(title=title)], ctx)
 
     (intent,) = _intents(executor)
-    assert intent["title"] == result["charts"][0]["title"] == drawn
+    (entry,) = result["charts"]
+    assert intent["title"] == entry["title"] == drawn
+    assert (whole in drawn) != (whole in entry.get("note", ""))
 
 
 async def test_a_card_whose_frame_is_unread_names_no_period(
