@@ -422,6 +422,39 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     assert summary.get("group_readings") == readings
 
 
+@pytest.mark.parametrize(
+    ("alternatives", "offered"),
+    [
+        (
+            [{"label": "net disbursements", "axis": "what", "definition": {"spec_id": "spec_n"}}],
+            {"alternatives": [{"spec_id": "spec_n", "label": "net disbursements"}]},
+        ),
+        # Net and gross are both published, but the basis convention settles which one
+        # answers, so search lists no basis sibling and the part offers no count to ask.
+        (
+            [{"label": "constant prices", "axis": "unit", "definition": {"spec_id": "spec_c"}}],
+            {"other_prices": [{"spec_id": "spec_c", "label": "constant prices"}]},
+        ),
+        ([], {}),
+    ],
+    ids=["basis-sibling", "convention-settled-basis", "no-sibling"],
+)
+def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
+    alternatives: list[dict[str, Any]], offered: dict[str, Any]
+) -> None:
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "measure_label": "gross disbursements",
+        "alternative_measures": alternatives,
+    }
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert summary.get("alternatives") == offered.get("alternatives")
+    assert summary.get("other_prices") == offered.get("other_prices")
+    assert ("counted_as" in summary) is bool(offered)
+
+
 def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
     part = _definite("spec_a")
     part["spec"]["resolved"] |= {

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 from data_mcp.digest import render_answer, render_digest
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # Envelope factories. `spec_id`/`sentence`/`confidence`/`coverage`/`stat_vars`/
 # `entities`/`facets` mirror one resolved spec; `_part` wraps one status
@@ -534,6 +538,63 @@ def test_a_definite_spec_names_its_elected_measure_and_each_sibling(
         assert "Counted as" not in digest
     else:
         assert line in digest.splitlines()
+
+
+def _scope_spec() -> dict[str, Any]:
+    """A spec carrying the recorded US health aid to Africa `PartScope` as served."""
+    part_scope = json.loads((_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+    spec = _spec()
+    spec["resolved"]["scope_choices"] = part_scope
+    return spec
+
+
+def test_each_scope_choice_renders_one_line_with_its_active_option_provenance_and_others() -> None:
+    digest = render_digest(_envelope("definite", spec=_scope_spec()))
+
+    lines = [line for line in digest.splitlines() if line.startswith("Scope choice")]
+    assert lines == [
+        "Scope choice sector: sector:120 (explicit); 1 other option available [sector:120+130].",
+        "Scope choice region: region:members_only (carried); "
+        "1 other option available [region:members_and_residuals].",
+        # measure_basis:net is unavailable, so only grant equivalents are offered.
+        "Scope choice measure_basis: measure_basis:gross (default); "
+        "1 other option available [measure_basis:grant_equivalent].",
+    ]
+
+
+def test_a_scope_choice_with_no_other_option_says_so_and_a_partial_option_is_offered() -> None:
+    spec = _scope_spec()
+    choices = spec["resolved"]["scope_choices"]["choices"]
+    for option in choices[0]["options"]:
+        option["availability"] = {"status": "unavailable", "code": "conflicts_with", "detail": {}}
+    choices[1]["options"][0]["availability"] = {"status": "partial", "years": [[2011, 2024]]}
+
+    lines = [
+        line
+        for line in render_digest(_envelope("definite", spec=spec)).splitlines()
+        if line.startswith("Scope choice")
+    ]
+
+    assert lines[0] == "Scope choice sector: sector:120 (explicit); no other option available."
+    assert "[region:members_and_residuals]" in lines[1]
+
+
+def test_the_structured_answer_carries_the_scope_choices_of_a_definite_spec() -> None:
+    answer = render_answer(_envelope("definite", spec=_scope_spec()))
+
+    assert answer["parts"][0]["specs"][0]["scope_choices"][1] == {
+        "axis": "region",
+        "provenance": "carried",
+        "active": {"option_id": "region:members_only", "label": "region:members_only"},
+        "other_options": ["region:members_and_residuals"],
+    }
+
+
+def test_a_spec_without_scope_choices_renders_no_scope_line_and_no_answer_field() -> None:
+    envelope = _envelope("definite", spec=_spec())
+
+    assert "Scope choice" not in render_digest(envelope)
+    assert "scope_choices" not in render_answer(envelope)["parts"][0]["specs"][0]
 
 
 def test_a_spec_with_no_elected_stat_vars_renders_no_measure_line() -> None:

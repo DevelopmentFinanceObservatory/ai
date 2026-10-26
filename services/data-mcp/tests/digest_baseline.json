@@ -110,7 +110,7 @@
       "spec_count": 1,
       "rendered_spec_count": 1,
       "digest_chars": 663,
-      "envelope_chars": 2442
+      "envelope_chars": 2431
     },
     {
       "id": "definite_1_fat",
@@ -134,7 +134,7 @@
       "spec_count": 1,
       "rendered_spec_count": 1,
       "digest_chars": 729,
-      "envelope_chars": 2574
+      "envelope_chars": 2563
     },
     {
       "id": "definite_2",
@@ -142,7 +142,7 @@
       "spec_count": 2,
       "rendered_spec_count": 2,
       "digest_chars": 1290,
-      "envelope_chars": 4189
+      "envelope_chars": 4167
     },
     {
       "id": "definite_3",
@@ -150,7 +150,7 @@
       "spec_count": 3,
       "rendered_spec_count": 3,
       "digest_chars": 1908,
-      "envelope_chars": 6052
+      "envelope_chars": 6019
     },
     {
       "id": "definite_6",
@@ -158,7 +158,7 @@
       "spec_count": 6,
       "rendered_spec_count": 6,
       "digest_chars": 3652,
-      "envelope_chars": 11450
+      "envelope_chars": 11384
     },
     {
       "id": "definite_6_warned",
@@ -166,7 +166,7 @@
       "spec_count": 6,
       "rendered_spec_count": 6,
       "digest_chars": 4017,
-      "envelope_chars": 12479
+      "envelope_chars": 12413
     },
     {
       "id": "definite_many_axes",
@@ -174,7 +174,7 @@
       "spec_count": 1,
       "rendered_spec_count": 1,
       "digest_chars": 781,
-      "envelope_chars": 4230
+      "envelope_chars": 4205
     },
     {
       "id": "definite_source_codes",
@@ -189,7 +189,7 @@
       "status": "definite",
       "spec_count": 1,
       "rendered_spec_count": 1,
-      "digest_chars": 446,
+      "digest_chars": 298,
       "envelope_chars": 3845
     },
     {
@@ -213,7 +213,7 @@
       "status": "no_data",
       "spec_count": 0,
       "rendered_spec_count": 0,
-      "digest_chars": 96,
+      "digest_chars": 61,
       "envelope_chars": 507
     },
     {

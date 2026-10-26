@@ -73,6 +73,9 @@ _CALLER_INPUT_WARNING_CODES: frozenset[str] = frozenset(
 # block's measure choice line, in the order the line names them.
 _CHOICE_AXIS_LEADS: dict[str, str] = {"what": "other counts", "unit": "other prices"}
 
+# The availability statuses of a scope option the caller can ask for.
+_OFFERED_STATUSES = frozenset({"available", "partial"})
+
 _BASIS_DISPLAY: dict[str, str] = {
     "declared_default": "(default)",
     "bound": "(bound)",
@@ -148,7 +151,8 @@ def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:
     its diagnostics warnings sit beside `parts`. A spec is its
     `spec_id`, its rendered sentence as `label`, and the facts the digest's
     measure line states (`_measure`); a definite part's spec adds the
-    elected measure and its siblings (`_measure_choice`). A `no_data` part's flagged
+    elected measure and its siblings (`_measure_choice`) and each scope
+    choice Search settled (`_scope_choices`). A `no_data` part's flagged
     match is left out, since the digest names it as a reason for the refusal
     and it is no spec to retrieve.
     """
@@ -213,7 +217,12 @@ def _answer_spec(spec: Mapping[str, Any], *, definite: bool) -> dict[str, Any]:
         "label": (spec.get("resolved") or {}).get("rendered_sentence"),
         **_measure(spec),
     }
-    return {**entry, **_measure_choice(spec)} if definite else entry
+    if not definite:
+        return entry
+    entry.update(_measure_choice(spec))
+    if scope_choices := _scope_choices(spec):
+        entry["scope_choices"] = scope_choices
+    return entry
 
 
 def _answer_warning(warning: Mapping[str, Any]) -> dict[str, Any]:
@@ -516,7 +525,7 @@ def _spec_lines(spec: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _spec_block(spec: Mapping[str, Any]) -> str:
-    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, entities, facets, facet options."""
+    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, scope choices, entities, facets, facet options."""
     headline, confidence_line = _spec_lines(spec)
     lines = [headline, confidence_line]
     measure = _measure_line(spec)
@@ -525,6 +534,7 @@ def _spec_block(spec: Mapping[str, Any]) -> str:
     choice = _measure_choice_line(spec)
     if choice:
         lines.append(choice)
+    lines.extend(_scope_choice_lines(spec))
     resolved = spec.get("resolved") or {}
     entities = resolved.get("entities") or []
     if entities:
@@ -690,6 +700,65 @@ def _measure_choice_line(spec: Mapping[str, Any]) -> str | None:
         if named:
             pieces.append(f"{lead}: {', '.join(named)}")
     return f"{'; '.join(pieces)}."
+
+
+def _scope_choices(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Each scope choice Search settled for `spec`, as data, in wire order.
+
+    Reads `resolved.scope_choices.choices`. An entry is `{axis, provenance,
+    active, other_options}`: `active` is the option in force as
+    `{option_id, label}`, and `other_options` holds the option ids the
+    caller could ask for instead, the options whose availability is
+    `available` or `partial`. An unavailable option is left out. A choice
+    missing its axis or its active option is left out. Empty when Search
+    states no scope choice.
+    """
+    part_scope = (spec.get("resolved") or {}).get("scope_choices") or {}
+    choices: list[dict[str, Any]] = []
+    for choice in part_scope.get("choices") or []:
+        axis = choice.get("axis")
+        active_id = choice.get("active")
+        if not axis or not active_id:
+            continue
+        options = choice.get("options") or []
+        active = next((o for o in options if o.get("option_id") == active_id), {})
+        others = [
+            option["option_id"]
+            for option in options
+            if option.get("option_id") not in (None, active_id)
+            and (option.get("availability") or {}).get("status") in _OFFERED_STATUSES
+        ]
+        choices.append(
+            {
+                "axis": axis,
+                "provenance": choice.get("provenance"),
+                "active": {"option_id": active_id, "label": active.get("label") or active_id},
+                "other_options": others,
+            }
+        )
+    return choices
+
+
+def _scope_choice_lines(spec: Mapping[str, Any]) -> list[str]:
+    """One line per scope choice (`_scope_choices`): axis, active option, provenance, other options.
+
+    For example "Scope choice sector: Health incl. population and
+    reproductive health (default); 1 other option available [sector:120]."
+    The other options are counted and named by option id; no line names a
+    sample of codes or members. No line when Search states no scope choice.
+    """
+    lines = []
+    for choice in _scope_choices(spec):
+        others = choice["other_options"]
+        if others:
+            noun = "option" if len(others) == 1 else "options"
+            tail = f"{len(others)} other {noun} available [{', '.join(others)}]"
+        else:
+            tail = "no other option available"
+        active = choice["active"]["label"]
+        provenance = f" ({choice['provenance']})" if choice["provenance"] else ""
+        lines.append(f"Scope choice {choice['axis']}: {active}{provenance}; {tail}.")
+    return lines
 
 
 def _entities_line(entities: Sequence[Mapping[str, Any]]) -> str:
