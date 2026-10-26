@@ -825,7 +825,8 @@ class TurnRequest(_WireModel):
     `apply_choice` carries a chip's choice and option, with no message text:
     the turn applies the option to the reading the answer used, with no
     search (`harness.graph.switch.apply_stored_choice`). It cannot come with
-    a message, seeds or a card reference.
+    a message, seeds or a card reference. A request carries `message` or
+    `apply_choice`.
     """
 
     kind: Literal["turn.request"]
@@ -845,8 +846,11 @@ class TurnRequest(_WireModel):
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
-        """Refuse an `apply_choice` beside message text, seeds or a card reference."""
+        """Refuse a request with neither `message` nor `apply_choice`, and an
+        `apply_choice` beside message text, seeds or a card reference."""
         if self.apply_choice is None:
+            if "message" not in self.model_fields_set:
+                raise ValueError("turn.request requires message or apply_choice")
             return self
         stated = [
             name

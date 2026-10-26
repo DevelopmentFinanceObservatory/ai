@@ -4573,17 +4573,18 @@ def _chip_body(choice_id: str, option_id: str) -> dict[str, Any]:
 
 
 def _chip_app(
-    *script: types.Part, executor: Any = None, **fetched: Any
+    *script: types.Part, executor: Any = None, fetches: Sequence[Mapping[str, Any]] = ({},)
 ) -> tuple[FastAPI, dict[str, Any], SearchStub]:
     """An app whose first turn searches US health aid to Africa, fetches it
-    (with `fetched`, the fetch's `scope`, `stat_vars` or `breakdown`) and
-    answers, then runs `script`; Search answers a chip moving its sector to
-    CRS 120 and 130. Returns the app, the scope and the Search stub."""
+    once per entry of `fetches` (each the fetch's `scope`, `stat_vars` or
+    `breakdown`) and answers, then runs `script`; Search answers a chip moving
+    its sector to CRS 120 and 130. Returns the app, the scope and the Search
+    stub."""
     scope = _hashed_scope()
     search = SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
     app = _app(
         search_call("health aid to Africa", "health aid"),
-        fetch_call(scope["compiled"]["spec_id"], **fetched),
+        *(fetch_call(scope["compiled"]["spec_id"], **fetched) for fetched in fetches),
         _text("Health aid to Africa was this much."),
         *script,
         resolver=CannedSearch(_scoped_envelope(scope)),
@@ -4593,31 +4594,57 @@ def _chip_app(
     return app, scope, search
 
 
-async def test_a_chip_fetches_the_switched_reading_narrowed_as_the_answer_fetched_it() -> None:
-    """The answer fetched two countries over 2015 to 2020, summed. The chip's
-    fetch of the switched reading carries the same places, years and reading,
-    so it changes the sector alone."""
-    narrowing = {
-        "scope": {
-            "entities": {"destination": ["Ghana", "Kenya"]},
-            "window": {"kind": "range", "start_year": 2015, "end_year": 2020},
-        },
-        "stat_vars": "sum",
-    }
+_TWO_YEARS = {"kind": "range", "start_year": 2015, "end_year": 2020}
+
+
+@pytest.mark.parametrize(
+    "fetches",
+    [
+        pytest.param(
+            [
+                {
+                    "scope": {
+                        "entities": {"destination": ["Ghana", "Kenya"]},
+                        "window": _TWO_YEARS,
+                    },
+                    "stat_vars": "sum",
+                }
+            ],
+            id="places-and-years",
+        ),
+        pytest.param(
+            [
+                {"scope": {"entities": {"destination": ["Ghana"]}}},
+                {"scope": {"entities": {"destination": ["Kenya"]}}},
+            ],
+            id="ghana-then-kenya",
+        ),
+        pytest.param(
+            [{"scope": {"window": _TWO_YEARS}}, {"scope": {"window": {"kind": "latest"}}}],
+            id="years-then-latest",
+        ),
+    ],
+)
+async def test_a_chip_fetches_the_switched_reading_narrowed_as_the_answer_fetched_it(
+    fetches: list[dict[str, Any]],
+) -> None:
+    """The chip fetches the switched reading once for each way the answer
+    fetched it, with that fetch's places, years and reading, so it changes the
+    sector alone."""
     executor = ScriptedExecutor()
-    app, scope, _ = _chip_app(_text("Now with population."), executor=executor, **narrowing)
+    app, scope, _ = _chip_app(_text("Now with population."), executor=executor, fetches=fetches)
     sector = f"{scope['id']}:sector"
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("health aid to Ghana and Kenya"))
         await _stream(client, "/api/studio/turn", _chip_body(sector, "sector:120+130"))
 
-    answer, chip = [call["args"] for call in executor.calls if call["tool"] == "get_data"]
-    assert (answer["spec_id"], chip["spec_id"]) == (
-        scope["compiled"]["spec_id"],
-        _switched_answer(scope)[0],
-    )
-    assert {key: chip[key] for key in narrowing} == narrowing
-    assert {key: answer[key] for key in narrowing} == narrowing
+    calls = [call["args"] for call in executor.calls if call["tool"] == "get_data"]
+    answer, chip = calls[: len(fetches)], calls[len(fetches) :]
+    assert [c["spec_id"] for c in answer] == [scope["compiled"]["spec_id"]] * len(fetches)
+    assert [c["spec_id"] for c in chip] == [_switched_answer(scope)[0]] * len(fetches)
+    for asked, made, refetched in zip(fetches, answer, chip, strict=True):
+        assert {key: made[key] for key in asked} == asked
+        assert {key: refetched[key] for key in asked} == asked
 
 
 async def test_a_chip_that_no_longer_applies_is_refused_with_its_constraint() -> None:

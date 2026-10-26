@@ -484,6 +484,7 @@ _CHIP = {
     "change",
     [
         pytest.param({"message": "health aid"}, id="with-message"),
+        pytest.param({"apply_choice": None}, id="neither-message-nor-chip"),
         pytest.param(
             {"component_ref": {"component_id": "cmp_1", "intent": "follow_up"}}, id="with-card"
         ),

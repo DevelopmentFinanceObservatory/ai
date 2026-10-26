@@ -624,16 +624,17 @@ class FetchReading(StrictModel):
     or refusal code, or, when `plan_step`, a plan step's retrieval, which the
     planner's ledger text does not show (`render_readings`). `served` is how
     the figures served were counted, kept for a reading with scope choices
-    whose retrieval stated it. `args` are the arguments the `fetch` was called
-    with that shape its frame (`scope`, `stat_vars`, `breakdown`), as JSON,
-    so a chip fetches the switched reading the same way
+    whose retrieval stated it. `args` holds, for each distinct `fetch` of the
+    reading that returned data, oldest first, the arguments that shaped its
+    frame (`scope`, `stat_vars`, `breakdown`), as JSON, so a chip fetches the
+    switched reading each of those ways
     (`harness.graph.switch.apply_stored_choice`)."""
 
     summary: str | None = None
     refusal_code: str | None = None
     plan_step: bool = Field(default=False, exclude_if=lambda plan_step: not plan_step)
     served: ServedScope | None = Field(default=None, exclude_if=lambda served: served is None)
-    args: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda args: not args)
+    args: tuple[dict[str, Any], ...] = Field(default=(), exclude_if=lambda args: not args)
 
 
 # The reading statuses whose own spec_id a search settled on: a `definite`
@@ -839,14 +840,20 @@ class SearchReading(StrictModel):
         args: Mapping[str, Any] | None = None,
     ) -> SearchReading:
         """This reading with the outcome of a `fetch` result for its spec_id,
-        the `args` that shaped a fetch that returned data (`FetchReading.args`),
         and `served`, the retrieval's `harness.scope_choices.served_facts`,
-        when the reading has scope choices."""
+        when the reading has scope choices. A fetch that returned data adds
+        `args`, the arguments that shaped it, to those of the reading's earlier
+        fetches (`FetchReading.args`) unless they hold the same; a refused one
+        keeps the earlier ones. As with `served`, only a reading with scope
+        choices keeps them, since only its chips read them."""
+        held = self.fetch.args if self.fetch is not None else ()
         if result.get("code"):
-            fetched = FetchReading(refusal_code=str(result["code"]))
+            fetched = FetchReading(refusal_code=str(result["code"]), args=held)
         else:
+            shaped = dict(args or {})
             fetched = FetchReading(
-                summary=_str_or_none(result.get("summary")), args=dict(args or {})
+                summary=_str_or_none(result.get("summary")),
+                args=held if self.scope is None or shaped in held else (*held, shaped),
             )
         reading = self.model_copy(update={"fetch": fetched})
         return reading.with_served(served) if served is not None else reading
@@ -1198,9 +1205,9 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     option's label, quoted after the part's text when several parts offer
     chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
-    fetch named its own places (`entities` in `FetchReading.args`' scope):
-    the chip refetches with those places, which replace every role's
-    entities, so the choice would change nothing.
+    fetch named its own places (`entities` in the scope of any of
+    `FetchReading.args`): the chip refetches with those places, which replace
+    every role's entities, so the choice would change nothing.
 
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
@@ -1219,7 +1226,7 @@ def scope_chips(readings: Sequence[Mapping[str, Any]]) -> list[ScopeChip]:
     for reading in used:
         assert reading.scope is not None
         assert reading.fetch is not None
-        placed = "entities" in (reading.fetch.args.get("scope") or {})
+        placed = any("entities" in (args.get("scope") or {}) for args in reading.fetch.args)
         for choice in reading.scope.choices:
             if placed and any(isinstance(o.binding, EntitiesBinding) for o in choice.options):
                 continue

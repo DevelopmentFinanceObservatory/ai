@@ -441,8 +441,8 @@ async def apply_stored_choice(
     The reading's base identity is posted with its entries and the switch
     (`switch_entries`) through `surface` (`_resubmit`), the reading Search
     compiles is stored as the plan-card switch stores it, and its spec_id is
-    fetched with the orchestrator's `fetch` tool, with the arguments the
-    answer's own fetch of the reading was called with (`FetchReading.args`:
+    fetched with the orchestrator's `fetch` tool once for each way the answer
+    fetched the reading, with that fetch's arguments (`FetchReading.args`:
     its places, period and reading of the family), so the chip changes the
     chosen option alone. Its frames, served scope and step reach the turn as
     any fetch's do. The chip applied is
@@ -534,8 +534,12 @@ async def apply_stored_choice(
         args=args,
         result={"outcome": "ok", "frame_refs": [], "summary": f"counting {label}"},
     )
-    shaped = reading.fetch.args if reading.fetch is not None else {}
-    fetched = await fetch(spec_id=switched.spec_id, tool_context=ctx, **shaped)
+    # One fetch per way the answer fetched the reading, one after another, as
+    # the agent's own calls run.
+    fetched = [
+        await fetch(spec_id=switched.spec_id, tool_context=ctx, **shaped)
+        for shaped in (reading.fetch.args if reading.fetch is not None else ()) or ({},)
+    ]
     held = choice.active_option
     moved = [
         f"Search also moved {entry['from_label']} to {entry['to_label']}: {entry['reason']}"
@@ -544,13 +548,14 @@ async def apply_stored_choice(
     lead = (
         f'The user chose to count "{reading.text or reading.sentence or pin}" as {label}'
         f"{f' in place of {held.label}' if held is not None else ''}. Search counted it again "
-        f"as {switched.spec_id}, and its data was fetched for you below. Answer the user's last "
+        f"as {switched.spec_id}, and its data was fetched for you below, once for each way the "
+        "answer fetched it. Answer the user's last "
         "question again from these figures and say what the change did to them. Search and "
         "plan are not available this turn."
     )
     return {
         "status": f"Counting {label}",
-        "text": "\n".join([lead, *moved, json.dumps(fetched)]),
+        "text": "\n".join([lead, *moved, *(json.dumps(result) for result in fetched)]),
     }
 
 

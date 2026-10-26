@@ -930,26 +930,33 @@ def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve(
     assert scope_chips([planned.model_dump(mode="json")]) == []
 
 
+_TWO_YEARS = {"kind": "range", "start_year": 2015, "end_year": 2020}
+
+
 @pytest.mark.parametrize(
-    ("scope", "region_chip"),
+    ("scopes", "region_chip"),
     [
-        ({"window": {"kind": "range", "start_year": 2015, "end_year": 2020}}, True),
-        ({"entities": {"destination": ["Ghana", "Kenya"]}}, False),
+        ([{"window": _TWO_YEARS}], True),
+        ([{"entities": {"destination": ["Ghana", "Kenya"]}}], False),
+        ([{"window": _TWO_YEARS}, {"entities": {"destination": ["Ghana"]}}], False),
     ],
-    ids=["period-only", "places-named"],
+    ids=["period-only", "places-named", "places-named-by-a-later-fetch"],
 )
 def test_a_fetch_that_named_its_places_offers_no_region_chip(
-    scope: dict[str, Any], region_chip: bool
+    scopes: list[dict[str, Any]], region_chip: bool
 ) -> None:
-    """The chip refetches with the answer's places, which replace the region's
-    members, so a region option would change nothing; the other choices still
-    offer theirs. No served record is needed to tell."""
-    reading = SearchReading.from_part(_scoped_part()).with_fetch(
-        {"summary": "30 observations"}, args={"scope": scope}
-    )
+    """The chip refetches with each of the answer's fetches, and places one of
+    them names replace the region's members, so a region option would change
+    nothing; the other choices still offer theirs. No served record is needed
+    to tell."""
+    reading = SearchReading.from_part(_scoped_part())
+    for scope in scopes:
+        reading = reading.with_fetch({"summary": "30 observations"}, args={"scope": scope})
 
     options = [chip.option_id for chip in scope_chips([reading.model_dump(mode="json")])]
 
+    assert reading.fetch is not None
+    assert [args["scope"] for args in reading.fetch.args] == scopes
     assert ("region:members_and_residuals" in options) is region_chip
     assert "sector:120+130" in options
 
