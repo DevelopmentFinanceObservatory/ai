@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from analysis_mcp.frame_ref_resolution import AdmittedFrame
 
+from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_share_of_digest
 from analysis_mcp.engine.aggregate import ComposedUnitSumError
 from analysis_mcp.engine.common import (
@@ -364,7 +365,9 @@ def _share_or_refusal(
         PlaceLevelsMixedError,
         ComposedUnitSumError,
     ) as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+        return to_tool_result(
+            composite_refusal(_refusal_for_engine_error(exc), [numerator.trace, denominator.trace])
+        )
 
 
 @holds_input_rows

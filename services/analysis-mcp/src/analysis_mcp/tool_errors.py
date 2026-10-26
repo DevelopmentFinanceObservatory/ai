@@ -438,6 +438,33 @@ class ToolRefusal:
         )
 
     @classmethod
+    def composite_stat_vars_unsummed(
+        cls, *, distinct_stat_vars: list[str], components: list[dict[str, object]]
+    ) -> Self:
+        """`stat_var_unresolved` for a composite frame read with one series per StatVar:
+        `components` names each component's role and member count
+        (`analysis_mcp.composite.frame_components`), and `get_data` the read that adds
+        them into one series per party and year."""
+        parts = " and ".join(
+            f"{component['role']} ({component['stat_vars']} StatVars)" for component in components
+        )
+        reason = f"the input frame is a composite of {parts}, read with one series per StatVar"
+        return cls(
+            code=ToolErrorCode.STAT_VAR_UNRESOLVED,
+            message=(
+                f"Could not resolve a single StatVar: {reason}. Read the spec again with "
+                'get_data stat_vars="sum", which adds every component\'s StatVars into one '
+                "series per party and year, and pass that frame_ref."
+            ),
+            fix={
+                "reason": reason,
+                "distinct_stat_vars": distinct_stat_vars,
+                "components": components,
+                "get_data": {"stat_vars": "sum"},
+            },
+        )
+
+    @classmethod
     def role_ambiguous(cls, *, parameter: str, columns: list[str], available: list[str]) -> Self:
         """`parameter` names the calling verb's own column-list parameter
         this refusal is about (`group_by`, `entity_by`, `rank_by`,

@@ -789,7 +789,7 @@ class PlannerSeam:
         `harness.graph.PlannerModel.revise`'s contract. The proposal runs
         the chain `propose_plan` runs (`submission.service.submit`), reading
         each first year it needs and compiling each input a calculation needs
-        on another basis (`planner.agent.with_source_reads`), then
+        on another basis or provider scope (`planner.agent.with_source_reads`), then
         the translation, and the plan is ready when `declare_ready` says so.
         A dataset requirement re-pinned to another spec_id cites the
         decisions that pin states and drops those of the one it left, which
@@ -1620,7 +1620,7 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
 
 
 def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
-    """Store each pin compiled to put a calculation's inputs on one basis as a reading of the conversation.
+    """Store each pin compiled to put a calculation's inputs on one basis or provider scope as a reading of the conversation.
 
     `planner_state` holds the pins (`submission.service.aligned_pins`), each
     with Search's answer as a digest. A pin no reading of the conversation
@@ -1628,9 +1628,9 @@ def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
     `switch` node stores a switched one: under the words of the reading it
     was compiled from, keeping that reading's asked, held-open and share
     roles, with its compiled scope on `SearchReading.scope`. Its block is
-    marked as the planner's (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`),
-    so the reading reads `SearchReading.aligned_basis` and its basis entry is
-    never carried as the user's (`harness.scope_choices.carried_entries`).
+    marked as the planner's (`harness.scope_choices.ALIGNED_BLOCK_KEYS`), so the
+    reading reads `SearchReading.aligned_basis` or `aligned_provider` and its
+    entry on that axis is never carried as the user's (`harness.scope_choices.carried_entries`).
     Later turns then find it among the readings, and a switch on its
     plan-card row finds its scope (`harness.graph.switch`).
 

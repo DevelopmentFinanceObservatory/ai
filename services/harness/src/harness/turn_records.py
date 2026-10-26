@@ -670,11 +670,11 @@ class SearchReading(StrictModel):
     offering reading's own in other prices. `scope` is how search counted
     the part (`harness.scope_choices.PartScope`), its scope choices with
     their options and the entries that settled them; `None` when the part's
-    block carries none. `aligned_basis` marks a part the planner compiled to
-    put a calculation's inputs on one measure basis
-    (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`, copied from its block):
-    its explicit basis entry is the planner's, never the user's. `observed_at` is stored and not
-    rendered.
+    block carries none. `aligned_basis` and `aligned_provider` mark a part the
+    planner compiled to put a calculation's inputs on one measure basis or one
+    provider scope (`harness.scope_choices.ALIGNED_BLOCK_KEYS`, copied from its
+    block): its explicit entry on that axis is the planner's, never the user's.
+    `observed_at` is stored and not rendered.
     """
 
     text: str | None
@@ -716,6 +716,7 @@ class SearchReading(StrictModel):
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
     scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
     aligned_basis: bool = Field(default=False, exclude_if=lambda aligned: not aligned)
+    aligned_provider: bool = Field(default=False, exclude_if=lambda aligned: not aligned)
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -756,7 +757,7 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `aligned_basis` too. A `no_data` part's `reason` is the reading's
+        among them, `aligned_basis` and `aligned_provider` too. A `no_data` part's `reason` is the reading's
         `refusal_code`, and `counted_as`,
         `alternatives` and `other_prices` are
         `harness.tool_contracts.measure_choice`'s.
@@ -824,6 +825,7 @@ class SearchReading(StrictModel):
             other_prices=_offers(part.get("other_prices")),
             scope=part.get("scope"),
             aligned_basis=part.get("aligned_basis") is True,
+            aligned_provider=part.get("aligned_provider") is True,
             origin=origin,
             observed_at=observed_at,
         )
@@ -1171,13 +1173,24 @@ def _part_name(reading: SearchReading) -> str:
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
     """The basis line's clauses for one used reading: one per scope choice
-    that names its active option, then one per entry Search dropped."""
+    that names its active option, then one per entry Search dropped.
+
+    A composite frame's served components state what its figures count
+    (`ServedScope.composite_clause`) in place of the choice on that clause's
+    axis, or after the choices when the part has none on it."""
     scope = reading.scope
     assert scope is not None
     served = reading.fetch.served if reading.fetch is not None else None
+    composite = served.composite_clause() if served is not None else None
     clauses = [
-        clause for choice in scope.choices if (clause := _choice_clause(choice, served)) is not None
+        composite[1]
+        if composite is not None and choice.axis == composite[0]
+        else _choice_clause(choice, served)
+        for choice in scope.choices
     ]
+    clauses = [clause for clause in clauses if clause is not None]
+    if composite is not None and all(choice.axis != composite[0] for choice in scope.choices):
+        clauses.append(composite[1])
     for dropped in scope.dropped_entries:
         label = next(
             (

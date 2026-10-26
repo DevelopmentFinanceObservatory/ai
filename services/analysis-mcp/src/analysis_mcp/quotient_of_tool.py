@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from analysis_mcp.engine.quotient_of import QuotientOfResult, Side
     from analysis_mcp.frame_ref_resolution import AdmittedFrame
 
+from analysis_mcp.composite import composite_refusal
 from analysis_mcp.digest import render_quotient_of_digest
 from analysis_mcp.engine.common import (
     FacetHeterogeneousError,
@@ -275,7 +276,9 @@ def _divide_or_refusal(
             denominator_pinned_unit=op_spec.denominator_unit,
         )
     except _ENGINE_ERRORS as exc:
-        return to_tool_result(_refusal_for_engine_error(exc))
+        return to_tool_result(
+            composite_refusal(_refusal_for_engine_error(exc), [numerator.trace, denominator.trace])
+        )
     refusal = _operation_ref_side(result)
     return result if refusal is None else to_tool_result(refusal)
 

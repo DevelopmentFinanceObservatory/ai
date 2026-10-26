@@ -620,16 +620,21 @@ async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conve
 
 @pytest.mark.parametrize(
     ("aligned", "axes"),
-    [(True, ["sector", "region"]), (False, ["sector", "region", "measure_basis"])],
-    ids=["compiled-by-the-planner", "switched-by-the-user"],
+    [
+        ("aligned_basis", ["sector", "region"]),
+        (None, ["sector", "region", "measure_basis"]),
+        ("aligned_provider", ["sector", "region", "measure_basis"]),
+    ],
+    ids=["compiled-by-the-planner", "switched-by-the-user", "provider-compiled-by-the-planner"],
 )
 async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_switched_is(
-    aligned: bool, axes: list[str]
+    aligned: str | None, axes: list[str]
 ):
     """A reading whose gross basis came from an explicit entry on the plan card:
     the planner's, compiled to put a share's inputs on one basis, carries no basis
     to a later "US total ODA" search, while its user-stated sector and region
-    still carry; the same entry from the user's own switch carries."""
+    still carry; the same entry from the user's own switch carries, and so does
+    one on a reading the planner compiled on another axis."""
     reading = SearchReading.from_part(_scoped_part()).model_dump(mode="json")
     basis = reading["scope"]["choices"][2]
     basis["provenance"] = "explicit"
@@ -641,8 +646,8 @@ async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_sw
             "origin": {"kind": "choice", "choice_id": basis["id"]},
         }
     )
-    if aligned:
-        reading["aligned_basis"] = True
+    if aligned is not None:
+        reading[aligned] = True
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
     ctx.state["orchestrator:searches"] = [

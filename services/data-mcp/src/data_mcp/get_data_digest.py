@@ -14,8 +14,8 @@ grammar rides `structuredContent`, and `McpExecutor` merges it into the
 graph's typed refusal (`code`, `retry_mode`, `fix`), and that is what
 reaches the model.
 
-Scope for this module: the acknowledgement line, the coverage line, any
-warnings that qualify that coverage, the period note, the frame reference, the citation
+Scope for this module: the acknowledgement line, the coverage line, the
+components of a composite frame, any warnings that qualify that coverage, the period note, the frame reference, the citation
 line, the version description's steps, caveats and unknowns, per-series statistics, any dropped-role,
 remint-persistence, operation-poll, or degraded-frame notes, and any
 remaining manifest warnings.
@@ -32,6 +32,7 @@ string). `render_get_data_digest` is the public seam.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -48,9 +49,11 @@ from data_mcp.manifest import (
     CoverageModel,
     DefinitionModel,
     Manifest,
+    ManifestComponent,
     PartyTotalsLeftOut,
     SeriesStatisticsModel,
     WarningModel,
+    manifest_components,
     party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
@@ -123,6 +126,14 @@ _MAGNITUDE_WORDS = {"K": "thousands", "M": "millions", "B": "billions"}
 # Its message carries the count of StatVars summed, so it renders outside
 # `_MANIFEST_WARNING_CAP`.
 _STAT_VARS_SUMMED = "stat_vars_summed"
+
+# What the digest calls each component role apis composes a frame from.
+_COMPONENT_NOUNS = {
+    "bilateral": "bilateral",
+    "imputed": "imputed multilateral",
+    "headline_net": "net flows",
+    "headline_ge": "grant equivalents",
+}
 
 # The coverage dimension apis counts after every declared role column.
 _YEARS_DIMENSION = "years"
@@ -299,7 +310,7 @@ def render_get_data_digest(
 
     Returns:
         A short prose digest: an acknowledgement of what was retrieved, its
-        coverage, the group totals apis left out of the frame
+        coverage, the components of a composite frame (`trace.components`), the group totals apis left out of the frame
         (`trace.party_totals_left_out`), any warnings that qualify that coverage, the period note
         of a one-year frame (`common.period_note.period_note`), the frame
         reference for downstream tools, then the citation, per-series statistics, any
@@ -326,6 +337,7 @@ def render_get_data_digest(
         ),
         _coverage_line(manifest.coverage, definition),
     ]
+    sections.extend(_components_lines(manifest_components(manifest.trace)))
     if breakdown is not None:
         sections.append(_breakdown_line(breakdown, spec_id=definition.spec_id))
     sections.extend(_left_out_totals_lines(party_totals_left_out(manifest.trace), entity_labels))
@@ -527,6 +539,79 @@ def _window_text(window: Mapping[str, object] | None) -> str:
     if end is not None:
         return f"through {end}"
     return ""
+
+
+def _components_lines(components: Sequence[ManifestComponent]) -> list[str]:
+    """The line stating a composite frame's components, none for a frame of one table.
+
+    Each component reads as its role, its rows, the years it serves, the zeros written
+    for it and the years left out of it, all as counts and year spans. Components serving
+    disjoint years are spliced, and the line names each year the measure changes at, so
+    a change across it is read as comparing two measures.
+    """
+    if not components:
+        return []
+    line = "Components: " + " · ".join(_component_piece(c) for c in components) + "."
+    served = sorted(
+        (component for component in components if component.periods),
+        key=lambda component: component.periods[0][0],
+    )
+    years = [_years_of(component.periods) for component in served]
+    spliced = len(served) > 1 and sum(len(held) for held in years) == len(set().union(*years))
+    if spliced:
+        breaks = [
+            f"between {max(before)} and {min(after)}, from {_component_noun(earlier)} to "
+            f"{_component_noun(later)}"
+            for (earlier, before), (later, after) in itertools.pairwise(
+                zip(served, years, strict=True)
+            )
+        ]
+        line += (
+            f" The measure changes {'; and '.join(breaks)}: a change across those years "
+            "compares two measures."
+        )
+    return [line]
+
+
+def _component_piece(component: ManifestComponent) -> str:
+    """One component as the components line states it."""
+    row_word = "row" if component.rows == 1 else "rows"
+    piece = f"{_component_noun(component)} {component.rows} {row_word}"
+    if component.periods:
+        piece += f", {_spans_text(component.periods)}"
+    if component.zero_rows:
+        piece += f", {component.zero_rows} of them zeros written where its table reports nothing"
+    if component.dropped_years:
+        dropped = sorted(set(component.dropped_years))
+        year_word = "year" if len(dropped) == 1 else "years"
+        piece += (
+            f", {len(dropped)} {year_word} left out ({_spans_text(_spans(dropped))}) as "
+            "outside the years every component covers"
+        )
+    return piece
+
+
+def _component_noun(component: ManifestComponent) -> str:
+    return _COMPONENT_NOUNS.get(component.role, component.role)
+
+
+def _years_of(periods: Sequence[tuple[int, int]]) -> set[int]:
+    return {year for first, last in periods for year in range(first, last + 1)}
+
+
+def _spans(years: Sequence[int]) -> list[tuple[int, int]]:
+    """Sorted, distinct `years` as closed runs of consecutive years."""
+    spans: list[tuple[int, int]] = []
+    for year in years:
+        if spans and year == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], year)
+        else:
+            spans.append((year, year))
+    return spans
+
+
+def _spans_text(spans: Sequence[tuple[int, int]]) -> str:
+    return ", ".join(str(first) if first == last else f"{first}-{last}" for first, last in spans)
 
 
 def _frame_reference_line(frame_ref: FrameRef) -> str:

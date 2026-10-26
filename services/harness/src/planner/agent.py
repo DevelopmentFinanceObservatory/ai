@@ -61,7 +61,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
-from harness.scope_choices import mark_aligned_basis, switch_entries
+from harness.scope_choices import mark_aligned, option_axis, switch_entries
 from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
@@ -1297,7 +1297,7 @@ def _first_year_unreadable(
     )
 
 
-# The seconds one compile of a pin on another basis may take
+# The seconds one compile of a pin on another basis or provider scope may take
 # (`compile_on_basis`), for the reason `FIRST_YEAR_READ_DEADLINE_SECONDS` gives.
 BASIS_COMPILE_DEADLINE_SECONDS = 10.0
 
@@ -1309,35 +1309,33 @@ async def compile_on_basis(
     state: SessionState,
     deadline_s: float = BASIS_COMPILE_DEADLINE_SECONDS,
 ) -> dict[str, object] | None:
-    """Compile `realignment`'s pin on its calculation's basis and hold the pin Search answers.
+    """Compile `realignment`'s pin on its calculation's basis or provider scope and hold the pin Search answers.
 
-    Posts the pin's base identity with its scope entries and the basis as an
-    explicit entry from its choice, the resubmit a switch on the plan card
+    Posts the pin's base identity with its scope entries and the option, on
+    the axis it names (`harness.scope_choices.option_axis`), as an explicit
+    entry from its choice, the resubmit a switch on the plan card
     posts (`harness.scope_choices.switch_entries`), with the part's entity
     groups, through data-mcp's `resolve_definition`, which stores the
     definition it answers. The answer is shown to the planner as a source
     of its own (`planner.plan.save_pin_sources`), settled as the pin it was
     compiled from, and held as a `submission.service.AlignedPin` with the
     answer's digest (`harness.tool_contracts.resolver_digest`), its block
-    marked as compiled here (`harness.scope_choices.mark_aligned_basis`),
+    marked as compiled here on that axis (`harness.scope_choices.mark_aligned`),
     so the next
     proposal pins it and the planner seam stores it as a reading of the
     conversation (`harness.planner_seam.store_aligned_readings`).
 
     Returns `None` once the pin is held, or the refusal the proposal
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
-    `OPERATION_UNSUPPORTED` when it refuses the basis or answers with no
+    `OPERATION_UNSUPPORTED` when it refuses the option or answers with no
     one dataset.
     """
     sources = pin_sources(state)
     source = sources.get(realignment.spec_id)
     block = source.spec_block(realignment.spec_id) if source is not None else None
     scope = part_scope(realignment.spec_id, block)
-    choice = (
-        next((c for c in scope.choices if c.axis == "measure_basis"), None)
-        if scope is not None
-        else None
-    )
+    axis = option_axis(realignment.option_id)
+    choice = next((c for c in scope.choices if c.axis == axis), None) if scope is not None else None
 
     def unservable(reason: str) -> dict[str, object]:
         return basis_unservable(
@@ -1348,7 +1346,9 @@ async def compile_on_basis(
         )
 
     if source is None or block is None or scope is None or choice is None:
-        return unservable(f"{realignment.requirement_id!r}'s dataset has no basis on record")
+        return unservable(
+            f"{realignment.requirement_id!r}'s dataset has no {axis} choice on record"
+        )
     entries = [
         entry.model_dump(mode="json", exclude_none=True)
         for entry in switch_entries(scope, choice=choice, option_id=realignment.option_id)
@@ -1368,18 +1368,18 @@ async def compile_on_basis(
         if exc.retryable:
             return _basis_uncompiled(realignment, str(exc))
         return unservable(
-            f"Search does not count {realignment.requirement_id!r}'s dataset on the basis its "
+            f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
             f"calculation's other inputs share ({exc.code or 'refused'})"
         )
     spec = part.get("spec") if part.get("status") == "definite" else None
     spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
     if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
         return unservable(
-            f"Search holds no one dataset counting {realignment.requirement_id!r} on the "
-            "basis its calculation's other inputs share"
+            f"Search holds no one dataset counting {realignment.requirement_id!r} the way "
+            "its calculation's other inputs share"
         )
     digest = resolver_digest({"parts": [dict(part)]})
-    mark_aligned_basis(digest)
+    mark_aligned(digest, axis=axis)
     compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
     save_pin_sources(state, {**sources, spec_id: compiled})
     save_aligned_pin(
@@ -1449,14 +1449,14 @@ async def pin_by_search(
 
 
 def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
-    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis that did not complete.
+    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider scope that did not complete.
 
     The same proposal can succeed later, so nothing in it needs changing.
     """
     return problem(
         ProblemCode.SURFACE_UNAVAILABLE,
-        f"{realignment.requirement_id!r} could not be counted on the basis the other inputs of "
-        f"{realignment.step_id!r} share: {cause}. The plan is sound and nothing was recorded; "
+        f"{realignment.requirement_id!r} could not be counted the way the other inputs of "
+        f"{realignment.step_id!r} are: {cause}. The plan is sound and nothing was recorded; "
         "propose it again.",
         outcome=Outcome.REFUSED,
         detail={"basis": realignment._asdict()},
@@ -1478,8 +1478,8 @@ async def with_source_reads(
     dataset while another carries a basis choice needs that input searched
     for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
     requirement's content is never made twice. A calculation whose inputs are counted on
-    different measure bases needs each input it names compiled on their
-    shared basis (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
+    different measure bases or provider scopes needs each input it names
+    compiled on their shared option (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
     compiled is never asked for twice, so a refusal naming one is answered
     as it stands.
     """

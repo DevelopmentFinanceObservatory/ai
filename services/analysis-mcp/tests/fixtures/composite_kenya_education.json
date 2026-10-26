@@ -1,0 +1,420 @@
+{
+  "rows": [
+    {
+      "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 100.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 100.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 50.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 50.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 7.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 7.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11182_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11182_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11220_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11220_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11230_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11230_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11231_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11231_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11232_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11232_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11240_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11240_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11250_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11250_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11260_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11260_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11320_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11320_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11330_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11330_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11420_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11420_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11430_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11430_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode114_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2020",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    },
+    {
+      "stat_var": "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode114_Nominal",
+      "financingProvider": "country/FRA",
+      "financingRecipient": "country/KEN",
+      "time_period": "2021",
+      "value": 0.0,
+      "unit": "USD",
+      "measurementMethod": "GrantEquivalent",
+      "provenance": "provenance/ONEBilateralAndImputedMultilateral"
+    }
+  ],
+  "components": [
+    {
+      "content_version": "cv_703dc494d480326e1e64a1ca985bb375",
+      "dropped_years": [
+        2019
+      ],
+      "periods": [
+        [
+          2020,
+          2021
+        ]
+      ],
+      "provenance": "provenance/OECDCreditorReportingSystem",
+      "role": "bilateral",
+      "rows": 4,
+      "stat_vars": [
+        "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+        "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal"
+      ],
+      "warnings": [],
+      "zero_rows": 0
+    },
+    {
+      "content_version": "cv_e2102db949aaff4b1d873d2370b41369",
+      "dropped_years": [],
+      "periods": [
+        [
+          2020,
+          2021
+        ]
+      ],
+      "provenance": "provenance/ONEImputedMultilateralSectors",
+      "role": "imputed",
+      "rows": 32,
+      "stat_vars": [
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11182_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11220_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11230_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11231_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11232_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11240_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11250_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11260_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11320_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11330_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11420_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11430_Nominal",
+        "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode114_Nominal"
+      ],
+      "warnings": [],
+      "zero_rows": 30
+    }
+  ]
+}

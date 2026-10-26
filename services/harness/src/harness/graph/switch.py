@@ -59,7 +59,7 @@ from harness.plan_display import listed_together
 from harness.scope_choices import (
     PartScope,
     ScopeChoice,
-    mark_aligned_basis,
+    mark_aligned,
     moved_choices,
     switch_entries,
 )
@@ -370,16 +370,22 @@ def _reading_digest(item: _Switched, *, axis: str) -> dict[str, Any]:
 
     Search echoes the spec_id data-mcp posts as the part's text, so the
     reading keeps the words the user's search used. A reading the planner
-    compiled to align a basis (`SearchReading.aligned_basis`) keeps that
-    mark through a switch of another axis, since its basis entry is still
-    the planner's; a switch of the basis is the user's and drops it
-    (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`).
+    compiled to align a basis or a provider scope (`SearchReading.aligned_basis`,
+    `aligned_provider`) keeps that mark through a switch of another axis, since
+    its entry on the aligned axis is still the planner's; a switch of the
+    aligned axis is the user's and drops it
+    (`harness.scope_choices.ALIGNED_BLOCK_KEYS`).
     """
     digest = resolver_digest(item.envelope)
     (part,) = digest.get("part_digests") or [{}]
     part["variable"] = item.reading.text
-    if item.reading.aligned_basis and axis != "measure_basis":
-        mark_aligned_basis(digest)
+    marked = {
+        "measure_basis": item.reading.aligned_basis,
+        "provider": item.reading.aligned_provider,
+    }
+    for aligned, held in marked.items():
+        if held and axis != aligned:
+            mark_aligned(digest, axis=aligned)
     return digest
 
 

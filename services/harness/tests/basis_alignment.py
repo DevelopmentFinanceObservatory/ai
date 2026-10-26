@@ -125,3 +125,96 @@ class BasisCompiles:
             choice["provenance"] = "explicit"
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+# The spec_id Search answers the US donor total under counting bilateral flows
+# alone, compiled from `TOTAL` (`ProviderCompiles`).
+TOTAL_BILATERAL = f"spec_{'5' * 32}"
+
+_PROVIDER_LABELS = {
+    "provider:bilateral": "bilateral aid only",
+    "provider:inclusive": "bilateral plus imputed multilateral aid",
+}
+
+
+def provider_block(
+    spec_id: str,
+    *,
+    narrow: bool,
+    active: str,
+    provenance: str = "default",
+    basis: str = "measure_basis:gross",
+    bilateral: str = "available",
+) -> dict[str, Any]:
+    """`basis_block` counted gross by default as `basis`, carrying a provider
+    choice counted as `active` by `provenance`, its bilateral option `bilateral`,
+    as dfo-apis writes the provider axis (`ProviderBinding`)."""
+    block = basis_block(spec_id, narrow=narrow, active=basis)
+    scope = block["resolved"]["scope_choices"]
+    scope["choices"].append(
+        {
+            "id": f"{scope['id']}:provider",
+            "axis": "provider",
+            "rule": "provider_scope",
+            "provenance": provenance,
+            "active": active,
+            "options": [
+                {
+                    "option_id": option_id,
+                    "label": label,
+                    "binding": {"kind": "provider", "scope": option_id.split(":")[1]},
+                    "availability": (
+                        {"status": "unavailable", "code": "provider_not_offered", "detail": {}}
+                        if option_id == "provider:bilateral" and bilateral == "unavailable"
+                        else {"status": "available", "detail": {}}
+                    ),
+                }
+                for option_id, label in _PROVIDER_LABELS.items()
+            ],
+        }
+    )
+    if provenance == "explicit":
+        scope["entries"] = [
+            *scope["entries"],
+            {
+                "axis": "provider",
+                "option_id": active,
+                "provenance": "explicit",
+                "origin": {"kind": "text", "text": "aid", "start": 0, "end": 3},
+            },
+        ]
+    return block
+
+
+class ProviderCompiles:
+    """A tool surface whose `resolve_definition` compiles the US donor total on the
+    provider scope its explicit entry posts, bilateral flows alone as
+    `TOTAL_BILATERAL`, recording each call's arguments in `calls`."""
+
+    def __init__(self) -> None:
+        self.calls: list[Mapping[str, Any]] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        assert tool.name == "resolve_definition", tool
+        self.calls.append(arguments)
+        (provider,) = [
+            e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
+        ]
+        assert provider == "provider:bilateral", provider
+        block = provider_block(TOTAL_BILATERAL, narrow=False, active=provider)
+        scope = block["resolved"]["scope_choices"]
+        scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
+        scope["base"]["identity"] = arguments["identity"]
+        scope["entries"] = arguments["scope_entries"]
+        for choice in scope["choices"]:
+            choice["id"] = f"{arguments['spec_id']}:{choice['axis']}"
+        provider_choice = next(c for c in scope["choices"] if c["axis"] == "provider")
+        provider_choice["provenance"] = "explicit"
+        part = {"status": "definite", "spec": block}
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})

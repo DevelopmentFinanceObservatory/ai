@@ -931,6 +931,110 @@ def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause()
     )
 
 
+def _composite_manifest(identity: dict[str, Any], **periods: list[list[int]]) -> dict[str, Any]:
+    """`_manifest` of a composite frame whose `trace.components` serve each role over its
+    `periods`, shaped as dfo-apis' `materialise.composite.ComponentSummary` writes them."""
+    return _manifest(identity) | {
+        "trace": {
+            "components": [
+                {"role": role, "periods": spans, "dropped_years": [], "rows": 10, "zero_rows": 0}
+                for role, spans in periods.items()
+            ]
+        }
+    }
+
+
+def test_a_fetch_keeps_the_components_of_a_composite_frame() -> None:
+    # Minted by dfo-apis' `tests/datasets_api/test_mint_composite.py` client.
+    manifest = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/mint_composite_kenya_education.json"
+        ).read_text()
+    )
+
+    facts = served_facts(manifest)
+
+    assert facts is not None
+    assert facts["components"] == [
+        {"role": "bilateral", "periods": [[2020, 2021]]},
+        {"role": "imputed", "periods": [[2020, 2021]]},
+    ]
+
+
+_INCLUSIVE = {
+    "id": "spec_choice:provider",
+    "axis": "provider",
+    "rule": "provider_scope",
+    "provenance": "explicit",
+    "active": "provider:inclusive",
+    "options": [
+        {
+            "option_id": "provider:bilateral",
+            "label": "bilateral aid only",
+            "binding": {"kind": "provider", "scope": "bilateral"},
+            "availability": {"status": "available"},
+        },
+        {
+            "option_id": "provider:inclusive",
+            "label": "including imputed multilateral aid",
+            "binding": {"kind": "provider", "scope": "inclusive"},
+            "availability": {
+                "status": "partial",
+                "years": [[2011, 2024]],
+                "code": "imputed_coverage",
+            },
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("choices", "manifest", "line"),
+    [
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], imputed=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE.removesuffix(".")
+            + " · bilateral plus imputed multilateral, 2011 to 2024.",
+            id="stacked",
+        ),
+        pytest.param(
+            [_INCLUSIVE],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], imputed=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE.removesuffix(".")
+            + " · bilateral plus imputed multilateral, 2011 to 2024.",
+            id="stacked-as-the-provider-choice",
+        ),
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(netting="Net"),
+                headline_net=[[2015, 2017]],
+                headline_ge=[[2018, 2024]],
+            ),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · net to 2017, grant equivalents from 2018.",
+            id="headline",
+        ),
+    ],
+)
+def test_the_basis_line_states_a_composite_frame_from_its_served_components(
+    choices: list[dict[str, Any]], manifest: dict[str, Any], line: str
+) -> None:
+    part = _example_part()
+    part["scope"]["choices"].extend(copy.deepcopy(choices))
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"}, served=served_facts(manifest)
+    )
+
+    assert basis_line([reading.model_dump(mode="json")], plans=[]) == line
+
+
 @pytest.mark.parametrize(
     ("provenance", "code", "why"),
     [

@@ -186,7 +186,16 @@ from translator.referral import (
 )
 from translator.tool import Translate, build_translate
 
-from ..basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, BasisCompiles, basis_block
+from ..basis_alignment import (
+    HEALTH,
+    TOTAL,
+    TOTAL_BILATERAL,
+    TOTAL_GROSS,
+    BasisCompiles,
+    ProviderCompiles,
+    basis_block,
+    provider_block,
+)
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
@@ -4875,6 +4884,183 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
     }
     assert surface.calls == []
     assert load_plan(ctx.state) is None
+
+
+# --- a calculation's inputs on one provider scope ---
+
+
+def _sum_of_health(propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision) -> Any:
+    """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`."""
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    return propose(
+        question="US health aid plus US total aid?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total ODA", TOTAL),
+            SumOfRequirement(
+                id="sum",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="health"),
+                right=RequirementSide(input_id="total"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+
+@pytest.mark.parametrize(
+    ("health", "total", "realign"),
+    [
+        pytest.param(
+            ("provider:bilateral", "default"),
+            ("provider:inclusive", "default"),
+            [(TOTAL, "provider:bilateral", "total")],
+            id="narrowest-wins",
+        ),
+        pytest.param(
+            ("provider:bilateral", "default"),
+            ("provider:inclusive", "explicit"),
+            [(HEALTH, "provider:inclusive", "health")],
+            id="stated-wins",
+        ),
+    ],
+)
+@pytest.mark.parametrize("calculation", [_share_of_health, _sum_of_health], ids=["share", "sum"])
+def test_a_calculation_counts_its_inputs_on_one_provider_scope(
+    decision: DecisionFactory,
+    health: tuple[str, str],
+    total: tuple[str, str],
+    realign: list[tuple[str, str, str]],
+    calculation: Callable[..., Any],
+) -> None:
+    """US health aid counted bilateral beside the US total counted with imputed
+    multilateral flows: adding them counts the bilateral flows twice, so the
+    inputs are put on one provider scope, the one the user stated, else the
+    narrower part's. With no tool surface to compile through, the proposal is
+    refused naming the input to compile."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active=health[0], provenance=health[1]),
+        provider_block(TOTAL, narrow=False, active=total[0], provenance=total[1]),
+    )
+
+    refused = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert [
+        (r["spec_id"], r["option_id"], r["requirement_id"]) for r in refused["detail"]["realign"]
+    ] == realign
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("calculation", "code"),
+    [
+        (_share_of_health, Outcome.OK.value),
+        (_sum_of_health, ProblemCode.OPERATION_UNSUPPORTED.value),
+    ],
+    ids=["share", "sum"],
+)
+def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_never_summed(
+    decision: DecisionFactory, calculation: Callable[..., Any], code: str
+) -> None:
+    """ "Bilateral health aid as a share of all US aid with multilateral": the share
+    contrasts the two scopes as stated. The same two inputs summed would count the
+    bilateral flows twice, so the sum is refused."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
+        provider_block(TOTAL, narrow=False, active="provider:inclusive", provenance="explicit"),
+    )
+
+    result = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == ProblemCode.OPERATION_UNSUPPORTED.value:
+        assert result["detail"]["basis"] == {
+            "spec_id": TOTAL,
+            "option_id": "provider:bilateral",
+            "requirement_id": "total",
+            "step_id": "sum",
+        }
+        assert load_plan(ctx.state) is None
+
+
+def test_an_input_that_would_move_on_both_basis_and_provider_scope_is_refused(
+    decision: DecisionFactory,
+) -> None:
+    """The total counted in grant equivalents with imputed multilateral flows, beside
+    health aid counted gross and bilateral: one compile moves one option, so the
+    share is refused naming the total."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral"),
+        provider_block(
+            TOTAL,
+            narrow=False,
+            active="provider:inclusive",
+            basis="measure_basis:grant_equivalent",
+        ),
+    )
+
+    refused = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
+    assert refused["detail"]["basis"]["requirement_id"] == "total"
+
+
+async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planners_decision(
+    decision: DecisionFactory,
+) -> None:
+    """The US total is compiled on bilateral flows alone through the resubmit a switch
+    posts; the sum reads the compiled pin, and the provider decision on it is the
+    planner's, saying why."""
+    surface = ProviderCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral"),
+        provider_block(TOTAL, narrow=False, active="provider:inclusive"),
+    )
+
+    result = await _sum_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    assert call["scope_entries"][-1] == {
+        "axis": "provider",
+        "option_id": "provider:bilateral",
+        "provenance": "explicit",
+        "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:provider"},
+    }
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("total").source_spec_id == TOTAL_BILATERAL  # type: ignore[union-attr]
+    (aligned,) = [
+        d
+        for d in plan.decisions
+        if d.scope is not None
+        and d.scope.axis == "provider"
+        and d.fixes is not None
+        and d.fixes.source_spec_id == TOTAL_BILATERAL
+    ]
+    assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert aligned.active_option_id == "provider:bilateral"
 
 
 @pytest.mark.parametrize(

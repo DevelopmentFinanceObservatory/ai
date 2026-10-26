@@ -56,6 +56,11 @@ OptionId = Annotated[str, Field(pattern=r"^(sector|region|measure_basis|provider
 YearSpan = tuple[int, int]
 
 
+def option_axis(option_id: str) -> str:
+    """The axis an `OptionId` names, the part before its colon (`provider` of `provider:inclusive`)."""
+    return option_id.split(":", 1)[0]
+
+
 class TextOrigin(StrictModel):
     """The words of the user's message an explicit entry was read from."""
 
@@ -235,44 +240,60 @@ class PartScope(StrictModel):
         return cls.model_validate(raw, extra="ignore")
 
 
-# The key a spec block carries when the planner compiled it to put a
-# calculation's inputs on one measure basis (`planner.agent.compile_on_basis`):
-# its explicit basis entry is the planner's, never the user's. The block is
-# the one source of truth. `harness.tool_contracts.reading_facts` copies it to
-# the stored reading (`harness.turn_records.SearchReading.aligned_basis`),
-# which `carried_entries`' callers read, and `submission.service.
-# _aligned_bases` reads it off the pin's block. A block Search answers afresh
-# carries none, so a switch of the basis drops it; a switch of another axis
-# keeps it (`harness.graph.switch`).
-ALIGNED_BASIS_BLOCK_KEY = "_aligned_basis"
+# The key a spec block carries for each axis the planner compiled it on, to put
+# a calculation's inputs on one measure basis or one provider scope
+# (`planner.agent.compile_on_basis`): its explicit entry on that axis is the
+# planner's, never the user's. The block is the one source of truth.
+# `harness.tool_contracts.reading_facts` copies each to the stored reading
+# (`harness.turn_records.SearchReading.aligned_basis` and `aligned_provider`),
+# which `carried_entries`' callers read, and `submission.service._aligned_bases`
+# reads them off the pin's block (`aligned_axes`). A block Search answers afresh
+# carries none, so a switch of an aligned axis drops its key; a switch of another
+# axis keeps it (`harness.graph.switch`).
+ALIGNED_BLOCK_KEYS: dict[str, str] = {
+    "measure_basis": "_aligned_basis",
+    "provider": "_aligned_provider",
+}
+ALIGNED_BASIS_BLOCK_KEY = ALIGNED_BLOCK_KEYS["measure_basis"]
 
 
-def mark_aligned_basis(digest: dict[str, Any]) -> None:
+def aligned_axes(block: Mapping[str, Any] | None) -> frozenset[str]:
+    """The axes `block`, a spec block, was compiled on by the planner (`ALIGNED_BLOCK_KEYS`)."""
+    return frozenset(
+        axis for axis, key in ALIGNED_BLOCK_KEYS.items() if (block or {}).get(key) is True
+    )
+
+
+def mark_aligned(digest: dict[str, Any], *, axis: str) -> None:
     """Mark each spec block of `digest`, a `harness.tool_contracts.resolver_digest`,
-    as compiled by the planner to align a basis (`ALIGNED_BASIS_BLOCK_KEY`)."""
+    as compiled by the planner on `axis` (`ALIGNED_BLOCK_KEYS`)."""
     for holder in (digest, *(digest.get("part_digests") or ())):
         if isinstance(holder.get("spec_block"), Mapping):
-            holder["spec_block"] = {**holder["spec_block"], ALIGNED_BASIS_BLOCK_KEY: True}
+            holder["spec_block"] = {**holder["spec_block"], ALIGNED_BLOCK_KEYS[axis]: True}
 
 
-def carried_entries(scopes: Iterable[PartScope], *, aligned: Collection[str] = ()) -> list[Entry]:
+def carried_entries(
+    scopes: Iterable[PartScope], *, aligned: Mapping[str, Collection[str]] | None = None
+) -> list[Entry]:
     """The entries a later search carries from `scopes`, oldest first.
 
     Every choice an explicit or carried entry settled becomes a `carried`
     entry for its active option, with the concept of the entry that settled
     it and a `choice` origin naming the choice. A choice a declared default
-    settled carries nothing, and neither does the measure basis of a scope
-    whose compiled spec_id is in `aligned`: the planner compiled it to put a
-    calculation's inputs on one basis (`harness.turn_records.SearchReading.
-    aligned_basis`), so that entry is its own, and that scope's other
+    settled carries nothing, and neither does a choice on an axis `aligned`
+    lists for the scope's compiled spec_id: the planner compiled it on that
+    axis to put a calculation's inputs on one measure basis or one provider
+    scope (`harness.turn_records.SearchReading.aligned_basis` and
+    `aligned_provider`), so that entry is its own, and that scope's other
     choices, the user's, still carry. The newest choice per axis and
     concept wins.
     """
+    aligned = aligned or {}
     newest: dict[tuple[str, str | None], Entry] = {}
     for scope in scopes:
         for choice in scope.choices:
-            if choice.provenance == "default" or (
-                choice.axis == "measure_basis" and scope.compiled.spec_id in aligned
+            if choice.provenance == "default" or choice.axis in aligned.get(
+                scope.compiled.spec_id, ()
             ):
                 continue
             concept = next(
@@ -429,6 +450,35 @@ class ServedScope(StrictModel):
             ),
         )
 
+    def composite_clause(self) -> tuple[ScopeAxis, str] | None:
+        """What a composite frame's served components count, as one basis-line clause, with
+        the axis whose choice it speaks for; `None` for figures served whole.
+
+        Bilateral and imputed components stacked over the same years read "bilateral
+        plus imputed multilateral" with the years served ("2011 to 2024"), on the
+        provider axis. The OECD headline's net and grant-equivalent components read
+        "net to 2017, grant equivalents from 2018", by the last year served net and the
+        first served in grant equivalents, on the measure-basis axis.
+        """
+        years = {
+            served.role: {
+                year for first, last in served.periods or () for year in range(first, last + 1)
+            }
+            for served in self.components
+        }
+        if years.keys() == {"bilateral", "imputed"}:
+            held = sorted(years["bilateral"] | years["imputed"])
+            served_years = f", {_years_text(held)}" if held else ""
+            return "provider", f"bilateral plus imputed multilateral{served_years}"
+        if years.keys() and years.keys() <= {"headline_net", "headline_ge"}:
+            pieces = []
+            if net := years.get("headline_net"):
+                pieces.append(f"net to {max(net)}")
+            if grant := years.get("headline_ge"):
+                pieces.append(f"grant equivalents from {min(grant)}")
+            return ("measure_basis", ", ".join(pieces)) if pieces else None
+        return None
+
     def narrowed(self, role: str) -> bool:
         """Whether the fetch bound fewer of `role`'s members than the part compiles to."""
         return any(served.role == role and served.narrowed for served in self.roles)
@@ -440,6 +490,17 @@ class ServedScope(StrictModel):
         )
 
 
+def _years_text(years: list[int]) -> str:
+    """Sorted, distinct `years` as runs: "2011 to 2024", or "2005, 2011 to 2024"."""
+    runs: list[list[int]] = []
+    for year in years:
+        if runs and year == runs[-1][1] + 1:
+            runs[-1][1] = year
+        else:
+            runs.append([year, year])
+    return ", ".join(str(first) if first == last else f"{first} to {last}" for first, last in runs)
+
+
 _NETTING_SLOT = "nettingBasis"
 
 
@@ -448,8 +509,10 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
 
     Read from the minted definition's identity (`definition.identity`): the
     refs bound on each entity role, the shape's measured property and the
-    `nettingBasis` slot's bound value. The frame is one `whole` component
-    over the manifest's covered window (`coverage.window`). JSON only, so a
+    `nettingBasis` slot's bound value. A composite frame's components are its
+    trace's (`trace.components`), each role with the years it serves; any other
+    frame is one `whole` component over the manifest's covered window
+    (`coverage.window`). JSON only, so a
     `get_data` result can carry it. `None` for a manifest naming no
     definition.
     """
@@ -472,6 +535,15 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
     start, end = window.get("start_year"), window.get("end_year")
     periods = [[start, end]] if isinstance(start, int) and isinstance(end, int) else None
     measured = shape.get("measured_property")
+    listed = (manifest.get("trace") or {}).get("components")
+    components = (
+        [
+            {"role": component.get("role"), "periods": component.get("periods") or None}
+            for component in listed
+        ]
+        if isinstance(listed, list) and listed
+        else [{"role": "whole", "periods": periods}]
+    )
     return {
         "spec_id": spec_id,
         "entities": {
@@ -480,7 +552,7 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
         },
         "measured_property": measured if isinstance(measured, str) else None,
         "netting_basis": netting if isinstance(netting, str) else None,
-        "components": [{"role": "whole", "periods": periods}],
+        "components": components,
     }
 
 
