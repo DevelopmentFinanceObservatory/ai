@@ -72,7 +72,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import SearchPart
+from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
@@ -91,6 +91,7 @@ from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
     AskBreakdown,
+    SessionState,
     earlier_block,
     recorded_identity,
 )
@@ -119,6 +120,7 @@ from harness.chart_binding import (
     select_binding_ok,
     top_members,
 )
+from harness.conversation import current_user_message
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -130,6 +132,7 @@ from harness.graph.state import (
     ORCHESTRATOR_CALLS_KEY,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_PENDING_KEY,
+    ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_READINGS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
@@ -154,6 +157,7 @@ from harness.reply_figures import (
     with_coordinates,
 )
 from harness.rolling_cards import named_year
+from harness.scope_choices import PartScope, carried_entries
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -1567,11 +1571,42 @@ def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
 
 class Resolver(Protocol):
     """Stands in for data-mcp `search`: the question and its search parts ->
-    the search digest (`harness.tool_contracts.resolver_digest`)."""
+    the search digest (`harness.tool_contracts.resolver_digest`).
+
+    `context` is the conversation a parsed search is made in
+    (`_search_context`); a raw-text search is sent none.
+    """
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]: ...
+
+
+def _search_context(state: SessionState) -> SearchContext:
+    """The conversation a parsed search is made in: the user's message for the
+    turn (`current_user_message`) and the entries carried from the scope
+    choices of every earlier search, the earlier turns' readings
+    (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`).
+    """
+    readings = [
+        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+    ]
+    scopes = [
+        PartScope.model_validate(reading["scope"]) for reading in readings if reading.get("scope")
+    ]
+    return SearchContext(
+        user_message=current_user_message.get() or None,
+        carried_entries=[
+            entry.model_dump(mode="json", exclude_none=True) for entry in carried_entries(scopes)
+        ],
+    )
 
 
 def build_orchestrator_tools(
@@ -1738,10 +1773,15 @@ def build_orchestrator_tools(
         if spent:
             return spent
         parts = parts or []
-        raw_text = as_text or not parts
-        wire_parts = [] if raw_text else [part.model_dump(exclude_none=True) for part in parts]
         try:
-            digest = await resolver(question=query, parts=wire_parts, raw_text=raw_text)
+            if as_text or not parts:
+                digest = await resolver(question=query, parts=[], raw_text=True)
+            else:
+                digest = await resolver(
+                    question=query,
+                    parts=[part.model_dump(exclude_none=True) for part in parts],
+                    context=_search_context(tool_context.state),
+                )
         except ResolverError as exc:
             # The service's own code and retry mode word the user's line for
             # the failed search.

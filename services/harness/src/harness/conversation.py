@@ -8,6 +8,11 @@ analysis-mcp record as a stored frame's `writer`. It is a contextvar
 because the value has to cross the graph: studio -> ADK runner -> graph
 node -> executor, and none of those seams carries wire identity, since the
 graph must stay runnable without any studio layer at all.
+
+`current_user_message` holds the user's own message for the turn, which the
+orchestrator's `search` sends Search to read intent and explicit scope from.
+`harness.studio` sets it at the start of a turn and again on each resume,
+when an amendment or an answer to a question has been added to it.
 """
 
 from __future__ import annotations
@@ -31,6 +36,11 @@ current_conversation_key: ContextVar[tuple[str, str] | None] = ContextVar(
 )
 
 
+# The user's message for the current turn as `ConversationState.turn_user_message`
+# holds it, amendments and answers included; `None` outside a Studio turn.
+current_user_message: ContextVar[str | None] = ContextVar("studio_user_message", default=None)
+
+
 def current_conversation_caller() -> str | None:
     """The caller the harness names in its MCP calls: the current
     conversation's, or `None` outside any conversation, which sends no
@@ -52,4 +62,5 @@ __all__ = [
     "current_conversation_caller",
     "current_conversation_id",
     "current_conversation_key",
+    "current_user_message",
 ]

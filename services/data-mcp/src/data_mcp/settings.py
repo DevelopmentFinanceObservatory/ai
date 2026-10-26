@@ -146,6 +146,9 @@ class Settings(FrameServiceSettings):
     rebuilds, so at the worst case one of the harness's own mints waits up to 30s for
     one (`materialise_wait_seconds`) and is then refused. Calls through the harness's
     own mount are not counted.
+
+    `search_sends_conversation_context` gates the parsed input's `user_message`
+    and `carried_entries` (its own description says why it defaults off).
     """
 
     dfo_apis_url: str = "http://localhost:8083"
@@ -168,6 +171,18 @@ class Settings(FrameServiceSettings):
     )
     operation_poll_interval_s: float = Field(default=2.0, ge=0.5, allow_inf_nan=False)
     external_mint_concurrency: int = Field(default=1, ge=1)
+    search_sends_conversation_context: bool = Field(
+        default=False,
+        description=(
+            "Whether `search` posts the conversation context its caller sends "
+            "(`search_tool.SearchContext`: the user's message and the carried scope "
+            "entries) to the Search API as the parsed input's `user_message` and "
+            "`carried_entries`. Leave it off until the dfo-apis deployment behind "
+            "`dfo_apis_url` declares both members: the API refuses a request with an "
+            "unknown field with 422, so every parsed search would fail. Off, the "
+            "context is read and dropped."
+        ),
+    )
 
     @field_validator("dfo_site_origin", mode="before")
     @classmethod

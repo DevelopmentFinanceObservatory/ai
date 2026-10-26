@@ -51,6 +51,7 @@ from pydantic import ConfigDict, Field, model_validator
 from translator.discovery import BLOCKING_WARNING_CODES
 
 from harness import plan_display
+from harness.scope_choices import PartScope, ScopeChoice
 from harness.tool_contracts import requested_range, series_description
 
 # Where a source or reading came from: the orchestrator's `search`, the
@@ -640,8 +641,10 @@ class SearchReading(StrictModel):
     among its `alternatives` or `other_prices`, set on the reading a `fetch`
     of such a spec_id gains (`harness.orchestrator_tools`), whose
     `counted_as` is then the count it reads: the offered count, or the
-    offering reading's own in other prices. `observed_at` is stored and not
-    rendered.
+    offering reading's own in other prices. `scope` is how search counted
+    the part (`harness.scope_choices.PartScope`), its scope choices with
+    their options and the entries that settled them; `None` when the part's
+    block carries none. `observed_at` is stored and not rendered.
     """
 
     text: str | None
@@ -681,6 +684,7 @@ class SearchReading(StrictModel):
         default=(), exclude_if=lambda prices: not prices
     )
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
+    scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -720,8 +724,9 @@ class SearchReading(StrictModel):
 
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
-        `open_roles` (`harness.orchestrator_tools`) when present. A `no_data` part's
-        `reason` is the reading's `refusal_code`, and `counted_as`,
+        `open_roles` (`harness.orchestrator_tools`) when present, `scope`
+        among them. A `no_data` part's `reason` is the reading's
+        `refusal_code`, and `counted_as`,
         `alternatives` and `other_prices` are
         `harness.tool_contracts.measure_choice`'s.
         """
@@ -786,6 +791,7 @@ class SearchReading(StrictModel):
             counted_as=_str_or_none(part.get("counted_as")),
             alternatives=_offers(part.get("alternatives")),
             other_prices=_offers(part.get("other_prices")),
+            scope=part.get("scope"),
             origin=origin,
             observed_at=observed_at,
         )
@@ -1022,16 +1028,17 @@ def render_readings(
     close the text, once each, those in `skills_read` marked `*`.
 
     Levels, tried in order until one fits: everything, then sentences cut to
-    160 characters and candidate labels to 60, then sentences and labels
-    dropped, then the oldest readings folded one at a time to their first
-    line and whether a fetch ran, then the oldest readings dropped one at a
-    time with a count of how many. The last level's text is cut to `budget`
+    160 characters and candidate and scope option labels to 60, then
+    sentences and labels dropped, then the oldest readings folded one at a
+    time to their first line and whether a fetch ran, then the oldest
+    readings dropped one at a time with a count of how many. The last level's text is cut to `budget`
     if it still does not fit, and by then it names no reading.
 
     `spec_ids` holds each reading's own spec_id and, unless the reading is
     folded, each of its candidates', for every reading the text shows.
     `other_counts` holds the spec_id of each other count an unfolded
-    reading names. A folded reading drops its measure choice.
+    reading names. A folded reading drops its measure choice and its scope
+    choices, each otherwise one line (`_scope_text`).
     """
     rendered = RenderedReadings("", ())
     for detail in range(3):
@@ -1117,6 +1124,8 @@ def _reading_lines(number: int, reading: SearchReading, *, detail: int, folded: 
         lines.append(f"   {choice}")
     if sibling := _sibling_text(reading):
         lines.append(f"   {sibling}")
+    if reading.scope is not None:
+        lines.extend(f"   {_scope_text(choice, detail=detail)}" for choice in reading.scope.choices)
     if codes:
         lines.append(f"   warnings: {codes}")
     if reading.fetch is not None:
@@ -1133,6 +1142,30 @@ def _measure_choice(reading: SearchReading) -> str:
     return measure_choice_text(
         reading.counted_as, reading.alternatives, other_prices=reading.other_prices
     )
+
+
+def _scope_text(choice: ScopeChoice, *, detail: int) -> str:
+    """One scope choice: its axis, active option, what settled it and how many
+    other options could be served.
+
+    "scope region: region:members_and_residuals Africa incl. regional buckets
+    (default; 1 of 1 other options available)". The label is cut to 60
+    characters at detail 1 and dropped at detail 2. A partial option, served
+    for some of the years asked, is counted apart.
+    """
+    active = choice.active_option
+    label = (
+        ""
+        if active is None or detail == 2
+        else f" {_cut(active.label, _LABEL_CUT if detail else None)}"
+    )
+    others = [
+        option.availability.status for option in choice.options if option.option_id != choice.active
+    ]
+    served = f"{others.count('available')} of {len(others)} other options available"
+    if partial := others.count("partial"):
+        served += f", {partial} partial"
+    return f"scope {choice.axis}: {choice.active}{label} ({choice.provenance}; {served})"
 
 
 def _sibling_text(reading: SearchReading) -> str:

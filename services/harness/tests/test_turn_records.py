@@ -620,6 +620,72 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     assert lines[-1] == "   fetch refused: frame_too_large"
 
 
+def _scoped_part() -> dict[str, Any]:
+    """A definite part carrying the scope choices dfo-apis wrote for it, its
+    active options given readers' labels."""
+    scope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/scope_choices_us_health_africa.json"
+        ).read_text()
+    )
+    labels = {
+        "sector:120": "health, CRS 120 alone",
+        "region:members_only": "Africa's countries only",
+        "measure_basis:gross": "gross disbursements",
+    }
+    for choice in scope["choices"]:
+        for option in choice["options"]:
+            option["label"] = labels.get(option["option_id"], option["label"])
+    return {
+        "variable": "health aid",
+        "status": "definite",
+        "spec_id": scope["compiled"]["spec_id"],
+        "scope": scope,
+    }
+
+
+def test_a_reading_keeps_its_parts_scope_choices_and_a_reading_without_stores_no_key() -> None:
+    reading = SearchReading.from_part(_scoped_part())
+    dumped = reading.model_dump(mode="json")
+    unscoped = SearchReading.from_part({**_scoped_part(), "scope": None})
+
+    assert reading.scope is not None
+    assert [(c.axis, c.active, c.provenance) for c in reading.scope.choices] == [
+        ("sector", "sector:120", "explicit"),
+        ("region", "region:members_only", "carried"),
+        ("measure_basis", "measure_basis:gross", "default"),
+    ]
+    assert SearchReading.model_validate_json(json.dumps(dumped)) == reading
+    assert dumped["scope"]["base"] == _scoped_part()["scope"]["base"]
+    assert "scope" not in unscoped.model_dump(mode="json")
+
+
+def test_each_scope_choice_renders_one_line_that_sheds_its_label_with_the_detail() -> None:
+    reading = SearchReading.from_part(_scoped_part())
+    head = f'"health aid" definite {reading.spec_id}'
+
+    whole = render_readings([reading], budget=10_000).text
+    shed = render_readings([reading, reading], budget=600).text
+
+    assert whole.splitlines()[2:] == [
+        "   scope sector: sector:120 health, CRS 120 alone (explicit; 1 of 1 other options "
+        "available)",
+        "   scope region: region:members_only Africa's countries only (carried; 1 of 1 other "
+        "options available)",
+        "   scope measure_basis: measure_basis:gross gross disbursements (default; 1 of 2 other "
+        "options available)",
+    ]
+    # The oldest reading folds to its head; the other keeps one line per choice, unlabelled.
+    assert shed.splitlines()[1:] == [
+        f"1. {head}",
+        f"2. {head}",
+        "   scope sector: sector:120 (explicit; 1 of 1 other options available)",
+        "   scope region: region:members_only (carried; 1 of 1 other options available)",
+        "   scope measure_basis: measure_basis:gross (default; 1 of 2 other options available)",
+    ]
+
+
 def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:
     """A seed's reading has no question text, so its head names no quoted text."""
     reading = SearchReading.from_part(

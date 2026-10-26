@@ -12,9 +12,10 @@ import pytest
 from data_mcp import client_holder, search_tool
 from data_mcp.deadline import CallDeadline
 from data_mcp.digest import render_answer, render_digest
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
 from data_mcp.search_tool import (
     TIME_FORMS,
+    SearchContext,
     SearchEntity,
     SearchOperation,
     SearchPart,
@@ -146,6 +147,101 @@ def test_to_wire_request_drops_none_fields() -> None:
 
     assert wire["input"] == {"kind": "parsed", "parts": [{"variable_text": "malaria grants"}]}
     assert "raw_query" not in wire["input"]
+
+
+# A carried entry as Search's `Entry` writes one, from an earlier part's sector choice.
+CARRIED_SECTOR = {
+    "axis": "sector",
+    "option_id": "sector:120",
+    "provenance": "carried",
+    "concept": "health",
+    "origin": {"kind": "choice", "choice_id": "spec_6176d83382fca6c596e00cb242a06803:sector"},
+}
+
+
+@pytest.mark.parametrize(
+    ("context", "members"),
+    [
+        (
+            SearchContext(user_message="now Ghana", carried_entries=[CARRIED_SECTOR]),
+            {"user_message": "now Ghana", "carried_entries": [CARRIED_SECTOR]},
+        ),
+        (
+            SearchContext(user_message="health aid to Africa"),
+            {"user_message": "health aid to Africa"},
+        ),
+        (SearchContext(carried_entries=[CARRIED_SECTOR]), {"carried_entries": [CARRIED_SECTOR]}),
+        (SearchContext(), {}),
+        (None, {}),
+    ],
+)
+def test_a_parsed_request_carries_the_context_members_that_are_set(
+    context: SearchContext | None, members: dict[str, object]
+) -> None:
+    wire = to_wire_request([SearchPart(variable="aid")], raw_query=None, context=context)
+
+    assert wire["input"] == {"kind": "parsed", "parts": [{"variable_text": "aid"}], **members}
+
+
+def test_the_raw_text_door_takes_no_context() -> None:
+    context = SearchContext(user_message="now Ghana", carried_entries=[CARRIED_SECTOR])
+
+    wire = to_wire_request(None, raw_query="aid to Ghana", context=context)
+
+    assert wire["input"] == {"kind": "raw_text", "query": "aid to Ghana"}
+
+
+async def test_the_context_stays_off_the_tools_input_schema() -> None:
+    async with Client(mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    assert set(tools["search"].input_schema["properties"]) == {"parts", "raw_query"}
+
+
+async def _search_with_meta(meta: dict[str, object]) -> tuple[CallToolResult, list[dict[str, Any]]]:
+    sent: list[dict[str, Any]] = []
+    envelope = _envelope("definite", spec=_spec())
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json=envelope)
+
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "search", {"parts": [{"variable": "aid"}]}, meta=meta, raise_on_error=False
+            )
+    return result, sent
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_the_context_in_meta_reaches_search_only_when_the_setting_is_on(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", str(enabled).lower())
+    context = {"user_message": "now Ghana", "carried_entries": [CARRIED_SECTOR]}
+
+    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: context})
+
+    assert result.is_error is False
+    members = context if enabled else {}
+    assert [body["input"] for body in sent] == [
+        {"kind": "parsed", "parts": [{"variable_text": "aid"}], **members}
+    ]
+
+
+async def test_a_context_of_the_wrong_shape_is_refused_before_search_is_called(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "true")
+
+    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: {"message": "now Ghana"}})
+
+    assert result.is_error
+    assert result.structured_content is not None
+    assert result.structured_content["code"] == "request_invalid"
+    assert sent == []
 
 
 def test_to_wire_request_carries_open_roles_as_given() -> None:

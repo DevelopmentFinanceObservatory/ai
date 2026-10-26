@@ -58,7 +58,11 @@ from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorde
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import (
+    current_conversation_id,
+    current_conversation_key,
+    current_user_message,
+)
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
@@ -1028,6 +1032,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            current_user_message.set(conversation.turn_user_message)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
             # This request's model-call bounds, read by every model call the
@@ -1432,6 +1437,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             conversation.turn_user_message += f"\n(then: {body.payload})"
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
+        # The amended message, so a search after the resume reads the refined ask.
+        current_user_message.set(conversation.turn_user_message)
         current_earlier_block.set(conversation.earlier_block)
         current_recorded_identity.set(conversation.recorded_identity)
         start_turn_budget(settings)

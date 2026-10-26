@@ -1,0 +1,286 @@
+{
+  "id": "spec_6176d83382fca6c596e00cb242a06803",
+  "base": {
+    "schema_version": 1,
+    "spec_id": "spec_6176d83382fca6c596e00cb242a06803",
+    "identity": {
+      "identity_version": "spec1",
+      "shape": {
+        "kind": "statvar_schema",
+        "population_type": "ODA",
+        "measured_property": "amount"
+      },
+      "slots": [
+        {
+          "property": "crsPurpose",
+          "binding": {
+            "state": "set",
+            "refs": [
+              "CRSPurposeCode120",
+              "CRSPurposeCode130"
+            ]
+          }
+        },
+        {
+          "property": "nettingBasis",
+          "binding": {
+            "state": "value",
+            "ref": "Gross"
+          }
+        }
+      ],
+      "entities": {
+        "origin": [
+          "country/USA"
+        ],
+        "destination": [
+          "country/GHA",
+          "country/KEN",
+          "DACAfricaUnallocated"
+        ]
+      },
+      "requested_window": {
+        "kind": "all"
+      }
+    }
+  },
+  "rule_version": "test",
+  "entries": [
+    {
+      "axis": "sector",
+      "option_id": "sector:120",
+      "provenance": "explicit",
+      "concept": "health",
+      "origin": {
+        "kind": "text",
+        "text": "120 alone",
+        "start": 12,
+        "end": 21
+      }
+    },
+    {
+      "axis": "region",
+      "option_id": "region:members_only",
+      "provenance": "carried",
+      "origin": {
+        "kind": "choice",
+        "choice_id": "earlier:region"
+      }
+    }
+  ],
+  "dropped_entries": [],
+  "choices": [
+    {
+      "id": "spec_6176d83382fca6c596e00cb242a06803:sector",
+      "axis": "sector",
+      "rule": "test_sector_grouping",
+      "provenance": "explicit",
+      "active": "sector:120",
+      "options": [
+        {
+          "option_id": "sector:120+130",
+          "label": "sector:120+130",
+          "binding": {
+            "kind": "slot",
+            "slot": "crsPurpose",
+            "state": "set",
+            "refs": [
+              "CRSPurposeCode120",
+              "CRSPurposeCode130"
+            ]
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        },
+        {
+          "option_id": "sector:120",
+          "label": "sector:120",
+          "binding": {
+            "kind": "slot",
+            "slot": "crsPurpose",
+            "state": "value",
+            "refs": [
+              "CRSPurposeCode120"
+            ]
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": "spec_6176d83382fca6c596e00cb242a06803:region",
+      "axis": "region",
+      "rule": "test_summed_region",
+      "provenance": "carried",
+      "active": "region:members_only",
+      "options": [
+        {
+          "option_id": "region:members_and_residuals",
+          "label": "region:members_and_residuals",
+          "binding": {
+            "kind": "entities",
+            "role": "destination",
+            "add": [
+              "DACAfricaUnallocated"
+            ]
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        },
+        {
+          "option_id": "region:members_only",
+          "label": "region:members_only",
+          "binding": {
+            "kind": "entities",
+            "role": "destination",
+            "add": []
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": "spec_6176d83382fca6c596e00cb242a06803:measure_basis",
+      "axis": "measure_basis",
+      "rule": "test_basis_convention",
+      "provenance": "default",
+      "active": "measure_basis:gross",
+      "options": [
+        {
+          "option_id": "measure_basis:gross",
+          "label": "measure_basis:gross",
+          "binding": {
+            "kind": "shape",
+            "measured_property": "amount",
+            "netting_basis": "Gross"
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        },
+        {
+          "option_id": "measure_basis:net",
+          "label": "measure_basis:net",
+          "binding": {
+            "kind": "shape",
+            "measured_property": "amount",
+            "netting_basis": "Net"
+          },
+          "availability": {
+            "status": "unavailable",
+            "code": "conflicts_with",
+            "detail": {
+              "entry": "sector:120",
+              "cause": "net_lacks_purpose_120"
+            }
+          }
+        },
+        {
+          "option_id": "measure_basis:grant_equivalent",
+          "label": "measure_basis:grant_equivalent",
+          "binding": {
+            "kind": "shape",
+            "measured_property": "grantEquivalent",
+            "netting_basis": null
+          },
+          "availability": {
+            "status": "available",
+            "detail": {}
+          }
+        }
+      ]
+    }
+  ],
+  "compiled": {
+    "spec_id": "spec_9f0330e5ca67f5ef7576003ee30d2104",
+    "identity": {
+      "identity_version": "spec1",
+      "shape": {
+        "kind": "statvar_schema",
+        "population_type": "ODA",
+        "measured_property": "amount"
+      },
+      "slots": [
+        {
+          "property": "crsPurpose",
+          "binding": {
+            "state": "value",
+            "ref": "CRSPurposeCode120"
+          }
+        },
+        {
+          "property": "nettingBasis",
+          "binding": {
+            "state": "value",
+            "ref": "Gross"
+          }
+        }
+      ],
+      "entities": {
+        "origin": [
+          "country/USA"
+        ],
+        "destination": [
+          "country/GHA",
+          "country/KEN"
+        ]
+      },
+      "requested_window": {
+        "kind": "all"
+      }
+    },
+    "components": [
+      {
+        "role": "whole",
+        "identity": {
+          "identity_version": "spec1",
+          "shape": {
+            "kind": "statvar_schema",
+            "population_type": "ODA",
+            "measured_property": "amount"
+          },
+          "slots": [
+            {
+              "property": "crsPurpose",
+              "binding": {
+                "state": "value",
+                "ref": "CRSPurposeCode120"
+              }
+            },
+            {
+              "property": "nettingBasis",
+              "binding": {
+                "state": "value",
+                "ref": "Gross"
+              }
+            }
+          ],
+          "entities": {
+            "origin": [
+              "country/USA"
+            ],
+            "destination": [
+              "country/GHA",
+              "country/KEN"
+            ]
+          },
+          "requested_window": {
+            "kind": "all"
+          }
+        }
+      }
+    ]
+  },
+  "ledger": []
+}

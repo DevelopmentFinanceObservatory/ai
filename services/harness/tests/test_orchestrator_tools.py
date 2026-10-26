@@ -35,7 +35,7 @@ from compiler.sources import source_from_spec_block
 from compiler.surface import ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.catalogue_counts import COUNTS_UNAVAILABLE
 from data_mcp.frame_materialisation import KIND_COLUMNS, frame_ref_for
-from data_mcp.search_tool import MAX_PARTS
+from data_mcp.search_tool import MAX_PARTS, SearchContext
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar import Frame
 from google.adk.sessions.state import State
@@ -46,6 +46,7 @@ from harness.chart_binding import (
     MAX_SERIES_PER_COMPONENT,
     empty_select_refusal,
 )
+from harness.conversation import current_user_message
 from harness.dfo_faq import CANNOT_DESCRIBE_DFO, DFO_FAQ_NOT_READ
 from harness.graph.plan_done import HandBack
 from harness.graph.state import (
@@ -103,7 +104,7 @@ from . import drawn_cards
 from . import test_rolling_cards as rolling_scene
 from .resolved_revision import resolved_revision
 from .search_results import search_result_parts
-from .test_turn_records import _top_donors
+from .test_turn_records import _scoped_part, _top_donors
 
 SPEC_AID = "spec_" + "a" * 32
 SPEC_LIFE = "spec_" + "b" * 32
@@ -554,6 +555,60 @@ async def test_search_without_parts_asks_search_to_read_the_query():
     assert resolver.calls == [
         {"question": "aid to Kenya from all official donors", "parts": [], "raw_text": True}
     ]
+
+
+async def test_a_parsed_search_sends_the_users_message_and_the_choices_the_conversation_settled():
+    """Every explicit or carried choice of an earlier search is carried, the
+    newest per axis and concept; a declared default is not. A raw-text search
+    is sent no context."""
+    earlier = SearchReading.from_part(_scoped_part()).model_dump(mode="json")
+    newer = copy.deepcopy(earlier)
+    sector = newer["scope"]["choices"][0]
+    sector["active"] = "sector:120+130"
+    newer["scope"]["choices"] = [sector]
+    newer["scope"]["entries"] = [
+        {
+            "axis": "sector",
+            "option_id": "sector:120+130",
+            "provenance": "explicit",
+            "concept": "health",
+            "origin": {"kind": "choice", "choice_id": sector["id"]},
+        }
+    ]
+    resolver = _resolver(_digest())
+    tools, ctx = _tools(resolver)
+    ctx.state["orchestrator:prior_ledger"] = {"readings": [earlier], "warnings": {}, "spec_ids": []}
+    ctx.state["orchestrator:searches"] = [newer]
+    token = current_user_message.set("health aid to Africa\n(then: now Ghana)")
+    try:
+        await tools["search"]("health aid to Ghana", ctx, [{"variable": "health aid"}])
+        await tools["search"](
+            "health aid to Ghana", ctx, [{"variable": "health aid"}], as_text=True
+        )
+    finally:
+        current_user_message.reset(token)
+
+    base = earlier["scope"]["id"]
+    parsed, raw = resolver.calls
+    assert parsed["context"] == SearchContext(
+        user_message="health aid to Africa\n(then: now Ghana)",
+        carried_entries=[
+            {
+                "axis": "region",
+                "option_id": "region:members_only",
+                "provenance": "carried",
+                "origin": {"kind": "choice", "choice_id": f"{base}:region"},
+            },
+            {
+                "axis": "sector",
+                "option_id": "sector:120+130",
+                "provenance": "carried",
+                "concept": "health",
+                "origin": {"kind": "choice", "choice_id": f"{base}:sector"},
+            },
+        ],
+    )
+    assert "context" not in raw
 
 
 @pytest.mark.parametrize("parts", [None, []])

@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from harness.tool_contracts import graph_envelope
+from harness.scope_choices import PartScope
+from harness.tool_contracts import graph_envelope, reading_facts
 
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
 
@@ -73,6 +74,39 @@ def test_part_summary_preserves_explicit_comparison_intent(separate: bool | None
         assert summary["separate"] is True
     else:
         assert "separate" not in summary
+
+
+def _scope_choices() -> dict[str, Any]:
+    """A part's `resolved.scope_choices` as dfo-apis writes it."""
+    return json.loads((_DATA_MCP_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+
+
+def test_a_stored_reading_holds_the_parts_scope_choices_and_the_model_sees_none() -> None:
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = _scope_choices()
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert PartScope.model_validate(scope) == PartScope.model_validate(_scope_choices())
+    # The identities stay as Search wrote them, so a switch posts them back unchanged.
+    assert scope["base"] == _scope_choices()["base"]
+    assert scope["compiled"]["identity"] == _scope_choices()["compiled"]["identity"]
+    shown = {key: value for key, value in summary.items() if key != "spec_block"}
+    assert "scope" not in shown
+    assert "scope_choices" not in json.dumps(shown)
+
+
+def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unreadable = _scope_choices()
+    unreadable["choices"][0]["axis"] = "donor_type"
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = unreadable
+
+    assert reading_facts(part["spec"])["scope"] is None
+    assert any("spec_1" in record.getMessage() for record in caplog.records)
 
 
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:

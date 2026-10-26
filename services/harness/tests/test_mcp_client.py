@@ -27,11 +27,13 @@ from common.caller import conversation_caller
 from common.period_note import period_note
 from compiler.caller_clients import CallerClients
 from compiler.surface import ProgressReport
-from data_mcp import stat_var_list
+from data_mcp import client_holder, stat_var_list
 from data_mcp.client import UpstreamClient
 from data_mcp.digest import render_answer
 from data_mcp.manifest import Manifest
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_tool import SearchContext
+from data_mcp.server import mcp as data_mcp
 from data_mcp.settings import Settings as DataMcpSettings
 from data_mcp.stat_var_list import STAT_VARS_OMITTED_KEY
 from executor.classify import MAX_ATTEMPTS_PER_STEP
@@ -216,6 +218,58 @@ async def test_a_raw_text_search_sends_the_question_without_parts(
         await resolver(question="ODA to Kenya from all official donors", parts=[], raw_text=True)
 
     assert sent == [{"tool": "search", "raw_query": "ODA to Kenya from all official donors"}]
+
+
+async def test_a_parsed_search_carries_its_context_through_data_mcp_to_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The context rides the call's `_meta` to data-mcp's own `search`, which
+    posts it to Search as the parsed input's members."""
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "true")
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2] / "data-mcp/tests/fixtures/resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    posted: list[dict[str, Any]] = []
+
+    def search_api(request: httpx2.Request) -> httpx2.Response:
+        posted.append(json.loads(request.content))
+        return httpx2.Response(200, json=envelope)
+
+    carried = {
+        "axis": "region",
+        "option_id": "region:members_only",
+        "provenance": "carried",
+        "origin": {"kind": "choice", "choice_id": "spec_0123:region"},
+    }
+    context = SearchContext(
+        user_message="aid to Africa\n(then: now Kenya)", carried_entries=[carried]
+    )
+    client_holder.set_client(
+        UpstreamClient(settings=DataMcpSettings(), transport=httpx2.MockTransport(search_api))
+    )
+    try:
+        async with Client(data_mcp) as client:
+
+            async def get() -> Client:
+                return client
+
+            async def release(_client: Client) -> None:
+                return None
+
+            resolver = McpResolver(settings=Settings())
+            monkeypatch.setattr(resolver, "_clients", SimpleNamespace(get=get, release=release))
+            digest = await resolver(
+                question="aid from France to Kenya", parts=[{"variable": "aid"}], context=context
+            )
+    finally:
+        client_holder.set_client(None)
+
+    (body,) = posted
+    assert body["input"]["user_message"] == "aid to Africa\n(then: now Kenya)"
+    assert body["input"]["carried_entries"] == [carried]
+    assert digest["part_digests"]
 
 
 async def test_the_executor_get_data_client_carries_its_180s_deadline(

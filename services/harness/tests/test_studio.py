@@ -2028,6 +2028,38 @@ async def test_an_ask_elicits_and_the_answer_resumes_on_a_new_stream() -> None:
     assert record["user"] == "ambiguous q\n(then: reading B)"
 
 
+async def test_a_search_after_the_answer_reads_the_message_the_answer_refined() -> None:
+    """Each segment's searches send the turn's message as it then stands: the
+    question first, and after the resume the question with the answer."""
+    search = CannedSearch(definite_envelope(spec_id=SPEC_A), definite_envelope(spec_id=SPEC_A))
+    app = _app(
+        search_call("ambiguous q", "aid"),
+        *_ask("reading A", "reading B"),
+        search_call("aid, reading B", "aid"),
+        _text("You meant reading B."),
+        resolver=search,
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        elicitation = _frame(first, "elicitation.request")
+        (question,) = elicitation["questions"]
+        second = await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(
+                elicitation["interrupt_id"],
+                "answer",
+                answers={"q1": _pick(question["options"][1]["id"])},
+            ),
+        )
+
+    assert _events(second)[-1] == "done"
+    assert [call["context"].user_message for call in search.calls] == [
+        "ambiguous q",
+        "ambiguous q\n(then: reading B)",
+    ]
+
+
 async def test_several_questions_resume_with_every_answer_in_one_reply() -> None:
     """Two questions share one pause. Each may be left to the agent, the pause
     as a whole may not be dismissed, and one reply answers both. The turn's
