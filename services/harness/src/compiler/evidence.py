@@ -416,7 +416,12 @@ def bound_refs_of(entity: Entity, source: SelectedSource | RetrievalEvidence) ->
     names the rows of its identity, else of its text, so a row bound on
     the other side is still reported against the role asked. Empty when
     it names no row.
+
+    An entity with a `dcid` names the rows pinning that node first, so two
+    entities written "Congo" and pinned apart each name their own row.
     """
+    if pinned := _pinned_refs(entity, source):
+        return pinned
     wanted = entity.name.casefold()
     by_identity = [row for row in source.bound_refs if row.identity.casefold() == wanted]
     by_text = [row for row in source.bound_refs if row.text.casefold() == wanted]
@@ -424,7 +429,18 @@ def bound_refs_of(entity: Entity, source: SelectedSource | RetrievalEvidence) ->
     def fitting(rows: list[BoundEntity]) -> list[BoundEntity]:
         return [row for row in rows if row.role is None or _role_fits(entity.role, row.role)]
 
-    rows = fitting(by_identity) or fitting(by_text) or by_identity or by_text
+    return _refs_of(fitting(by_identity) or fitting(by_text) or by_identity or by_text)
+
+
+def _pinned_refs(entity: Entity, source: SelectedSource | RetrievalEvidence) -> tuple[str, ...]:
+    """The refs Search bound for the rows whose identity is `entity`'s `dcid`; empty without one."""
+    if entity.dcid is None:
+        return ()
+    return _refs_of([row for row in source.bound_refs if row.identity == entity.dcid])
+
+
+def _refs_of(rows: Sequence[BoundEntity]) -> tuple[str, ...]:
+    """The refs Search bound for `rows`, each once, in order."""
     return tuple(dict.fromkeys(ref for row in rows for ref in row.refs))
 
 
@@ -453,7 +469,13 @@ def resolve_name(
     (`SelectedSource.entity_refs`), so "United States" names the entity
     labelled "United States of America". A stated role tells apart a ref
     resolved under several role columns, as it does a label.
+
+    An entity with a `dcid` names the entity of the refs Search bound for
+    the rows pinning it, else of the `dcid` itself, and no other.
     """
+    if entity.dcid is not None:
+        refs = _pinned_refs(entity, source) or (entity.dcid,)
+        return _one_by_ref(entity, source.entities, refs)
     bound = bound_refs_of(entity, source)
     resolved = _one_by_ref(entity, source.entities, bound) or resolve_entity(
         entity, source.entities
@@ -1013,6 +1035,18 @@ def _named_entity_issues(
                 required=[entity.name for entity in requirement.entities],
             )
         ]
+    issues, missing = _entity_findings(requirement, evidence, approved)
+    return [*issues, *(issue for _, issue in missing)]
+
+
+def _entity_findings(
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None,
+) -> tuple[list[EvidenceIssue], list[tuple[Entity, EvidenceIssue]]]:
+    """`_named_entity_issues` over a source that resolves entities: the
+    findings on the entities it meets, and each entity it misses with its
+    `entity_missing` finding."""
     labels = [entity.label for entity in evidence.entities]
     issues: list[EvidenceIssue] = []
     missing: list[Entity] = []
@@ -1058,23 +1092,27 @@ def _named_entity_issues(
             continue
         issues.extend(_role_issues(requirement, entity, resolved))
     present = [entity for entity in requirement.entities if entity not in missing]
+    gaps: list[tuple[Entity, EvidenceIssue]] = []
     for entity in missing:
         severity = _left_out_severity(requirement, entity, present, approved)
-        issues.append(
-            EvidenceIssue(
-                code=EvidenceIssueCode.ENTITY_MISSING,
-                severity=severity,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the source resolves no entity named {entity.name!r}"
-                    if severity is Severity.ERROR
-                    else f"the retrieval holds no series for {entity.name!r}, so it is left out"
+        gaps.append(
+            (
+                entity,
+                EvidenceIssue(
+                    code=EvidenceIssueCode.ENTITY_MISSING,
+                    severity=severity,
+                    requirement_id=requirement.id,
+                    detail=(
+                        f"the source resolves no entity named {entity.name!r}"
+                        if severity is Severity.ERROR
+                        else f"the retrieval holds no series for {entity.name!r}, so it is left out"
+                    ),
+                    found=labels,
+                    required=entity.name,
                 ),
-                found=labels,
-                required=entity.name,
             )
         )
-    return issues
+    return issues, gaps
 
 
 def _left_out_severity(
@@ -1115,20 +1153,21 @@ def _approved_column(entity: Entity, approved: SelectedSource) -> str | None:
 
 def left_out_entities(
     requirement: DatasetRequirement,
-    issues: Sequence[EvidenceIssue],
+    evidence: RetrievalEvidence,
     approved: SelectedSource,
 ) -> dict[ResolvedEntity, EvidenceIssue]:
-    """Each entity `requirement` names that a run-time check left out
-    (`_left_out_severity`), as the approved source resolved it, with its
-    finding."""
-    by_name = {entity.name: entity for entity in requirement.entities}
+    """Each entity `requirement` names that a run-time check of `evidence`
+    left out (`_left_out_severity`), as the approved source resolved it,
+    with its finding. Each finding is paired with the entity it was made
+    for, so two entities written alike each answer for their own."""
+    if not requirement.entities or not evidence.entities:
+        return {}
+    _, missing = _entity_findings(requirement, evidence, approved)
     left_out: dict[ResolvedEntity, EvidenceIssue] = {}
-    for issue in issues:
-        if issue.code is not EvidenceIssueCode.ENTITY_MISSING or issue.severity is Severity.ERROR:
+    for entity, issue in missing:
+        if issue.severity is Severity.ERROR:
             continue
-        entity = by_name.get(str(issue.required))
-        resolved = resolve_name(entity, approved) if entity is not None else None
-        if resolved is not None:
+        if (resolved := resolve_name(entity, approved)) is not None:
             left_out[resolved] = issue
     return left_out
 
