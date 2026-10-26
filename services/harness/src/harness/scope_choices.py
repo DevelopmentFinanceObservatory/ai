@@ -235,44 +235,57 @@ class PartScope(StrictModel):
         return cls.model_validate(raw, extra="ignore")
 
 
-# The key a spec block carries when the planner compiled it to put a
-# calculation's inputs on one measure basis (`planner.agent.compile_on_basis`):
-# its explicit basis entry is the planner's, never the user's. The block is
-# the one source of truth. `harness.tool_contracts.reading_facts` copies it to
-# the stored reading (`harness.turn_records.SearchReading.aligned_basis`),
-# which `carried_entries`' callers read, and `submission.service.
-# _aligned_bases` reads it off the pin's block. A block Search answers afresh
-# carries none, so a switch of the basis drops it; a switch of another axis
-# keeps it (`harness.graph.switch`).
-ALIGNED_BASIS_BLOCK_KEY = "_aligned_basis"
+# The key a spec block carries naming the scope axes whose entries the
+# planner's own words settled, so they are the planner's, never the user's:
+# the measure basis of a pin compiled to put a calculation's inputs on one
+# basis (`planner.agent.compile_on_basis`), and every axis an entry settled
+# on a pin searched for an input the planner pinned no dataset for, posted
+# with the planner's words and no message of the user's
+# (`planner.agent.pin_by_search`). The block is the one source of truth.
+# `harness.tool_contracts.reading_facts` copies it to the stored reading
+# (`harness.turn_records.SearchReading.planner_axes`), which
+# `carried_entries`' callers read; `submission.service._input_bases` and
+# `submission.service.scope_choice_decisions` read it off the pin's block. A
+# block Search answers afresh carries none, so a switch on the plan card
+# drops the switched axis from it and keeps the others (`harness.graph.switch`).
+PLANNER_AXES_BLOCK_KEY = "_planner_axes"
 
 
-def mark_aligned_basis(digest: dict[str, Any]) -> None:
+def planner_axes(block: Mapping[str, Any] | None) -> frozenset[str]:
+    """The axes `block`, a spec block, marks as settled by the planner (`PLANNER_AXES_BLOCK_KEY`)."""
+    return frozenset((block or {}).get(PLANNER_AXES_BLOCK_KEY) or ())
+
+
+def mark_planner_axes(digest: dict[str, Any], axes: Iterable[str]) -> None:
     """Mark each spec block of `digest`, a `harness.tool_contracts.resolver_digest`,
-    as compiled by the planner to align a basis (`ALIGNED_BASIS_BLOCK_KEY`)."""
+    as settled by the planner on `axes` (`PLANNER_AXES_BLOCK_KEY`); no axes marks nothing."""
+    marked = sorted(set(axes))
+    if not marked:
+        return
     for holder in (digest, *(digest.get("part_digests") or ())):
         if isinstance(holder.get("spec_block"), Mapping):
-            holder["spec_block"] = {**holder["spec_block"], ALIGNED_BASIS_BLOCK_KEY: True}
+            holder["spec_block"] = {**holder["spec_block"], PLANNER_AXES_BLOCK_KEY: marked}
 
 
-def carried_entries(scopes: Iterable[PartScope], *, aligned: Collection[str] = ()) -> list[Entry]:
+def carried_entries(
+    scopes: Iterable[PartScope], *, planner: Mapping[str, Collection[str]] | None = None
+) -> list[Entry]:
     """The entries a later search carries from `scopes`, oldest first.
 
     Every choice an explicit or carried entry settled becomes a `carried`
     entry for its active option, with the concept of the entry that settled
     it and a `choice` origin naming the choice. A choice a declared default
-    settled carries nothing, and neither does the measure basis of a scope
-    whose compiled spec_id is in `aligned`: the planner compiled it to put a
-    calculation's inputs on one basis (`harness.turn_records.SearchReading.
-    aligned_basis`), so that entry is its own, and that scope's other
-    choices, the user's, still carry. The newest choice per axis and
-    concept wins.
+    settled carries nothing, and neither does a choice on an axis `planner`
+    names for the scope's compiled spec_id (`PLANNER_AXES_BLOCK_KEY`): the
+    planner's words settled it, and the scope's other choices, the user's,
+    still carry. The newest choice per axis and concept wins.
     """
+    planner = planner or {}
     newest: dict[tuple[str, str | None], Entry] = {}
     for scope in scopes:
         for choice in scope.choices:
-            if choice.provenance == "default" or (
-                choice.axis == "measure_basis" and scope.compiled.spec_id in aligned
+            if choice.provenance == "default" or choice.axis in planner.get(
+                scope.compiled.spec_id, ()
             ):
                 continue
             concept = next(

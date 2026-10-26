@@ -4335,7 +4335,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
         readings = switch._readings(ctx)
         pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
         return {
-            "stored": [(r.spec_id, r.aligned_basis) for r in readings],
+            "stored": [(r.spec_id, r.planner_axes) for r in readings],
             "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],
             "carried": _search_context(cast(SessionState, ctx.state)).carried_entries,
         }
@@ -4358,7 +4358,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
     ]
 
     assert len(surface.calls) == 1
-    assert result["stored"] == [(TOTAL_GROSS, True), (TOTAL, False)]
+    assert result["stored"] == [(TOTAL_GROSS, ("measure_basis",)), (TOTAL, ())]
     assert result["target"] == [
         TOTAL_GROSS,
         "US total ODA",

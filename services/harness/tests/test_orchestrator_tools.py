@@ -642,7 +642,7 @@ async def test_a_basis_the_planner_compiled_is_never_carried_and_one_the_user_sw
         }
     )
     if aligned:
-        reading["aligned_basis"] = True
+        reading["planner_axes"] = ["measure_basis"]
     resolver = _resolver(_digest())
     tools, ctx = _tools(resolver)
     ctx.state["orchestrator:searches"] = [

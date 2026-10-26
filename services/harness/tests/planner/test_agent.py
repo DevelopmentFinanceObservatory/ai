@@ -47,11 +47,12 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
-from harness.graph.state import APPROVE_INTERRUPT
+from harness.graph.state import APPROVE_INTERRUPT, store_search
+from harness.orchestrator_tools import _search_context
 from harness.plan_display import shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
 from harness.prefix_cache import PrefixCache
-from harness.scope_choices import ALIGNED_BASIS_BLOCK_KEY
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.studio_state import _turn_identities
 from harness.turn_records import RecordedIdentity, _periods
 from planner import agent as planner_agent
@@ -167,6 +168,7 @@ from submission.service import (
     first_year_reads,
     identity_on_record,
     scope_choice_decisions,
+    searched_pins,
 )
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -4654,11 +4656,16 @@ def test_a_scope_decision_moved_to_a_copy_over_another_period_keeps_its_choice()
 
 
 def _share_of_health(
-    propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision, **intent: Any
+    propose: Callable[..., Any],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    *,
+    total: str | None = TOTAL,
+    **intent: Any,
 ) -> Any:
-    """Propose US health aid as a share of the US total, pinning `HEALTH` and `TOTAL`."""
+    """Propose US health aid as a share of the US total, pinning `HEALTH` and `total`."""
 
-    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+    def dataset(requirement_id: str, measure: str, pin: str | None) -> DatasetRequirement:
         return DatasetRequirement(
             id=requirement_id,
             decision_ids=["measure"],
@@ -4674,7 +4681,7 @@ def _share_of_health(
         decisions=drafts([decision]),
         evidence_requirements=[
             dataset("health", "US aid to health", HEALTH),
-            dataset("total", "US total ODA", TOTAL),
+            dataset("total", "US total net ODA", total),
             ShareOfRequirement(
                 id="share",
                 decision_ids=["measure"],
@@ -4775,7 +4782,7 @@ def test_a_basis_the_planner_compiled_in_an_earlier_turn_is_not_read_as_the_user
     ctx = _FakeToolContext()
     total = basis_block(TOTAL, narrow=False, active="measure_basis:gross", provenance="explicit")
     if compiled:
-        total[ALIGNED_BASIS_BLOCK_KEY] = True
+        total[PLANNER_AXES_BLOCK_KEY] = ["measure_basis"]
     _show_blocks(
         ctx,
         basis_block(HEALTH, narrow=True, active="measure_basis:net", provenance="explicit"),
@@ -4874,6 +4881,70 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
         },
     }
     assert surface.calls == []
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid counted gross over a US total the planner pinned no dataset
+    for. Search reads "net" in the planner's words for the total, an explicit
+    entry the user never stated: the total is compiled on the health aid's gross,
+    the narrower part's basis, and no later search carries net as the user's."""
+    surface = BasisCompiles(
+        searched={
+            "status": "definite",
+            "spec": basis_block(
+                TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"
+            ),
+        }
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    result = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
+    (searched,) = searched_pins(ctx.state)
+    assert searched.digest is not None
+    store_search(ctx.state, searched.digest, asked=[()], held_open=[()])
+    assert _search_context(ctx.state).carried_entries == []
+
+
+async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
+    decision: DecisionFactory,
+) -> None:
+    """Search answers the unpinned US total as ambiguous, so one basis cannot be
+    guaranteed for the share: the plan is refused as unsupported, naming the
+    input, and nothing is recorded."""
+    surface = BasisCompiles(searched={"status": "ambiguous"})
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    refused = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
+    assert refused["detail"] == {
+        "operation": UnsupportedOperation.UNSUPPORTED_ASK.value,
+        "basis": {
+            "spec_id": None,
+            "option_id": None,
+            "requirement_id": "total",
+            "step_id": "share",
+        },
+    }
+    assert surface.tools == ["search"]
     assert load_plan(ctx.state) is None
 
 

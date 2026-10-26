@@ -45,6 +45,7 @@ from planner.plan import (
 from planner.records import (
     AmbiguousSourceReading,
     ResolvedSourceMention,
+    ScopeAxis,
     StatVarReading,
     StrictModel,
 )
@@ -670,10 +671,9 @@ class SearchReading(StrictModel):
     offering reading's own in other prices. `scope` is how search counted
     the part (`harness.scope_choices.PartScope`), its scope choices with
     their options and the entries that settled them; `None` when the part's
-    block carries none. `aligned_basis` marks a part the planner compiled to
-    put a calculation's inputs on one measure basis
-    (`harness.scope_choices.ALIGNED_BASIS_BLOCK_KEY`, copied from its block):
-    its explicit basis entry is the planner's, never the user's. `observed_at` is stored and not
+    block carries none. `planner_axes` are the scope axes the planner's own
+    words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
+    copied from its block): their entries are the planner's, never the user's. `observed_at` is stored and not
     rendered.
     """
 
@@ -715,7 +715,7 @@ class SearchReading(StrictModel):
     )
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
     scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
-    aligned_basis: bool = Field(default=False, exclude_if=lambda aligned: not aligned)
+    planner_axes: tuple[ScopeAxis, ...] = Field(default=(), exclude_if=lambda axes: not axes)
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -756,10 +756,9 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `aligned_basis` too. A `no_data` part's `reason` is the reading's
-        `refusal_code`, and `counted_as`,
-        `alternatives` and `other_prices` are
-        `harness.tool_contracts.measure_choice`'s.
+        among them, `planner_axes` too. A `no_data` part's `reason` is the
+        reading's `refusal_code`, and `counted_as`, `alternatives` and
+        `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
         window = part.get("window")
         return cls(
@@ -823,7 +822,7 @@ class SearchReading(StrictModel):
             alternatives=_offers(part.get("alternatives")),
             other_prices=_offers(part.get("other_prices")),
             scope=part.get("scope"),
-            aligned_basis=part.get("aligned_basis") is True,
+            planner_axes=tuple(part.get("planner_axes") or ()),
             origin=origin,
             observed_at=observed_at,
         )
