@@ -31,6 +31,7 @@ from harness.graph.state import (
     AGENT_NAME,
     GraphState,
 )
+from harness.graph.switch import switch_node
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,8 @@ def create_root_workflow(
     runs an earlier turn left unfinished (`harness.graph.resume`).
     `definition_surface` reaches the data-mcp the `seed` node resolves each seed's identity again through
     (`translator.discovery.resolve_definition`), a call the Activity feed
-    does not show. `max_concurrent_steps` bounds how many of one plan's
+    does not show, and the `switch` node posts a switched scope choice
+    through (`harness.graph.switch`). `max_concurrent_steps` bounds how many of one plan's
     wave's tool calls the `execute` node's run may hold in flight against
     `tool_surface` at once (`executor.run.execute_approved_plan`'s own
     keyword of the same name). `fetch_series_stats` and `label_refs` are
@@ -143,6 +145,9 @@ def create_root_workflow(
     approve_n = node(approve, name="approve", rerun_on_resume=True)
     execute_n = node(execute, name="execute")
     plan_done_n = node(plan_done, name="plan_done")
+    switch_n = node(
+        switch_node(planner=planner, definition_surface=definition_surface), name="switch"
+    )
     return Workflow(
         name=AGENT_NAME,
         state_schema=GraphState,
@@ -157,6 +162,8 @@ def create_root_workflow(
             Edge(from_node=entry.planner, to_node=plan_done_n, route="refused"),
             Edge(from_node=approve_n, to_node=execute_n, route="approved"),
             Edge(from_node=approve_n, to_node=entry.planner, route="amend"),
+            Edge(from_node=approve_n, to_node=switch_n, route="switch"),
+            Edge(from_node=switch_n, to_node=approve_n, route="offer"),
             Edge(from_node=execute_n, to_node=entry.planner, route="replan"),
             Edge(from_node=execute_n, to_node=plan_done_n, route="ok"),
             (plan_done_n, orchestrate_n),

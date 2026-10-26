@@ -850,6 +850,9 @@ class InterruptDecision(StrEnum):
     # ask closes the turn. The planner's ask counts it as the user declining
     # to choose, and the planner plans on without a pick of theirs.
     SKIP = "skip"
+    # Plan only. The user moves one scope choice to another of its options;
+    # the plan is revised in code and offered again. It approves nothing.
+    SWITCH = "switch"
 
 
 class OptionAnswer(_WireModel):
@@ -885,9 +888,12 @@ class InterruptResponse(_WireModel):
     is opaque (delta 7 -- the fixtures' literal `"approve"` is a sample
     value). An elicitation's `answer` carries `answers`, one entry per
     question id of the frame, exactly. `payload` carries the amendment text
-    for a plan's `amend`. Both are absent for approve, reject and skip. The
-    response to this POST is a NEW SSE stream continuing the same turn
-    (delta 1).
+    for a plan's `amend`. Both are absent for approve, reject, skip and
+    switch. A plan's `switch` carries `choice_id` (a `PlanDecision.choice_id`),
+    `option_id` (one of that decision's options) and `plan_revision` (the
+    `PlanProposed.revision` the user saw), all three; every other decision
+    carries none of them. The response to this POST is a NEW SSE stream
+    continuing the same turn (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -901,6 +907,29 @@ class InterruptResponse(_WireModel):
     payload: str | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
+    # A plan's `switch`: the scope choice, the option it moves to, and the
+    # revision of the plan the user switched on.
+    choice_id: str | None = Field(default=None, min_length=1)
+    option_id: str | None = Field(default=None, min_length=1)
+    plan_revision: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _switch_members_come_with_switch(self) -> InterruptResponse:
+        """Refuse a `switch` missing one of its three members, and any other decision carrying one."""
+        members = {
+            "choice_id": self.choice_id,
+            "option_id": self.option_id,
+            "plan_revision": self.plan_revision,
+        }
+        if self.decision is InterruptDecision.SWITCH:
+            missing = [name for name, value in members.items() if value is None]
+            if missing:
+                raise ValueError(f"decision 'switch' requires {', '.join(missing)}")
+            return self
+        stated = [name for name, value in members.items() if value is not None]
+        if stated:
+            raise ValueError(f"decision {self.decision.value!r} does not take {', '.join(stated)}")
+        return self
 
 
 class MutationOp(StrEnum):
@@ -1096,6 +1125,20 @@ class PlanAction(StrEnum):
     APPROVE = "approve"
     AMEND = "amend"
     REJECT = "reject"
+    # Listed only when some decision has a `choice_id` with an option other
+    # than its active one that is available or partial.
+    SWITCH = "switch"
+
+
+class PlanMoved(_WireModel):
+    """A scope choice a switch moved besides the one the user switched:
+    the option it held (`from_label`), the one it holds now (`to_label`)
+    and why, as a sentence."""
+
+    choice_id: str
+    from_label: str
+    to_label: str
+    reason: str
 
 
 class PlanRequirement(_WireModel):
@@ -1156,6 +1199,8 @@ class PlanProposed(_WireModel):
     # Delta 20 (v1.5): the outputs the user asked for, in the order the
     # brief lists them; absent when the plan was given none.
     asks: list[PlanAsk] | None = None
+    # On the plan a switch offers: each other scope choice the switch moved.
+    moved: list[PlanMoved] | None = None
 
 
 class PlanVersioned(_WireModel):

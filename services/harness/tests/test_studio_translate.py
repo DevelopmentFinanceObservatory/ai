@@ -311,8 +311,9 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         }
     )
     payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
 
-    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
 
     rows = {row.id: row for row in frame.decisions}
     planners = [rows[d.slot] for d in plan.decisions if d.scope is None and d.slot in rows]
@@ -349,7 +350,37 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
         ),
     ]
     assert (basis.reason, basis.resolved_by) == ("Search's default for this question.", "default")
+    assert frame.actions == ["approve", "amend", "reject", "switch"]
+    assert frame.moved is None
+    # What a switch on this card may name: every shown choice, with its
+    # active option and each option's status.
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert set(choices) == {sector.choice_id, region.choice_id, basis.choice_id}
+    assert choices[basis.choice_id].active == "measure_basis:gross"
+    assert {k: o.status for k, o in choices[basis.choice_id].options.items()} == {
+        "measure_basis:gross": "available",
+        "measure_basis:net": "unavailable",
+        "measure_basis:grant_equivalent": "partial",
+    }
+
+
+def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_switch() -> None:
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    moved = {
+        "choice_id": "spec_" + "e" * 32 + ":region",
+        "from_label": "Africa incl. regional buckets",
+        "to_label": "Africa's countries only",
+        "reason": "Regional buckets apply only to a summed region.",
+    }
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan), "moved": [moved]}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    assert frame.moved is not None
+    assert [entry.model_dump() for entry in frame.moved] == [moved]
     assert frame.actions == ["approve", "amend", "reject"]
+    assert translator._conversation.pending[frame.interrupt_id].choices == {}
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:

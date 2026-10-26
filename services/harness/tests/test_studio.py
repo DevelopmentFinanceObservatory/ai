@@ -86,7 +86,9 @@ from harness.studio_state import (
     ConversationState,
     StudioStore,
     _deserialize_pending,
+    _PendingChoice,
     _PendingInterrupt,
+    _PendingOption,
     land_component,
 )
 from harness.studio_translate import _RecordingExecutor, _stream_fatal
@@ -4368,6 +4370,91 @@ async def test_approve_with_a_payload_is_refused() -> None:
         )
     assert response.status_code == 422
     assert "does not take a payload" in response.json()["detail"]
+
+
+# A scope choice a plan card shows: health counted as CRS 120 alone, with
+# CRS 120 and 130 to switch to and a third option out of reach.
+_CHOICE_ID = "spec_" + "b" * 32 + ":sector"
+_SHOWN_CHOICE = _PendingChoice(
+    active="sector:120",
+    options={
+        "sector:120": _PendingOption(label="health (CRS 120)", status="available"),
+        "sector:120+130": _PendingOption(label="health and population", status="available"),
+        "sector:130": _PendingOption(label="population (CRS 130)", status="unavailable"),
+    },
+)
+
+
+async def _plan_with_a_choice(app: FastAPI, client: httpx2.AsyncClient) -> dict[str, Any]:
+    """Open a turn pausing on its plan card, and keep `_SHOWN_CHOICE` on the
+    pause as a card showing it would; the plan.proposed frame."""
+    first = await _stream(client, "/api/studio/turn", _turn_body())
+    plan = _frame(first, "plan.proposed")
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    conversation.pending[plan["interrupt_id"]].choices = {_CHOICE_ID: _SHOWN_CHOICE}
+    await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+    return plan
+
+
+def _switch_body(plan: dict[str, Any], **change: Any) -> dict[str, Any]:
+    return {
+        **_interrupt_body(plan["interrupt_id"], "switch"),
+        "choice_id": _CHOICE_ID,
+        "option_id": "sector:120+130",
+        "plan_revision": plan["revision"],
+        **change,
+    }
+
+
+async def test_a_switch_the_card_cannot_take_is_refused_with_its_constraint() -> None:
+    """A stale revision is refused 409, an option the card does not offer
+    as switchable 422, each naming its constraint and leaving the pause to
+    answer; a switch carrying a payload breaks the payload discipline."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        cases = [
+            ({"plan_revision": "0" * 64}, 409, "plan_revision_stale"),
+            ({"choice_id": "spec_other:sector"}, 422, "switch_option_unavailable"),
+            ({"option_id": "sector:999"}, 422, "switch_option_unavailable"),
+            ({"option_id": "sector:130"}, 422, "switch_option_unavailable"),
+            ({"option_id": "sector:120"}, 422, "switch_option_unavailable"),
+            ({"payload": "stray"}, 422, None),
+        ]
+        answers = [
+            await client.post(
+                "/api/studio/interrupt", json=_switch_body(plan, **change), headers=AUTH
+            )
+            for change, _, _ in cases
+        ]
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        assert plan["interrupt_id"] in conversation.pending
+
+    assert [(r.status_code, r.json().get("constraint_id")) for r in answers] == [
+        (status, constraint) for _, status, constraint in cases
+    ]
+    assert all(r.json()["detail"] for r in answers)
+    assert answers[-1].json()["error"] == "binding_invalid"
+    assert conversation.approvals == []
+
+
+async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None:
+    """A switch the card offers resumes the turn with no approval record;
+    the graph revises the plan and offers it on a fresh card. Here the plan
+    states no scope choice, so the same plan comes back with a note."""
+    app = _app(*_plan())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        second = await _stream(client, "/api/studio/interrupt", _switch_body(plan))
+
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert conversation.approvals == []
+    assert _events(second)[-2:] == ["message.complete", "plan.proposed"]
+    again = _frame(second, "plan.proposed")
+    assert again["interrupt_id"] != plan["interrupt_id"]
+    assert again["revision"] == plan["revision"]
+    assert "nothing changed" in _frame(second, "message.complete")["text"]
+    assert conversation.turn_user_message.endswith("(then: count health and population)")
 
 
 async def test_answers_to_a_plan_are_refused() -> None:

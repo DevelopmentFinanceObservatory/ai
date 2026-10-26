@@ -372,6 +372,16 @@ def test_a_plan_proposed_carries_a_scope_decision_with_its_choice_and_options() 
     raw = _load("event-03-plan-proposed.json")
     raw["decisions"].append(_SCOPE_ROW)
 
+    raw["actions"].append("switch")
+    raw["moved"] = [
+        {
+            "choice_id": "spec_base:region",
+            "from_label": "Africa incl. regional buckets",
+            "to_label": "Africa's countries only",
+            "reason": "Regional buckets apply only to a summed region.",
+        }
+    ]
+
     frame = STUDIO_FRAME_ADAPTER.validate_python(raw)
 
     assert isinstance(frame, PlanProposed)
@@ -458,6 +468,48 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_SWITCH = {
+    "kind": "interrupt.response",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "interrupt_id": "plan_1",
+    "decision": "switch",
+    "choice_id": "spec_base:sector",
+    "option_id": "sector:120+130",
+    "plan_revision": "rev_1",
+}
+
+
+def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_SWITCH)
+
+    assert isinstance(accepted, InterruptResponse)
+    assert (accepted.decision, accepted.choice_id, accepted.option_id, accepted.plan_revision) == (
+        "switch",
+        "spec_base:sector",
+        "sector:120+130",
+        "rev_1",
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"choice_id": None}, id="switch-without-choice"),
+        pytest.param({"option_id": None}, id="switch-without-option"),
+        pytest.param({"plan_revision": None}, id="switch-without-revision"),
+        pytest.param({"option_id": ""}, id="switch-with-empty-option"),
+        pytest.param({"decision": "approve"}, id="approve-with-switch-members"),
+        pytest.param(
+            {"decision": "amend", "payload": "x", "choice_id": None}, id="amend-with-some"
+        ),
+    ],
+)
+def test_switch_members_come_together_and_only_with_switch(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_SWITCH, **change})
 
 
 _ANSWER = {

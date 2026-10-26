@@ -39,22 +39,38 @@ def build_planner(
 
 
 def handing_back_planner_failures(seam: PlannerModel) -> PlannerModel:
-    """`seam`, answering a draft it cannot finish (`PlannerSeamError`) with a
-    refusal instead of raising. The planner node then takes its "refused"
+    """`seam`, answering a draft or a revision it cannot finish (`PlannerSeamError`)
+    with a refusal instead of raising. The planner node then takes its "refused"
     route and `plan_done` hands the reason back to the agent, which answers
-    with what it can. The refusal states the failure's code, which words the
-    failed step the user sees. The failure is logged in full."""
+    with what it can; the `switch` node offers the plan unchanged. The refusal
+    states the failure's code, which words the failed step the user sees. The
+    failure is logged in full."""
+    return _HandingBackFailures(seam)
 
-    async def planner(**kwargs: Any) -> dict[str, Any]:
+
+class _HandingBackFailures:
+    """The `PlannerModel` `handing_back_planner_failures` returns."""
+
+    def __init__(self, seam: PlannerModel) -> None:
+        self._seam = seam
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
         try:
-            return await seam(**kwargs)
+            return await self._seam(**kwargs)
         except PlannerSeamError as exc:
-            logger.error(
-                "planner seam failed; handing the reason back to the orchestrator: %s", exc
-            )
-            return {"refused": {"text": str(exc), "code": exc.refusal.get("code")}}
+            return _handed_back(exc)
 
-    return planner
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        try:
+            return await self._seam.revise(**kwargs)
+        except PlannerSeamError as exc:
+            return _handed_back(exc)
+
+
+def _handed_back(exc: PlannerSeamError) -> dict[str, Any]:
+    """The refusal a `PlannerSeamError` is answered with, logged in full."""
+    logger.error("planner seam failed; handing the reason back to the orchestrator: %s", exc)
+    return {"refused": {"text": str(exc), "code": exc.refusal.get("code")}}
 
 
 __all__ = ["build_planner", "handing_back_planner_failures"]

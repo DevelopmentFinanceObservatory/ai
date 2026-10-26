@@ -111,6 +111,8 @@ from planner.plan import (
     pin_sources,
     plan_revision,
     rolls_from_its_start,
+    save_pin_sources,
+    save_plan,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
 from planner.settings import (
@@ -122,11 +124,13 @@ from planner.tool_results import ok
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
+from submission.service import scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 
 from .search_results import search_result_parts
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
+from .test_turn_records import _switchable_scope
 
 SPEC = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -4117,3 +4121,128 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
         "'breakdown_not_kept' when the source this ask's answer pins cannot hold the party open"
         in prompt
     )
+
+
+# --- revise: a plan amended in code, with no model call ------------------------
+
+
+def _sector_switched(scope: dict[str, Any]) -> dict[str, Any]:
+    """`scope` with its sector switched on the plan card to CRS 120 and 130."""
+    switched = copy.deepcopy(scope)
+    sector = switched["choices"][0]
+    sector["active"] = "sector:120+130"
+    switched["entries"] = [
+        switched["entries"][1],
+        {
+            "axis": "sector",
+            "option_id": "sector:120+130",
+            "provenance": "explicit",
+            "concept": "health",
+            "origin": {"kind": "choice", "choice_id": sector["id"]},
+        },
+    ]
+    return switched
+
+
+async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no_model_call(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """The US health aid plan, its sector switched: the re-pinned requirement
+    runs through `propose_plan`'s chain and the translation, the old pin's
+    scope decisions go, the new pin's are written and cited, the switched
+    one the user's, and the planner's model is never asked."""
+    old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
+    scope = _switchable_scope()
+    blocks = {
+        old: {"spec_id": old, "resolved": {"scope_choices": scope}},
+        new: {"spec_id": new, "resolved": {"scope_choices": _sector_switched(scope)}},
+    }
+    shown = {spec_id: PinSource(block=block, settled=True) for spec_id, block in blocks.items()}
+    scoped = scope_choice_decisions({old: shown[old]})[old]
+    translated = _translated_plan(decision, requirement, derived_requirement)
+    dataset = next(r for r in translated.evidence_requirements if isinstance(r, DatasetRequirement))
+    pinned = dataset.model_copy(
+        update={
+            "source_spec_id": old,
+            "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+        }
+    )
+    plan = Plan.model_validate(
+        {
+            **translated.model_dump(),
+            "decisions": [*translated.decisions, *scoped],
+            "evidence_requirements": [
+                pinned if r.id == dataset.id else r for r in translated.evidence_requirements
+            ],
+        }
+    )
+    drafted: list[Plan] = []
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        draft = load_plan(tool_context.state)
+        assert draft is not None
+        drafted.append(draft)
+        assert translated.translation is not None and translated.workflow is not None
+        save_plan(
+            tool_context.state,
+            draft.with_translation(
+                translation=translated.translation, workflow=translated.workflow
+            ),
+        )
+        return {"outcome": "ok"}
+
+    llm = ScriptedPlannerLlm(script=[])
+    seam = PlannerSeam(
+        settings=Settings(), surface=FixtureSurface(schemas=[]), translate=translate, model=llm
+    )
+    revised_pin = pinned.model_copy(update={"source_spec_id": new})
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        save_pin_sources(cast(SessionState, ctx.state), shown)
+        return await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[revised_pin.model_dump(mode="json")],
+            inherits={new: old},
+        )
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="revise_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    outputs = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    (result,) = outputs
+    assert llm.captured_requests == []
+    revised = Plan.model_validate(result["plan"])
+    assert (revised.version, revised.status) == (2, PlanStatus.PENDING_APPROVAL)
+    assert [d.version for d in drafted] == [2]
+    (dataset_after,) = [
+        r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)
+    ]
+    assert dataset_after.source_spec_id == new
+    by_slot = {d.slot: d for d in revised.decisions}
+    assert not [slot for slot in by_slot if slot.endswith(old)]
+    sector = by_slot[f"scope_sector_{new}"]
+    assert (sector.chosen, sector.resolved_by, sector.rationale) == (
+        "health (CRS 120) and population and reproductive health (CRS 130)",
+        ResolvedBy.USER,
+        "The user chose health (CRS 120) and population and reproductive health (CRS 130) "
+        "on the plan.",
+    )
+    assert {f"scope_{axis}_{new}" for axis in ("sector", "region", "measure_basis")} <= set(
+        dataset_after.decision_ids
+    )
+    assert result["summary"]["revision"] == plan_revision(revised)

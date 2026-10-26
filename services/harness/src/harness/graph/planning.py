@@ -283,7 +283,10 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
     the same answer later approves as of the same moment. The `"approved"`
     route stamps that time on the plan (`Plan.approved_at`), from which the
     approval's lifetime runs. An answer with no such time approves nothing
-    and routes `"amend"` as one naming another revision does. It
+    and routes `"amend"` as one naming another revision does. An answer
+    carrying `switch` (`{"choice_id", "option_id"}`, a scope choice the user
+    moved on the card) routes `"switch"` to the `switch` node
+    (`harness.graph.switch`), which offers the revised plan back here. It
     records a `plan.approved` span (nesting under the turn span
     `harness.studio_state.begin_turn` opens) and a matching log line with
     the same facts, `plan_version` and `amended`, off the `Plan` just
@@ -307,6 +310,12 @@ def approve(ctx: Context, node_input: dict[str, Any]) -> Iterator[Any]:
         # The card the user answered names a plan this release does not
         # read, so the answer approves nothing and amends nothing.
         yield Event(output={"unreadable_plan": True}, route="amend")
+        return
+    switch = answer.get("switch") if isinstance(answer, dict) else None
+    if isinstance(switch, dict):
+        # A switch moves a scope choice and approves nothing: the `switch`
+        # node revises the plan in code and offers it here again.
+        yield Event(output={"switch": switch}, route="switch")
         return
     key: Any = plan_revision(plan)
     approved_at = _answered_at(answer)

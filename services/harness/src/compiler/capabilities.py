@@ -159,12 +159,14 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
     ),
     # The harness's own read: `harness.graph`'s `seed` node resolves each seed's
     # identity again through Search, as does `translator.discovery` for a seed's
-    # identity over a plan's years. data-mcp stores the definition as it answers.
+    # identity over a plan's years, and the `switch` node compiles a switched
+    # scope choice through it (`scope_entries`). data-mcp stores the definition
+    # as it answers.
     ToolCapability(
         tool=_data("resolve_definition"),
         phase=Phase.DISCOVERY,
         implementation_version="1",
-        input_schema_hash="9d1e4169bddb8a136e8a978928a6eafc79ff19809d0383d05c1d1ecc120647c9",
+        input_schema_hash="f09505e5a81c2e5fdead829347a5b4fac8298a65ebebc2a953d690d6d4ce2e8d",
         # Above data-mcp's resubmit budget
         # (`data_mcp.resolve_definition_tool.RESUBMIT_CALL_BUDGET_S`, 100 s), itself
         # above the apis service's 90 s deadline for a resubmit whose member walk reads a

@@ -14,6 +14,11 @@ entries a later search posts as `carried_entries`. Search attaches each to
 a part by axis and concept and reports those it drops in
 `PartScope.dropped_entries`; the harness never matches an entry to a part.
 
+A switch on the plan card moves one choice to another option.
+`switch_entries` builds the entries the switch posts over the part's base
+identity, and `moved_choices` names each other choice the compiled answer
+moved with it.
+
 `ServedScope` is how the figures a retrieval served were counted, read from
 its `get_data` manifest (`served_facts`): the entities bound on each role,
 the measure basis and the components. `harness.turn_records.basis_line`
@@ -247,6 +252,67 @@ def carried_entries(scopes: Iterable[PartScope]) -> list[Entry]:
                 origin=ChoiceOrigin(choice_id=choice.id),
             )
     return list(newest.values())
+
+
+def switch_entries(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> list[Entry]:
+    """The scope entries a switch of `choice` to `option_id` posts over `scope.base`.
+
+    The scope's own entries, less any on the choice's axis, then the switch
+    as an explicit entry from the choice (`ChoiceOrigin`), so Search
+    compiles the other choices as they were settled. The switch keeps the
+    concept of the entry it replaces, so a later search carries it to the
+    same concept only.
+    """
+    replaced = next((entry for entry in scope.entries if entry.axis == choice.axis), None)
+    return [
+        *(entry for entry in scope.entries if entry.axis != choice.axis),
+        Entry(
+            axis=choice.axis,
+            option_id=option_id,
+            provenance="explicit",
+            concept=replaced.concept if replaced is not None else None,
+            origin=ChoiceOrigin(choice_id=choice.id),
+        ),
+    ]
+
+
+def moved_choices(before: PartScope, after: PartScope, *, switched: str) -> list[dict[str, str]]:
+    """Each choice of `before`, other than the one on axis `switched`, whose active option `after` moved.
+
+    Each is `{choice_id, from_label, to_label, reason}`: the option it held,
+    the one it holds now, and why, as a sentence. The reason is the option
+    it held being limited now (`REASON_COPY`), else Search's default
+    following the switch.
+    """
+    now = {choice.axis: choice for choice in after.choices}
+    moved: list[dict[str, str]] = []
+    for choice in before.choices:
+        changed = now.get(choice.axis)
+        if choice.axis == switched or changed is None or changed.active == choice.active:
+            continue
+        held, holds = choice.active_option, changed.active_option
+        if held is None or holds is None:
+            continue
+        kept = next(
+            (option for option in changed.options if option.option_id == choice.active), None
+        )
+        code = kept.availability.code if kept is not None else "option_not_covered"
+        moved.append(
+            {
+                "choice_id": changed.id,
+                "from_label": held.label,
+                "to_label": holds.label,
+                "reason": _sentence(REASON_COPY[code])
+                if code in REASON_COPY
+                else "Search counts it this way with the option you chose.",
+            }
+        )
+    return moved
+
+
+def _sentence(clause: str) -> str:
+    """`clause` as a sentence: its first letter capitalised and a full stop after it."""
+    return f"{clause[:1].upper()}{clause[1:]}."
 
 
 class ServedRole(StrictModel):

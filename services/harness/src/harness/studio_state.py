@@ -323,6 +323,25 @@ class _PendingQuestion:
     skippable: bool = False
 
 
+@dataclass(frozen=True)
+class _PendingOption:
+    """One option of a scope choice the plan card shows, as `/interrupt`
+    checks a switch against it: its label and whether it can be served
+    (`available`, `partial`, `unavailable`)."""
+
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class _PendingChoice:
+    """A scope choice the plan card shows, as `/interrupt` checks a switch
+    against it: its active option and each option by id."""
+
+    active: str
+    options: dict[str, _PendingOption] = field(default_factory=dict)
+
+
 @dataclass
 class _PendingInterrupt:
     """One wire interrupt id, mapped back to its ADK interrupt."""
@@ -363,6 +382,10 @@ class _PendingInterrupt:
     # recorded alongside `resuming_segment` so a retried resume can be
     # verified against what actually resumed.
     answer: dict[str, Any] | None = None
+    # A plan's scope choices the card shows, by choice id: what a switch on
+    # this card may name. Empty for an elicitation, a plan with none, and a
+    # plan paused before choices were kept.
+    choices: dict[str, _PendingChoice] = field(default_factory=dict)
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -1170,6 +1193,16 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
+            "choices": {
+                choice_id: {
+                    "active": choice.active,
+                    "options": {
+                        option_id: {"label": option.label, "status": option.status}
+                        for option_id, option in choice.options.items()
+                    },
+                }
+                for choice_id, choice in p.choices.items()
+            },
         }
         for interrupt_id, p in pending.items()
     }
@@ -1185,6 +1218,16 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         step_labels=dict(entry.get("step_labels") or {}),
         resuming_segment=entry.get("resuming_segment"),
         answer=entry.get("answer"),
+        choices={
+            choice_id: _PendingChoice(
+                active=choice["active"],
+                options={
+                    option_id: _PendingOption(label=option["label"], status=option["status"])
+                    for option_id, option in choice["options"].items()
+                },
+            )
+            for choice_id, choice in (entry.get("choices") or {}).items()
+        },
     )
     if "questions" in entry:
         pending.questions = tuple(

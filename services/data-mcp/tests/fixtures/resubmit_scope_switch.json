@@ -1,0 +1,816 @@
+{
+  "_recorded": "dfo-apis Search app over its offline test graph (tests/engine/test_dataset_resubmit.py), with the synthetic sector axis over activitySource that file declares: a switch resubmit posting a scope base identity with its scope entries, the definite part Search answered, and the 422 for an option the part does not offer.",
+  "request": {
+    "schema_version": 1,
+    "input": {
+      "kind": "dataset_resubmit",
+      "entries": [
+        {
+          "entry_kind": "identity",
+          "variable_text": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+          "identity": {
+            "identity_version": "spec1",
+            "shape": {
+              "kind": "statvar_schema",
+              "population_type": "EconomicActivity",
+              "measured_property": "amount",
+              "stat_type": "measuredValue",
+              "measurement_qualifier": "Nominal"
+            },
+            "slots": [
+              {
+                "property": "activitySource",
+                "binding": {
+                  "state": "unbound"
+                }
+              }
+            ],
+            "entities": {
+              "observationAbout": [
+                "country/IND"
+              ]
+            },
+            "requested_window": {
+              "kind": "all"
+            }
+          },
+          "scope_entries": [
+            {
+              "axis": "sector",
+              "option_id": "sector:1",
+              "provenance": "explicit",
+              "origin": {
+                "kind": "choice",
+                "choice_id": "spec_1f827136a0dbe48e0289024d1eefb7ed:sector"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "response": {
+    "schema_version": 1,
+    "query_echo": {
+      "entry_path": "dataset_resubmit",
+      "extract_skipped": true
+    },
+    "diagnostics": {
+      "engine_build": "unknown",
+      "trace_id": "a007fa520b7c450e976ab75f8d3ae1de",
+      "warnings": [],
+      "timing_ms": {
+        "total": 7,
+        "by_step": {
+          "coverage": 0
+        }
+      },
+      "timed_out": false
+    },
+    "kind": "resolution",
+    "parts": [
+      {
+        "variable_text": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+        "warnings": [],
+        "timing_ms": {
+          "total": 1,
+          "by_step": {
+            "validate": 0,
+            "walk": 1,
+            "reread_arcs": 0,
+            "detect_edits": 0,
+            "resolve_survivors": 0,
+            "shape": 0,
+            "bind": 0,
+            "where_places": 0,
+            "materialise": 0,
+            "answer": 0,
+            "options": 0
+          }
+        },
+        "entity_refs": [],
+        "operations": [],
+        "departures": [],
+        "assumptions": [],
+        "status": "definite",
+        "spec": {
+          "spec_id": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+          "definition": {
+            "schema_version": 1,
+            "spec_id": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+            "identity": {
+              "identity_version": "spec1",
+              "shape": {
+                "kind": "statvar_schema",
+                "population_type": "EconomicActivity",
+                "measured_property": "amount",
+                "stat_type": "measuredValue",
+                "measurement_qualifier": "Nominal"
+              },
+              "slots": [
+                {
+                  "property": "activitySource",
+                  "binding": {
+                    "state": "unbound"
+                  }
+                }
+              ],
+              "entities": {
+                "observationAbout": [
+                  "country/IND"
+                ]
+              },
+              "requested_window": {
+                "kind": "all"
+              }
+            }
+          },
+          "resolved": {
+            "shape": {
+              "shape_id": "economicactivity_amount_measuredvalue_nominal",
+              "label": "Nominal gross domestic product",
+              "population_type": {
+                "ref": "EconomicActivity",
+                "label": "EconomicActivity"
+              },
+              "measured_property": {
+                "ref": "amount",
+                "label": "amount"
+              },
+              "stat_type": {
+                "ref": "measuredValue",
+                "label": "measuredValue"
+              },
+              "measurement_qualifier": {
+                "ref": "Nominal",
+                "label": "Nominal"
+              },
+              "measurement_denominator_unresolved": false,
+              "slot_keys": [
+                {
+                  "axis": "how",
+                  "property": {
+                    "ref": "activitySource",
+                    "label": "activitySource"
+                  },
+                  "label": "activity source"
+                },
+                {
+                  "axis": "where",
+                  "label": "place"
+                },
+                {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                {
+                  "axis": "source",
+                  "label": "data source"
+                }
+              ],
+              "member_count": 1,
+              "member_digest": "b358d2247a1be42f5d65fd3558103ff81a8997d434ac725640ee9377a4f87c4d",
+              "refine_supported": true,
+              "data_commons": [
+                {
+                  "id": "base",
+                  "label": "Data Commons by Google"
+                }
+              ]
+            },
+            "slots": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "ref": "activitySource",
+                    "label": "activitySource"
+                  },
+                  "label": "activity source"
+                },
+                "binding": {
+                  "kind": "unbound"
+                },
+                "summable": false
+              },
+              {
+                "key": {
+                  "axis": "where",
+                  "label": "place"
+                },
+                "binding": {
+                  "kind": "value",
+                  "value": {
+                    "ref": {
+                      "ref": "country/IND",
+                      "label": "India"
+                    },
+                    "value_kind": "entity"
+                  }
+                },
+                "summable": false
+              },
+              {
+                "key": {
+                  "axis": "when",
+                  "label": "time window"
+                },
+                "binding": {
+                  "kind": "unbound"
+                },
+                "summable": false
+              },
+              {
+                "key": {
+                  "axis": "source",
+                  "label": "data source"
+                },
+                "binding": {
+                  "kind": "unbound"
+                },
+                "summable": false
+              }
+            ],
+            "inapplicable_slots": [],
+            "unresolved_slots": [],
+            "stat_vars": {
+              "member_count": 1,
+              "member_count_exact": true,
+              "served_count": 1,
+              "data_date_range": {
+                "start": "1960",
+                "end": "2026"
+              }
+            },
+            "entities": [
+              {
+                "ref": "country/IND",
+                "label": "India",
+                "entity_type": "Country",
+                "role": "observationAbout"
+              }
+            ],
+            "coverage": {
+              "kind": "exact",
+              "has_data": true,
+              "observation_count": 88,
+              "evidence": "facet_metadata",
+              "dimensions": [
+                {
+                  "label": "sources",
+                  "count": 0
+                },
+                {
+                  "label": "observations",
+                  "count": 88
+                },
+                {
+                  "label": "variables",
+                  "count": 1
+                }
+              ]
+            },
+            "download": {
+              "rows": 88,
+              "rows_exact": false,
+              "series": 1,
+              "window": {
+                "start_year": 1960,
+                "end_year": 2026
+              }
+            },
+            "facets": {},
+            "slot_options": [
+              {
+                "key": {
+                  "axis": "how",
+                  "property": {
+                    "ref": "activitySource",
+                    "label": "activitySource"
+                  },
+                  "label": "activity source"
+                },
+                "options": [
+                  {
+                    "value": {
+                      "ref": {
+                        "ref": "GrossDomesticProduction",
+                        "label": "GrossDomesticProduction"
+                      },
+                      "value_kind": "enum_value"
+                    },
+                    "served_rows": 88,
+                    "served_rows_exact": false
+                  }
+                ],
+                "truncated": true,
+                "source": "observed"
+              }
+            ],
+            "entity_options": [],
+            "facet_options": [],
+            "rendered_sentence": "India's GDP, 1960 to 2026.",
+            "sentence_plan": [
+              {
+                "kind": "slot",
+                "text": "India",
+                "axis": "where",
+                "segment": "heading",
+                "binding_ref": "where:",
+                "entity_refs": [],
+                "states": [
+                  "where:"
+                ]
+              },
+              {
+                "kind": "text",
+                "text": "'s",
+                "segment": "heading",
+                "entity_refs": [],
+                "states": []
+              },
+              {
+                "kind": "text",
+                "text": " ",
+                "segment": "heading",
+                "entity_refs": [],
+                "states": []
+              },
+              {
+                "kind": "slot",
+                "text": "GDP",
+                "axis": "what",
+                "segment": "heading",
+                "entity_refs": [],
+                "states": [
+                  "how:activitySource",
+                  "axis:populationType",
+                  "axis:measuredProperty",
+                  "axis:statType"
+                ]
+              },
+              {
+                "kind": "slot",
+                "text": "",
+                "axis": "how",
+                "segment": "heading",
+                "property_dcid": "activitySource",
+                "binding_ref": "how:activitySource",
+                "entity_refs": [],
+                "states": []
+              },
+              {
+                "kind": "text",
+                "text": ", ",
+                "segment": "heading",
+                "entity_refs": [],
+                "states": []
+              },
+              {
+                "kind": "slot",
+                "text": "1960 to 2026",
+                "axis": "when",
+                "segment": "heading",
+                "binding_ref": "when:",
+                "entity_refs": [],
+                "states": [
+                  "when:"
+                ]
+              },
+              {
+                "kind": "text",
+                "text": ".",
+                "segment": "heading",
+                "entity_refs": [],
+                "states": []
+              },
+              {
+                "kind": "slot",
+                "text": "",
+                "axis": "source",
+                "segment": "byline",
+                "binding_ref": "source:",
+                "entity_refs": [],
+                "states": []
+              }
+            ],
+            "trace": {
+              "resolved_entities": [
+                {
+                  "ref": "country/IND",
+                  "label": "India"
+                }
+              ],
+              "resolved_sources": [],
+              "slot_filters": [
+                {
+                  "key": {
+                    "axis": "how",
+                    "property": {
+                      "ref": "activitySource",
+                      "label": "activitySource"
+                    },
+                    "label": "activity source"
+                  },
+                  "binding_kind": "unbound",
+                  "refs": [],
+                  "provenance": "binder"
+                },
+                {
+                  "key": {
+                    "axis": "where",
+                    "label": "place"
+                  },
+                  "binding_kind": "value",
+                  "refs": [
+                    {
+                      "ref": "country/IND",
+                      "label": "India"
+                    }
+                  ],
+                  "provenance": "binder"
+                },
+                {
+                  "key": {
+                    "axis": "when",
+                    "label": "time window"
+                  },
+                  "binding_kind": "unbound",
+                  "refs": [],
+                  "provenance": "binder"
+                },
+                {
+                  "key": {
+                    "axis": "source",
+                    "label": "data source"
+                  },
+                  "binding_kind": "unbound",
+                  "refs": [],
+                  "provenance": "binder"
+                }
+              ],
+              "query_qualifiers": [],
+              "capability_version": "cap_afc126ee9c552002"
+            },
+            "confidence": "high",
+            "available_at_place": true,
+            "measure_label_axes": [],
+            "measure_axis_values": [],
+            "related_group": {
+              "ref": "dc/g/EconomicActivity_ActivitySource-GrossDomesticProduction",
+              "label": "dc/g/EconomicActivity_ActivitySource-GrossDomesticProduction"
+            },
+            "related_measures": [
+              {
+                "stat_var": {
+                  "ref": "GrowthRate_Amount_EconomicActivity_GrossDomesticProduction",
+                  "label": "Gross domestic product growth rate"
+                },
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_1e0f73323c7262b3e25ad69e9d3a14da",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "EconomicActivity",
+                      "measured_property": "amount",
+                      "stat_type": "growthRate"
+                    },
+                    "slots": [
+                      {
+                        "property": "activitySource",
+                        "binding": {
+                          "state": "value",
+                          "ref": "GrossDomesticProduction"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "observationAbout": [
+                        "country/IND"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                }
+              },
+              {
+                "stat_var": {
+                  "ref": "Amount_EconomicActivity_GrossDomesticProduction_RealValue",
+                  "label": "Real gross domestic product by economic activity"
+                },
+                "definition": {
+                  "schema_version": 1,
+                  "spec_id": "spec_0e9b89cf2cd7332c921addf9a04d3363",
+                  "identity": {
+                    "identity_version": "spec1",
+                    "shape": {
+                      "kind": "statvar_schema",
+                      "population_type": "EconomicActivity",
+                      "measured_property": "amount",
+                      "stat_type": "measuredValue",
+                      "measurement_qualifier": "RealValue"
+                    },
+                    "slots": [
+                      {
+                        "property": "activitySource",
+                        "binding": {
+                          "state": "value",
+                          "ref": "GrossDomesticProduction"
+                        }
+                      }
+                    ],
+                    "entities": {
+                      "observationAbout": [
+                        "country/IND"
+                      ]
+                    },
+                    "requested_window": {
+                      "kind": "all"
+                    }
+                  }
+                }
+              }
+            ],
+            "open_axis_facts": [
+              {
+                "property": "activitySource",
+                "varies": false,
+                "value": {
+                  "ref": "GrossDomesticProduction",
+                  "label": "GrossDomesticProduction"
+                },
+                "distinct_count": 1,
+                "undeclared_count": 0,
+                "values": [
+                  {
+                    "value": {
+                      "ref": "GrossDomesticProduction",
+                      "label": "GrossDomesticProduction"
+                    },
+                    "count": 1
+                  }
+                ]
+              }
+            ],
+            "scope_choices": {
+              "id": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+              "base": {
+                "schema_version": 1,
+                "spec_id": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+                "identity": {
+                  "identity_version": "spec1",
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "population_type": "EconomicActivity",
+                    "measured_property": "amount",
+                    "stat_type": "measuredValue",
+                    "measurement_qualifier": "Nominal"
+                  },
+                  "slots": [
+                    {
+                      "property": "activitySource",
+                      "binding": {
+                        "state": "unbound"
+                      }
+                    }
+                  ],
+                  "entities": {
+                    "observationAbout": [
+                      "country/IND"
+                    ]
+                  },
+                  "requested_window": {
+                    "kind": "all"
+                  }
+                }
+              },
+              "rule_version": "scope1:3621c1eaa676f369d408b5ba991dcd28",
+              "entries": [
+                {
+                  "axis": "sector",
+                  "option_id": "sector:1",
+                  "provenance": "explicit",
+                  "origin": {
+                    "kind": "choice",
+                    "choice_id": "spec_1f827136a0dbe48e0289024d1eefb7ed:sector"
+                  }
+                }
+              ],
+              "dropped_entries": [],
+              "choices": [
+                {
+                  "id": "spec_1f827136a0dbe48e0289024d1eefb7ed:sector",
+                  "axis": "sector",
+                  "rule": "test_activity_source",
+                  "provenance": "explicit",
+                  "active": "sector:1",
+                  "options": [
+                    {
+                      "option_id": "sector:1",
+                      "label": "sector:1",
+                      "binding": {
+                        "kind": "slot",
+                        "slot": "activitySource",
+                        "state": "value",
+                        "refs": [
+                          "SourceA"
+                        ]
+                      },
+                      "availability": {
+                        "status": "available",
+                        "detail": {}
+                      }
+                    },
+                    {
+                      "option_id": "sector:2",
+                      "label": "sector:2",
+                      "binding": {
+                        "kind": "slot",
+                        "slot": "activitySource",
+                        "state": "value",
+                        "refs": [
+                          "SourceB"
+                        ]
+                      },
+                      "availability": {
+                        "status": "available",
+                        "detail": {}
+                      }
+                    }
+                  ]
+                }
+              ],
+              "compiled": {
+                "spec_id": "spec_1f827136a0dbe48e0289024d1eefb7ed",
+                "identity": {
+                  "identity_version": "spec1",
+                  "shape": {
+                    "kind": "statvar_schema",
+                    "population_type": "EconomicActivity",
+                    "measured_property": "amount",
+                    "stat_type": "measuredValue",
+                    "measurement_qualifier": "Nominal"
+                  },
+                  "slots": [
+                    {
+                      "property": "activitySource",
+                      "binding": {
+                        "state": "unbound"
+                      }
+                    }
+                  ],
+                  "entities": {
+                    "observationAbout": [
+                      "country/IND"
+                    ]
+                  },
+                  "requested_window": {
+                    "kind": "all"
+                  }
+                },
+                "components": [
+                  {
+                    "role": "whole",
+                    "identity": {
+                      "identity_version": "spec1",
+                      "shape": {
+                        "kind": "statvar_schema",
+                        "population_type": "EconomicActivity",
+                        "measured_property": "amount",
+                        "stat_type": "measuredValue",
+                        "measurement_qualifier": "Nominal"
+                      },
+                      "slots": [
+                        {
+                          "property": "activitySource",
+                          "binding": {
+                            "state": "unbound"
+                          }
+                        }
+                      ],
+                      "entities": {
+                        "observationAbout": [
+                          "country/IND"
+                        ]
+                      },
+                      "requested_window": {
+                        "kind": "all"
+                      }
+                    }
+                  }
+                ]
+              },
+              "ledger": []
+            }
+          }
+        }
+      }
+    ],
+    "rendered_sentence": "India's GDP, 1960 to 2026.",
+    "sentence_plan": [
+      {
+        "kind": "slot",
+        "text": "India",
+        "axis": "where",
+        "segment": "heading",
+        "binding_ref": "where:",
+        "entity_refs": [],
+        "states": [
+          "where:"
+        ],
+        "part_index": 0
+      },
+      {
+        "kind": "text",
+        "text": "'s",
+        "segment": "heading",
+        "entity_refs": [],
+        "states": [],
+        "part_index": 0
+      },
+      {
+        "kind": "text",
+        "text": " ",
+        "segment": "heading",
+        "entity_refs": [],
+        "states": [],
+        "part_index": 0
+      },
+      {
+        "kind": "slot",
+        "text": "GDP",
+        "axis": "what",
+        "segment": "heading",
+        "entity_refs": [],
+        "states": [
+          "how:activitySource",
+          "axis:populationType",
+          "axis:measuredProperty",
+          "axis:statType"
+        ],
+        "part_index": 0
+      },
+      {
+        "kind": "slot",
+        "text": "",
+        "axis": "how",
+        "segment": "heading",
+        "property_dcid": "activitySource",
+        "binding_ref": "how:activitySource",
+        "entity_refs": [],
+        "states": [],
+        "part_index": 0
+      },
+      {
+        "kind": "text",
+        "text": ", ",
+        "segment": "heading",
+        "entity_refs": [],
+        "states": []
+      },
+      {
+        "kind": "slot",
+        "text": "1960 to 2026",
+        "axis": "when",
+        "segment": "heading",
+        "binding_ref": "when:",
+        "entity_refs": [],
+        "states": [
+          "when:"
+        ]
+      },
+      {
+        "kind": "text",
+        "text": ".",
+        "segment": "heading",
+        "entity_refs": [],
+        "states": []
+      },
+      {
+        "kind": "slot",
+        "text": "",
+        "axis": "source",
+        "segment": "byline",
+        "binding_ref": "source:",
+        "entity_refs": [],
+        "states": []
+      }
+    ],
+    "status": "definite"
+  },
+  "refusal": {
+    "type": "/codes/requested_option_unavailable",
+    "title": "Requested Option Unavailable",
+    "status": 422,
+    "detail": "Scope entry 0 cannot apply to this part: option_unknown.",
+    "code": "requested_option_unavailable",
+    "pointer": "/input/entries/0/scope_entries/0",
+    "trace_id": "94d21aab760e44bfa5f10bdfc7853307",
+    "capability_version": "cap_afc126ee9c552002",
+    "retryable": false
+  }
+}

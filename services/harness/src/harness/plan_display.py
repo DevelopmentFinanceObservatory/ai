@@ -272,6 +272,17 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     )
 
 
+def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
+    """The decisions of `plan` the card's row for `slot` stands for: the
+    decision under `slot` and every one listed with it (`_listed_slots`);
+    empty when no decision of `plan` holds `slot`."""
+    listed = _listed_slots(plan)
+    row = listed.get(slot)
+    if row is None:
+        return ()
+    return tuple(decision for decision in plan.decisions if listed.get(decision.slot) == row)
+
+
 def _listed_slots(plan: Plan) -> dict[str, str]:
     """Each slot of `plan`'s decisions mapped to the slot of the listed decision stating it.
 

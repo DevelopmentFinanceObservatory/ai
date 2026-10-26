@@ -1280,6 +1280,32 @@ def _first_year_unreadable(
     )
 
 
+async def with_first_years(
+    propose: Callable[[], dict[str, object]], *, state: SessionState, surface: ToolSurface
+) -> dict[str, object]:
+    """`propose`'s answer, once the first year of each dataset it refused for want of is read.
+
+    A refusal records nothing, so `propose` runs again once the read is held
+    (`planner.plan.save_full_history`). One read serves every requirement,
+    and every later proposal of the turn, that pins the dataset; an answer
+    stating no first year is held too, and the next refusal says so
+    (`first_year_read_failed`).
+    """
+    while True:
+        result = propose()
+        pin = _first_year_wanted(result)
+        if pin is None or pin in full_histories(state):
+            return result
+        identity = _first_year_identity(pin, pin_sources(state))
+        if identity is None:
+            return result
+        try:
+            history = await read_full_history(surface, identity)
+        except DefinitionNotResolvedError as exc:
+            return _first_year_unreadable(result, exc)
+        save_full_history(state, pin, history)
+
+
 def build_planner_tools(
     *,
     translate: Translate | None = None,
@@ -1448,20 +1474,11 @@ def build_planner_tools(
         next refusal says so (`first_year_read_failed`).
         """
         assert surface is not None
-        state = arguments["tool_context"].state
-        while True:
-            result = propose_plan(**arguments)
-            pin = _first_year_wanted(result)
-            if pin is None or pin in full_histories(state):
-                return result
-            identity = _first_year_identity(pin, pin_sources(state))
-            if identity is None:
-                return result
-            try:
-                history = await read_full_history(surface, identity)
-            except DefinitionNotResolvedError as exc:
-                return _first_year_unreadable(result, exc)
-            save_full_history(state, pin, history)
+        return await with_first_years(
+            lambda: propose_plan(**arguments),
+            state=arguments["tool_context"].state,
+            surface=surface,
+        )
 
     @functools.wraps(propose_plan)
     async def propose_plan_translating(**arguments: Any) -> dict[str, object]:

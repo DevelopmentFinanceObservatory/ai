@@ -97,7 +97,9 @@ from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
     ConversationState,
     StudioStore,
+    _PendingChoice,
     _PendingInterrupt,
+    _PendingOption,
     _PendingQuestion,
     _wire_id,
 )
@@ -123,6 +125,7 @@ from harness.wire import (
     PlanAsk,
     PlanDecision,
     PlanDecisionOption,
+    PlanMoved,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -1045,6 +1048,33 @@ def _scope_members(decision: Decision | None) -> dict[str, Any]:
     }
 
 
+def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
+    """The scope choices of the card's `decisions` a switch may name, by choice id.
+
+    A choice is switchable when an option other than its active one is
+    available or partial. The plan card lists `PlanAction.SWITCH` only
+    when one is, and `/interrupt` checks a switch against what is kept.
+    """
+    choices: dict[str, _PendingChoice] = {}
+    for decision in decisions:
+        if decision.choice_id is None or decision.options is None:
+            continue
+        assert decision.active_option_id is not None
+        if not any(
+            option.status != "unavailable" and option.option_id != decision.active_option_id
+            for option in decision.options
+        ):
+            continue
+        choices[decision.choice_id] = _PendingChoice(
+            active=decision.active_option_id,
+            options={
+                option.option_id: _PendingOption(label=option.label, status=option.status)
+                for option in decision.options
+            },
+        )
+    return choices
+
+
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
@@ -1058,12 +1088,13 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     a plan again, and `Plan`'s schema has no field for that. `restarted`
     marks an `"ok"` draft made over a plan the node could not read, whose version
     counts from 1 again; `_interrupt_frames` reads it to start a new line of
-    plan version ids.
+    plan version ids. `moved` rides on a plan the `switch` node offers
+    (`harness.graph.switch`): the other scope choices the switch moved.
     """
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "restarted")
+        if key not in ("summary", "revision", "refusal_note", "restarted", "moved")
     }
     return PlannerPlan.model_validate(fields)
 
@@ -1663,6 +1694,26 @@ class _Translator:
                 )
                 for row in plan_display.ask_rows(plan)
             ]
+            decisions = [
+                PlanDecision(
+                    id=decision.get("slot", f"d{index + 1}"),
+                    question=named(decision.get("description", "")),
+                    chosen=named(decision.get("chosen", "")),
+                    alternatives=(
+                        [named(option) for option in decision["options"]]
+                        if decision.get("options") is not None
+                        else None
+                    ),
+                    reason=named(decision.get("rationale", "")),
+                    resolved_by=_RESOLVED_BY_TO_WIRE.get(
+                        decision.get("resolved_by", ""), "default"
+                    ),
+                    **_scope_members(scoped.get(decision.get("slot", ""))),
+                )
+                for index, decision in enumerate(payload.get("decisions", []))
+                if decision.get("slot") in shown_slots
+            ]
+            choices = _switchable(decisions)
             frames.append(
                 PlanProposed(
                     event="plan.proposed",
@@ -1672,30 +1723,20 @@ class _Translator:
                     version=version,
                     title="Research plan",
                     steps=steps,
-                    decisions=[
-                        PlanDecision(
-                            id=decision.get("slot", f"d{index + 1}"),
-                            question=named(decision.get("description", "")),
-                            chosen=named(decision.get("chosen", "")),
-                            alternatives=(
-                                [named(option) for option in decision["options"]]
-                                if decision.get("options") is not None
-                                else None
-                            ),
-                            reason=named(decision.get("rationale", "")),
-                            resolved_by=_RESOLVED_BY_TO_WIRE.get(
-                                decision.get("resolved_by", ""), "default"
-                            ),
-                            **_scope_members(scoped.get(decision.get("slot", ""))),
-                        )
-                        for index, decision in enumerate(payload.get("decisions", []))
-                        if decision.get("slot") in shown_slots
+                    decisions=decisions,
+                    actions=[
+                        PlanAction.APPROVE,
+                        PlanAction.AMEND,
+                        PlanAction.REJECT,
+                        *([PlanAction.SWITCH] if choices else []),
                     ],
-                    actions=[PlanAction.APPROVE, PlanAction.AMEND, PlanAction.REJECT],
                     revision=revision,
                     requirements=requirements,
                     operations=operations,
                     asks=asks or None,
+                    moved=[PlanMoved.model_validate(moved) for moved in payload["moved"]]
+                    if payload.get("moved")
+                    else None,
                 )
             )
             conversation.pending[wire_id] = _PendingInterrupt(
@@ -1705,6 +1746,7 @@ class _Translator:
                 plan_revision=revision,
                 step_order=tuple(step_order),
                 step_labels=step_labels,
+                choices=choices,
             )
             return frames
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`

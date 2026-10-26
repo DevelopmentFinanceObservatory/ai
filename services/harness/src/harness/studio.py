@@ -178,9 +178,10 @@ def _interrupt_refusal(
 ) -> JSONResponse | None:
     """Everything that can be wrong with an interrupt.response, as one HTTP
     refusal: unknown id, a decision foreign to the interrupt kind, an
-    elicitation's answers (`_elicitation_refusal`), and the plan payload
+    elicitation's answers (`_elicitation_refusal`), the plan payload
     discipline (delta 12: amend carries the text it acts on, the other
-    decisions must not smuggle one)."""
+    decisions must not smuggle one), and a switch's revision and option
+    (`_switch_refusal`)."""
     if pending is None:
         return _tool_error_response(
             ToolError(
@@ -193,7 +194,12 @@ def _interrupt_refusal(
     allowed = (
         {InterruptDecision.ANSWER, InterruptDecision.SKIP}
         if pending.kind == "elicitation"
-        else {InterruptDecision.APPROVE, InterruptDecision.AMEND, InterruptDecision.REJECT}
+        else {
+            InterruptDecision.APPROVE,
+            InterruptDecision.AMEND,
+            InterruptDecision.REJECT,
+            InterruptDecision.SWITCH,
+        }
     )
     detail: str | None = None
     fix: str | None = None
@@ -209,6 +215,8 @@ def _interrupt_refusal(
             detail = "decision 'amend' requires a text payload"
     elif body.payload is not None:
         detail = f"decision {body.decision.value!r} does not take a payload"
+    elif body.decision is InterruptDecision.SWITCH:
+        return _switch_refusal(pending, body)
     if detail is None:
         return None
     return _tool_error_response(
@@ -217,6 +225,50 @@ def _interrupt_refusal(
             retry=RetryMode.CORRECT_AND_RETRY,
             detail=detail,
             fix=fix,
+        ),
+        status_code=422,
+    )
+
+
+def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSONResponse | None:
+    """What is wrong with a `switch` on a plan card, as one HTTP refusal, or `None`.
+
+    A switch names the revision of the plan the user saw, or is refused
+    409 `plan_revision_stale`. It moves a choice the card shows
+    (`_PendingInterrupt.choices`) to an option the card offers as available
+    or partial, other than the active one, or is refused 422
+    `switch_option_unavailable`. `detail` is copy the card shows.
+    """
+    if body.plan_revision != pending.plan_revision:
+        return _tool_error_response(
+            ToolError(
+                error=ErrorCode.EDIT_CONFLICT,
+                retry=RetryMode.REFRESH_THEN_RETRY,
+                constraint_id="plan_revision_stale",
+                detail="This plan has changed since you chose. Choose again on the plan shown now.",
+                fix="reload the conversation and switch on its current plan",
+            ),
+            status_code=409,
+        )
+    choice = pending.choices.get(body.choice_id or "")
+    option = choice.options.get(body.option_id or "") if choice is not None else None
+    if choice is None:
+        detail = "That choice cannot be switched on this plan."
+    elif option is None:
+        detail = "That option is not offered for this choice."
+    elif body.option_id == choice.active:
+        detail = f"The plan already counts {option.label}."
+    elif option.status == "unavailable":
+        detail = f"{option.label} cannot be counted for this plan."
+    else:
+        return None
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.CORRECT_AND_RETRY,
+            constraint_id="switch_option_unavailable",
+            detail=detail,
+            fix="choose an option the plan card offers",
         ),
         status_code=422,
     )
@@ -1268,8 +1320,20 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     question_id: answer.model_dump(mode="json")
                     for question_id, answer in body.answers.items()
                 }
+            if body.decision is InterruptDecision.SWITCH:
+                # Likewise a retry switching to another option.
+                requested_answer["switch"] = {
+                    "choice_id": body.choice_id,
+                    "option_id": body.option_id,
+                }
             resuming = pending.resuming_segment is not None
-            if not resuming and pending.kind == "plan":
+            # A switch revises the plan and approves nothing, so it leaves
+            # no approval record.
+            if (
+                not resuming
+                and pending.kind == "plan"
+                and body.decision is not InterruptDecision.SWITCH
+            ):
                 # Recorded once per interrupt id, on its first answer only:
                 # a resumed retry of the SAME answer (below) must not
                 # duplicate it. The record is of the act, not of what the
@@ -1430,6 +1494,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             if recorded is not None:
                 answer["at"] = recorded.at.isoformat()
+        elif body.decision is InterruptDecision.SWITCH:
+            # The graph's `switch` node revises the plan in code and offers
+            # it again; the turn's history record carries the choice.
+            assert body.choice_id is not None and body.option_id is not None
+            answer = {
+                "approved": None,
+                "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
+            }
+            label = pending.choices[body.choice_id].options[body.option_id].label
+            conversation.turn_user_message += f"\n(then: count {label})"
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record

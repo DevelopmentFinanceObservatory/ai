@@ -3000,14 +3000,14 @@ def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[De
         written = tuple(
             decision
             for choice in scope.choices
-            if (decision := _scope_decision(spec_id, choice)) is not None
+            if (decision := _scope_decision(spec_id, choice, scope=scope)) is not None
         )
         if written:
             decisions[spec_id] = written
     return decisions
 
 
-def _scope_decision(pin: str, choice: ScopeChoice) -> Decision | None:
+def _scope_decision(pin: str, choice: ScopeChoice, *, scope: PartScope) -> Decision | None:
     """The decision a pin of `pin` states for `choice`, or `None` when it states none.
 
     It states one when another option than the active one can be served,
@@ -3015,7 +3015,9 @@ def _scope_decision(pin: str, choice: ScopeChoice) -> Decision | None:
     choice's labels, unavailable ones included, so the card can say why
     each is out of reach. A choice a `Decision` cannot state, its labels
     repeated or past a limit of the plan's, states none. The user settled it
-    when an explicit or carried entry did, else Search's default did.
+    when an explicit or carried entry of `scope` did: an explicit one from a
+    choice (`ChoiceOrigin`) is a switch on the plan card. Else Search's
+    default did.
     """
     active = choice.active_option
     if active is None or not any(
@@ -3024,7 +3026,12 @@ def _scope_decision(pin: str, choice: ScopeChoice) -> Decision | None:
         if option.option_id != choice.active
     ):
         return None
-    if choice.provenance == "explicit":
+    switched = any(
+        entry.axis == choice.axis and entry.origin.kind == "choice" for entry in scope.entries
+    )
+    if choice.provenance == "explicit" and switched:
+        rationale = f"The user chose {active.label} on the plan."
+    elif choice.provenance == "explicit":
         rationale = f"The user's question asked for {active.label}."
     elif choice.provenance == "carried":
         rationale = f"The user chose {active.label} earlier in the conversation."
