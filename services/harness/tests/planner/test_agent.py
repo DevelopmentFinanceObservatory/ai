@@ -7111,6 +7111,237 @@ def test_a_share_whose_whole_names_its_own_donor_is_refused_until_the_whole_span
     assert spanning["outcome"] == Outcome.OK.value, spanning
 
 
+# The CRS and DAC2a pins a share's part and whole read, by spec_id.
+_PART_PIN = "spec_" + "1" * 32
+_WHOLE_PIN = "spec_" + "2" * 32
+
+# A donor a side names, with the graph ref its pin's block states for it, or
+# `None` when the block resolves no entity by that name.
+type _Donor = tuple[str, str | None]
+
+
+def _labelled_block(spec_id: str, donors: Sequence[_Donor]) -> dict[str, Any]:
+    """A search block for `spec_id` resolving Kenya and each donor of `donors` with a ref."""
+    entities = [{"role": "destination", "ref": "country/KEN", "label": "Kenya"}]
+    entities += [
+        {"role": "origin", "ref": ref, "label": name} for name, ref in donors if ref is not None
+    ]
+    return {"spec_id": spec_id, "resolved": {"entities": entities}}
+
+
+@pytest.mark.parametrize(
+    ("part", "whole", "pinned", "summed", "refused"),
+    [
+        # "United States" on CRS and "United States of America" on DAC2a are
+        # one graph ref, so the whole names the part's member alone.
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States of America", "country/USA")],
+            True,
+            False,
+            True,
+            id="alias-one-ref",
+        ),
+        # Two names alike in their words, two refs: the whole names another donor.
+        pytest.param(
+            [("Congo", "country/COG")],
+            [("Congo, Dem. Rep.", "country/COD")],
+            True,
+            False,
+            False,
+            id="similar-names-two-refs",
+        ),
+        # Japan resolves on the part's pin alone, so it is matched by name,
+        # and the alias beside it by ref.
+        pytest.param(
+            [("United States", "country/USA"), ("Japan", "country/JPN")],
+            [("United States of America", "country/USA"), ("Japan", None)],
+            True,
+            False,
+            True,
+            id="mixed-pins",
+        ),
+        # The whole is read through an aggregate, whose dataset's pin resolves it.
+        pytest.param(
+            [("United States", "country/USA"), ("Japan", "country/JPN")],
+            [("United States of America", "country/USA"), ("Japan", None)],
+            True,
+            True,
+            True,
+            id="mixed-pins-summed-whole",
+        ),
+        # No pin resolves a ref, so names decide: equal names are one member.
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States", "country/USA")],
+            False,
+            False,
+            True,
+            id="no-refs-equal-names",
+        ),
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States of America", "country/USA")],
+            False,
+            False,
+            False,
+            id="no-refs-alias",
+        ),
+    ],
+)
+def test_a_share_compares_its_whole_to_its_part_by_ref_where_the_pins_resolve_one(
+    decision: DecisionFactory,
+    part: list[_Donor],
+    whole: list[_Donor],
+    pinned: bool,
+    summed: bool,
+    refused: bool,
+) -> None:
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["The donors' share of ODA to Kenya, each year"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+    if pinned:
+        save_pin_sources(
+            ctx.state,
+            {
+                spec_id: PinSource(block=_labelled_block(spec_id, donors))
+                for spec_id, donors in ((_PART_PIN, part), (_WHOLE_PIN, whole))
+            },
+        )
+    period = Period(start=2015, end=2024)
+
+    def dataset(id: str, measure: str, donors: list[_Donor], pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=(
+                *(Entity(name=name, role="donor") for name, _ in donors),
+                Entity(name="Kenya", role="recipient"),
+            ),
+            period=period,
+            source_spec_id=pin if pinned else None,
+        )
+
+    by_year = AggregateRequirement(
+        id="whole_by_year",
+        decision_ids=["measure"],
+        input_id="whole",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of ODA to Kenya came from the donors each year?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("part", "ODA gross disbursements", part, _PART_PIN),
+            dataset("whole", "total ODA gross disbursements", whole, _WHOLE_PIN),
+            *((by_year,) if summed else ()),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id=by_year.id if summed else "whole"),
+            ),
+        ],
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.WHOLE_IS_ITS_MEMBER.value, result
+        assert result["detail"]["named"] == sorted(name for name, _ in whole)
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
+_G7_REFS = tuple(f"country/{code}" for code in ("CAN", "DEU", "FRA", "GBR", "ITA", "JPN", "USA"))
+
+
+@pytest.mark.parametrize(
+    ("members", "refused"),
+    [
+        # "G7" on CRS and "Group of Seven" on DAC2a bind the same seven donors,
+        # so each donor is divided by the seven's total.
+        pytest.param(_G7_REFS, False, id="pool-of-seven"),
+        pytest.param(_G7_REFS[-1:], True, id="pool-of-one"),
+    ],
+)
+def test_a_pooled_share_counts_the_members_its_whole_resolves_its_group_to(
+    decision: DecisionFactory, members: tuple[str, ...], refused: bool
+) -> None:
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["Each G7 donor's share of G7 ODA to Kenya, each year"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+
+    def block(spec_id: str, label: str) -> dict[str, Any]:
+        entities = [{"role": "destination", "ref": "country/KEN", "label": "Kenya"}]
+        entities += [{"role": "origin", "ref": ref, "label": ref} for ref in members]
+        return {
+            "spec_id": spec_id,
+            "resolved": {"entities": entities, "entity_groups": {"origin": {"label": label}}},
+        }
+
+    save_pin_sources(
+        ctx.state,
+        {
+            _PART_PIN: PinSource(block=block(_PART_PIN, "G7")),
+            _WHOLE_PIN: PinSource(block=block(_WHOLE_PIN, "Group of Seven")),
+        },
+    )
+    period = Period(start=2015, end=2024)
+    kenya = Entity(name="Kenya", role="recipient")
+
+    def dataset(id: str, measure: str, group: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=(Entity(name=group, role="donor", members=True), kenya),
+            period=period,
+            source_spec_id=pin,
+        )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of G7 ODA to Kenya came from each G7 donor each year?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts(
+            [decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))]
+        ),
+        evidence_requirements=[
+            dataset("part", "ODA gross disbursements", "G7", _PART_PIN),
+            dataset("whole", "total ODA gross disbursements", "Group of Seven", _WHOLE_PIN),
+            AggregateRequirement(
+                id="whole_by_year",
+                decision_ids=["measure"],
+                input_id="whole",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="whole_by_year"),
+                axis="donor",
+                denominator_scope=DenominatorScope.POOLED,
+            ),
+        ],
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.WHOLE_IS_ITS_MEMBER.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
 def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
     decision: DecisionFactory,
 ) -> None:
