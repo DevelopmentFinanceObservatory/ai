@@ -35,6 +35,7 @@ caller's.
 
 from __future__ import annotations
 
+import functools
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol
 
-from compiler.evidence import open_axes_for
+from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     measure_named_by_query,
@@ -78,6 +79,7 @@ from planner.plan import (
     DecisionDraft,
     DecisionFixes,
     Decline,
+    Entity,
     EvidenceRequirement,
     FirstYear,
     FixDisagreement,
@@ -97,6 +99,7 @@ from planner.plan import (
     amendment_entry,
     authored,
     bound_fixes,
+    check_wholes_span_their_totals,
     cut_user_text,
     dataset_roots,
     fix_disagreements,
@@ -521,6 +524,9 @@ def admit(
                 )
             }
         )
+        # `Plan` validation compares the sides of a share by name; the
+        # pins resolve them to graph refs, so an alias divides by itself too.
+        check_wholes_span_their_totals(stated, refs=_entity_refs(view))
         split = split_of(stated)
         # The recorded plan carries the copies, and `Plan` validation checks
         # they are the split of `stated` before `_window_pins` gives each pin
@@ -665,8 +671,9 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     can still carry model-supplied text (an unknown key on a requirement), so
     each string in it is cut at `_MAX_LOC_ELEMENT_CHARS`. A `Decision`
     validator's message echoes `chosen` and `options`, which their own
-    length caps bound. Any other `ValueError` is a plan rule stated in words,
-    so its text is the message. A rule that refused what the system cannot do
+    length caps bound. A plan rule's typed error raised outside validation
+    answers as it does inside (`_rule_refused`); any other `ValueError` is a
+    plan rule stated in words, so its text is the message. A rule that refused what the system cannot do
     (`UnsupportedPlanError`) is no malformed draft, so it answers `_unsupported`.
     An ask left unaccounted for (`AsksUnaccountedError`) answers
     `_asks_unaccounted`, and a party an answer drops (`AskRoleDroppedError`)
@@ -683,7 +690,7 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     if isinstance(exc, RollingPlanError):
         return _rolling_refused(exc)
     if not isinstance(exc, ValidationError):
-        return _invalid_plan(f"Invalid plan data: {exc}")
+        return _rule_refused(exc, proposer) or _invalid_plan(f"Invalid plan data: {exc}")
     cause = _unsupported_cause(exc)
     if cause is not None:
         return _unsupported(cause, proposer)
@@ -1698,6 +1705,33 @@ def _pinned_source(spec_id: str | None, view: SessionView) -> SelectedSource | N
         except ValueError:
             return None
     return load_log(view.state).recorded_source(spec_id)
+
+
+def _entity_refs(
+    view: SessionView,
+) -> Callable[[DatasetRequirement | None, Entity], frozenset[str]]:
+    """The graph refs `check_wholes_span_their_totals` compares an entity by, given its side's dataset requirement.
+
+    A name is resolved against the source its dataset requirement pins
+    (`_pinned_source`), by label or by the refs Search bound for it
+    (`compiler.evidence.named_refs`), as
+    `translator.discovery._divides_its_member_by_itself` compares a pin's
+    members; a group names every member the source binds on its side. A
+    name the pin does not resolve, or on a requirement pinning nothing on
+    record, resolves no ref and is compared by its name.
+    """
+
+    @functools.cache
+    def source(spec_id: str) -> SelectedSource | None:
+        return _pinned_source(spec_id, view)
+
+    def refs(dataset: DatasetRequirement | None, entity: Entity) -> frozenset[str]:
+        if dataset is None or dataset.source_spec_id is None:
+            return frozenset()
+        pinned = source(dataset.source_spec_id)
+        return frozenset() if pinned is None else frozenset(named_refs((entity,), pinned))
+
+    return refs
 
 
 class _SumDatasets(NamedTuple):
