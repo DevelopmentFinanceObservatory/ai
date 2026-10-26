@@ -27,9 +27,11 @@ import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, override
 
 import pytest
+from compiler.evidence import resolve_name
+from compiler.sources import bound_refs
 from compiler.surface import FixtureSurface, ToolCallResult, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
@@ -119,8 +121,14 @@ from planner.settings import (
     AgentSettings,
     drop_thought_parts,
 )
-from planner.tool_results import ok
-from planner.workflow import EvidenceBinding, SelectedSource, ToolId, WorkflowStep
+from planner.tool_results import ProblemCode, ok
+from planner.workflow import (
+    EvidenceBinding,
+    ResolvedEntity,
+    SelectedSource,
+    ToolId,
+    WorkflowStep,
+)
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
 from translator.discovery import current_cut_calls
@@ -2850,6 +2858,248 @@ async def test_an_answer_that_resumes_a_run_after_a_translated_proposal_is_read(
     ]
     assert [(p or {}).get("outcome") for p in proposals] == ["ok", "ok"], proposals
     assert (proposals[1] or {})["version"] == draft.version + 1
+
+
+_CONGO_ROWS = [{"text": "Congo", "role": "donor"}, {"text": "Congo", "role": "recipient"}]
+_CONGO_NODES = {"COD": "Democratic Republic of the Congo", "COG": "Republic of the Congo"}
+
+# "Aid from Congo to Congo": Search's two "Congo" rows share one identity, so it
+# answers one group whose options pin both rows, read as a donor and a recipient
+# reading.
+_CONGO_SEARCH_RESPONSE = ToolCallResult(
+    is_error=False,
+    **search_result_parts(
+        {
+            "schema_version": 1,
+            "status": "no_data",
+            "parts": [
+                {
+                    "status": "no_data",
+                    "variable_text": "aid",
+                    "warnings": [],
+                    "no_data": {
+                        "category": "unresolved",
+                        "reason": "entity_ambiguous",
+                        "ambiguous_entities": [
+                            {
+                                "text": "Congo",
+                                "candidates": [
+                                    {"ref": f"country/{code}", "label": label, "kind": "country"}
+                                    for code, label in _CONGO_NODES.items()
+                                ],
+                            }
+                        ],
+                        "options": [
+                            {
+                                "mentions": ["Congo"],
+                                "label": label,
+                                "entity_choice": 0,
+                                "data_query": {
+                                    "parts": [
+                                        {
+                                            "variable": "aid",
+                                            "entities": [
+                                                {**row, "dcid": f"country/{code}"}
+                                                for row in _CONGO_ROWS
+                                            ],
+                                        }
+                                    ]
+                                },
+                            }
+                            for code, label in _CONGO_NODES.items()
+                        ],
+                    },
+                }
+            ],
+        }
+    ),
+)
+
+
+class _RecordingSearch(FixtureSurface):
+    """A surface whose `search` answers from `answers` in turn, recording what each call sent."""
+
+    def __init__(self, answers: list[ToolCallResult]) -> None:
+        super().__init__(schemas=[])
+        self._answers = answers
+        self.sent: list[Mapping[str, object]] = []
+
+    @override
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: Any = None,
+    ) -> ToolCallResult:
+        del on_progress
+        if tool.name != "search":
+            raise ToolSurfaceUnavailableError(f"no canned answer for {tool.name!r}")
+        self.sent.append(arguments)
+        return self._answers[min(len(self.sent), len(self._answers)) - 1]
+
+
+def _ask_about_congo(role: str) -> Any:
+    """A script entry asking about one end's Congo, offering the picks the referral carries."""
+
+    def step(request: Any) -> list[tuple[str, dict[str, Any]]]:
+        (translation,) = [
+            part.function_response.response["translation"]
+            for content in request.contents
+            for part in content.parts or []
+            if part.function_response is not None and part.function_response.name == "propose_plan"
+        ]
+        (reading,) = [
+            reading
+            for reading in translation["ambiguous_entities"]
+            if reading["entity"]["role"] == role
+        ]
+        candidates = [
+            {"spec_id": candidate["pick"], "label": candidate["label"]}
+            for candidate in reading["candidates"]
+        ]
+        return [
+            ("adk_request_input", {"message": f"Which Congo, as {role}?", "candidates": candidates})
+        ]
+
+    return step
+
+
+@pytest.mark.parametrize(
+    ("stated", "admitted"),
+    [(("COD", "COG"), True), (("COG", "COD"), False)],
+    ids=["as_picked", "swapped"],
+)
+async def test_each_congo_is_settled_by_its_own_answer_and_reaches_search_as_picked(
+    decision: Any,
+    requirement: Any,
+    derived_requirement: Any,
+    source: Any,
+    stated: tuple[str, str],
+    admitted: bool,
+) -> None:
+    """Propose, take the entity referral, ask about the donor, then the recipient,
+    each answered on its own resume, then propose the nodes.
+
+    The user picks the Democratic Republic as donor and the Republic as
+    recipient. A proposal stating them so is admitted and its translation sends
+    each row pinned to its own node, which evidence resolves per role. One
+    swapping them is refused, so nothing is searched again.
+    """
+    congos = [Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient")]
+    dataset = requirement(measure="aid", entities=congos)
+    draft = Plan(
+        question="aid from Congo to Congo",
+        decisions=[decision()],
+        evidence_requirements=[dataset, derived_requirement()],
+    )
+    pinned = [
+        {"name": "Congo", "role": role, "dcid": f"country/{code}"}
+        for role, code in zip(("donor", "recipient"), stated, strict=True)
+    ]
+
+    def settle(request: Any) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            (
+                "propose_plan",
+                {
+                    "amends_version": _last_amended_version(request, default=1),
+                    "evidence_requirements": [
+                        dataset.model_dump(mode="json") | {"entities": pinned}
+                    ],
+                },
+            )
+        ]
+
+    surface = _RecordingSearch([_CONGO_SEARCH_RESPONSE, _NO_DATA_SEARCH_RESPONSE])
+    seam = PlannerSeam(settings=Settings(), surface=surface)
+    seam._agent.model = ScriptedPlannerLlm(
+        script=[
+            [
+                (
+                    "propose_plan",
+                    {
+                        "question": draft.question,
+                        "answer_mode": "computed",
+                        "decisions": [d.model_dump(mode="json") for d in draft.decisions],
+                        "evidence_requirements": [
+                            r.model_dump(mode="json") for r in draft.evidence_requirements
+                        ],
+                    },
+                )
+            ],
+            _ask_about_congo("donor"),
+            _ask_about_congo("recipient"),
+            settle,
+            "stop",
+        ]
+    )
+    harness = _SeamHarness()
+
+    assert await harness.run(seam, question=draft.question, readings=[]) is None
+    for pick in (
+        f"{dataset.id}|donor|Congo|country/COD",
+        f"{dataset.id}|recipient|Congo|country/COG",
+    ):
+        interrupt_id = _pending_ask_interrupt_id(await harness.events())
+        answer = types.Content(
+            role="user",
+            parts=[create_request_input_response(interrupt_id, {"result": {"spec_id": pick}})],
+        )
+        await harness.run(seam, question=draft.question, readings=[], new_message=answer)
+
+    proposals = [
+        part.function_response.response
+        for event in await harness.events()
+        for part in (event.content.parts if event.content and event.content.parts else [])
+        if part.function_response is not None and part.function_response.name == "propose_plan"
+    ]
+    asked = [
+        part.function_call.args["candidates"]
+        for event in await harness.events()
+        for part in (event.content.parts if event.content and event.content.parts else [])
+        if part.function_call is not None and part.function_call.name == "adk_request_input"
+    ]
+    assert [[c["spec_id"] for c in candidates] for candidates in asked] == [
+        [f"{dataset.id}|{role}|Congo|country/{code}" for code in ("COD", "COG")]
+        for role in ("donor", "recipient")
+    ]
+    assert len(proposals) == 2
+    assert proposals[0]["translation"]["kind"] == "entity_name_ambiguous"
+    if not admitted:
+        assert proposals[-1]["code"] == ProblemCode.INVALID_PLAN.value
+        assert len(surface.sent) == 1
+        return
+    assert proposals[-1]["outcome"] == "ok"
+    sent = surface.sent[-1]["parts"][0]["entities"]
+    assert sent == [
+        {"text": "Congo", "dcid": "country/COD", "role": "donor"},
+        {"text": "Congo", "dcid": "country/COG", "role": "recipient"},
+    ]
+
+    # Search restates each row as sent and binds it its own node; the recorded
+    # plan's entities resolve to them per role.
+    found = source(
+        entities=(
+            ResolvedEntity(role="origin", ref="country/COD", label="Congo, Dem. Rep."),
+            ResolvedEntity(role="destination", ref="country/COG", label="Congo"),
+        ),
+        bound_refs=bound_refs(
+            {
+                "restatement": {"entities": sent},
+                "entity_refs": [{"text": row["text"], "refs": [row["dcid"]]} for row in sent],
+            }
+        ),
+        identity=None,
+    )
+    recorded = load_plan(await harness.state())
+    assert recorded is not None
+    (stored,) = [r for r in recorded.evidence_requirements if isinstance(r, DatasetRequirement)]
+    resolved = {entity.role: resolve_name(entity, found) for entity in stored.entities}
+    assert {role: entity.ref if entity else None for role, entity in resolved.items()} == {
+        "donor": "country/COD",
+        "recipient": "country/COG",
+    }
 
 
 async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_referral(

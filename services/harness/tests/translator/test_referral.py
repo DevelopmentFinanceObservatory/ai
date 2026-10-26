@@ -126,6 +126,32 @@ def test_an_ambiguous_entity_carries_the_graph_nodes_it_could_name() -> None:
     )
 
     assert referral.outcome is Outcome.CHOICE_REQUIRED
+    # Each candidate's pick names the requirement and the reading, a restated
+    # group by its name, and reading the stored referral back keeps them.
+    restated = Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id="a",
+        ambiguous_entities=(
+            AmbiguousEntityReading(
+                text="Central Africa",
+                candidates=(
+                    EntityCandidate(ref="region/UN", label="UN", restate_as="Central Africa (UN)"),
+                    EntityCandidate(ref="region/AU", label="AU"),
+                ),
+                entity=EntityKey(name="Central Africa", role="recipient"),
+            ),
+            *two,
+        ),
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+    assert [c.pick for r in restated.ambiguous_entities for c in r.candidates] == [
+        "a|recipient|Central Africa|Central Africa (UN)",
+        "a|recipient|Central Africa|region/AU",
+        "a|donor|Congo|country/COD",
+        "a|donor|Congo|country/COG",
+    ]
+    assert Referral.model_validate_json(restated.model_dump_json()) == restated
     with pytest.raises(ValidationError, match="carries the offered graph nodes"):
         Referral(
             kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,

@@ -1464,7 +1464,9 @@ def test_return_to_planner_carries_the_choices_search_offered(
         tool_context=context,
     )
     assert result["outcome"] == "referred"
-    assert result["referral"][field] == [group.model_dump(mode="json")]
+    # An entity reading reaches the planner with its picks naming the requirement.
+    offered = group.picked_under(ask.id) if isinstance(group, AmbiguousEntityReading) else group
+    assert result["referral"][field] == [offered.model_dump(mode="json")]
     assert result["referral"]["candidates"] == []
     # Only the entity referral carries how to settle its choice.
     assert result["referral"].get("repair") == (
