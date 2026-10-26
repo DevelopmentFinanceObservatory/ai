@@ -276,6 +276,48 @@ def test_to_wire_request_sends_separate_only_when_set(separate: bool | None, sen
     assert part.get("separate", False) is sent
 
 
+@pytest.mark.parametrize(
+    ("identities", "expected"),
+    [
+        (
+            [{"name": "Democratic Republic of the Congo"}, {"name": "Republic of the Congo"}],
+            [
+                {"text": "Congo", "role_text": "from", "name": "Democratic Republic of the Congo"},
+                {"text": "Congo", "role_text": "to", "name": "Republic of the Congo"},
+            ],
+        ),
+        (
+            [{"dcid": "country/COD"}, {"dcid": "country/COG"}],
+            [
+                {"text": "Congo", "role_text": "from", "dcid": "country/COD"},
+                {"text": "Congo", "role_text": "to", "dcid": "country/COG"},
+            ],
+        ),
+    ],
+    ids=["name", "dcid"],
+)
+def test_two_entities_written_alike_go_out_as_two_rows_with_their_identities(
+    identities: list[dict[str, str]], expected: list[dict[str, str]]
+) -> None:
+    entities = [
+        SearchEntity(text="Congo", role=role, **identity)
+        for role, identity in zip(("from", "to"), identities, strict=True)
+    ]
+
+    wire = to_wire_request([SearchPart(variable="aid", entities=entities)], raw_query=None)
+
+    assert wire["input"]["parts"][0]["entities"] == expected
+
+
+def test_an_entity_with_both_a_name_and_a_dcid_is_refused() -> None:
+    with pytest.raises(ValidationError) as refused:
+        SearchEntity.model_validate(
+            {"text": "Congo", "name": "Republic of the Congo", "dcid": "country/COG"}
+        )
+
+    assert [error["type"] for error in refused.value.errors()] == ["value_error"]
+
+
 def test_an_entity_with_an_unknown_field_is_refused() -> None:
     with pytest.raises(ValidationError) as refused:
         SearchEntity.model_validate({"text": "Africa", "each_member": True})

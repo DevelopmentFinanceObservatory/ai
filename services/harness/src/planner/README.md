@@ -176,6 +176,22 @@ refuses the requirement unpinned with its `entities` and `across` unchanged
 (`source_not_offered`): the translator's fresh search would settle on a
 withheld source. The planner makes the referral's `repair` or asks the user.
 
+An entity's words can name more than one graph node, as "Congo" names both
+the Republic of the Congo and the Democratic Republic of the Congo. Search
+then answers an `entity_name_ambiguous` referral. Each reading in its
+`ambiguous_entities` holds one entity's `(name, role)` and the candidate nodes,
+each a `ref` and its graph `label`, so "aid from Congo to Congo" gives two
+readings, one per role. The planner settles a reading itself when the question
+or brief decides it and asks the user otherwise, one ask per reading, and
+states the node in the entity's `dcid`, keeping its name and role. The referral's
+`repair` carries that instruction (`translator.referral.REPAIR_OF`), so the
+planner reads it only when such a referral is pending, and the planner's
+instruction does not name the kind. Two entities of one requirement never state
+the same `dcid`. `propose_plan` refuses as
+`invalid_plan` a `dcid` that is neither among the candidates a pending
+`entity_name_ambiguous` referral offers for that entity nor unchanged from the
+plan being amended (`submission.service._entity_dcid_unoffered`).
+
 A pin's identity carries the years of the search that found it.
 `propose_plan` moves each pin whose identity is on record to that identity
 over the requirement's own period (`_window_pins`,
@@ -434,7 +450,11 @@ claim. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
 source a pending referral offers in place of a pin counts as settled, so a
-re-pin to it states its measure decision too. A
+re-pin to it states its measure decision too. A decision the patch states
+whose `fixes` lists `measure`, cited by a requirement that also cites the
+measure decision written for its pin, lists the flow twice and is refused as
+`measure_fixed_by_pin`
+(`_measure_fixed_by_pin`); a decision a stored plan carries unchanged stands. A
 decision the plan being amended records goes once a patch leaves no requirement
 citing it (`_uncited_carried_decisions`); one the patch itself states has to be
 cited. A patch moving a value a carried decision fixes drops a planner's

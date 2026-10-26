@@ -1,0 +1,328 @@
+{
+  "comment": "A real `/api/search/resolve` response from the deployed dev apis (engine build 99e62038), for the raw-text query \"aid from Congo to Congo\": it refused `entity_ambiguous` with two `ambiguous_entities` groups sharing the text \"Congo\", one per flow end, each offering Congo [DRC] and Congo [Republic]; each option names its group by `entity_choice`, as does each heading slot token. Unchanged apart from this comment.",
+  "schema_version": 1,
+  "query_echo": {
+    "entry_path": "raw_text",
+    "raw_query": "aid from Congo to Congo",
+    "normalized_query": "aid from Congo to Congo",
+    "extract_skipped": true
+  },
+  "diagnostics": {
+    "engine_build": "99e62038ceb4b459c2ac699549076ff123c166aa",
+    "trace_id": "cf06d4ead57a494aa302b4126cd5a60b",
+    "warnings": [],
+    "timing_ms": {
+      "total": 1,
+      "by_step": {
+        "coverage": 0,
+        "response_cache_layer1": 1
+      }
+    },
+    "llm_usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_tokens": 0
+    },
+    "timed_out": false
+  },
+  "kind": "resolution",
+  "parts": [
+    {
+      "variable_text": "aid",
+      "warnings": [],
+      "timing_ms": {
+        "total": 133,
+        "by_step": {
+          "recall": 133,
+          "phase_resolve_places": 0,
+          "phase_check_entities": 0
+        }
+      },
+      "rendered_sentence": "\"Congo\" (from) and \"Congo\" (to) each match more than one entity: \"Congo [DRC]\" and \"Congo [Republic]\". Be more specific.",
+      "sentence_plan": [
+        {
+          "kind": "text",
+          "text": "\"",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "Congo",
+          "segment": "heading",
+          "role": "origin",
+          "entity_choice": 0,
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "\" (from) and \"",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "slot",
+          "text": "Congo",
+          "axis": "where",
+          "segment": "heading",
+          "role": "destination",
+          "entity_choice": 1,
+          "entity_refs": [],
+          "states": []
+        },
+        {
+          "kind": "text",
+          "text": "\" (to) each match more than one entity: \"Congo [DRC]\" and \"Congo [Republic]\". Be more specific.",
+          "segment": "heading",
+          "entity_refs": [],
+          "states": []
+        }
+      ],
+      "restatement": {
+        "variable_text": "aid",
+        "entities": [
+          {
+            "text": "Congo",
+            "name": "Democratic Republic of the Congo",
+            "role_text": "from"
+          },
+          {
+            "text": "Congo",
+            "name": "Republic of the Congo",
+            "role_text": "to"
+          }
+        ],
+        "sources": [],
+        "operations": []
+      },
+      "entity_refs": [
+        {
+          "text": "Congo",
+          "refs": []
+        },
+        {
+          "text": "Congo",
+          "refs": []
+        }
+      ],
+      "operations": [],
+      "departures": [],
+      "assumptions": [],
+      "status": "no_data",
+      "no_data": {
+        "reason": "entity_ambiguous",
+        "category": "unresolved",
+        "message": "\"Congo\" (from) and \"Congo\" (to) each match more than one entity: \"Congo [DRC]\" and \"Congo [Republic]\". Be more specific.",
+        "entity_terms": [
+          "Congo",
+          "Congo"
+        ],
+        "ambiguous_entities": [
+          {
+            "text": "Congo",
+            "candidates": [
+              {
+                "ref": "country/COD",
+                "label": "Congo [DRC]",
+                "kind": "country"
+              },
+              {
+                "ref": "country/COG",
+                "label": "Congo [Republic]",
+                "kind": "country"
+              }
+            ]
+          },
+          {
+            "text": "Congo",
+            "candidates": [
+              {
+                "ref": "country/COD",
+                "label": "Congo [DRC]",
+                "kind": "country"
+              },
+              {
+                "ref": "country/COG",
+                "label": "Congo [Republic]",
+                "kind": "country"
+              }
+            ]
+          }
+        ],
+        "source_terms": [],
+        "ambiguous_sources": [],
+        "unbound_qualifiers": [],
+        "options": [
+          {
+            "mentions": [
+              "Congo"
+            ],
+            "label": "Congo [DRC]",
+            "data_query": {
+              "kind": "parsed",
+              "parts": [
+                {
+                  "variable_text": "aid",
+                  "entities": [
+                    {
+                      "text": "Congo",
+                      "role_text": "from",
+                      "dcid": "country/COD"
+                    },
+                    {
+                      "text": "Congo",
+                      "name": "Republic of the Congo",
+                      "role_text": "to"
+                    }
+                  ],
+                  "sources": [],
+                  "operations": []
+                }
+              ]
+            },
+            "entity_choice": 0
+          },
+          {
+            "mentions": [
+              "Congo"
+            ],
+            "label": "Congo [Republic]",
+            "data_query": {
+              "kind": "parsed",
+              "parts": [
+                {
+                  "variable_text": "aid",
+                  "entities": [
+                    {
+                      "text": "Congo",
+                      "role_text": "from",
+                      "dcid": "country/COG"
+                    },
+                    {
+                      "text": "Congo",
+                      "name": "Republic of the Congo",
+                      "role_text": "to"
+                    }
+                  ],
+                  "sources": [],
+                  "operations": []
+                }
+              ]
+            },
+            "entity_choice": 0
+          },
+          {
+            "mentions": [
+              "Congo"
+            ],
+            "label": "Congo [DRC]",
+            "data_query": {
+              "kind": "parsed",
+              "parts": [
+                {
+                  "variable_text": "aid",
+                  "entities": [
+                    {
+                      "text": "Congo",
+                      "name": "Democratic Republic of the Congo",
+                      "role_text": "from"
+                    },
+                    {
+                      "text": "Congo",
+                      "role_text": "to",
+                      "dcid": "country/COD"
+                    }
+                  ],
+                  "sources": [],
+                  "operations": []
+                }
+              ]
+            },
+            "entity_choice": 1
+          },
+          {
+            "mentions": [
+              "Congo"
+            ],
+            "label": "Congo [Republic]",
+            "data_query": {
+              "kind": "parsed",
+              "parts": [
+                {
+                  "variable_text": "aid",
+                  "entities": [
+                    {
+                      "text": "Congo",
+                      "name": "Democratic Republic of the Congo",
+                      "role_text": "from"
+                    },
+                    {
+                      "text": "Congo",
+                      "role_text": "to",
+                      "dcid": "country/COG"
+                    }
+                  ],
+                  "sources": [],
+                  "operations": []
+                }
+              ]
+            },
+            "entity_choice": 1
+          }
+        ]
+      }
+    }
+  ],
+  "rendered_sentence": "\"Congo\" (from) and \"Congo\" (to) each match more than one entity: \"Congo [DRC]\" and \"Congo [Republic]\". Be more specific.",
+  "sentence_plan": [
+    {
+      "kind": "text",
+      "text": "\"",
+      "segment": "heading",
+      "entity_refs": [],
+      "states": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "Congo",
+      "segment": "heading",
+      "role": "origin",
+      "entity_choice": 0,
+      "entity_refs": [],
+      "states": [],
+      "part_index": 0
+    },
+    {
+      "kind": "text",
+      "text": "\" (from) and \"",
+      "segment": "heading",
+      "entity_refs": [],
+      "states": [],
+      "part_index": 0
+    },
+    {
+      "kind": "slot",
+      "text": "Congo",
+      "axis": "where",
+      "segment": "heading",
+      "role": "destination",
+      "entity_choice": 1,
+      "entity_refs": [],
+      "states": [],
+      "part_index": 0
+    },
+    {
+      "kind": "text",
+      "text": "\" (to) each match more than one entity: \"Congo [DRC]\" and \"Congo [Republic]\". Be more specific.",
+      "segment": "heading",
+      "entity_refs": [],
+      "states": [],
+      "part_index": 0
+    }
+  ],
+  "status": "no_data"
+}

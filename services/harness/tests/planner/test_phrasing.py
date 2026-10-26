@@ -94,6 +94,10 @@ def test_entities_phrase_states_the_party_across_covers_last() -> None:
         )
         == "all 55 donors, every recipient and every place with data"
     )
+    # One member is no population to count.
+    assert phrasing.entities_phrase([], across=("donor",), member_counts={"donor": 1}) == (
+        "every donor"
+    )
 
 
 @pytest.mark.parametrize(
@@ -154,6 +158,7 @@ def test_every_level_of_place_has_a_noun_the_card_can_pluralise() -> None:
         ("donors", 55, "ranks all 55 donors the source holds"),
         ("country", 193, "ranks all 193 countries the source holds"),
         ("countries", 12_345, "ranks all 12,345 countries the source holds"),
+        ("donor", 1, "ranks every donor the source holds"),
     ],
 )
 def test_among_phrase_states_how_many_members_the_source_holds(

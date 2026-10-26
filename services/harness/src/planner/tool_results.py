@@ -96,6 +96,7 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 
 class Action(StrictModel):
