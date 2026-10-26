@@ -704,8 +704,8 @@ def is_search_pin(decision: Decision) -> bool:
 def scope_choice_slot(spec_id: str, axis: ScopeAxis) -> str:
     """The `Decision.slot` `propose_plan` records the scope choice on `axis` of a pin of `spec_id` under.
 
-    Derived from the pin as `search_pin_slot` is, so a source's choices
-    never collide with each other or with another source's.
+    Derived from the pin as `search_pin_slot` is, so each source's choices
+    have slots of their own.
     """
     return f"scope_{axis}_{spec_id}"
 

@@ -673,8 +673,8 @@ class SearchReading(StrictModel):
     their options and the entries that settled them; `None` when the part's
     block carries none. `planner_axes` are the scope axes the planner's own
     words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
-    copied from its block): their entries are the planner's, never the user's. `observed_at` is stored and not
-    rendered.
+    copied from its block): their entries are the planner's. `observed_at`
+    is stored and not rendered.
     """
 
     text: str | None

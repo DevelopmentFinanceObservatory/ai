@@ -3446,7 +3446,7 @@ def _aligned_bases(
     dataset Search settled on for it (`searched`), since its basis is
     unknown until a dataset is pinned. An input of a calculation another of
     whose inputs carries a basis choice, with no search of it held yet,
-    answers `BASIS_UNKNOWN`, naming each to search for (`Unpinned`):
+    answers `BASIS_UNKNOWN`, naming each to search for (`Unpinned`).
     `planner.agent.with_source_reads` searches for them and proposes again.
     One whose search settled on no one dataset answers
     `OPERATION_UNSUPPORTED`, since one basis cannot be guaranteed for it.
@@ -3454,17 +3454,18 @@ def _aligned_bases(
     A calculation reading several inputs (a comparison, sum, share, quotient
     or join) contrasts sector, region and provider, and keeps those as
     stated. It contrasts the measure basis only when the user stated
-    different bases on its inputs (explicit entries naming different
-    options, an entry this planner compiled excluded: `_InputBasis.stated`). Otherwise its dataset inputs with a measure-basis choice are
-    counted on one basis: the one the user stated on any of them, else the
-    one the narrowest part is counted on (`_part_rank`), the first such
-    input in plan order on a tie.
+    different bases on its inputs (`_InputBasis.stated`: explicit entries
+    naming different options, leaving out an entry this planner compiled).
+    Otherwise its dataset inputs with a measure-basis choice are counted on
+    one basis. That is the one the user stated on any of them, else the one
+    the narrowest part is counted on (`_part_rank`), the first such input in
+    plan order on a tie.
 
     An input already on that basis keeps its origin pin. Another is pinned
     to the pin compiled from its origin on that basis (`aligned`), and the
     requirement is restated under it, appended when only the plan this call
     amends states it. An input with no such pin yet answers
-    `BASES_UNALIGNED`, naming each to compile (`Realignment`):
+    `BASES_UNALIGNED`, naming each to compile (`Realignment`).
     `planner.agent.with_source_reads` compiles them and proposes again. An
     input whose choice does not offer that basis, or offers it unavailable,
     and an input two calculations want on different bases, answer

@@ -1490,10 +1490,10 @@ async def with_source_reads(
     (`first_year_read_failed`). A calculation one of whose inputs pins no
     dataset while another carries a basis choice needs that input searched
     for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
-    requirement's content is never made twice. A calculation whose inputs are counted on
-    different measure bases needs each input it names compiled on their
-    shared basis (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
-    compiled is never asked for twice, so a refusal naming one is answered
+    requirement's content is made once. A calculation whose inputs are
+    counted on different measure bases needs each input it names compiled
+    on their shared basis (`BASES_UNALIGNED`, `compile_on_basis`); a pin
+    already compiled is asked for once, so a refusal naming one is answered
     as it stands.
     """
     while True:

@@ -236,8 +236,8 @@ class PartScope(StrictModel):
 
 
 # The key a spec block carries naming the scope axes whose entries the
-# planner's own words settled, so they are the planner's, never the user's:
-# the measure basis of a pin compiled to put a calculation's inputs on one
+# planner's own words settled, so they are the planner's. They are the
+# measure basis of a pin compiled to put a calculation's inputs on one
 # basis (`planner.agent.compile_on_basis`), and every axis an entry settled
 # on a pin searched for an input the planner pinned no dataset for, posted
 # with the planner's words and no message of the user's
