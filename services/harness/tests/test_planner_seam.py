@@ -134,7 +134,7 @@ from submission.service import scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 
-from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, BasisCompiles, basis_block
+from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, TOTAL_NET, BasisCompiles, basis_block
 from .search_results import search_result_parts
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 from .test_turn_records import _switchable_scope
@@ -4035,7 +4035,7 @@ async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it
 
 async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> None:
     """The reading is over 2020-2024 and the plan states those years as fixed,
-    so no first year is needed and `resolve_definition` is never called."""
+    so no first year is needed and none is read."""
     reads = _DefinitionReads(_held_since_1995)
     fixed = _last_five_years_plan()
     dataset, growth, _ = fixed["evidence_requirements"]
@@ -4044,7 +4044,7 @@ async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> 
 
     _, state = await _run_the_planner(reads, [[("propose_plan", fixed)]])
 
-    assert reads.calls == []
+    assert reads.first_year_reads == []
     assert full_histories(state) == {}
     plan = load_plan(state)
     assert plan is not None
@@ -4368,3 +4368,140 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
     ]
     # A later "US total ODA" search carries no basis: the planner chose it.
     assert result["carried"] == []
+
+
+_HEALTH_SWITCHED = f"spec_{'5' * 32}"
+
+
+@pytest.mark.parametrize(
+    ("switched", "total_after", "compiles"),
+    [
+        (
+            basis_block(
+                _HEALTH_SWITCHED, narrow=True, active="measure_basis:net", provenance="explicit"
+            ),
+            TOTAL_NET,
+            2,
+        ),
+        (
+            basis_block(_HEALTH_SWITCHED, narrow=True, active="measure_basis:gross"),
+            TOTAL_GROSS,
+            1,
+        ),
+    ],
+    ids=["basis-moves-both-inputs", "sector-moves-health-alone"],
+)
+async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
+    decision: Any, switched: dict[str, Any], total_after: str, compiles: int
+) -> None:
+    """US health aid in 2023 as a share of the US total, the total compiled on
+    the health aid's gross basis. A switch of the health aid's basis to net
+    compiles the total on net too; a switch of its sector alone leaves the
+    total on the gross pin compiled for it."""
+
+    def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=requirement_id,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=pin,
+        )
+
+    health = dataset("health", HEALTH)
+    plan = Plan(
+        question="What share of US aid went to health in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[decision()],
+        evidence_requirements=[
+            health,
+            dataset("total", TOTAL),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+    )
+    blocks = (
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+    )
+    shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks}
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {"outcome": "ok"}
+
+    surface = BasisCompiles()
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=cast(Any, surface),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        state = cast(SessionState, ctx.state)
+        save_pin_sources(state, shown)
+        await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[health.model_dump(mode="json")],
+            inherits={},
+        )
+        aligned = load_plan(state)
+        assert aligned is not None
+        save_pin_sources(
+            state,
+            {**pin_sources(state), _HEALTH_SWITCHED: PinSource(block=switched, settled=True)},
+        )
+        await seam.revise(
+            ctx=ctx,
+            prior_plan=aligned.model_dump(mode="json"),
+            evidence_requirements=[
+                health.model_copy(update={"source_spec_id": _HEALTH_SWITCHED}).model_dump(
+                    mode="json"
+                )
+            ],
+            inherits={_HEALTH_SWITCHED: HEALTH},
+        )
+        after = load_plan(state)
+        assert after is not None and after.version == aligned.version + 1
+        return {
+            "pins": {
+                r.id: r.source_spec_id
+                for r in after.evidence_requirements
+                if isinstance(r, DatasetRequirement)
+            },
+            "bases": sorted(
+                (d.fixes.source_spec_id, d.chosen)
+                for d in after.decisions
+                if d.scope is not None and d.scope.axis == "measure_basis" and d.fixes is not None
+            ),
+        }
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="share_switch_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    assert result["pins"] == {"health": _HEALTH_SWITCHED, "total": total_after}
+    assert len(surface.calls) == compiles
+    (health_basis, total_basis) = result["bases"]
+    assert health_basis[1] == total_basis[1]

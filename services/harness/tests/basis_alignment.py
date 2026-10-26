@@ -28,6 +28,10 @@ _FRANCE_KENYA = json.loads(
 HEALTH = f"spec_{'1' * 32}"
 TOTAL = f"spec_{'2' * 32}"
 TOTAL_GROSS = f"spec_{'3' * 32}"
+TOTAL_NET = f"spec_{'4' * 32}"
+
+# The spec_id Search answers the US donor total under, by the basis posted.
+_COMPILED = {"measure_basis:gross": TOTAL_GROSS, "measure_basis:net": TOTAL_NET}
 
 
 def basis_block(
@@ -82,9 +86,9 @@ def basis_block(
 
 
 class BasisCompiles:
-    """A tool surface whose `resolve_definition` compiles the US donor total on gross
-    disbursements as `TOTAL_GROSS` over the base identity and entries posted,
-    its basis settled by the explicit entry posted, recording each call."""
+    """A tool surface whose `resolve_definition` compiles the US donor total on the
+    basis its explicit entry posts, gross disbursements as `TOTAL_GROSS` and net
+    as `TOTAL_NET`, over the base identity and entries posted, recording each call."""
 
     def __init__(self) -> None:
         self.calls: list[Mapping[str, Any]] = []
@@ -98,7 +102,10 @@ class BasisCompiles:
         del on_progress
         assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
-        block = basis_block(TOTAL_GROSS, narrow=False, active="measure_basis:gross")
+        (basis,) = [
+            e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "measure_basis"
+        ]
+        block = basis_block(_COMPILED[basis], narrow=False, active=basis)
         scope = block["resolved"]["scope_choices"]
         scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
         scope["base"]["identity"] = arguments["identity"]

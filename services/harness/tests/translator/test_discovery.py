@@ -1111,7 +1111,7 @@ class _SearchAndResolve:
         return await chosen.call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
 
 
-@pytest.mark.parametrize("on_record", ["copy", "identity", None])
+@pytest.mark.parametrize("on_record", ["copy", "identity", "shown", None])
 async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_with_no_search(
     surface: McpSurface,
     search_calls: list[dict[str, Any]],
@@ -1124,7 +1124,10 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
 ) -> None:
     # The pin names a dataset over the requirement's period whose identity is
     # on record: the copy `propose_plan` pinned in place of an earlier
-    # search's dataset over other years, or an earlier search's own identity.
+    # search's dataset over other years, an earlier search's own identity, or
+    # the identity of a block the planner was shown that no search returned
+    # (a scope choice switched on the plan card, an input compiled on its
+    # calculation's basis), whose breadth coverage states no window.
     # Search's answer for that identity is the source, with no `search`
     # call and nothing referred back. With nothing on record the pin is
     # searched for, and a search that does not return it refers it back.
@@ -1148,6 +1151,10 @@ async def test_a_pin_whose_identity_is_on_record_is_read_from_searchs_answer_wit
         earlier = _KENYA_OVER["2015-2023"]["spec_id"]
         copied = WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)
         save_windowed_pins(context.state, [copied])
+    if on_record == "shown":
+        shown = copy.deepcopy(answered)
+        shown["resolved"]["coverage"] = {"kind": "breadth", "has_data": True}
+        _shown(context, spec_id, shown)
     resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
 
     try:

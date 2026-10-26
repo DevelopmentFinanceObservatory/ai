@@ -2179,7 +2179,9 @@ async def _recorded_source(
     The identity is the copy over the requirement's period that
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
     the one a search in the conversation recorded for the pin itself
-    (`planner.plan.recorded_identity`) when its window is that period, or
+    (`planner.plan.recorded_identity`), or the one the block of the pin the
+    planner was shown states (`planner.plan.pin_sources`, `_shown_definition`),
+    when its window is that period, or
     a range with no end year for a requirement stating `period_end_open`,
     from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
@@ -2198,6 +2200,7 @@ async def _recorded_source(
     recorded = (
         windowed_pins(tool_context.state).get(spec_id)
         or recorded_identity(spec_id)
+        or _shown_definition(tool_context.state, spec_id)
         or load_log(tool_context.state).recorded_alternative(spec_id)
     )
     identity = recorded.identity if recorded is not None else None
@@ -2234,6 +2237,31 @@ async def _recorded_source(
         )
     except (PartNotResolvedError, ValueError):
         return None
+
+
+def _shown_definition(state: SessionState, spec_id: str) -> _RecordedSourceDefinition | None:
+    """The definition the block of `spec_id` the planner was shown states, when it hashes to `spec_id`.
+
+    A pin compiled in code during the request (a scope choice switched on the
+    plan card, `harness.graph.switch`, or an input put on its calculation's
+    basis, `planner.agent.compile_on_basis`) is held there and nowhere a
+    search recorded it, since no search returned it.
+    """
+    source = pin_sources(state).get(spec_id)
+    block = source.spec_block(spec_id) if source is not None else None
+    if block is None:
+        return None
+    try:
+        shown = source_from_spec_block(block)
+    except ValueError:
+        return None
+    if shown.identity is None:
+        return None
+    try:
+        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": shown.identity})
+    except (IdentityMismatch, IdentityUnusable):
+        return None
+    return _RecordedSourceDefinition(shown.identity, shown.groups, shown.resolved_sources)
 
 
 def _resolve_pin_block(

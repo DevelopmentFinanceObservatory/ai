@@ -558,7 +558,7 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
     requirements, it ultimately reads.
     """
     if isinstance(requirement, DatasetRequirement):
-        return requirement.measure
+        return _dataset_measure(requirement, plan)
     if isinstance(
         requirement, (AggregateRequirement, GrowthRequirement, RankRequirement, FilterRequirement)
     ):
@@ -578,6 +578,38 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
         right = _measure_of(plan.requirement(requirement.right_id), plan)
         return f"{left} joined with {right}"
     raise AssertionError(f"unhandled requirement kind: {requirement!r}")
+
+
+# The scope axes whose choice settles what a dataset's measure counts: the
+# basis it is counted on and the sector codes it covers.
+_MEASURE_AXES = frozenset({"measure_basis", "sector"})
+
+
+def _dataset_measure(requirement: DatasetRequirement, plan: Plan) -> str:
+    """The measure `requirement` fetches, in words.
+
+    The planner's `measure`, unless a scope decision the requirement cites
+    settles its basis or its sector and the compiled plan names the source.
+    Then the words are the source's `measure_label`, as `_label_dataset`
+    names the retrieval, which states the basis the source counts, followed
+    by the sector option the sector decision chose. The planner wrote its
+    words for the source it pinned, and a switch on the plan card re-pins
+    the requirement in code (`harness.graph.switch`), as an input put on its
+    calculation's basis is (`submission.service._aligned_bases`), so only
+    Search's words follow every pin.
+    """
+    governing = {
+        decision.scope.axis: decision
+        for decision in plan.decisions
+        if decision.scope is not None
+        and decision.scope.axis in _MEASURE_AXES
+        and decision.slot in requirement.decision_ids
+    }
+    source = _selected_source(requirement.id, plan)
+    if not governing or source is None or source.measure_label is None:
+        return requirement.measure
+    sector = governing.get("sector")
+    return f"{source.measure_label} for {sector.chosen}" if sector else source.measure_label
 
 
 def _divided(

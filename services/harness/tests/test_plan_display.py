@@ -2450,3 +2450,65 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
             copy_gap.replace("'debt_history'", "'debt'"),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("axes", "measure"),
+    [
+        (
+            ("sector", "measure_basis"),
+            "net disbursements (official development assistance) for sector:120+130 label",
+        ),
+        (("measure_basis",), "net disbursements (official development assistance)"),
+        ((), "gross ODA disbursements to health"),
+    ],
+    ids=["sector-and-basis", "basis", "no-scope-choice"],
+)
+def test_a_step_reading_a_scoped_dataset_names_its_measure_as_search_counts_it(
+    decision: DecisionFactory,
+    axes: tuple[typing.Literal["sector", "measure_basis"], ...],
+    measure: str,
+) -> None:
+    """The planner wrote "gross ODA disbursements to health" for the pin it
+    chose; a switch on the plan card re-pinned the dataset on net
+    disbursements. A step reading a dataset whose basis or sector a scope
+    decision settles names the source's measure and the sector chosen, so its
+    label and sentence follow the pin; with no such decision they keep the
+    planner's words."""
+    compiled = _retrieve_then_aggregate_plan(decision)
+    assert compiled.workflow is not None
+    scoped = [_scope_decision(_SPEC_A, axis) for axis in axes]
+    dataset, totals = compiled.evidence_requirements
+    assert isinstance(dataset, DatasetRequirement)
+    plan = compiled.model_copy(
+        update={
+            "decisions": [*compiled.decisions, *scoped],
+            "evidence_requirements": [
+                dataset.model_copy(
+                    update={
+                        "measure": "gross ODA disbursements to health",
+                        "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+                    }
+                ),
+                totals,
+            ],
+            "workflow": compiled.workflow.model_copy(
+                update={
+                    "sources": [
+                        source.model_copy(
+                            update={
+                                "measure_label": "net disbursements (official development assistance)"
+                            }
+                        )
+                        for source in compiled.workflow.sources
+                    ]
+                }
+            ),
+        }
+    )
+
+    labels = {row["id"]: row["label"] for row in step_rows(plan)}
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert labels["annual_totals"] == f"Total {measure} by year"
+    assert sentences["annual_totals"] == f"The total of {measure}, grouped by year."

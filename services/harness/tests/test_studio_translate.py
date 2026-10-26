@@ -10,6 +10,7 @@ mark `recommended`) needs no real event to exercise.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any, cast
@@ -1628,7 +1629,10 @@ def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
     return translator, translator.finish()
 
 
-def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_keeps_it() -> None:
+def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_leaves_it_out() -> None:
+    """The reply and the stored turn keep the line; the digest a later turn's
+    model reads holds the answer alone, so the model has no line to restate
+    before the code appends its own."""
     translator, frames = _answered([_fetched(_example_part())])
     conversation = translator._conversation
 
@@ -1638,9 +1642,12 @@ def test_the_answer_closes_with_the_basis_line_and_the_next_turns_history_keeps_
 
     assert complete.text == f"The US gave $7.9bn.\n\n{_EXAMPLE_LINE}"
     assert "The US gave $7.9bn." + "".join(deltas) == complete.text
-    assert conversation.turns[-1]["assistant"] == complete.text
+    assert conversation.turn_final_text == complete.text
+    stored = conversation.turns[-1]
+    assert (stored["assistant"], stored["basis_line"]) == ("The US gave $7.9bn.", _EXAMPLE_LINE)
     assert digest is not None
-    assert digest["turns"][-1]["assistant"] == complete.text
+    assert digest["turns"][-1]["assistant"] == "The US gave $7.9bn."
+    assert "Counted as" not in json.dumps(digest)
 
 
 def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:
@@ -1671,9 +1678,9 @@ def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line(
             entry.model_dump(mode="json", exclude_none=True) for entry in context.carried_entries
         ]
 
-    stated = conversation.turns[-1]["assistant"]
+    stated = conversation.turns[-1]["basis_line"]
     with_line = carried()
-    conversation.turns[-1]["assistant"] = "The US gave $7.9bn."
+    del conversation.turns[-1]["basis_line"]
 
     assert "Africa's countries only" in stated
     assert (

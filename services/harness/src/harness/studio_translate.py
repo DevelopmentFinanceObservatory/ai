@@ -2161,7 +2161,10 @@ class _Translator:
         (`harness.turn_records.loose_match_notes`) and the line on how its
         figures were counted (`harness.turn_records.basis_line`), sent as a
         last `message.delta` so the deltas still add up to the
-        `message.complete` text and the stored turn keeps them."""
+        `message.complete` text and the stored turn keeps them. The turn
+        record keeps the basis line apart from the answer
+        (`ConversationState.close_turn`), so a later turn's model reads the
+        answer without it and never restates it."""
         frames: list[Any] = [*self._drain_recorder(), *self._close_status()]
         # A held refusal no later call corrected is a failed step after all.
         frames.extend(
@@ -2174,16 +2177,21 @@ class _Translator:
         self._held.clear()
         if self.paused:
             return frames
+        answer, basis = self._final_text, None
         if self._final_text:
-            notes = loose_match_notes(
-                self._conversation.turn_readings,
-                specs=self._conversation.turn_specs,
-                plans=self._conversation.turn_plans,
+            notes = " ".join(
+                loose_match_notes(
+                    self._conversation.turn_readings,
+                    specs=self._conversation.turn_specs,
+                    plans=self._conversation.turn_plans,
+                )
             )
             basis = basis_line(
                 self._conversation.turn_readings, plans=self._conversation.turn_plans
             )
-            closing = "".join(f"\n\n{block}" for block in (" ".join(notes), basis) if block)
+            noted = f"\n\n{notes}" if notes else ""
+            answer += noted
+            closing = noted + (f"\n\n{basis}" if basis else "")
             if closing:
                 self._final_text += closing
                 frames.append(
@@ -2199,7 +2207,7 @@ class _Translator:
                     text=self._final_text,
                 )
             )
-        self._conversation.close_turn(final_text=self._final_text)
+        self._conversation.close_turn(final_text=answer, basis_line=basis)
         frames.append(Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=[]))
         frames.append(
             Done(
