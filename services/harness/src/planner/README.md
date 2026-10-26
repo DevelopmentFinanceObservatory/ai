@@ -446,7 +446,11 @@ claim. Code writes `fixes.source_spec_id`.
 `propose_plan` sets it on the measure decision it writes for a pin of a measure
 a settled source offers (`_measure_decisions`) and moves it with the pin. A
 source a pending referral offers in place of a pin counts as settled, so a
-re-pin to it states its measure decision too. A
+re-pin to it states its measure decision too. A decision the patch states
+whose `fixes` lists `measure`, cited by a requirement that also cites the
+measure decision written for its pin, lists the flow twice and is refused as
+`measure_fixed_by_pin`
+(`_measure_fixed_by_pin`); a decision a stored plan carries unchanged stands. A
 decision the plan being amended records goes once a patch leaves no requirement
 citing it (`_uncited_carried_decisions`); one the patch itself states has to be
 cited. A patch moving a value a carried decision fixes drops a planner's

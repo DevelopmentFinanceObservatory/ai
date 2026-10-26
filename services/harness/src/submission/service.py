@@ -11,7 +11,8 @@ contradicts (`_contradicted_carried_decisions`: a planner's is dropped
 unless another requirement still rests on it), the carried planner
 decisions it leaves uncited (`_uncited_carried_decisions`), a user's
 decision it drops or changes with no word from the user since the plan was
-recorded (`_user_decision_refused`), the `Plan` it
+recorded (`_user_decision_refused`), a decision of its own restating
+the measure a pin decides (`_measure_fixed_by_pin`), the `Plan` it
 builds under the first years on record (`_first_years_on_record`), that
 plan split so a dataset read from its first year serves only the steps
 rolling from their start (`planner.plan.split_of`), the pins it windows
@@ -460,6 +461,13 @@ def admit(
             )
         )
         or _shared_decision_contradicted(contradicted, proposer)
+        or _measure_fixed_by_pin(
+            patch.decisions,
+            requirements_after,
+            _decisions_after(previous, settled, removed=removed_decisions),
+            measures,
+            proposer,
+        )
     )
     if blocked is not None:
         return blocked
@@ -3302,6 +3310,111 @@ def _shared_decision_contradicted(
             "still_cited_by": list(contradiction.backing),
         },
     )
+
+
+def _measure_fixed_by_pin(
+    drafts: Sequence[DecisionDraft],
+    requirements: Sequence[EvidenceRequirement],
+    decisions: Iterable[Decision],
+    measures: Mapping[str, MeasureChoice],
+    proposer: Proposer,
+) -> dict[str, object] | None:
+    """The `MEASURE_FIXED_BY_PIN` refusal for the first of `drafts` restating a pin's measure, or `None`.
+
+    A draft listing `measure` in `fixes` restates the flow when a requirement
+    citing it also cites another decision `propose_plan` wrote for that
+    requirement's own pin (`is_search_pin`, from `_measure_decisions`), so
+    the plan would list the flow twice. `decisions` are every decision the
+    patched plan holds, this call's settled ones and the carried ones it
+    keeps. A draft restating the pin's own decision, or cited by a
+    requirement whose pin has no such decision beside it, is let through.
+    Only this call's own `drafts` are read: a decision carried unchanged
+    from the plan being amended stands, and `Plan` validation never refuses
+    one, so a stored plan holding one still loads. `detail` names the
+    draft's `slot`, the `requirement_id` citing it, the pinned `spec_id`,
+    the `measure_decision` recording the choice, the measure `chosen`, and
+    the spec_id of each count the source offers by label (`counts`, from
+    `measures`). Its `action` calls `proposer` to restate `decisions`.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    for draft in drafts:
+        if "measure" not in (draft.fixes or ()):
+            continue
+        for requirement in requirements:
+            if (
+                not isinstance(requirement, DatasetRequirement)
+                or draft.slot not in requirement.decision_ids
+            ):
+                continue
+            pinned = next(
+                (
+                    decision
+                    for slot in requirement.decision_ids
+                    if slot != draft.slot
+                    and (decision := by_slot.get(slot)) is not None
+                    and is_search_pin(decision)
+                    and decision.fixes is not None
+                    and decision.fixes.source_spec_id == requirement.source_spec_id
+                ),
+                None,
+            )
+            if pinned is not None:
+                return _measure_fixed(draft, requirement, pinned, measures, proposer)
+    return None
+
+
+def _measure_fixed(
+    draft: DecisionDraft,
+    requirement: DatasetRequirement,
+    pinned: Decision,
+    measures: Mapping[str, MeasureChoice],
+    proposer: Proposer,
+) -> dict[str, object]:
+    """The `MEASURE_FIXED_BY_PIN` refusal of `draft`, which `requirement` cites beside `pinned`, its pin's flow decision."""
+    pin = requirement.source_spec_id
+    choice = measures.get(pin) if pin is not None else None
+    counts = dict(zip(choice.options, choice.spec_ids, strict=True)) if choice else {}
+    others = ", ".join(
+        f"{label} ({spec_id})" for label, spec_id in counts.items() if spec_id != pin
+    )
+    another_way = (
+        f" To count the flow another way, pin that count's own `spec_id`: {others}."
+        if others
+        else ""
+    )
+    return problem(
+        ProblemCode.MEASURE_FIXED_BY_PIN,
+        f"Decision {draft.slot!r} lists `measure` in `fixes`, but {requirement.id!r} pins "
+        f"{pin}, and a pin decides how its flow is counted: `propose_plan` records "
+        f"{pinned.chosen} as decision {pinned.slot!r}. Cite {draft.slot!r} on no "
+        "requirement pinning such a source, and leave it out of `decisions` when no other "
+        f"requirement rests on it.{another_way} To choose between candidate readings, pin "
+        "the chosen candidate's `spec_id` and state a `Decision` naming the candidates you "
+        "weighed, with no `measure` in its `fixes`.",
+        outcome=Outcome.REFUSED,
+        action=proposer.action(needs=("decisions",)),
+        detail={
+            "slot": draft.slot,
+            "requirement_id": requirement.id,
+            "spec_id": pin,
+            "measure_decision": pinned.slot,
+            "chosen": pinned.chosen,
+            "counts": counts,
+        },
+    )
+
+
+def _decisions_after(
+    previous: Plan | None, decisions: Sequence[Decision], *, removed: Collection[str]
+) -> list[Decision]:
+    """Every decision the plan holds once this call's patch lands: `previous`'s
+    less those `removed` and those `decisions` restate, then `decisions`."""
+    restated = {decision.slot for decision in decisions}
+    carried = previous.decisions if previous is not None else ()
+    return [
+        *(d for d in carried if d.slot not in removed and d.slot not in restated),
+        *decisions,
+    ]
 
 
 def _requirements_after(
