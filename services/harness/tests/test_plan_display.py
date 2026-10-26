@@ -93,7 +93,10 @@ from planner.workflow import (
 from .share_plan import (
     ALL_DONORS,
     DAC_DONORS,
+    NAMED_DONORS,
+    UGANDA,
     US_DONOR,
+    USA_RECEIVING,
     us_share_of_kenya_oda,
     us_share_per_recipient,
 )
@@ -2660,6 +2663,96 @@ def test_a_denominator_narrowed_below_its_sources_population_names_no_whole(
     assert {row["id"]: row["sentence"] for row in requirement_rows(plan)}["share"] == sentence
 
 
+_UK_AND_US = ("United Kingdom", "United States")
+_TWO_RECIPIENTS = {"whole_recipients": ("Kenya", "Uganda")}
+_US_TO_TWO = {"entities": (*US_DONOR["entities"], UGANDA)}
+
+
+@pytest.mark.parametrize(
+    ("whole", "whole_donors", "options", "wholes"),
+    [
+        (NAMED_DONORS, _UK_AND_US, {}, {"share": "from United Kingdom and United States"}),
+        # The United States narrowed out of the same frame.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {"narrowed_from": "all_oda"},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # Narrowed out of the two donors' ODA to Kenya, it holds Kenya alone.
+        (
+            {"entities": (*NAMED_DONORS["entities"], UGANDA)},
+            _UK_AND_US,
+            {
+                **_TWO_RECIPIENTS,
+                "numerator": NAMED_DONORS,
+                "us_donors": _UK_AND_US,
+                "narrowed_from": "us",
+            },
+            {"share": "from United Kingdom and United States and to Kenya and Uganda"},
+        ),
+        # A frame holding the United States on both sides narrows to the donor
+        # its requirement names.
+        (
+            {"entities": (*NAMED_DONORS["entities"], USA_RECEIVING)},
+            _UK_AND_US,
+            {"narrowed_from": "all_oda"},
+            {"share": "from United Kingdom and United States"},
+        ),
+        # The denominator names the numerator's donor, by its words or by another
+        # name the graph resolves to the same ref, beside recipients it does not.
+        (_US_TO_TWO, ("United States",), _TWO_RECIPIENTS, {"share": "to Kenya and Uganda"}),
+        (
+            {**_US_TO_TWO, "entity_refs": {"usa": "country/USA"}},
+            ("USA",),
+            _TWO_RECIPIENTS,
+            {"share": "to Kenya and Uganda"},
+        ),
+        # Donors giving at least $1bn of the two are not both of them.
+        (
+            NAMED_DONORS,
+            _UK_AND_US,
+            {
+                "narrowing": [
+                    _narrowed(
+                        FilterRequirement(id="big", input_id="all_oda", predicates=_AT_LEAST_1BN)
+                    )
+                ]
+            },
+            {},
+        ),
+    ],
+    ids=[
+        "named_donors",
+        "narrowed_out_of_the_frame",
+        "narrowed_out_of_another_frame",
+        "named_on_both_sides",
+        "same_donor",
+        "same_ref",
+        "value_filter",
+    ],
+)
+def test_a_share_of_named_donors_names_them_where_the_numerator_holds_others(
+    decision: DecisionFactory,
+    whole: dict[str, Any],
+    whole_donors: tuple[str, ...],
+    options: dict[str, Any],
+    wholes: dict[str, str],
+) -> None:
+    """The United States' share of the United Kingdom's and the United
+    States' ODA to Kenya divides by the two donors; Kenya, which both sides
+    name, is no part of the whole."""
+    plan = us_share_of_kenya_oda(
+        decision,
+        whole=whole,
+        whole_across=(),
+        whole_donors=whole_donors,
+        **{"numerator": US_DONOR, **options},
+    )
+
+    assert share_wholes(plan) == wholes
+
+
 @pytest.mark.parametrize(
     ("reduction", "wholes"),
     [
@@ -2680,10 +2773,10 @@ def test_a_denominator_reducing_by_no_total_names_no_whole(
     assert share_wholes(plan) == wholes
 
 
-def test_a_denominator_narrowed_to_one_entity_names_no_whole(decision: DecisionFactory) -> None:
+def test_a_denominator_narrowed_to_one_entity_names_that_entity(decision: DecisionFactory) -> None:
     """The United States' ODA to Kenya as a share of the United Kingdom's ODA
     to every recipient divides by the United Kingdom's row of a frame of two
-    donors to all 150 recipients, which no population names."""
+    donors to all 150 recipients, and names the United Kingdom alone."""
     donors = (
         ResolvedEntity(role="origin", ref="country/GBR", label="United Kingdom"),
         ResolvedEntity(role="origin", ref="country/USA", label="United States"),
@@ -2723,7 +2816,9 @@ def test_a_denominator_narrowed_to_one_entity_names_no_whole(decision: DecisionF
     share = next(item for item in payload["workflow"]["steps"] if item["id"] == "share")
     share["bindings"]["denominator"]["from_step"] = "all_oda"
 
-    assert share_wholes(Plan.model_validate(payload)) == {}
+    assert share_wholes(Plan.model_validate(payload)) == {
+        "share": "to every recipient and from United Kingdom"
+    }
 
 
 @pytest.mark.parametrize(
