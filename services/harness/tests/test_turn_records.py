@@ -733,6 +733,18 @@ def _example_part(variable: str = "health aid", **active: str) -> dict[str, Any]
     return {**part, "variable": variable, "spec_id": scope["base"]["spec_id"]}
 
 
+def _switchable_scope() -> dict[str, Any]:
+    """The scope choices of `_scoped_part` (health as CRS 120 alone, the
+    user's words; Africa's countries only, carried; gross disbursements by
+    default, net out of reach beside CRS 120 alone), every option labelled as
+    `_EXAMPLE_LABELS` says."""
+    scope = _scoped_part()["scope"]
+    for choice in scope["choices"]:
+        for option in choice["options"]:
+            option["label"] = _EXAMPLE_LABELS[option["option_id"]]
+    return scope
+
+
 def _manifest(identity: dict[str, Any], *, spec_id: str = "spec_served") -> dict[str, Any]:
     """A `get_data` manifest minted for `identity`, covering 2015 to 2024."""
     return {
@@ -885,7 +897,17 @@ def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause()
     )
 
 
-def test_a_partial_option_and_a_dropped_carried_entry_say_why() -> None:
+@pytest.mark.parametrize(
+    ("provenance", "code", "why"),
+    [
+        ("carried", None, "an earlier choice did not apply here"),
+        ("explicit", "stated_choice_not_applied", "the option you asked for is not available here"),
+    ],
+    ids=["carried", "stated"],
+)
+def test_a_partial_option_and_a_dropped_entry_say_why(
+    provenance: str, code: str | None, why: str
+) -> None:
     part = _example_part()
     scope = part["scope"]
     basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
@@ -895,23 +917,26 @@ def test_a_partial_option_and_a_dropped_carried_entry_say_why() -> None:
         "code": "imputed_coverage",
         "detail": {},
     }
-    scope["dropped_entries"] = [
-        {
-            "entry": {
-                "axis": "region",
-                "option_id": "region:members_only",
-                "provenance": "carried",
-                "origin": {"kind": "choice", "choice_id": "earlier:region"},
-            },
-            "cause": "no_summed_region",
-        }
-    ]
+    origin = (
+        {"kind": "choice", "choice_id": "earlier:region"}
+        if provenance == "carried"
+        else {"kind": "text", "text": "African countries", "start": 0, "end": 17}
+    )
+    dropped = {
+        "entry": {
+            "axis": "region",
+            "option_id": "region:members_only",
+            "provenance": provenance,
+            "origin": origin,
+        },
+        "cause": "no_summed_region",
+    }
+    scope["dropped_entries"] = [dropped if code is None else {**dropped, "code": code}]
 
     assert basis_line([_fetched(part)], plans=[]) == (
         "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
         "Africa incl. regional buckets · gross disbursements, current USD (imputed "
-        "multilateral aid covers only some years: 2011-2024) · an earlier choice did not "
-        "apply here: Africa's countries only."
+        f"multilateral aid covers only some years: 2011-2024) · {why}: Africa's countries only."
     )
 
 
@@ -923,6 +948,7 @@ _CONTRACT_REASON_CODES = {
     "residuals_need_summed_region",
     "conflicts_with",
     "carried_choice_not_applied",
+    "stated_choice_not_applied",
     "option_not_covered",
 }
 

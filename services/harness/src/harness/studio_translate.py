@@ -66,7 +66,7 @@ from orchestrator.agent import AGENT_NAME as ORCHESTRATOR_AGENT_NAME
 from planner.agent import AGENT_NAME as PLANNER_AGENT_NAME
 from planner.agent import PROPOSE_PLAN
 from planner.phrasing import entities_phrase
-from planner.plan import PLAN_STATE_KEY, DatasetRequirement
+from planner.plan import PLAN_STATE_KEY, DatasetRequirement, Decision
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
@@ -91,6 +91,7 @@ from harness.provenance import (
     manifest_with_stat_vars,
     retrieval_frame_ref,
 )
+from harness.scope_choices import REASON_COPY
 from harness.seeds import SEED_STEP_TOOL, SEEDS_STEP_ID
 from harness.sentences import MAX_SENTENCE_CHARS, failure_sentence
 from harness.studio_state import (
@@ -121,6 +122,7 @@ from harness.wire import (
     PlanAction,
     PlanAsk,
     PlanDecision,
+    PlanDecisionOption,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -1021,6 +1023,28 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
+def _scope_members(decision: Decision | None) -> dict[str, Any]:
+    """The `PlanDecision` members a scope decision adds: the choice's id, its
+    active option and each option with its label, status, years and why it is
+    limited (`REASON_COPY`). Empty for any other decision."""
+    if decision is None or decision.scope is None:
+        return {}
+    return {
+        "choice_id": decision.scope.choice_id,
+        "active_option_id": decision.active_option_id,
+        "options": [
+            PlanDecisionOption(
+                option_id=state.option_id,
+                label=label,
+                status=state.status,
+                reason=REASON_COPY.get(state.code) if state.code is not None else None,
+                years=list(state.years) if state.years is not None else None,
+            )
+            for label, state in zip(decision.options, decision.scope.options, strict=True)
+        ],
+    }
+
+
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
@@ -1590,6 +1614,7 @@ class _Translator:
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
             shown_slots = {decision.slot for decision in plan_display.shown_decisions(plan)}
+            scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
             named = functools.partial(plan_display.with_source_names, plan=plan)
             revision = payload.get("revision")
             steps = [
@@ -1661,6 +1686,7 @@ class _Translator:
                             resolved_by=_RESOLVED_BY_TO_WIRE.get(
                                 decision.get("resolved_by", ""), "default"
                             ),
+                            **_scope_members(scoped.get(decision.get("slot", ""))),
                         )
                         for index, decision in enumerate(payload.get("decisions", []))
                         if decision.get("slot") in shown_slots

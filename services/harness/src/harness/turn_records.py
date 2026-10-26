@@ -1043,7 +1043,7 @@ def basis_line(
     `loose_match_notes` reads it: a fetch of its spec_id returned data, or a
     plan record names it as a source; its newest reading speaks for it. Each
     scope choice of a used part gives one clause (`_choice_clause`), and
-    each carried entry search left out of the part another. Parts whose
+    each entry search left out of the part another. Parts whose
     clauses are the same share them; otherwise each part's clauses follow
     its quoted text:
 
@@ -1098,7 +1098,7 @@ def _part_name(reading: SearchReading) -> str:
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
     """The basis line's clauses for one used reading: one per scope choice
-    that names its active option, then one per dropped carried entry."""
+    that names its active option, then one per entry Search dropped."""
     scope = reading.scope
     assert scope is not None
     served = reading.fetch.served if reading.fetch is not None else None

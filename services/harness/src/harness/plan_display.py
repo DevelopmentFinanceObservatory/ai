@@ -79,6 +79,7 @@ from planner.plan import (
     authored_text,
     copy_origins,
     frame_shapes,
+    is_scope_choice,
     is_search_pin,
 )
 from planner.records import (
@@ -261,7 +262,9 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     the source's spec_id, since the plan names that source in words where
     it lists its sources. One that chooses how the flow is counted, by the
     measures' labels, is listed; pins making the same choice share one
-    listed decision (`_listed_slots`).
+    listed decision (`_listed_slots`). Every scope decision
+    (`planner.plan.is_scope_choice`) is listed, and sources whose choices
+    are the same share one.
     """
     listed = _listed_slots(plan)
     return tuple(
@@ -278,13 +281,20 @@ def _listed_slots(plan: Plan) -> dict[str, str]:
     user settled, else the first. Their options are left out of the
     comparison, since the card and the plan record show no options, and two
     sources offering different other counts make the same choice. A search
-    pin whose choice names a spec_id has no entry. Every other decision maps
-    to its own slot.
+    pin whose choice names a spec_id has no entry. Scope decisions of
+    several sources map to one of them, chosen the same way, when they
+    settle the same axis on the same option with the same options, each as
+    available as in the others, so the row reads true for every source it
+    stands for. Every other decision maps to its own slot.
     """
     listed: dict[str, str] = {}
-    same_choice: dict[tuple[str, str], list[Decision]] = {}
+    same_choice: dict[tuple[object, ...], list[Decision]] = {}
     for decision in plan.decisions:
-        if not is_search_pin(decision):
+        if is_scope_choice(decision):
+            assert decision.scope is not None
+            key = (decision.scope.axis, decision.chosen, decision.options, decision.scope.options)
+            same_choice.setdefault(key, []).append(decision)
+        elif not is_search_pin(decision):
             listed[decision.slot] = decision.slot
         elif not _SPEC_ID.search(decision.chosen):
             same_choice.setdefault((decision.description, decision.chosen), []).append(decision)

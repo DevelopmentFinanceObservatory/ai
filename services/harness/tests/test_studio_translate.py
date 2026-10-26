@@ -49,17 +49,26 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
-from harness.wire import CompositionActor, MessageComplete, MessageDelta, PlanAsk, StepStatus
+from harness.wire import (
+    CompositionActor,
+    MessageComplete,
+    MessageDelta,
+    PlanAsk,
+    PlanDecisionOption,
+    StepStatus,
+)
 from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
+    PinSource,
     Plan,
     SessionState,
     UnsupportedOperation,
     plan_revision,
 )
 from planner.workflow import ToolId
+from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
@@ -70,6 +79,7 @@ from .test_turn_records import (
     _fetched,
     _scoped_part,
     _served_identity,
+    _switchable_scope,
 )
 
 
@@ -269,6 +279,77 @@ def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, args)
 
     assert frame.asks is None
+
+
+def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> None:
+    """US health aid to Africa: each scope choice with another option to
+    switch to is a card row naming the choice, its active option and every
+    option, with why one out of reach is; a planner decision carries none."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    pin = "spec_" + "e" * 32
+    scope = _switchable_scope()
+    grant = scope["choices"][2]["options"][2]
+    grant["availability"] = {
+        "status": "partial",
+        "years": [[2011, 2024]],
+        "code": "imputed_coverage",
+        "detail": {},
+    }
+    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
+    scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
+    cited = dataset.model_copy(
+        update={"decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped))}
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [*plan.decisions, *scoped],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+
+    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    rows = {row.id: row for row in frame.decisions}
+    planners = [rows[d.slot] for d in plan.decisions if d.scope is None and d.slot in rows]
+    assert planners
+    assert all(row.choice_id is row.options is row.active_option_id is None for row in planners)
+    sector, region, basis = (rows[d.slot] for d in scoped)
+    base = _switchable_scope()["id"]
+    assert (sector.choice_id, sector.active_option_id, sector.chosen, sector.resolved_by) == (
+        f"{base}:sector",
+        "sector:120",
+        "health (CRS 120)",
+        "user",
+    )
+    assert sector.reason == "The user's question asked for health (CRS 120)."
+    assert (region.active_option_id, region.resolved_by) == ("region:members_only", "user")
+    assert basis.options == [
+        PlanDecisionOption(
+            option_id="measure_basis:gross",
+            label="gross disbursements, current USD",
+            status="available",
+        ),
+        PlanDecisionOption(
+            option_id="measure_basis:net",
+            label="net disbursements",
+            status="unavailable",
+            reason="it conflicts with another choice",
+        ),
+        PlanDecisionOption(
+            option_id="measure_basis:grant_equivalent",
+            label="grant equivalents",
+            status="partial",
+            reason="imputed multilateral aid covers only some years",
+            years=[(2011, 2024)],
+        ),
+    ]
+    assert (basis.reason, basis.resolved_by) == ("Search's default for this question.", "default")
+    assert frame.actions == ["approve", "amend", "reject"]
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:

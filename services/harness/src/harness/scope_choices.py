@@ -27,13 +27,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Annotated, Any, Literal
 
-from planner.records import StrictModel
+from planner.records import OptionStatus, ScopeAxis, StrictModel
 from pydantic import Field
 
-ScopeAxis = Literal["sector", "region", "measure_basis", "provider"]
 EntryProvenance = Literal["explicit", "carried"]
 ChoiceProvenance = Literal["explicit", "carried", "default"]
-OptionStatus = Literal["available", "partial", "unavailable"]
 ComponentRole = Literal["whole", "bilateral", "imputed", "headline_net", "headline_ge"]
 ScopeReasonCode = Literal[
     "provider_not_offered",
@@ -42,6 +40,7 @@ ScopeReasonCode = Literal[
     "residuals_need_summed_region",
     "conflicts_with",
     "carried_choice_not_applied",
+    "stated_choice_not_applied",
     "option_not_covered",
 ]
 
@@ -157,10 +156,14 @@ class ScopeChoice(StrictModel):
 
 
 class DroppedEntry(StrictModel):
-    """A carried entry Search left out of this part, with its cause."""
+    """An entry Search left out of this part, with its cause: a carried one
+    (`carried_choice_not_applied`) or an option the user's words asked for
+    that the part cannot serve (`stated_choice_not_applied`)."""
 
     entry: Entry
-    code: Literal["carried_choice_not_applied"] = "carried_choice_not_applied"
+    code: Literal["carried_choice_not_applied", "stated_choice_not_applied"] = (
+        "carried_choice_not_applied"
+    )
     cause: str
 
 
@@ -369,5 +372,6 @@ REASON_COPY: dict[str, str] = {
     "residuals_need_summed_region": "regional buckets apply only to a summed region",
     "conflicts_with": "it conflicts with another choice",
     "carried_choice_not_applied": "an earlier choice did not apply here",
+    "stated_choice_not_applied": "the option you asked for is not available here",
     "option_not_covered": "the data holds no series for this option",
 }

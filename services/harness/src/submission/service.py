@@ -5,8 +5,9 @@ it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
 as the model wrote it (`planner.plan.authored`), the pins it
 moves back from their windowed copies (`_unwindowed_pins`), a referral the
 user has not answered (`_referral_unanswered`), the decisions it settles
-(`planner.plan.settle_decisions`), the measure decisions written on the
-model's behalf (`_measure_decisions`), the carried decisions it
+(`planner.plan.settle_decisions`), the measure decisions and then the
+scope decisions written on the model's behalf (`_measure_decisions`,
+`_scope_decisions`), the carried decisions it
 contradicts (`_contradicted_carried_decisions`: a planner's is dropped
 unless another requirement still rests on it), the carried planner
 decisions it leaves uncited (`_uncited_carried_decisions`), a user's
@@ -50,6 +51,7 @@ from compiler.sources import (
 )
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.scope_choices import PartScope, ScopeChoice
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -76,6 +78,7 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionScope,
     Decline,
     EvidenceRequirement,
     FirstYear,
@@ -87,6 +90,7 @@ from planner.plan import (
     RankRequirement,
     RecordedDefinition,
     ResolvedBy,
+    ScopeOptionState,
     SessionState,
     SumOfRequirement,
     UnsupportedOperation,
@@ -103,6 +107,7 @@ from planner.plan import (
     full_histories,
     full_history,
     inputs_of,
+    is_scope_choice,
     is_search_pin,
     keep_years_admits,
     licences_restated,
@@ -118,9 +123,11 @@ from planner.plan import (
     open_window,
     period_licences_held,
     period_window,
+    pin_slot_moves,
     pin_sources,
     recorded_identity,
     roles_not_kept,
+    scope_choice_slot,
     search_pin_slot,
     settle_decisions,
     shown_identity,
@@ -400,6 +407,13 @@ def admit(
         previous=previous,
         measures=measures,
         user_settled=user_settled,
+    )
+    settled, evidence_requirements = _scope_decisions(
+        settled,
+        evidence_requirements,
+        previous=previous,
+        scopes=scope_choice_decisions(pins),
+        removed=removed_decisions,
     )
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
@@ -2326,11 +2340,13 @@ def _repinned(
     `decision_pins` maps a decision's slot, `requirement_pins` a dataset
     requirement's id, to the spec_id it pins after the move; anything either
     map does not name is returned as it was. `slots` maps the slot of a
-    decision `propose_plan` wrote for a search pin (`planner.plan.
-    is_search_pin`) to the one its moved pin takes (`search_pin_slot`): that
-    decision is rewritten for its new pin, and every citation of it cites the
-    new slot, so it stays a search pin. A measure choice (`MeasureChoice`)
-    keeps its options, since it reads the same over any period.
+    decision `propose_plan` wrote for a pin, a search pin's
+    (`planner.plan.is_search_pin`) or a scope choice's
+    (`planner.plan.is_scope_choice`), to the one its moved pin takes
+    (`planner.plan.pin_slot_moves`): that decision is rewritten for its new
+    pin, and every citation of it cites the new slot, so it stays one code
+    wrote. A measure choice (`MeasureChoice`) keeps its options, and a scope
+    choice its choice and options, since each reads the same over any period.
     """
     moved_decisions: list[Decision] = []
     for decision in decisions:
@@ -2341,7 +2357,7 @@ def _repinned(
         update: dict[str, object] = {
             "fixes": decision.fixes.model_copy(update={"source_spec_id": pin})
         }
-        if is_search_pin(decision) and decision.slot in slots:
+        if (is_search_pin(decision) or is_scope_choice(decision)) and decision.slot in slots:
             update["slot"] = slots[decision.slot]
         moved_decisions.append(decision.model_copy(update=update))
     moved_requirements: list[EvidenceRequirement] = []
@@ -2386,7 +2402,9 @@ def _unwindowed_pins(
             and (origin := to_origin.get(requirement.source_spec_id or ""))
         },
         slots={
-            search_pin_slot(copy): search_pin_slot(origin) for copy, origin in to_origin.items()
+            slot: moved
+            for copy, origin in to_origin.items()
+            for slot, moved in pin_slot_moves(copy, origin).items()
         },
     )
 
@@ -2729,8 +2747,10 @@ def _window_pins(
         pinned = targets.get(decision.slot, set())
         if len(pinned) == 1 and pinned != {pin}:
             decision_pins[decision.slot] = next(iter(pinned))
-            if is_search_pin(decision):
-                slots[decision.slot] = search_pin_slot(decision_pins[decision.slot])
+            if is_search_pin(decision) or is_scope_choice(decision):
+                slots[decision.slot] = pin_slot_moves(pin, decision_pins[decision.slot])[
+                    decision.slot
+                ]
     requirement_pins = {
         requirement_id: copy.spec_id for requirement_id, copy in copies.items() if copy is not None
     }
@@ -2808,7 +2828,12 @@ def _measure_decisions(
             return None
         for slot in requirement.decision_ids:
             cited = known.get(slot)
-            if cited is not None and cited.fixes is not None and cited.fixes.source_spec_id == pin:
+            if (
+                cited is not None
+                and cited.fixes is not None
+                and cited.fixes.source_spec_id == pin
+                and not is_scope_choice(cited)
+            ):
                 return None
         return pin
 
@@ -2943,6 +2968,177 @@ def _user_settled_rewrites(
         ):
             rewritten.append(_measure_decision(decision.slot, pin, choice, user=user))
     return rewritten
+
+
+# What each scope decision asks, by the axis its choice settles.
+_SCOPE_QUESTIONS: dict[str, str] = {
+    "sector": "Which sector codes the figures count.",
+    "region": "Which places the region's figures count.",
+    "measure_basis": "Which basis the figures are measured on.",
+    "provider": "Whose spending the figures count.",
+}
+
+
+def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[Decision, ...]]:
+    """The scope decisions a pin of each spec_id of `shown` states, in the order Search lists its choices.
+
+    Read from the source's spec block (`resolved.scope_choices`,
+    `harness.scope_choices.PartScope`). A block carrying none, or one this
+    release cannot read, states none. Each choice is one decision
+    (`_scope_decision`), when it states one.
+    """
+    decisions: dict[str, tuple[Decision, ...]] = {}
+    for spec_id, source in shown.items():
+        block = source.spec_block(spec_id)
+        raw = ((block or {}).get("resolved") or {}).get("scope_choices")
+        if raw is None:
+            continue
+        try:
+            scope = PartScope.model_validate(raw)
+        except ValidationError:
+            continue
+        written = tuple(
+            decision
+            for choice in scope.choices
+            if (decision := _scope_decision(spec_id, choice)) is not None
+        )
+        if written:
+            decisions[spec_id] = written
+    return decisions
+
+
+def _scope_decision(pin: str, choice: ScopeChoice) -> Decision | None:
+    """The decision a pin of `pin` states for `choice`, or `None` when it states none.
+
+    It states one when another option than the active one can be served,
+    whole or for some years (`available` or `partial`). Its options are the
+    choice's labels, unavailable ones included, so the card can say why
+    each is out of reach. A choice a `Decision` cannot state, its labels
+    repeated or past a limit of the plan's, states none. The user settled it
+    when an explicit or carried entry did, else Search's default did.
+    """
+    active = choice.active_option
+    if active is None or not any(
+        option.availability.status != "unavailable"
+        for option in choice.options
+        if option.option_id != choice.active
+    ):
+        return None
+    if choice.provenance == "explicit":
+        rationale = f"The user's question asked for {active.label}."
+    elif choice.provenance == "carried":
+        rationale = f"The user chose {active.label} earlier in the conversation."
+    else:
+        rationale = "Search's default for this question."
+    try:
+        return Decision(
+            slot=scope_choice_slot(pin, choice.axis),
+            description=_SCOPE_QUESTIONS[choice.axis],
+            options=tuple(option.label for option in choice.options),
+            chosen=active.label,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT
+            if choice.provenance == "default"
+            else ResolvedBy.USER,
+            rationale=rationale,
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=choice.id,
+                axis=choice.axis,
+                options=tuple(
+                    ScopeOptionState(
+                        option_id=option.option_id,
+                        status=option.availability.status,
+                        years=option.availability.years,
+                        code=option.availability.code,
+                    )
+                    for option in choice.options
+                ),
+            ),
+        )
+    except ValidationError:
+        return None
+
+
+def _scope_decisions(
+    decisions: Sequence[Decision],
+    evidence_requirements: Sequence[EvidenceRequirement],
+    *,
+    previous: Plan | None,
+    scopes: Mapping[str, Sequence[Decision]],
+    removed: Collection[str],
+) -> tuple[list[Decision], list[EvidenceRequirement]]:
+    """Add the scope decisions each pin in this call's requirements states, and cite them.
+
+    Runs after the model's decisions and the measure decisions
+    (`_measure_decisions`), so those come first under the cap. Each dataset
+    requirement of `evidence_requirements` pinning a spec_id of `scopes`
+    cites that pin's scope decisions; one citing a scope decision for a pin
+    it no longer states has that citation dropped. A decision whose slot is
+    new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
+    past that it is neither written nor cited, and the basis line still
+    states its choice. The count is every slot of `previous` this call does
+    not remove and every slot it states, so it never falls short of the
+    plan's own and the cap never refuses. One `previous` records as Search's
+    default is restated when Search now says otherwise, unless this call
+    states its slot; a user's stands.
+
+    Args:
+        decisions: This call's decisions, the measure decisions included.
+        evidence_requirements: This call's own requirements.
+        previous: The plan this call amends, or `None`.
+        scopes: The scope decisions a pin of each spec_id states
+            (`scope_choice_decisions`).
+        removed: The slots this call removes.
+
+    Returns:
+        `decisions` with each new or restated scope decision appended, and
+        `evidence_requirements` citing them.
+    """
+    carried = previous.decisions if previous is not None else ()
+    known = {decision.slot: decision for decision in (*carried, *decisions)}
+    held = {decision.slot for decision in carried} - set(removed)
+    stated = {decision.slot for decision in decisions}
+    held |= stated
+    written: list[Decision] = []
+    patched: list[EvidenceRequirement] = []
+    for requirement in evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            patched.append(requirement)
+            continue
+        pin = requirement.source_spec_id
+        cited = [
+            slot
+            for slot in requirement.decision_ids
+            if not (
+                (decision := known.get(slot)) is not None
+                and is_scope_choice(decision)
+                and decision.fixes is not None
+                and decision.fixes.source_spec_id != pin
+            )
+        ]
+        for derived in scopes.get(pin, ()) if pin is not None else ():
+            standing = known.get(derived.slot)
+            if standing is None:
+                if len(held) >= MAX_PLAN_DECISIONS:
+                    continue
+                held.add(derived.slot)
+                known[derived.slot] = derived
+                written.append(derived)
+            elif (
+                standing != derived
+                and standing.resolved_by is ResolvedBy.PLANNER_DEFAULT
+                and derived.slot not in stated
+            ):
+                known[derived.slot] = derived
+                written.append(derived)
+            if derived.slot not in cited:
+                cited.append(derived.slot)
+        patched.append(
+            requirement
+            if tuple(cited) == requirement.decision_ids
+            else requirement.model_copy(update={"decision_ids": tuple(cited)})
+        )
+    return [*decisions, *written], patched
 
 
 def _uncited_carried_decisions(

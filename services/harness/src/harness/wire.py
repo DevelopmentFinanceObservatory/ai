@@ -1045,9 +1045,27 @@ class DecisionResolvedBy(StrEnum):
     USER = "user"
 
 
+class PlanDecisionOption(_WireModel):
+    """One option of a scope choice on the plan card: `reason` says, in a
+    reader's words, why a partial or unavailable option is limited, and
+    `years` are the years a partial option covers."""
+
+    option_id: str
+    label: str
+    status: Literal["available", "partial", "unavailable"]
+    reason: str | None = None
+    years: list[tuple[int, int]] | None = None
+
+
 class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
-    one-line reason -- what makes the plan reviewable."""
+    one-line reason -- what makes the plan reviewable.
+
+    A decision stating how Search counted a source carries the scope
+    choice's id (`choice_id`), its active option (`active_option_id`) and
+    every option (`options`), all three together. One without `choice_id`
+    is a planner decision.
+    """
 
     id: str
     question: str
@@ -1055,6 +1073,23 @@ class PlanDecision(_WireModel):
     reason: str
     resolved_by: DecisionResolvedBy
     alternatives: list[str] | None = None
+    choice_id: str | None = None
+    active_option_id: str | None = None
+    options: list[PlanDecisionOption] | None = None
+
+    @model_validator(mode="after")
+    def _scope_members_come_together(self) -> PlanDecision:
+        """Refuse a scope choice missing one of its three members, or whose
+        active option is not among its options."""
+        members = (self.choice_id, self.active_option_id, self.options)
+        if all(member is None for member in members):
+            return self
+        if any(member is None for member in members):
+            raise ValueError("choice_id, active_option_id and options are set together")
+        assert self.options is not None
+        if self.active_option_id not in {option.option_id for option in self.options}:
+            raise ValueError(f"active option {self.active_option_id!r} is not among the options")
+        return self
 
 
 class PlanAction(StrEnum):

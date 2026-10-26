@@ -80,6 +80,7 @@ from planner.records import (
     GrowthChange,
     Identifier,
     OpenPeriodFault,
+    OptionStatus,
     Period,
     PeriodThreshold,
     PlaceLevel,
@@ -93,6 +94,7 @@ from planner.records import (
     RollingIssue,
     RollingPlanError,
     RollingWindow,
+    ScopeAxis,
     SpecId,
     StatVarReading,
     StrictModel,
@@ -428,9 +430,10 @@ class DecisionFixes(StrictModel):
 
     `settle_decisions` writes it from the field names a `DecisionDraft`
     lists, reading each value off the requirements that cite the decision.
-    `propose_plan` sets `source_spec_id` on the measure decision it writes
-    for a pin (`submission.service._measure_decisions`) and moves it with the
-    pin (`submission.service._repinned`). Every requirement citing a decision
+    `propose_plan` sets `source_spec_id` on the measure and scope decisions
+    it writes for a pin (`submission.service._measure_decisions`,
+    `_scope_decisions`) and moves it with the pin
+    (`submission.service._repinned`). Every requirement citing a decision
     states each value it fixes, `source_spec_id` aside (`fix_disagreements`).
     """
 
@@ -609,6 +612,38 @@ class _Choice(StrictModel):
         return self
 
 
+# The longest scope choice id, option id and reason code a scope decision
+# holds, and the most year spans a partial option lists. A choice id is a
+# spec_id and an axis (51 characters at most), an option id an axis and a
+# value such as `sector:120+130`, and a partial option covers one span or a
+# few; each limit sits several times above that.
+MAX_SCOPE_ID_CHARS = 200
+MAX_SCOPE_YEAR_SPANS = 50
+
+
+class ScopeOptionState(StrictModel):
+    """One option of a scope choice as Search offered it for the pinned part:
+    its id, whether it can be served, the years a partial option covers and
+    the reason code of a partial or unavailable one."""
+
+    option_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    status: OptionStatus
+    years: tuple[tuple[int, int], ...] | None = Field(default=None, max_length=MAX_SCOPE_YEAR_SPANS)
+    code: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+
+
+class DecisionScope(StrictModel):
+    """The scope choice a scope decision states (`harness.scope_choices.ScopeChoice`).
+
+    `choice_id` names the choice and `axis` the axis it settles. `options`
+    holds one state per `Decision.options` label, in the same order.
+    """
+
+    choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    axis: ScopeAxis
+    options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
+
+
 class Decision(_Choice):
     """One methodological choice the plan makes explicit."""
 
@@ -618,6 +653,30 @@ class Decision(_Choice):
             "The requirement fields this decision settles; unset when it is a rationale only."
         ),
     )
+    # Set only on a decision `propose_plan` writes for a scope choice of a
+    # pinned source (`submission.service._scope_decisions`). Left out of
+    # every dump while unset, so a plan stating none keeps its serialised
+    # form and its `plan_revision`.
+    scope: Annotated[DecisionScope | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda scope: scope is None
+    )
+
+    @model_validator(mode="after")
+    def _scope_states_each_option(self) -> Decision:
+        """Reject a scope decision whose option states do not match its options one for one."""
+        if self.scope is not None and len(self.scope.options) != len(self.options):
+            raise ValueError(
+                f"a scope decision states {len(self.scope.options)} option states for "
+                f"{len(self.options)} options"
+            )
+        return self
+
+    @property
+    def active_option_id(self) -> str | None:
+        """The option id of `chosen` on a scope decision; `None` on any other."""
+        if self.scope is None:
+            return None
+        return self.scope.options[self.options.index(self.chosen)].option_id
 
 
 def search_pin_slot(spec_id: str) -> str:
@@ -640,6 +699,39 @@ def is_search_pin(decision: Decision) -> bool:
         and fixes.source_spec_id is not None
         and decision.slot == search_pin_slot(fixes.source_spec_id)
     )
+
+
+def scope_choice_slot(spec_id: str, axis: ScopeAxis) -> str:
+    """The `Decision.slot` `propose_plan` records the scope choice on `axis` of a pin of `spec_id` under.
+
+    Derived from the pin as `search_pin_slot` is, so a source's choices
+    never collide with each other or with another source's.
+    """
+    return f"scope_{axis}_{spec_id}"
+
+
+def is_scope_choice(decision: Decision) -> bool:
+    """Whether `decision` is one `propose_plan` wrote for a scope choice of a pinned source."""
+    fixes = decision.fixes
+    return (
+        decision.scope is not None
+        and fixes is not None
+        and fixes.source_spec_id is not None
+        and decision.slot == scope_choice_slot(fixes.source_spec_id, decision.scope.axis)
+    )
+
+
+def pin_slot_moves(origin: str, target: str) -> dict[str, str]:
+    """Each slot `propose_plan` may write for a pin of `origin`, mapped to the one a pin of `target` takes.
+
+    The measure decision's (`search_pin_slot`) and one scope decision's per
+    axis (`scope_choice_slot`), so a moved pin renames every decision code
+    wrote for it and every citation of one.
+    """
+    moves = {search_pin_slot(origin): search_pin_slot(target)}
+    for axis in get_args(ScopeAxis):
+        moves[scope_choice_slot(origin, axis)] = scope_choice_slot(target, axis)
+    return moves
 
 
 # The name of each `DecisionFixes` field a `DecisionDraft` may list.
@@ -3492,8 +3584,9 @@ def _same(first: Any, second: Any) -> bool:
 
 
 # The `DecisionFixes` field no requirement is held to. Code writes
-# `source_spec_id` on the decision a pin states and moves it with the pin
-# (`submission.service._measure_decisions`, `_repinned`); a draft cannot name it.
+# `source_spec_id` on the decisions a pin states and moves it with the pin
+# (`submission.service._measure_decisions`, `_scope_decisions`, `_repinned`);
+# a draft cannot name it.
 _UNCHECKED_FIXES = frozenset({"source_spec_id"})
 
 
@@ -3785,7 +3878,9 @@ class Plan(StrictModel):
         planner's brief can carry. The message names the measured size and the
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
-        copies `whole_history_split` adds.
+        copies `whole_history_split` adds. The size leaves out the scope
+        decisions `propose_plan` writes (`is_scope_choice`): the model cannot
+        shorten them, and `MAX_PLAN_DECISIONS` bounds how many a plan holds.
         """
         written = authored(self)
         if len(written.evidence_requirements) > MAX_PLAN_REQUIREMENTS:
@@ -3794,6 +3889,11 @@ class Plan(StrictModel):
                 f"over the {MAX_PLAN_REQUIREMENTS} a plan may take"
             )
         record = written.model_dump(mode="json", include=_MODEL_AUTHORED)
+        record["decisions"] = [
+            dumped
+            for dumped, decision in zip(record["decisions"], written.decisions, strict=True)
+            if not is_scope_choice(decision)
+        ]
         size = _serialised_chars(record)
         if size <= MAX_PLAN_RECORD_CHARS:
             return self

@@ -114,9 +114,12 @@ from planner.plan import (
     current_recorded_identity,
     fix_disagreements,
     is_dataset,
+    is_scope_choice,
+    is_search_pin,
     load_plan,
     load_plan_rounds,
     open_window,
+    pin_slot_moves,
     pin_sources,
     plan_revision,
     record_optional_decline,
@@ -125,6 +128,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    scope_choice_slot,
     search_pin_slot,
     stored_plan,
     windowed_pins,
@@ -161,6 +165,7 @@ from submission.service import (
     _source_ref_unpicked,
     first_year_reads,
     identity_on_record,
+    scope_choice_decisions,
 )
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -186,6 +191,7 @@ from ..decision_drafts import drafts
 from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
+from ..test_turn_records import _switchable_scope
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
 # fixtures, from conftest.py. Annotated structurally rather than imported: a
@@ -4418,6 +4424,228 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
         synthesized.slot
     ]
     assert synthesized.slot in amended.requirement(dataset.id).decision_ids
+
+
+def _scoped_gross(*, basis_alternative: str = "available") -> dict[str, Any]:
+    """`_FRANCE_KENYA` carrying the US health to Africa scope choices
+    (`_switchable_scope`), its grant-equivalent basis `basis_alternative`."""
+    scope = _switchable_scope()
+    basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
+    grant = next(o for o in basis["options"] if o["option_id"] == "measure_basis:grant_equivalent")
+    grant["availability"] = {"status": basis_alternative, "detail": {}}
+    if basis_alternative == "unavailable":
+        grant["availability"] |= {"code": "basis_not_published"}
+    return {**_FRANCE_KENYA, "resolved": {**_FRANCE_KENYA["resolved"], "scope_choices": scope}}
+
+
+@pytest.mark.parametrize(
+    ("basis_alternative", "axes"),
+    [
+        ("available", ["sector", "region", "measure_basis"]),
+        ("partial", ["sector", "region", "measure_basis"]),
+        ("unavailable", ["sector", "region"]),
+    ],
+)
+def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    basis_alternative: str,
+    axes: list[str],
+) -> None:
+    """A pin of a source whose part carries scope choices gets one decision
+    per choice with another option that can be served, after the measure
+    decision and cited by the requirement pinning it: the user's where their
+    words or an earlier choice settled it, the planner's where Search's
+    default did. A basis choice whose only other options are out of reach
+    states none."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross(basis_alternative=basis_alternative))
+    dataset, derived = requirements
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    scoped = [d for d in plan.decisions if is_scope_choice(d)]
+    assert [d.slot for d in plan.decisions] == [
+        "measure",
+        search_pin_slot(_GROSS),
+        *(scope_choice_slot(_GROSS, axis) for axis in axes),
+    ]
+    assert [(d.chosen, d.resolved_by) for d in scoped] == [
+        ("health (CRS 120)", ResolvedBy.USER),
+        ("Africa's countries only", ResolvedBy.USER),
+        ("gross disbursements, current USD", ResolvedBy.PLANNER_DEFAULT),
+    ][: len(axes)]
+    base = _switchable_scope()["id"]
+    assert [d.scope.choice_id for d in scoped if d.scope] == [f"{base}:{axis}" for axis in axes]
+    assert [d.active_option_id for d in scoped] == [
+        "sector:120",
+        "region:members_only",
+        "measure_basis:gross",
+    ][: len(axes)]
+    assert plan.requirement(dataset.id).decision_ids == (
+        "measure",
+        search_pin_slot(_GROSS),
+        *(d.slot for d in scoped),
+    )
+    assert set(scoped) <= set(shown_decisions(plan))
+
+
+def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_measure(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A correction round restates the pinned requirement citing the scope
+    decisions it was shown and not the measure decision: a scope decision
+    states no measure, so the measure citation is added back."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross())
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    scope_slots = tuple(scope_choice_slot(_GROSS, axis) for axis in ("sector", "region"))
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=[
+            pinned.model_copy(update={"decision_ids": ("measure", *scope_slots)}),
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert search_pin_slot(_GROSS) in plan.requirement(dataset.id).decision_ids
+
+
+def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """With the model's decisions and the measure decision one short of
+    `MAX_PLAN_DECISIONS`, the first scope choice is written and the others
+    are neither written nor cited, and the plan is recorded."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross())
+    dataset, derived = requirements
+    own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 2)]
+    cited = tuple(d.slot for d in own)
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts(own),
+        evidence_requirements=[
+            dataset.model_copy(update={"source_spec_id": _GROSS, "decision_ids": cited}),
+            derived.model_copy(update={"decision_ids": cited[:1]}),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert len(plan.decisions) == MAX_PLAN_DECISIONS
+    assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [
+        scope_choice_slot(_GROSS, "sector")
+    ]
+    assert plan.requirement(dataset.id).decision_ids[-2:] == (
+        search_pin_slot(_GROSS),
+        scope_choice_slot(_GROSS, "sector"),
+    )
+
+
+def test_a_windowed_pin_takes_its_scope_decisions_to_the_copy(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """A pin over other years than its search's moves to a windowed copy,
+    and its scope decisions move with it, under the copy's slots."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    block = _scoped_gross()
+    _show_block(ctx, block)
+    dataset = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source_spec_id=_GROSS,
+    )
+    token = current_recorded_identity.set(_turn_identities({_GROSS: block}, ()).get)
+    try:
+        result = tools["propose_plan"].func(
+            question="q",
+            answer_mode=AnswerMode.SERIES,
+            decisions=drafts([decision()]),
+            evidence_requirements=[dataset],
+            tool_context=ctx,
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (copy,) = windowed_pins(ctx.state).values()
+    scoped = [d for d in plan.decisions if is_scope_choice(d)]
+    assert [d.slot for d in scoped] == [
+        scope_choice_slot(copy.spec_id, axis) for axis in ("sector", "region", "measure_basis")
+    ]
+    assert {d.slot for d in scoped} <= set(plan.requirement("aid").decision_ids)
+
+
+def test_a_scope_decision_moved_to_a_copy_over_another_period_keeps_its_choice() -> None:
+    """A windowed copy of a pin takes the scope decisions of the pin under
+    the copy's slots, cited under them, with the same choice and options."""
+    sector = scope_choice_decisions({_GROSS: PinSource(block=_scoped_gross(), settled=True)})[
+        _GROSS
+    ][0]
+    citing = DatasetRequirement(
+        id="aid",
+        decision_ids=(sector.slot,),
+        measure="aid",
+        entities=[Entity(name="Africa", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source_spec_id=_GROSS,
+    )
+
+    (moved,), (moved_requirement,) = _repinned(
+        [sector],
+        [citing],
+        decision_pins={sector.slot: SPEC},
+        requirement_pins={citing.id: SPEC},
+        slots=pin_slot_moves(_GROSS, SPEC),
+    )
+
+    assert is_scope_choice(moved)
+    assert (moved.slot, moved.fixes) == (
+        scope_choice_slot(SPEC, "sector"),
+        DecisionFixes(source_spec_id=SPEC),
+    )
+    assert (moved.scope, moved.options, moved.chosen) == (
+        sector.scope,
+        sector.options,
+        sector.chosen,
+    )
+    assert moved_requirement.decision_ids == (moved.slot,)
+    assert not is_search_pin(moved)
 
 
 @pytest.mark.parametrize(

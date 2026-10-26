@@ -47,6 +47,7 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlanDecision,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -343,6 +344,57 @@ def test_a_plan_proposed_without_the_new_fields_still_validates() -> None:
     assert frame.requirements is None
     assert frame.operations is None
     assert all(step.args is None for step in frame.steps)
+
+
+_SCOPE_ROW: dict[str, Any] = {
+    "id": "scope_sector_spec_a",
+    "question": "Which sector codes the figures count.",
+    "chosen": "health (CRS 120)",
+    "reason": "The user's question asked for health (CRS 120).",
+    "resolved_by": "user",
+    "alternatives": ["health incl. population and reproductive health", "health (CRS 120)"],
+    "choice_id": "spec_base:sector",
+    "active_option_id": "sector:120",
+    "options": [
+        {"option_id": "sector:120+130", "label": "health incl. population", "status": "available"},
+        {
+            "option_id": "sector:120",
+            "label": "health (CRS 120)",
+            "status": "partial",
+            "reason": "imputed multilateral aid covers only some years",
+            "years": [[2011, 2024]],
+        },
+    ],
+}
+
+
+def test_a_plan_proposed_carries_a_scope_decision_with_its_choice_and_options() -> None:
+    raw = _load("event-03-plan-proposed.json")
+    raw["decisions"].append(_SCOPE_ROW)
+
+    frame = STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+    assert isinstance(frame, PlanProposed)
+    assert frame.model_dump(mode="json", exclude_unset=True) == raw
+    assert all(d.choice_id is None for d in frame.decisions[:-1])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"choice_id": None},
+        {"active_option_id": None},
+        {"options": None},
+        {"active_option_id": "sector:999"},
+        {"options": [{**_SCOPE_ROW["options"][0], "status": "maybe"}]},
+    ],
+    ids=["no-choice", "no-active", "no-options", "active-not-offered", "unknown-status"],
+)
+def test_a_scope_decision_missing_or_misstating_a_member_is_refused(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        PlanDecision.model_validate({**_SCOPE_ROW, **change})
 
 
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
