@@ -79,6 +79,7 @@ from harness.graph.answer import (
 from harness.graph.delivery import Delivery, deliver
 from harness.graph.plan_done import HandBack, StepSummary
 from harness.graph.seams import Executor
+from harness.plan_display import share_wholes
 from harness.tool_contracts import HarnessCode
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,7 @@ def run_resumer(
             totals=answer_notes(surface, outcome, plan=plan) if plan is not None else [],
         )
         tools = {record.step_id: record.tool.name for record in outcome.steps}
+        wholes = share_wholes(plan) if plan is not None else {}
         read = True
         for step_id, frame in answer_frames(outcome).items():
             try:
@@ -213,6 +215,7 @@ def run_resumer(
                     frame.presented.model_dump(),
                     tool=tools[step_id],
                     store_ref=frame.store.model_dump(),
+                    whole=wholes.get(step_id),
                 )
             except Exception:
                 logger.exception("resume: describing %s raised", frame.presented.spec_id)

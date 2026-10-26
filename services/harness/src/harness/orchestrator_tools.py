@@ -676,15 +676,31 @@ class _Narrowed:
 _CUT_SUFFIX = re.compile(r"(?:, [\d/-]+ to [\d/-]+)? \(\d+ largest of \d+ in [^()]+\)$")
 
 
-def _card_title(subject: str, *, period: str | None, cut: TopMembers | None) -> str:
-    """A card's title: the model's `subject`, then the period the card shows,
-    then on a card cut to its largest members what the cut leaves out and the
-    period it ranked at. The subject is shortened so the title fits 120
-    characters."""
-    suffix = f", {period}" if period is not None else ""
+def _card_title(
+    subject: str, *, whole: str | None, period: str | None, cut: TopMembers | None
+) -> tuple[str, str | None]:
+    """A card's title, and the whole it leaves out.
+
+    The title is the model's `subject`, then on a card of shares the whole
+    they divide by (`harness.plan_display.share_wholes`), then the period the
+    card shows, then on a card cut to its largest members what the cut leaves
+    out and the period it ranked at, in 120 characters. A whole that fits
+    only beside a shortened subject is left out of the title and returned,
+    for the card's note (`_whole_note`); the subject is then shortened so
+    the rest fits."""
+    suffix = ""
+    if period is not None:
+        suffix = f", {period}"
     if cut is not None:
         suffix += f" ({len(cut.members)} largest of {cut.holding} in {cut.period})"
-    return f"{subject[: 120 - len(suffix)]}{suffix}"
+    if whole is not None and len(subject + _whole_clause(whole) + suffix) <= 120:
+        return f"{subject}{_whole_clause(whole)}{suffix}", None
+    return f"{subject[: max(0, 120 - len(suffix))]}{suffix}", whole
+
+
+def _whole_clause(whole: str) -> str:
+    """The clause `_card_title` states a card's whole in."""
+    return f", of the total {whole}"
 
 
 def _covered_years(view: Mapping[str, Any]) -> list[str]:
@@ -878,6 +894,15 @@ async def _top_select(
         return top if isinstance(top, _Unranked) else _Unranked("not_ranked")
     members = top.members if cut else [*top.members, *top.unvalued]
     return _Narrowed(select={**select, dimension: members}, cut=top if cut else None)
+
+
+def _whole_note(whole: str) -> str:
+    """The whole a card of shares divides by, for the model, when its title
+    leaves it out (`_card_title`)."""
+    return (
+        f"This card's values are shares of the total {whole}, which its title leaves out "
+        "for length. Say in the reply what they are shares of."
+    )
 
 
 def _cut_note(cut: TopMembers) -> str:
@@ -2024,9 +2049,11 @@ def build_orchestrator_tools(
         frame: Mapping[str, Any],
         on_canvas: list[str],
         cut: TopMembers | None,
+        whole: str | None,
     ) -> dict[str, Any]:
         """What `make_charts` returns of a card on the canvas: its title,
-        `_card_result` and, on a cut card, what the cut leaves out."""
+        `_card_result` and a note of the `whole` its title leaves out and, on
+        a cut card, of what the cut leaves out."""
         try:
             held = await _card_result(chart, component, frame=frame, on_canvas=on_canvas, cut=cut)
         except Exception:
@@ -2035,8 +2062,12 @@ def build_orchestrator_tools(
             logger.exception("make_charts: reading the figures of %r failed", title)
             held = _figures_unread()
         entry = {"title": title, **held}
-        if cut is not None:
-            entry["note"] = _cut_note(cut)
+        notes = [
+            *([] if whole is None else [_whole_note(whole)]),
+            *([] if cut is None else [_cut_note(cut)]),
+        ]
+        if notes:
+            entry["note"] = " ".join(notes)
         return entry
 
     async def _draw(charts: list[Chart], tool_context: ToolContext) -> list[dict[str, Any]]:
@@ -2076,8 +2107,12 @@ def build_orchestrator_tools(
                     )
                     continue
                 # A title the model copied from a card already cut loses that
-                # suffix, so the card's own suffix is the only one.
+                # suffix, and one copied from a card of shares everything from
+                # the whole's clause on, its period included, so the card's own
+                # suffixes are the only ones.
                 subject = _CUT_SUFFIX.sub("", chart.title)
+                if (whole := frame.get("whole")) is not None:
+                    subject = subject.partition(_whole_clause(whole))[0]
                 if (refusal := _title_refusal(subject, frame["view"])) is not None:
                     drawn.append(_not_drawn(chart, refusal["message"], refusal=refusal))
                     continue
@@ -2149,7 +2184,7 @@ def build_orchestrator_tools(
                     drawn.append(_not_drawn(chart, issue["message"], refusal=issue))
                     continue
                 period, window = await _card_period(chart, frame=frame, select=select, cut=cut)
-                title = _card_title(subject, period=period, cut=cut)
+                title, untitled = _card_title(subject, whole=whole, period=period, cut=cut)
                 intent: dict[str, Any] = {
                     "type": chart.type,
                     "frame_ref": frame["ref"],
@@ -2181,7 +2216,13 @@ def build_orchestrator_tools(
                 ):
                     read = True
                     entry = await _card_entry(
-                        chart, stored, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                        chart,
+                        stored,
+                        title=title,
+                        frame=frame,
+                        on_canvas=on_canvas,
+                        cut=cut,
+                        whole=untitled,
                     )
                     drawn.append(
                         entry
@@ -2232,7 +2273,13 @@ def build_orchestrator_tools(
                 landed = True
                 drawn.append(
                     await _card_entry(
-                        chart, component, title=title, frame=frame, on_canvas=on_canvas, cut=cut
+                        chart,
+                        component,
+                        title=title,
+                        frame=frame,
+                        on_canvas=on_canvas,
+                        cut=cut,
+                        whole=untitled,
                     )
                 )
                 drawn_cards[identity] = {
