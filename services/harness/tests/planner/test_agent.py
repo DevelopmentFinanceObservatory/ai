@@ -1804,8 +1804,14 @@ def test_propose_plan_reads_the_dataset_of_every_pin_it_sums(
         stored = load_plan(ctx.state)
         assert stored is not None
         aid = stored.requirement("aid")
-        assert isinstance(aid, DatasetRequirement)
-        assert aid.source_spec_id == SPEC_GHANA_AID
+        assert isinstance(aid, DatasetRequirement) and aid.source_spec_id is not None
+        if held_as == "shown":
+            assert aid.source_spec_id == SPEC_GHANA_AID
+        else:
+            # A found source's identity is on record, so the pin moves to its copy
+            # over the requirement's years.
+            copy = windowed_pins(ctx.state).get(aid.source_spec_id)
+            assert copy is not None and copy.windowed_from == SPEC_GHANA_AID
 
 
 # The datasets `_sum_of_two_sources` adds by default, as a `combination_unasked`
@@ -8903,22 +8909,39 @@ def test_a_pin_a_source_choice_offered_is_judged_as_the_model_wrote_it(
 _WHOLE, _WHOLE_IDENTITY = windowed_identity(_ON_EVERY_YEAR, open_window(_EVERY_YEAR_FROM))
 
 
-@pytest.mark.parametrize("on_record", [True, False], ids=["on-record", "not-on-record"])
+@pytest.mark.parametrize(
+    "held", ["searched", "discovered", "nowhere"], ids=["on-record", "in-the-log", "not-on-record"]
+)
 def test_a_pin_offered_for_a_copy_s_whole_history_reads_the_origin_s_stated_years(
-    on_record: bool,
+    held: str,
 ) -> None:
     """Discovery did not find the pin of 'aid_history', 'aid''s copy, and offers
     `_WHOLE`, found over every year the dataset holds. The model reads the
-    choice for 'aid' and pins it there. With its identity on record, 'aid'
+    choice for 'aid' and pins it there. With its identity on record, from a
+    search in the conversation or as the source discovery logged, 'aid'
     retrieves it from its stated 2015 and the copy from 1978. With none, the
     years it holds are unknown, so the pin is refused for 'aid' and nothing
     reads the whole history in its place."""
+    on_record = held != "nowhere"
     lookup = {_STALE: RecordedIdentity(identity=_STALE_IDENTITY)}
-    if on_record:
+    if held == "searched":
         lookup[_WHOLE] = RecordedIdentity(identity=_WHOLE_IDENTITY)
     token = current_recorded_identity.set(lookup.get)
     try:
         ctx = _FakeToolContext()
+        if held == "discovered":
+            found = DiscoveryRecord(
+                revision="earlier",
+                tool="search",
+                requirement_id="aid_history",
+                requirement_key="earlier",
+                status=DiscoveryStatus.DEFINITE,
+                spec_ids=(_WHOLE,),
+            )
+            whole = SelectedSource(
+                spec_id=_WHOLE, sentence="gross aid", has_data=True, identity=_WHOLE_IDENTITY
+            )
+            save_log(ctx.state, load_log(ctx.state).with_record(found, (whole,)))
         for spec_id in (_WHOLE, _STALE):
             save_full_history(ctx.state, spec_id, FullHistory(first_year=_EVERY_YEAR_FROM, rows=35))
         answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
@@ -9072,17 +9095,40 @@ def _tools_reading(surface: ToolSurface) -> dict[str, FunctionTool]:
     return {tool.name: tool for tool in build_planner_tools(surface=surface)}
 
 
-@pytest.mark.usefixtures("aid_on_record")
+@pytest.fixture(params=["searched", "discovered"])
+def aid_held(request: pytest.FixtureRequest) -> str:
+    """Where the 2020-2024 education-aid identity is on record: a search in the
+    conversation (`aid_on_record`), or discovery's log alone, which the test writes."""
+    if request.param == "searched":
+        request.getfixturevalue("aid_on_record")
+    return request.param
+
+
 async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
+    aid_held: str,
 ) -> None:
     """The first proposal reads the recorded dataset over no window once; an
     amendment of the turn that still rolls from its start is pinned from the year
-    held."""
+    held. A dataset only discovery found, such as a referral's candidate, is on
+    record in its log and read the same way."""
     reads = _DefinitionReads()
     propose = _tools_reading(reads)["propose_plan"].func
     ctx = _FakeToolContext()
+    if aid_held == "discovered":
+        found = DiscoveryRecord(
+            revision="earlier",
+            tool="search",
+            requirement_id="aid",
+            requirement_key="earlier",
+            status=DiscoveryStatus.DEFINITE,
+            spec_ids=(_AID_2020_2024_SPEC,),
+        )
+        aid = SelectedSource(
+            spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
+        )
+        save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
     dataset = requirement(
         source_spec_id=_AID_2020_2024_SPEC,
         period=Period(start=2020, end=2024),

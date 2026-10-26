@@ -624,8 +624,14 @@ class DiscoveryLog(StrictModel):
                     return found
         return None
 
-    def recorded_alternative(self, spec_id: str) -> _RecordedSourceDefinition | None:
-        """A verified sibling definition offered by a source in this session."""
+    def recorded_definition(self, spec_id: str) -> _RecordedSourceDefinition | None:
+        """The verified definition of `spec_id` a source this log holds states, or `None`.
+
+        The source is `spec_id`'s own, such as a candidate a
+        `pinned_source_not_found` referral offered, or one offering it as a
+        sibling measure (`elected_measure.alternatives`). Its identity must
+        hash to `spec_id` (`caller_definition`).
+        """
         for own in reversed(tuple(self.sources.values())):
             for source in reversed(tuple(own.values())):
                 identities = (
@@ -633,6 +639,8 @@ class DiscoveryLog(StrictModel):
                     if source.elected_measure is not None
                     else {}
                 )
+                if source.identity is not None:
+                    identities[source.spec_id] = source.identity
                 identity = identities.get(spec_id)
                 if identity is None:
                     continue
@@ -2186,8 +2194,9 @@ async def _recorded_source(
 
     The identity is the copy over the requirement's period that
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
-    the one a search in the conversation recorded for the pin itself
-    (`planner.plan.recorded_identity`) when its window is that period, or
+    the one a search in the conversation or this session's discovery
+    recorded for the pin itself (`planner.plan.recorded_identity`,
+    `DiscoveryLog.recorded_definition`) when its window is that period, or
     a range with no end year for a requirement stating `period_end_open`,
     from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
@@ -2206,7 +2215,7 @@ async def _recorded_source(
     recorded = (
         windowed_pins(tool_context.state).get(spec_id)
         or recorded_identity(spec_id)
-        or load_log(tool_context.state).recorded_alternative(spec_id)
+        or load_log(tool_context.state).recorded_definition(spec_id)
     )
     identity = recorded.identity if recorded is not None else None
     if (
