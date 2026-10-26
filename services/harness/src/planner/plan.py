@@ -53,6 +53,7 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
+from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -373,6 +374,13 @@ class Entity(StrictModel):
             "'Africa' with `members` set. Unset, a set named alone is one entity, its own "
             "figure. A set is named once, never listed member by member."
         ),
+    )
+    dcid: Annotated[str | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        exclude_if=lambda dcid: dcid is None,
+        description="Graph node from an entity_name_ambiguous referral.",
     )
 
 
@@ -915,20 +923,25 @@ class DatasetRequirement(TaggedModel):
 
     @model_validator(mode="after")
     def _entities_are_unique(self) -> DatasetRequirement:
-        """Reject a requirement naming the same entity and role more than once."""
-        keys = [(entity.name, entity.role) for entity in self.entities]
-        seen: set[tuple[str, str | None]] = set()
+        """Reject a requirement naming the same entity, role and node more than once."""
+        keys = [(entity.name, entity.role, entity.dcid) for entity in self.entities]
+        seen: set[tuple[str, str | None, str | None]] = set()
         repeated = sorted(
-            {
-                f"{name}/{role}" if role else name
-                for name, role in keys
-                if (name, role) in seen or seen.add((name, role))
-            }
+            {"/".join(part for part in key if part) for key in keys if key in seen or seen.add(key)}
         )
         if repeated:
             raise ValueError(
-                f"every entity must be unique by name and role; repeated: {repeated!r}"
+                f"every entity must be unique by name, role and node; repeated: {repeated!r}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _nodes_are_unique(self) -> DatasetRequirement:
+        """Reject two entities stating one `dcid`: Search reads rows pinning one node
+        as one entity, so the second would lose its role or name the first again."""
+        dcids = [entity.dcid for entity in self.entities if entity.dcid is not None]
+        if repeated := sorted({dcid for dcid in dcids if dcids.count(dcid) > 1}):
+            raise ValueError(f"each entity's dcid must be its own node; repeated: {repeated!r}")
         return self
 
     @model_validator(mode="after")
@@ -1837,7 +1850,7 @@ class WholeIsItsMemberError(ValueError):
     `party` the party the ask totals across, `denominator_id` the dataset
     requirement its denominator reads, and `named` the entities that
     requirement names alone on that side, each of which the numerator names
-    too (`_check_wholes_span_their_totals`). `planner.agent.propose_plan`
+    too (`check_wholes_span_their_totals`). `planner.agent.propose_plan`
     answers it with a typed problem naming the ways out.
     """
 
@@ -2002,7 +2015,16 @@ def _side_dataset(
     return item if isinstance(item, DatasetRequirement) else None
 
 
-def _check_wholes_span_their_totals(plan: Plan) -> None:
+def no_refs(_dataset: DatasetRequirement | None, _entity: Entity) -> frozenset[str]:
+    """No graph ref, so the entity is compared by its name (`check_wholes_span_their_totals`)."""
+    return frozenset()
+
+
+def check_wholes_span_their_totals(
+    plan: Plan,
+    *,
+    refs: Callable[[DatasetRequirement | None, Entity], frozenset[str]] = no_refs,
+) -> None:
     """Reject a share or quotient whose denominator, on a party its ask totals across, names the numerator's members alone.
 
     An ask's `over` (`AskBreakdown.over`) is a party its answer totals
@@ -2029,8 +2051,16 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
     `share_of` operation runs over (`harness.orchestrator_tools._breakdowns_missing`).
     An ask listing a party in `by` is answered by an output keeping it
     (`_check_asks_keep_their_parties`), which an unkeyed share does not.
-    Names are compared as the plan writes them, so an alias, or a group on
-    one side beside its members on the other, is not seen. The requirements
+
+    Each entity is compared by the graph refs `refs` resolves it to, given
+    the dataset requirement its side reads, `None` through any other kind,
+    and by its name where either entity of a pair resolves none
+    (`_among_members`). `Plan` validation resolves none (`no_refs`), so it
+    compares names as the plan writes them, and an alias, or a group on one
+    side beside its members on the other, is not seen there.
+    `submission.service.admit` checks again with the refs each side's pinned
+    source resolves its names to, so "United States" and "United States of
+    America" compare equal when both resolve to one ref. The requirements
     are those the model wrote (`authored`), so a refusal names its ids.
 
     Raises:
@@ -2055,13 +2085,23 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                 continue
             numerator = side_entities(by_id, requirement.numerator)
             denominator = side_entities(by_id, requirement.denominator)
+            numerator_dataset = _side_dataset(by_id, requirement.numerator.input_id)
+            dataset = _side_dataset(by_id, requirement.denominator.input_id)
             for word in words:
-                held = _names_on_side(denominator, word)
-                if not held or not held <= _names_on_side(numerator, word):
+                held = [(entity, refs(dataset, entity)) for entity in _on_side(denominator, word)]
+                part = [
+                    (entity, refs(numerator_dataset, entity))
+                    for entity in _on_side(numerator, word)
+                ]
+                if not held or not all(_among_members(one, part) for one in held):
                     continue
-                if len(held) > 1 and _pools_across(requirement, word):
+                # A pool's members are every ref its entities resolve to, a
+                # group counting each of its members, and the names that resolve none.
+                members = {ref for _, found in held for ref in found} | {
+                    entity.name for entity, found in held if not found
+                }
+                if len(members) > 1 and _pools_across(requirement, word):
                     continue
-                dataset = _side_dataset(by_id, requirement.denominator.input_id)
                 raise WholeIsItsMemberError(
                     requirement_id=requirement.id,
                     ask=answer.ask,
@@ -2070,7 +2110,7 @@ def _check_wholes_span_their_totals(plan: Plan) -> None:
                     denominator_id=requirement.denominator.input_id
                     if dataset is None
                     else dataset.id,
-                    named=held,
+                    named={entity.name for entity, _ in held},
                 )
 
 
@@ -2084,13 +2124,27 @@ def _pools_across(requirement: ShareOfRequirement | QuotientRequirement, word: s
     )
 
 
-def _names_on_side(entities: Iterable[Entity], word: str) -> set[str]:
-    """The names of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
-    return {
-        entity.name
-        for entity in entities
-        if entity.role is not None and same_party(entity.role, word)
-    }
+def _among_members(
+    resolved: tuple[Entity, frozenset[str]], part: Sequence[tuple[Entity, frozenset[str]]]
+) -> bool:
+    """Whether an entity of a whole, with the refs it resolves to, is among the members `part` names.
+
+    By ref, when every ref it resolves to is one `part`'s entities resolve
+    to, so a group the part names stands for each of its members; by name,
+    against an entity of `part` with the same name where either of the two
+    resolves no ref.
+    """
+    entity, found = resolved
+    if found and found <= {ref for _, theirs in part for ref in theirs}:
+        return True
+    return any(one.name == entity.name for one, theirs in part if not (found and theirs))
+
+
+def _on_side(entities: Iterable[Entity], word: str) -> tuple[Entity, ...]:
+    """The entities of `entities` whose role names the party `word` names (`planner.parties.same_party`)."""
+    return tuple(
+        entity for entity in entities if entity.role is not None and same_party(entity.role, word)
+    )
 
 
 def _check_asks_across_years(asks: Sequence[str], numbers: Sequence[int]) -> None:
@@ -3943,7 +3997,7 @@ class Plan(StrictModel):
         party its ask breaks down by unless that part is declined
         (`_check_asks_keep_their_parties`), and a share or quotient answering
         an ask that totals across a party divides by a whole spanning more
-        than the numerator's own members of it (`_check_wholes_span_their_totals`).
+        than the numerator's own members of it (`check_wholes_span_their_totals`).
 
         The requirements are judged as they run: split so each dataset read
         from its first year serves only its rolling-start readers
@@ -3998,7 +4052,7 @@ class Plan(StrictModel):
         _check_population_claims_are_cited(self.evidence_requirements, decisions_by_slot)
         _check_asks_accounted(self.asks, self.answered, self.declined, self.evidence_requirements)
         _check_asks_keep_their_parties(self)
-        _check_wholes_span_their_totals(self)
+        check_wholes_span_their_totals(self)
         _check_asks_across_years(self.asks, self.asks_across_years)
         self._translation_and_workflow_agree()
         return self
@@ -5629,6 +5683,56 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     `spec_id`; `None` outside a conversation or when none recorded one."""
     lookup = current_recorded_identity.get()
     return lookup(spec_id) if lookup is not None else None
+
+
+class _ShownDefinition(NamedTuple):
+    """The definition of a dataset the planner was shown, as its block carries it,
+    with the sets its places were asked for as."""
+
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
+
+
+def identity_on_record(
+    pin: str,
+    *,
+    shown: Mapping[str, PinSource],
+    end_open: bool,
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> RecordedDefinition | None:
+    """The definition on record for `pin`; `None` when none is.
+
+    The definition is the one a search in the conversation recorded
+    (`recorded_identity`), else the one `definition_lookup` answers:
+    `submission.service.admit` and the translator pass the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
+    each source the translator offered. With `end_open` it is otherwise the
+    one the block the planner was shown carries (`shown_identity`). Admission
+    asks for it only for a requirement stating `period_end_open`: the
+    translator can find a closed requirement's pin by searching its stated
+    years, and no search finds a definition with no end year. The translator
+    always asks for it, since a pin compiled in code during the request (a
+    scope choice switched on the plan card, `harness.graph.switch`, or an
+    input put on its calculation's basis, `planner.agent.compile_on_basis`)
+    is held there and nowhere a search recorded it. A shown block that is
+    not readable as a source (`compiler.sources.source_from_spec_block`)
+    puts none on record.
+    """
+    recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and definition_lookup is not None:
+        recorded = definition_lookup(pin)
+    if recorded is not None or not end_open or pin not in shown:
+        return recorded
+    identity = shown_identity(pin, shown[pin])
+    block = shown[pin].spec_block(pin)
+    if identity is None or block is None:
+        return None
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return None
+    return _ShownDefinition(identity, source.groups, source.resolved_sources)
 
 
 # The seconds a discovery call made now may take inside a planner entry. That is

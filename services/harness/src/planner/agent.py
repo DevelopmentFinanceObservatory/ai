@@ -77,7 +77,6 @@ from submission.service import (
     Unpinned,
     aligned_pins,
     basis_unservable,
-    identity_on_record,
     part_scope,
     realignments_wanted,
     save_aligned_pin,
@@ -90,6 +89,7 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    load_log,
     resolve_definition,
     resolved_spec,
 )
@@ -113,6 +113,7 @@ from planner.plan import (
     UnsupportedOperation,
     full_histories,
     full_history,
+    identity_on_record,
     load_plan,
     pin_sources,
     plan_revision,
@@ -144,9 +145,10 @@ PROPOSE_PLAN = "propose_plan"
 _PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. "
     "Given a development finance question, draft a methodological plan. "
-    "State each real decision (measure, scope, time window when the "
-    "search results do not settle it, and so on), the alternatives you "
-    "considered, and a one-line reason for your choice. Record a decision "
+    "State each real decision (a measure no pinned source settles, "
+    "scope, time window when the search results do not settle it, and so "
+    "on), the alternatives you considered, and a one-line reason for your "
+    "choice. Record a decision "
     "only where you weighed more than one alternative. A value the "
     "question already states outright, such as the entity it names or the "
     "measure it names, is a fact for a requirement's own fields to carry "
@@ -182,7 +184,11 @@ _PLANNING = (
     "conversation fetched) answers a dataset requirement, pin it as that "
     "requirement's `source_spec_id`, verbatim, and cite no decision for "
     "the pin. The plan retrieves that dataset as it was shown, with no "
-    "new search. Pin a candidate's `spec_id` with a `Decision` naming the "
+    "new search. A pinned source also fixes how its flow is counted, "
+    "such as gross or net disbursements, and `propose_plan` records that "
+    "choice itself, so write no `Decision` over it. To count the flow "
+    "another way, pin that count's own `spec_id` from the reading's other "
+    "counts. Pin a candidate's `spec_id` with a `Decision` naming the "
     "candidates you weighed. Otherwise the source is a decision like any "
     "other. State a dataset requirement's `unit` only when the question "
     "names a currency or price basis, and do not copy a source's own "
@@ -1231,9 +1237,18 @@ def _first_year_wanted(result: Mapping[str, object]) -> str | None:
 FIRST_YEAR_READ_DEADLINE_SECONDS = 10.0
 
 
-def _first_year_identity(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | None:
-    """The identity a first-year read of `pin` reads; `None` when none is on record."""
-    recorded = identity_on_record(pin, shown=shown, end_open=True)
+def _first_year_identity(pin: str, state: SessionState) -> Mapping[str, Any] | None:
+    """The identity a first-year read of `pin` reads; `None` when none is on record.
+
+    It is on record as `submission.service.admit` finds it, the discovery
+    log's definitions included, so a pin `propose_plan` admits is read.
+    """
+    recorded = identity_on_record(
+        pin,
+        shown=pin_sources(state),
+        end_open=True,
+        definition_lookup=load_log(state).recorded_definition,
+    )
     return recorded.identity if recorded is not None else None
 
 
@@ -1503,7 +1518,7 @@ async def with_source_reads(
         if pin is not None:
             if pin in full_histories(state):
                 return result
-            identity = _first_year_identity(pin, pin_sources(state))
+            identity = _first_year_identity(pin, state)
             if identity is None:
                 return result
             try:

@@ -13,7 +13,8 @@ contradicts (`_contradicted_carried_decisions`: a planner's is dropped
 unless another requirement still rests on it), the carried planner
 decisions it leaves uncited (`_uncited_carried_decisions`), a user's
 decision it drops or changes with no word from the user since the plan was
-recorded (`_user_decision_refused`), the `Plan` it
+recorded (`_user_decision_refused`), a decision of its own restating
+the measure a pin decides (`_measure_fixed_by_pin`), the `Plan` it
 builds under the first years on record (`_first_years_on_record`), that
 plan split so a dataset read from its first year serves only the steps
 rolling from their start (`planner.plan.split_of`), the pins it windows
@@ -36,6 +37,7 @@ caller's.
 
 from __future__ import annotations
 
+import functools
 import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -44,7 +46,7 @@ from enum import StrEnum
 from itertools import chain
 from typing import Annotated, Any, NamedTuple, Protocol, cast
 
-from compiler.evidence import open_axes_for
+from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
     measure_named_by_query,
@@ -82,6 +84,7 @@ from planner.plan import (
     DecisionFixes,
     DecisionScope,
     Decline,
+    Entity,
     EvidenceRequirement,
     FirstYear,
     FixDisagreement,
@@ -102,12 +105,14 @@ from planner.plan import (
     amendment_entry,
     authored,
     bound_fixes,
+    check_wholes_span_their_totals,
     cut_user_text,
     dataset_roots,
     fix_disagreements,
     fixes_changes,
     full_histories,
     full_history,
+    identity_on_record,
     inputs_of,
     is_scope_choice,
     is_search_pin,
@@ -128,12 +133,10 @@ from planner.plan import (
     pin_slot_moves,
     pin_sources,
     reached,
-    recorded_identity,
     roles_not_kept,
     scope_choice_slot,
     search_pin_slot,
     settle_decisions,
-    shown_identity,
     split_of,
     unstated_period_reductions,
     unstated_result_scopes,
@@ -141,10 +144,11 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import (
+    AmbiguousEntityReading,
+    EntityKey,
     GroupBy,
     Identifier,
     OpenPeriodFault,
-    ResolvedSourceMention,
     RollingIssue,
     RollingPlanError,
     StrictModel,
@@ -152,7 +156,7 @@ from planner.records import (
 )
 from planner.shapes import PLACE_PHRASE, pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import OpenEntityAxis, ResolvedGroup, SelectedSource
+from planner.workflow import OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
 from translator.discovery import (
@@ -443,7 +447,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         previous, evidence_requirements, removed_evidence_requirements
     )
     read = full_histories(view.state)
-    definition_lookup = load_log(view.state).recorded_alternative
+    definition_lookup = load_log(view.state).recorded_definition
     settled = [
         *settled,
         *_user_settled_rewrites(
@@ -496,6 +500,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             )
         )
         or _shared_decision_contradicted(contradicted, proposer)
+        or _measure_fixed_by_pin(
+            patch.decisions,
+            requirements_after,
+            _decisions_after(previous, settled, removed=removed_decisions),
+            measures,
+            proposer,
+        )
     )
     if blocked is not None:
         return blocked
@@ -549,6 +560,9 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                 )
             }
         )
+        # `Plan` validation compares the sides of a share by name; the
+        # pins resolve them to graph refs, so an alias divides by itself too.
+        check_wholes_span_their_totals(stated, refs=_entity_refs(view))
         split = split_of(stated)
         # The recorded plan carries the copies, and `Plan` validation checks
         # they are the split of `stated` before `_window_pins` gives each pin
@@ -693,8 +707,9 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     can still carry model-supplied text (an unknown key on a requirement), so
     each string in it is cut at `_MAX_LOC_ELEMENT_CHARS`. A `Decision`
     validator's message echoes `chosen` and `options`, which their own
-    length caps bound. Any other `ValueError` is a plan rule stated in words,
-    so its text is the message. A rule that refused what the system cannot do
+    length caps bound. A plan rule's typed error raised outside validation
+    answers as it does inside (`_rule_refused`); any other `ValueError` is a
+    plan rule stated in words, so its text is the message. A rule that refused what the system cannot do
     (`UnsupportedPlanError`) is no malformed draft, so it answers `_unsupported`.
     An ask left unaccounted for (`AsksUnaccountedError`) answers
     `_asks_unaccounted`, and a party an answer drops (`AskRoleDroppedError`)
@@ -711,7 +726,7 @@ def _invalid_data(exc: ValueError, proposer: Proposer) -> dict[str, object]:
     if isinstance(exc, RollingPlanError):
         return _rolling_refused(exc)
     if not isinstance(exc, ValidationError):
-        return _invalid_plan(f"Invalid plan data: {exc}")
+        return _rule_refused(exc, proposer) or _invalid_plan(f"Invalid plan data: {exc}")
     cause = _unsupported_cause(exc)
     if cause is not None:
         return _unsupported(cause, proposer)
@@ -1585,8 +1600,16 @@ def _choice_not_offered(
     referral is about: stated unpinned and otherwise unchanged, it would
     have the translator's search find those sources again
     (`_withheld_scope_dropped`).
+
+    An `entity_name_ambiguous` referral offers graph nodes and no sources,
+    so it leaves every pin as it is (`_entity_dcid_unoffered` checks its
+    choice).
     """
-    if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
+    if (
+        referral is None
+        or referral.outcome is not Outcome.CHOICE_REQUIRED
+        or referral.kind is ReferralKind.ENTITY_NAME_AMBIGUOUS
+    ):
         return None
     for requirement_id, candidates in referral.offered().items():
         try:
@@ -1718,6 +1741,33 @@ def _pinned_source(spec_id: str | None, view: SessionView) -> SelectedSource | N
         except ValueError:
             return None
     return load_log(view.state).recorded_source(spec_id)
+
+
+def _entity_refs(
+    view: SessionView,
+) -> Callable[[DatasetRequirement | None, Entity], frozenset[str]]:
+    """The graph refs `check_wholes_span_their_totals` compares an entity by, given its side's dataset requirement.
+
+    A name is resolved against the source its dataset requirement pins
+    (`_pinned_source`), by label or by the refs Search bound for it
+    (`compiler.evidence.named_refs`), as
+    `translator.discovery._divides_its_member_by_itself` compares a pin's
+    members; a group names every member the source binds on its side. A
+    name the pin does not resolve, or on a requirement pinning nothing on
+    record, resolves no ref and is compared by its name.
+    """
+
+    @functools.cache
+    def source(spec_id: str) -> SelectedSource | None:
+        return _pinned_source(spec_id, view)
+
+    def refs(dataset: DatasetRequirement | None, entity: Entity) -> frozenset[str]:
+        if dataset is None or dataset.source_spec_id is None:
+            return frozenset()
+        pinned = source(dataset.source_spec_id)
+        return frozenset() if pinned is None else frozenset(named_refs((entity,), pinned))
+
+    return refs
 
 
 class _SumDatasets(NamedTuple):
@@ -1913,6 +1963,51 @@ def _source_ref_unpicked(
     return None
 
 
+def _entity_dcid_unoffered(
+    plan: Plan, referral: Referral | None, previous: Plan | None
+) -> dict[str, object] | None:
+    """A new entity `dcid` must be a graph node Search offered for that entity.
+
+    The options are the candidates of the reading the open
+    `entity_name_ambiguous` referral (`referral`, as `_authored_referral`
+    gives it) holds for the entity's `(name, role)` in its requirement. The planner settles the choice when the
+    question decides it, so the user need not have picked it. An entity
+    whose `(name, role, dcid)` the previous plan states for the requirement
+    carries its settled choice forward.
+    """
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        kept: set[tuple[str, str | None, str | None]] = set()
+        if previous is not None:
+            old = next((r for r in previous.evidence_requirements if r.id == requirement.id), None)
+            if isinstance(old, DatasetRequirement):
+                kept = {(e.name, e.role, e.dcid) for e in old.entities}
+        readings: tuple[AmbiguousEntityReading, ...] = ()
+        if (
+            referral is not None
+            and referral.kind is ReferralKind.ENTITY_NAME_AMBIGUOUS
+            and referral.requirement_id == requirement.id
+        ):
+            readings = referral.ambiguous_entities
+        for entity in requirement.entities:
+            if entity.dcid is None or (entity.name, entity.role, entity.dcid) in kept:
+                continue
+            offered = {
+                candidate.ref
+                for reading in readings
+                if reading.entity == EntityKey(name=entity.name, role=entity.role)
+                for candidate in reading.candidates
+            }
+            if entity.dcid not in offered:
+                return _invalid_plan(
+                    "An entity's dcid must be a graph node an entity_name_ambiguous referral "
+                    "offered for that entity. Leave dcid unset unless Search asked which node "
+                    "the entity is."
+                )
+    return None
+
+
 def _unrecordable(
     plan: Plan,
     view: SessionView,
@@ -1929,8 +2024,9 @@ def _unrecordable(
     (`_nothing_to_plan`); one that states none and makes a decline nothing
     earned is refused for the decline (`_decline_unearned`). A patch carries forward what it
     does not name, so the amended plan is checked whole for a source
-    reference the user did not pick (`_source_ref_unpicked`) and a pin a
-    pending source choice did not offer (`_choice_not_offered`), both
+    reference the user did not pick (`_source_ref_unpicked`), an entity
+    node no referral offered (`_entity_dcid_unoffered`) and a pin a
+    pending source choice did not offer (`_choice_not_offered`), each
     against `stated`, the plan before its split and `_window_pins`, with
     `referral`, the pending referral naming the requirements the model wrote
     (`_authored_referral`), for a
@@ -1959,6 +2055,7 @@ def _unrecordable(
         )
     return (
         _source_ref_unpicked(stated, referral, view, previous)
+        or _entity_dcid_unoffered(stated, referral, previous)
         or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous)
         or _decline_unearned(plan, previous, view)
@@ -2601,49 +2698,6 @@ def _open_window(
     return open_window(first_year)
 
 
-@dataclass(frozen=True)
-class _ShownDefinition:
-    """The definition of a dataset the planner was shown, as its block carries it,
-    with the sets its places were asked for as."""
-
-    identity: Mapping[str, Any]
-    groups: tuple[ResolvedGroup, ...] = ()
-    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
-
-
-def identity_on_record(
-    pin: str,
-    *,
-    shown: Mapping[str, PinSource],
-    end_open: bool,
-    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
-) -> RecordedDefinition | None:
-    """The definition on record for `pin`; `None` when none is.
-
-    The definition is the one a search in the conversation recorded
-    (`planner.plan.recorded_identity`). For a requirement stating
-    `period_end_open` it is otherwise the one the block the planner was
-    shown carries (`planner.plan.shown_identity`): the translator can find
-    a closed requirement's pin by searching its stated years, and no search
-    finds a definition with no end year. A shown block that is not readable
-    as a source (`source_from_spec_block`) puts none on record.
-    """
-    recorded: RecordedDefinition | None = recorded_identity(pin)
-    if recorded is None and definition_lookup is not None:
-        recorded = definition_lookup(pin)
-    if recorded is not None or not end_open or pin not in shown:
-        return recorded
-    identity = shown_identity(pin, shown[pin])
-    block = shown[pin].spec_block(pin)
-    if identity is None or block is None:
-        return None
-    try:
-        source = source_from_spec_block(block)
-    except ValueError:
-        return None
-    return _ShownDefinition(identity, source.groups, source.resolved_sources)
-
-
 def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     """The identity of each dataset the planner was shown whose first year `propose_plan`
     can still read in `state`.
@@ -2684,7 +2738,10 @@ def _window_pins(
     `scope.window` would mint), and so is the decision that fixes the pin.
 
     The identity on record is the one a search in the conversation recorded
-    (`planner.plan.recorded_identity`). One of a `latest` window is copied
+    (`planner.plan.recorded_identity`), else the one `definition_lookup`
+    answers, the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`) under
+    `admit`. One of a `latest` window is copied
     like any other: the copy replaces the window whole, as `get_data`'s
     scope surgery does, and the translator confirms the copy through Search
     before it is retrieved.
@@ -4158,6 +4215,111 @@ def _shared_decision_contradicted(
             "still_cited_by": list(contradiction.backing),
         },
     )
+
+
+def _measure_fixed_by_pin(
+    drafts: Sequence[DecisionDraft],
+    requirements: Sequence[EvidenceRequirement],
+    decisions: Iterable[Decision],
+    measures: Mapping[str, MeasureChoice],
+    proposer: Proposer,
+) -> dict[str, object] | None:
+    """The `MEASURE_FIXED_BY_PIN` refusal for the first of `drafts` restating a pin's measure, or `None`.
+
+    A draft listing `measure` in `fixes` restates the flow when a requirement
+    citing it also cites another decision `propose_plan` wrote for that
+    requirement's own pin (`is_search_pin`, from `_measure_decisions`), so
+    the plan would list the flow twice. `decisions` are every decision the
+    patched plan holds, this call's settled ones and the carried ones it
+    keeps. A draft restating the pin's own decision, or cited by a
+    requirement whose pin has no such decision beside it, is let through.
+    Only this call's own `drafts` are read: a decision carried unchanged
+    from the plan being amended stands, and `Plan` validation never refuses
+    one, so a stored plan holding one still loads. `detail` names the
+    draft's `slot`, the `requirement_id` citing it, the pinned `spec_id`,
+    the `measure_decision` recording the choice, the measure `chosen`, and
+    the spec_id of each count the source offers by label (`counts`, from
+    `measures`). Its `action` calls `proposer` to restate `decisions`.
+    """
+    by_slot = {decision.slot: decision for decision in decisions}
+    for draft in drafts:
+        if "measure" not in (draft.fixes or ()):
+            continue
+        for requirement in requirements:
+            if (
+                not isinstance(requirement, DatasetRequirement)
+                or draft.slot not in requirement.decision_ids
+            ):
+                continue
+            pinned = next(
+                (
+                    decision
+                    for slot in requirement.decision_ids
+                    if slot != draft.slot
+                    and (decision := by_slot.get(slot)) is not None
+                    and is_search_pin(decision)
+                    and decision.fixes is not None
+                    and decision.fixes.source_spec_id == requirement.source_spec_id
+                ),
+                None,
+            )
+            if pinned is not None:
+                return _measure_fixed(draft, requirement, pinned, measures, proposer)
+    return None
+
+
+def _measure_fixed(
+    draft: DecisionDraft,
+    requirement: DatasetRequirement,
+    pinned: Decision,
+    measures: Mapping[str, MeasureChoice],
+    proposer: Proposer,
+) -> dict[str, object]:
+    """The `MEASURE_FIXED_BY_PIN` refusal of `draft`, which `requirement` cites beside `pinned`, its pin's flow decision."""
+    pin = requirement.source_spec_id
+    choice = measures.get(pin) if pin is not None else None
+    counts = dict(zip(choice.options, choice.spec_ids, strict=True)) if choice else {}
+    others = ", ".join(
+        f"{label} ({spec_id})" for label, spec_id in counts.items() if spec_id != pin
+    )
+    another_way = (
+        f" To count the flow another way, pin that count's own `spec_id`: {others}."
+        if others
+        else ""
+    )
+    return problem(
+        ProblemCode.MEASURE_FIXED_BY_PIN,
+        f"Decision {draft.slot!r} lists `measure` in `fixes`, but {requirement.id!r} pins "
+        f"{pin}, and a pin decides how its flow is counted: `propose_plan` records "
+        f"{pinned.chosen} as decision {pinned.slot!r}. Cite {draft.slot!r} on no "
+        "requirement pinning such a source, and leave it out of `decisions` when no other "
+        f"requirement rests on it.{another_way} To choose between candidate readings, pin "
+        "the chosen candidate's `spec_id` and state a `Decision` naming the candidates you "
+        "weighed, with no `measure` in its `fixes`.",
+        outcome=Outcome.REFUSED,
+        action=proposer.action(needs=("decisions",)),
+        detail={
+            "slot": draft.slot,
+            "requirement_id": requirement.id,
+            "spec_id": pin,
+            "measure_decision": pinned.slot,
+            "chosen": pinned.chosen,
+            "counts": counts,
+        },
+    )
+
+
+def _decisions_after(
+    previous: Plan | None, decisions: Sequence[Decision], *, removed: Collection[str]
+) -> list[Decision]:
+    """Every decision the plan holds once this call's patch lands: `previous`'s
+    less those `removed` and those `decisions` restate, then `decisions`."""
+    restated = {decision.slot for decision in decisions}
+    carried = previous.decisions if previous is not None else ()
+    return [
+        *(d for d in carried if d.slot not in removed and d.slot not in restated),
+        *decisions,
+    ]
 
 
 def _requirements_after(

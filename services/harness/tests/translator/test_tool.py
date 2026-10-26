@@ -69,7 +69,10 @@ from planner.plan import (
     split_of,
 )
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityCandidate,
+    EntityKey,
     GroupBy,
     RelativePeriod,
     RollingWindow,
@@ -87,7 +90,13 @@ from translator.discovery import (
     save_log,
 )
 from translator.mechanical import TranslatorCore
-from translator.referral import Referral, ReferralKind, load_referral, save_referral
+from translator.referral import (
+    ENTITY_CHOICE_REPAIR,
+    Referral,
+    ReferralKind,
+    load_referral,
+    save_referral,
+)
 from translator.tool import (
     IssueResolution,
     _compile_failure_action,
@@ -1398,37 +1407,69 @@ async def test_translate_refers_a_search_never_issued_back_marked_not_issued(
     assert "was not called" in answer["reason"]
 
 
-def test_return_to_planner_carries_the_source_names_search_offered(
-    real_schemas, draft, context_holding
+_SOURCE_GROUP = AmbiguousSourceReading(
+    text="shared",
+    candidates=(
+        SourceNameCandidate(ref="provenance/a", label="A", kind="provenance"),
+        SourceNameCandidate(ref="provenance/b", label="B", kind="provenance"),
+    ),
+)
+_ENTITY_GROUP = AmbiguousEntityReading(
+    text="Congo",
+    candidates=(
+        EntityCandidate(ref="country/COD", label="Democratic Republic of the Congo"),
+        EntityCandidate(ref="country/COG", label="Republic of the Congo"),
+    ),
+    entity=EntityKey(name="Congo", role="donor"),
+)
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason", "field", "group"),
+    [
+        (
+            ReferralKind.SOURCE_NAME_AMBIGUOUS,
+            "source_ambiguous",
+            "ambiguous_sources",
+            _SOURCE_GROUP,
+        ),
+        (
+            ReferralKind.ENTITY_NAME_AMBIGUOUS,
+            "entity_ambiguous",
+            "ambiguous_entities",
+            _ENTITY_GROUP,
+        ),
+    ],
+    ids=["source", "entity"],
+)
+def test_return_to_planner_carries_the_choices_search_offered(
+    real_schemas, draft, context_holding, kind, reason, field, group
 ):
     context = context_holding(draft())
     ask = draft().requirement("annual_debt_service")
-    group = AmbiguousSourceReading(
-        text="shared",
-        candidates=(
-            SourceNameCandidate(ref="provenance/a", label="A", kind="provenance"),
-            SourceNameCandidate(ref="provenance/b", label="B", kind="provenance"),
-        ),
-    )
     record = DiscoveryRecord(
         revision=plan_revision(draft()),
         tool="search",
         requirement_id=ask.id,
         requirement_key=requirement_revision(ask),
         status=DiscoveryStatus.NO_DATA,
-        reason="source_ambiguous",
-        ambiguous_sources=(group,),
+        reason=reason,
+        **{field: (group,)},
     )
     save_log(context.state, load_log(context.state).with_record(record, ()))
     result = _core(real_schemas).return_to_planner(
-        kind=ReferralKind.SOURCE_NAME_AMBIGUOUS,
-        reason="Choose publisher",
+        kind=kind,
+        reason="Choose one",
         requirement_id=ask.id,
         tool_context=context,
     )
     assert result["outcome"] == "referred"
-    assert result["referral"]["ambiguous_sources"] == [group.model_dump(mode="json")]
+    assert result["referral"][field] == [group.model_dump(mode="json")]
     assert result["referral"]["candidates"] == []
+    # Only the entity referral carries how to settle its choice.
+    assert result["referral"].get("repair") == (
+        ENTITY_CHOICE_REPAIR if kind is ReferralKind.ENTITY_NAME_AMBIGUOUS else None
+    )
 
 
 @pytest.mark.parametrize(

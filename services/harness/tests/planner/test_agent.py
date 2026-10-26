@@ -137,8 +137,11 @@ from planner.plan import (
 )
 from planner.records import (
     MAX_ENTITIES,
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
     DenominatorScope,
+    EntityCandidate,
+    EntityKey,
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
@@ -161,7 +164,9 @@ from submission import service as submission_service
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    _choice_not_offered,
     _combination_unasked,
+    _entity_dcid_unoffered,
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
@@ -179,7 +184,9 @@ from translator.discovery import (
     save_log,
 )
 from translator.referral import (
+    ENTITY_CHOICE_REPAIR,
     OUTCOME_OF,
+    REPAIR_OF,
     Referral,
     ReferralKind,
     StalePin,
@@ -1816,8 +1823,14 @@ def test_propose_plan_reads_the_dataset_of_every_pin_it_sums(
         stored = load_plan(ctx.state)
         assert stored is not None
         aid = stored.requirement("aid")
-        assert isinstance(aid, DatasetRequirement)
-        assert aid.source_spec_id == SPEC_GHANA_AID
+        assert isinstance(aid, DatasetRequirement) and aid.source_spec_id is not None
+        if held_as == "shown":
+            assert aid.source_spec_id == SPEC_GHANA_AID
+        else:
+            # A found source's identity is on record, so the pin moves to its copy
+            # over the requirement's years.
+            copy = windowed_pins(ctx.state).get(aid.source_spec_id)
+            assert copy is not None and copy.windowed_from == SPEC_GHANA_AID
 
 
 # The datasets `_sum_of_two_sources` adds by default, as a `combination_unasked`
@@ -2520,23 +2533,39 @@ def test_propose_plan_clears_a_pending_referral(
     assert load_referral(ctx.state) is None
 
 
-def _referral_of(kind: ReferralKind, requirement_id: str) -> Referral:
-    """A valid `Referral` of `kind`, naming what that kind has to name."""
-    if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
-        return Referral(
-            kind=kind,
-            reason="r",
-            requirement_id=requirement_id,
-            ambiguous_sources=(
-                AmbiguousSourceReading(
-                    text="shared",
-                    candidates=tuple(
-                        SourceNameCandidate(ref=f"provenance/{name}", label=name, kind="provenance")
-                        for name in ("a", "b")
-                    ),
+# The choices a `source_name_ambiguous` and an `entity_name_ambiguous` referral
+# each have to carry.
+_CHOICES_OF: dict[ReferralKind, dict[str, Any]] = {
+    ReferralKind.SOURCE_NAME_AMBIGUOUS: {
+        "ambiguous_sources": (
+            AmbiguousSourceReading(
+                text="shared",
+                candidates=tuple(
+                    SourceNameCandidate(ref=f"provenance/{name}", label=name, kind="provenance")
+                    for name in ("a", "b")
                 ),
             ),
         )
+    },
+    ReferralKind.ENTITY_NAME_AMBIGUOUS: {
+        "ambiguous_entities": (
+            AmbiguousEntityReading(
+                text="Congo",
+                candidates=tuple(
+                    EntityCandidate(ref=f"country/{code}", label=code) for code in ("COD", "COG")
+                ),
+                entity=EntityKey(name="Congo", role="donor"),
+            ),
+        ),
+        "repair": ENTITY_CHOICE_REPAIR,
+    },
+}
+
+
+def _referral_of(kind: ReferralKind, requirement_id: str) -> Referral:
+    """A valid `Referral` of `kind`, naming what that kind has to name."""
+    if kind in _CHOICES_OF:
+        return Referral(kind=kind, reason="r", requirement_id=requirement_id, **_CHOICES_OF[kind])
     if kind is ReferralKind.SOURCE_AMBIGUOUS:
         candidates = tuple(
             SelectedSource(
@@ -5134,6 +5163,196 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     assert load_plan(ctx.state) is None
 
 
+_MEASURE_FIXED = DecisionFixes(measure="external debt service paid")
+
+
+def _measure_fixes(plan: Plan) -> DecisionFixes | None:
+    """What the `measure` decision of `plan` fixes."""
+    return next(d for d in plan.decisions if d.slot == "measure").fixes
+
+
+def test_a_decision_over_a_pins_flow_count_is_refused(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A decision listing `measure` that a pin of a measure-offering source
+    cites restates the flow `propose_plan` records for the pin, so the call
+    is refused and the detail names the pin's counts to re-pin to."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+
+    refused = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision(fixes=_MEASURE_FIXED)]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.MEASURE_FIXED_BY_PIN.value, refused
+    assert refused["detail"] == {
+        "slot": "measure",
+        "requirement_id": dataset.id,
+        "spec_id": _GROSS,
+        "measure_decision": search_pin_slot(_GROSS),
+        "chosen": "gross disbursements",
+        "counts": {"gross disbursements": _GROSS, "net disbursements": _NET},
+    }
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("fixes", "pin", "shown"),
+    [
+        (_MEASURE_FIXED, None, True),
+        (DecisionFixes(period=Period(start=2015, end=2024)), _GROSS, True),
+        (_MEASURE_FIXED, _GROSS, False),
+    ],
+    ids=["unpinned", "fixes-period", "pin-offers-no-measure"],
+)
+def test_a_decision_on_a_measure_no_pin_decides_is_recorded(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    fixes: DecisionFixes,
+    pin: str | None,
+    shown: bool,
+) -> None:
+    """A decision fixing the measure of an unpinned requirement, one fixing
+    another field of a pinned requirement, and one on a pin whose source
+    offers no measure each record as written."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    if shown:
+        _show_block(ctx, _FRANCE_KENYA)
+    else:
+        _show(ctx, _GROSS)
+    dataset, derived = requirements
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision(fixes=fixes)]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": pin}), derived],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert _measure_fixes(plan) == fixes
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["code_slot_restated", "pin_settled_after", "pin_settled_after_user_silent"],
+)
+def test_an_amendment_restating_a_measure_beside_no_second_flow_decision_is_recorded(
+    decision: DecisionFactory, requirements: RequirementPair, route: str
+) -> None:
+    """An amendment whose measure decision sits beside no other flow
+    decision of its pin records: one restating `propose_plan`'s own
+    `source_<pin>` decision with a `measure` fix, and one restating a
+    measure decision on a requirement pinned before its source offered a
+    measure, which `_measure_decisions` never revisits. With a silent user
+    the restated decision is theirs, and `user_decision_contradicted` would
+    refuse it without its `measure` fix, so it has to land as it stands."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    code_slot = route == "code_slot_restated"
+    user = route == "pin_settled_after_user_silent"
+    if code_slot:
+        _show_block(ctx, _FRANCE_KENYA)
+        first_decision = decision()
+    else:
+        _show(ctx, _GROSS, settled=False)
+        first_decision = decision(
+            fixes=_MEASURE_FIXED,
+            resolved_by=ResolvedBy.USER if user else ResolvedBy.PLANNER_DEFAULT,
+        )
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([first_decision]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    if user:
+        _recorded(ctx, first)
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    if code_slot:
+        restated = next(d for d in recorded.decisions if d.slot == search_pin_slot(_GROSS))
+    else:
+        _show_block(ctx, _FRANCE_KENYA)
+        restated = first_decision
+
+    amended = tools["propose_plan"].func(
+        decisions=drafts([restated.model_copy(update={"fixes": _MEASURE_FIXED})]),
+        amends_version=recorded.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [d.slot for d in plan.decisions] == [
+        "measure",
+        *([search_pin_slot(_GROSS)] if code_slot else []),
+    ]
+
+
+def test_a_stored_decision_over_a_pins_flow_count_loads_and_stands_through_an_amendment(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A plan recorded before the refusal, holding a decision that fixes a
+    pinned measure, still loads, and an amendment that leaves the decision
+    as it stands is recorded with it."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _FRANCE_KENYA)
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    recorded = load_plan(ctx.state)
+    assert recorded is not None
+    stored = Plan.model_validate(
+        recorded.model_copy(
+            update={
+                "decisions": tuple(
+                    d.model_copy(update={"fixes": _MEASURE_FIXED}) if d.slot == "measure" else d
+                    for d in recorded.decisions
+                )
+            }
+        ).model_dump()
+    )
+    save_plan(ctx.state, stored)
+    loaded = load_plan(ctx.state)
+    assert loaded is not None
+    assert _measure_fixes(loaded) == _MEASURE_FIXED
+
+    amended = tools["propose_plan"].func(
+        evidence_requirements=[derived.model_copy(update={"reduction": Reduction.MEAN})],
+        amends_version=loaded.version,
+        tool_context=ctx,
+    )
+
+    assert amended["outcome"] == Outcome.OK.value, amended
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert _measure_fixes(plan) == _MEASURE_FIXED
+
+
 @pytest.mark.parametrize(
     "offered",
     [(POPULATION_SPEC,), (POPULATION_SPEC, SPEC)],
@@ -6497,18 +6716,29 @@ _SERVED_INSTRUCTION = planner_agent.planner_instruction(
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
-    """Every `ReferralKind` is named, by its own value, in the planner's instruction.
+    """Every `ReferralKind` is named, by its own value, in the planner's instruction,
+    unless every referral of it carries its own guidance as `repair` (`REPAIR_OF`).
 
     The planner reads a referral's `kind` verbatim off the function response,
     so a kind the instruction never names is one the model has to guess at.
     Describing a kind in prose alone does not satisfy this: the model
-    matches on the string it is sent.
+    matches on the string it is sent. A kind in `REPAIR_OF` is told in the
+    referral itself, which `Referral` refuses to send without that guidance.
     """
-    unnamed = [kind.value for kind in ReferralKind if kind.value not in _SERVED_INSTRUCTION]
+    unnamed = [
+        kind.value
+        for kind in ReferralKind
+        if kind.value not in _SERVED_INSTRUCTION and kind not in REPAIR_OF
+    ]
     assert unnamed == [], (
         f"referral kinds the planner is never told how to read: {unnamed}. "
         "Name each one in `_TRANSLATING` and say what the planner does about it."
     )
+    for kind in REPAIR_OF:
+        valid = _referral_of(kind, "a")
+        assert valid.repair == REPAIR_OF[kind]
+        with pytest.raises(ValidationError, match="carries its own guidance as repair"):
+            Referral.model_validate(valid.model_dump() | {"repair": None})
 
 
 def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable_referral() -> None:
@@ -7599,6 +7829,237 @@ def test_a_share_whose_whole_names_its_own_donor_is_refused_until_the_whole_span
         "named": ["United States"],
     }
     assert spanning["outcome"] == Outcome.OK.value, spanning
+
+
+# The CRS and DAC2a pins a share's part and whole read, by spec_id.
+_PART_PIN = "spec_" + "1" * 32
+_WHOLE_PIN = "spec_" + "2" * 32
+
+# A donor a side names, with the graph ref its pin's block states for it, or
+# `None` when the block resolves no entity by that name.
+type _Donor = tuple[str, str | None]
+
+
+def _labelled_block(spec_id: str, donors: Sequence[_Donor]) -> dict[str, Any]:
+    """A search block for `spec_id` resolving Kenya and each donor of `donors` with a ref."""
+    entities = [{"role": "destination", "ref": "country/KEN", "label": "Kenya"}]
+    entities += [
+        {"role": "origin", "ref": ref, "label": name} for name, ref in donors if ref is not None
+    ]
+    return {"spec_id": spec_id, "resolved": {"entities": entities}}
+
+
+@pytest.mark.parametrize(
+    ("part", "whole", "pinned", "summed", "refused"),
+    [
+        # "United States" on CRS and "United States of America" on DAC2a are
+        # one graph ref, so the whole names the part's member alone.
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States of America", "country/USA")],
+            True,
+            False,
+            True,
+            id="alias-one-ref",
+        ),
+        # Two names alike in their words, two refs: the whole names another donor.
+        pytest.param(
+            [("Congo", "country/COG")],
+            [("Congo, Dem. Rep.", "country/COD")],
+            True,
+            False,
+            False,
+            id="similar-names-two-refs",
+        ),
+        # Japan resolves on the part's pin alone, so it is matched by name,
+        # and the alias beside it by ref.
+        pytest.param(
+            [("United States", "country/USA"), ("Japan", "country/JPN")],
+            [("United States of America", "country/USA"), ("Japan", None)],
+            True,
+            False,
+            True,
+            id="mixed-pins",
+        ),
+        # The whole is read through an aggregate, whose dataset's pin resolves it.
+        pytest.param(
+            [("United States", "country/USA"), ("Japan", "country/JPN")],
+            [("United States of America", "country/USA"), ("Japan", None)],
+            True,
+            True,
+            True,
+            id="mixed-pins-summed-whole",
+        ),
+        # No pin resolves a ref, so names decide: equal names are one member.
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States", "country/USA")],
+            False,
+            False,
+            True,
+            id="no-refs-equal-names",
+        ),
+        pytest.param(
+            [("United States", "country/USA")],
+            [("United States of America", "country/USA")],
+            False,
+            False,
+            False,
+            id="no-refs-alias",
+        ),
+    ],
+)
+def test_a_share_compares_its_whole_to_its_part_by_ref_where_the_pins_resolve_one(
+    decision: DecisionFactory,
+    part: list[_Donor],
+    whole: list[_Donor],
+    pinned: bool,
+    summed: bool,
+    refused: bool,
+) -> None:
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["The donors' share of ODA to Kenya, each year"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+    if pinned:
+        save_pin_sources(
+            ctx.state,
+            {
+                spec_id: PinSource(block=_labelled_block(spec_id, donors))
+                for spec_id, donors in ((_PART_PIN, part), (_WHOLE_PIN, whole))
+            },
+        )
+    period = Period(start=2015, end=2024)
+
+    def dataset(id: str, measure: str, donors: list[_Donor], pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=(
+                *(Entity(name=name, role="donor") for name, _ in donors),
+                Entity(name="Kenya", role="recipient"),
+            ),
+            period=period,
+            source_spec_id=pin if pinned else None,
+        )
+
+    by_year = AggregateRequirement(
+        id="whole_by_year",
+        decision_ids=["measure"],
+        input_id="whole",
+        reduction=Reduction.SUM,
+        group_by=(GroupBy.PERIOD,),
+    )
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of ODA to Kenya came from the donors each year?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("part", "ODA gross disbursements", part, _PART_PIN),
+            dataset("whole", "total ODA gross disbursements", whole, _WHOLE_PIN),
+            *((by_year,) if summed else ()),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id=by_year.id if summed else "whole"),
+            ),
+        ],
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.WHOLE_IS_ITS_MEMBER.value, result
+        assert result["detail"]["named"] == sorted(name for name, _ in whole)
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
+_G7_REFS = tuple(f"country/{code}" for code in ("CAN", "DEU", "FRA", "GBR", "ITA", "JPN", "USA"))
+
+
+@pytest.mark.parametrize(
+    ("members", "refused"),
+    [
+        # "G7" on CRS and "Group of Seven" on DAC2a bind the same seven donors,
+        # so each donor is divided by the seven's total.
+        pytest.param(_G7_REFS, False, id="pool-of-seven"),
+        pytest.param(_G7_REFS[-1:], True, id="pool-of-one"),
+    ],
+)
+def test_a_pooled_share_counts_the_members_its_whole_resolves_its_group_to(
+    decision: DecisionFactory, members: tuple[str, ...], refused: bool
+) -> None:
+    ctx = _FakeToolContext()
+    ctx.state[ASKS_STATE_KEY] = ["Each G7 donor's share of G7 ODA to Kenya, each year"]
+    ctx.state[ASK_BREAKDOWNS_STATE_KEY] = [
+        AskBreakdown(ask=0, over=("donor",)).model_dump(mode="json")
+    ]
+
+    def block(spec_id: str, label: str) -> dict[str, Any]:
+        entities = [{"role": "destination", "ref": "country/KEN", "label": "Kenya"}]
+        entities += [{"role": "origin", "ref": ref, "label": ref} for ref in members]
+        return {
+            "spec_id": spec_id,
+            "resolved": {"entities": entities, "entity_groups": {"origin": {"label": label}}},
+        }
+
+    save_pin_sources(
+        ctx.state,
+        {
+            _PART_PIN: PinSource(block=block(_PART_PIN, "G7")),
+            _WHOLE_PIN: PinSource(block=block(_WHOLE_PIN, "Group of Seven")),
+        },
+    )
+    period = Period(start=2015, end=2024)
+    kenya = Entity(name="Kenya", role="recipient")
+
+    def dataset(id: str, measure: str, group: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=(Entity(name=group, role="donor", members=True), kenya),
+            period=period,
+            source_spec_id=pin,
+        )
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="What share of G7 ODA to Kenya came from each G7 donor each year?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts(
+            [decision(fixes=DecisionFixes(denominator_scope=DenominatorScope.POOLED))]
+        ),
+        evidence_requirements=[
+            dataset("part", "ODA gross disbursements", "G7", _PART_PIN),
+            dataset("whole", "total ODA gross disbursements", "Group of Seven", _WHOLE_PIN),
+            AggregateRequirement(
+                id="whole_by_year",
+                decision_ids=["measure"],
+                input_id="whole",
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="part"),
+                denominator=RequirementSide(input_id="whole_by_year"),
+                axis="donor",
+                denominator_scope=DenominatorScope.POOLED,
+            ),
+        ],
+        answered=[AskAnswer(ask=0, outputs=("share",))],
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.WHOLE_IS_ITS_MEMBER.value, result
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
 
 
 def test_a_plan_whose_answer_drops_the_asked_party_is_refused_until_it_keeps_it(
@@ -9162,22 +9623,39 @@ def test_a_pin_a_source_choice_offered_is_judged_as_the_model_wrote_it(
 _WHOLE, _WHOLE_IDENTITY = windowed_identity(_ON_EVERY_YEAR, open_window(_EVERY_YEAR_FROM))
 
 
-@pytest.mark.parametrize("on_record", [True, False], ids=["on-record", "not-on-record"])
+@pytest.mark.parametrize(
+    "held", ["searched", "discovered", "nowhere"], ids=["on-record", "in-the-log", "not-on-record"]
+)
 def test_a_pin_offered_for_a_copy_s_whole_history_reads_the_origin_s_stated_years(
-    on_record: bool,
+    held: str,
 ) -> None:
     """Discovery did not find the pin of 'aid_history', 'aid''s copy, and offers
     `_WHOLE`, found over every year the dataset holds. The model reads the
-    choice for 'aid' and pins it there. With its identity on record, 'aid'
+    choice for 'aid' and pins it there. With its identity on record, from a
+    search in the conversation or as the source discovery logged, 'aid'
     retrieves it from its stated 2015 and the copy from 1978. With none, the
     years it holds are unknown, so the pin is refused for 'aid' and nothing
     reads the whole history in its place."""
+    on_record = held != "nowhere"
     lookup = {_STALE: RecordedIdentity(identity=_STALE_IDENTITY)}
-    if on_record:
+    if held == "searched":
         lookup[_WHOLE] = RecordedIdentity(identity=_WHOLE_IDENTITY)
     token = current_recorded_identity.set(lookup.get)
     try:
         ctx = _FakeToolContext()
+        if held == "discovered":
+            found = DiscoveryRecord(
+                revision="earlier",
+                tool="search",
+                requirement_id="aid_history",
+                requirement_key="earlier",
+                status=DiscoveryStatus.DEFINITE,
+                spec_ids=(_WHOLE,),
+            )
+            whole = SelectedSource(
+                spec_id=_WHOLE, sentence="gross aid", has_data=True, identity=_WHOLE_IDENTITY
+            )
+            save_log(ctx.state, load_log(ctx.state).with_record(found, (whole,)))
         for spec_id in (_WHOLE, _STALE):
             save_full_history(ctx.state, spec_id, FullHistory(first_year=_EVERY_YEAR_FROM, rows=35))
         answered = [AskAnswer(ask=0, outputs=("aid",)), AskAnswer(ask=1, outputs=("top",))]
@@ -9331,17 +9809,40 @@ def _tools_reading(surface: ToolSurface) -> dict[str, FunctionTool]:
     return {tool.name: tool for tool in build_planner_tools(surface=surface)}
 
 
-@pytest.mark.usefixtures("aid_on_record")
+@pytest.fixture(params=["searched", "discovered"])
+def aid_held(request: pytest.FixtureRequest) -> str:
+    """Where the 2020-2024 education-aid identity is on record: a search in the
+    conversation (`aid_on_record`), or discovery's log alone, which the test writes."""
+    if request.param == "searched":
+        request.getfixturevalue("aid_on_record")
+    return request.param
+
+
 async def test_a_second_proposal_reads_no_first_year_the_turn_already_holds(
     pinning_decision: Callable[..., Decision],
     requirement: Callable[..., DatasetRequirement],
+    aid_held: str,
 ) -> None:
     """The first proposal reads the recorded dataset over no window once; an
     amendment of the turn that still rolls from its start is pinned from the year
-    held."""
+    held. A dataset only discovery found, such as a referral's candidate, is on
+    record in its log and read the same way."""
     reads = _DefinitionReads()
     propose = _tools_reading(reads)["propose_plan"].func
     ctx = _FakeToolContext()
+    if aid_held == "discovered":
+        found = DiscoveryRecord(
+            revision="earlier",
+            tool="search",
+            requirement_id="aid",
+            requirement_key="earlier",
+            status=DiscoveryStatus.DEFINITE,
+            spec_ids=(_AID_2020_2024_SPEC,),
+        )
+        aid = SelectedSource(
+            spec_id=_AID_2020_2024_SPEC, sentence="aid", has_data=True, identity=_AID_2020_2024
+        )
+        save_log(ctx.state, load_log(ctx.state).with_record(found, (aid,)))
     dataset = requirement(
         source_spec_id=_AID_2020_2024_SPEC,
         period=Period(start=2020, end=2024),
@@ -9682,6 +10183,79 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
     assert (
         _source_ref_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None) is None
     ) == valid
+
+
+@pytest.mark.parametrize(
+    ("entity", "referred", "previous", "valid"),
+    [
+        (Entity(name="Congo", role="donor", dcid="country/COG"), True, None, True),
+        (Entity(name="Congo", role="donor", dcid="country/XXX"), True, None, False),
+        (Entity(name="Congo", role="recipient", dcid="country/COG"), True, None, False),
+        (Entity(name="Congo", role="donor", dcid="country/COG"), False, None, False),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            False,
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            True,
+        ),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            False,
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            False,
+        ),
+        (Entity(name="Congo", role="donor"), False, None, True),
+    ],
+    ids=[
+        "offered",
+        "not_offered",
+        "another_entity",
+        "no_referral",
+        "kept_from_previous",
+        "changed_from_previous",
+        "unpinned",
+    ],
+)
+def test_an_entity_node_must_be_one_a_referral_offered_for_it(
+    decision, requirements, entity, referred, previous, valid
+):
+    dataset, derived = requirements
+    ctx = _FakeToolContext()
+    if referred:
+        save_referral(ctx.state, _referral_of(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id))
+
+    def plan_naming(named: Entity) -> Plan:
+        stated = dataset.model_copy(update={"entities": (named,)})
+        return Plan(
+            question="question", decisions=[decision()], evidence_requirements=[stated, derived]
+        )
+
+    refusal = _entity_dcid_unoffered(
+        plan_naming(entity),
+        load_referral(ctx.state),
+        plan_naming(previous) if previous is not None else None,
+    )
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
+    decision, pinning_decision, requirement, derived_requirement
+):
+    # The referral offers graph nodes and no sources, so the pin it was
+    # discovered under stays until the entity is settled.
+    pinned = requirement(decision_ids=["source"], source_spec_id=SPEC_GHANA_AID)
+    ctx = _FakeToolContext()
+    save_referral(ctx.state, _referral_of(ReferralKind.ENTITY_NAME_AMBIGUOUS, pinned.id))
+    plan = Plan(
+        question="question",
+        decisions=[decision(), pinning_decision(SPEC_GHANA_AID, slot="source")],
+        evidence_requirements=[pinned, derived_requirement()],
+    )
+
+    assert _choice_not_offered(plan, load_referral(ctx.state), ToolContextSession(ctx)) is None
 
 
 @pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])

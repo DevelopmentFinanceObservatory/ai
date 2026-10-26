@@ -310,6 +310,7 @@ def register_frames(
     described: Sequence[DescribedFrame],
     *,
     fetch_args: dict[str, Any] | None = None,
+    wholes: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Add each (frame ref, `describe_frame` view, store ref) to the frames in
     `state` (`ORCHESTRATOR_FRAMES_KEY`) under its id, and return the entries
@@ -322,6 +323,9 @@ def register_frames(
     frame ref (`frame_store_ref`). `fetch_args` are the arguments of the
     `fetch` that retrieved the frames, kept on each entry because
     `make_charts` asks the same retrieval again for the frame's members' kinds.
+    `wholes` maps the id of a frame holding shares to the whole they divide
+    by (`harness.plan_display.share_wholes`), kept as the entry's `whole`,
+    which `make_charts` states in the card's title.
 
     A frame id the frames did not hold clears the turn's count of calls that
     drew nothing (`make_charts_failed`), so a chart of a frame that arrived
@@ -339,6 +343,8 @@ def register_frames(
             frames[frame_id]["store_ref"] = store_ref
         if fetch_args is not None:
             frames[frame_id]["fetch_args"] = fetch_args
+        if wholes and frame_id in wholes:
+            frames[frame_id]["whole"] = wholes[frame_id]
         entries.append({"frame": frame_id, "view": view})
     state[ORCHESTRATOR_FRAMES_KEY] = frames
     calls = state.get(ORCHESTRATOR_CALLS_KEY) or {}

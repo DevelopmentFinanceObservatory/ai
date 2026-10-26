@@ -505,8 +505,9 @@ class HandBack:
 
     `describe` describes one frame through `executor`. `listing` registers
     the described frames under ids the orchestrator charts by, each with the
-    pair the materialisation store holds it under, and returns
-    them with the step summaries, the notes on how the figures were computed
+    pair the materialisation store holds it under and, for a frame of
+    shares, the whole they divide by (`wholes`), and returns them with the
+    step summaries, the notes on how the figures were computed
     (`totals`, `harness.graph.answer.answer_notes`), the frames no view was
     prepared for (`frames_not_chartable`), and the asks. `read` says whether
     every frame described so far was read for delivery
@@ -521,6 +522,7 @@ class HandBack:
     )
     not_chartable: list[dict[str, Any]] = field(default_factory=list)
     reads: list[bool] = field(default_factory=list)
+    wholes: dict[str, str] = field(default_factory=dict)
 
     @property
     def read(self) -> bool:
@@ -534,18 +536,26 @@ class HandBack:
         return bool(self.not_chartable) and not self.described
 
     async def describe(
-        self, ref: dict[str, Any], *, tool: str, store_ref: dict[str, Any] | None
+        self,
+        ref: dict[str, Any],
+        *,
+        tool: str,
+        store_ref: dict[str, Any] | None,
+        whole: str | None = None,
     ) -> dict[str, Any]:
         """Describe one final frame for listing, and return its status as
         `_ask_status` reports it: `data`, `empty` for a frame with no series,
         or `not_chartable` with a closed-vocabulary reason. `ref` is the pair
         the frame is described and drawn by, and `store_ref` the pair the
         materialisation store holds it under, or None when the step states no
-        store pair."""
+        store pair. `whole` is what the frame's shares divide by
+        (`plan_display.share_wholes`), None for a frame of anything else."""
         view = await self.executor(tool="describe_frame", args={"frame_ref": ref})
         self.reads.append(frame_read(view))
         if view.get("outcome") == "ok":
             self.described.append((ref, view.get("view") or {}, store_ref))
+            if whole is not None:
+                self.wholes[frame_id_for(ref)] = whole
             empty = (view.get("view") or {}).get("series_count") == 0
             return {"status": "empty" if empty else "data", "frame": frame_id_for(ref)}
         # The reason comes from a closed vocabulary
@@ -558,7 +568,7 @@ class HandBack:
         """The frames, summaries, computation notes and asks the agent
         reads, the described frames registered in `state` under their ids."""
         result: dict[str, Any] = {
-            "frames": register_frames(state, self.described),
+            "frames": register_frames(state, self.described, wholes=self.wholes),
             "step_summaries": [_hand_back_text(summary) for summary in self.summaries],
             "totals": self.totals,
         }
@@ -738,13 +748,19 @@ def plan_done_node(
                 + listed,
             }
             return
+        plan = readable_plan(ctx, ctx.state.get("plan"))
+        wholes = plan_display.share_wholes(plan) if plan is not None else {}
         # Final step id -> its output's status, as `_ask_status` reports it.
         ran: dict[str, dict[str, Any]] = {}
         steps = node_input.get("frame_ref_steps", [])
         for ref, step in zip(node_input.get("frame_refs", []), steps, strict=True):
             if step.get("is_final_step"):
-                ran[step.get("step_id", "")] = await hand_back.describe(
-                    ref, tool=step.get("tool", ""), store_ref=step.get("store_ref")
+                step_id = step.get("step_id", "")
+                ran[step_id] = await hand_back.describe(
+                    ref,
+                    tool=step.get("tool", ""),
+                    store_ref=step.get("store_ref"),
+                    whole=wholes.get(step_id),
                 )
         # The run's own frames decide its delivery; an earlier run's kept
         # frames, described below, do not.
@@ -759,7 +775,6 @@ def plan_done_node(
             delivery = await deliver(run_ledger, run["run_id"], read=read)
         unrecorded = unfinished and run.get("status") in ("unfinished", "not_started")
         record = ""
-        plan = readable_plan(ctx, ctx.state.get("plan"))
         if plan is not None:
             stopped = _stop_causes(plan, failed.get("step_id") if failed else None)
             plan_record = record_plan(

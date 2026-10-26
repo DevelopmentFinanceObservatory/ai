@@ -150,11 +150,11 @@ from planner.plan import (
     authored,
     dataset_of,
     discovery_time_left,
+    identity_on_record,
     inputs_of,
     load_plan,
     pin_sources,
     plan_revision,
-    recorded_identity,
     retrieves_period,
     save_plan,
     side_entities,
@@ -163,7 +163,9 @@ from planner.plan import (
     with_authored_requirements,
 )
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityKey,
     GroupBy,
     Identifier,
     ResolvedSourceMention,
@@ -319,6 +321,9 @@ class DiscoveryRecord(StrictModel):
     variable_sent: str | None = None
     warnings: tuple[PartWarning, ...] = ()
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
     blocked_by: tuple[str, ...] = ()
     transport_failed: bool = False
 
@@ -619,8 +624,14 @@ class DiscoveryLog(StrictModel):
                     return found
         return None
 
-    def recorded_alternative(self, spec_id: str) -> _RecordedSourceDefinition | None:
-        """A verified sibling definition offered by a source in this session."""
+    def recorded_definition(self, spec_id: str) -> _RecordedSourceDefinition | None:
+        """The verified definition of `spec_id` a source this log holds states, or `None`.
+
+        The source is `spec_id`'s own, such as a candidate a
+        `pinned_source_not_found` referral offered, or one offering it as a
+        sibling measure (`elected_measure.alternatives`). Its identity must
+        hash to `spec_id` (`caller_definition`).
+        """
         for own in reversed(tuple(self.sources.values())):
             for source in reversed(tuple(own.values())):
                 identities = (
@@ -628,6 +639,8 @@ class DiscoveryLog(StrictModel):
                     if source.elected_measure is not None
                     else {}
                 )
+                if source.identity is not None:
+                    identities[source.spec_id] = source.identity
                 identity = identities.get(spec_id)
                 if identity is None:
                     continue
@@ -1214,10 +1227,15 @@ def search_part(requirement: DatasetRequirement, variable: str) -> dict[str, obj
     An entity with `members` set asks for each member of the set it names
     (`"members": true`). A set named without it goes as one entity, which
     search binds to the set's own published figure where the source has one.
+
+    An entity with a `dcid` sends it beside its words, so search binds that
+    graph node and keeps two entities written alike apart.
     """
     entities = []
     for entity in requirement.entities:
         sent: dict[str, object] = {"text": entity.name}
+        if entity.dcid is not None:
+            sent["dcid"] = entity.dcid
         if entity.role is not None and (role := party_role(entity.role)) is not None:
             sent["role"] = role
         if entity.members:
@@ -1522,9 +1540,15 @@ async def apply_definitions(state: SessionState, pairs: Sequence[DescribedPair])
 
 
 def _unmatched_names(requirement: DatasetRequirement, source: SelectedSource) -> tuple[str, ...]:
-    """The names `requirement` gives entities that name nothing `source` holds (`named_members`)."""
+    """The names `requirement` gives entities that name nothing `source` holds (`named_members`).
+
+    An entity with a `dcid` already names its node, and resolving its name
+    again would key `entity_refs` once for two entities written alike.
+    """
     return tuple(
-        entity.name for entity in requirement.entities if not named_members(entity, source)
+        entity.name
+        for entity in requirement.entities
+        if entity.dcid is None and not named_members(entity, source)
     )
 
 
@@ -2178,10 +2202,9 @@ async def _recorded_source(
 
     The identity is the copy over the requirement's period that
     `planner.agent.propose_plan` pinned (`planner.plan.windowed_pins`), or
-    the one a search in the conversation recorded for the pin itself
-    (`planner.plan.recorded_identity`), or the one the block of the pin the
-    planner was shown states (`planner.plan.pin_sources`, `_shown_definition`),
-    when its window is that period, or
+    the one on record for the pin itself (`planner.plan.identity_on_record`:
+    a search in the conversation, this session's discovery, or the block of
+    the pin the planner was shown) when its window is that period, or
     a range with no end year for a requirement stating `period_end_open`,
     from `first_year` where the plan reads its dataset's whole history
     (`planner.plan.retrieves_period`). It
@@ -2197,11 +2220,11 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = (
-        windowed_pins(tool_context.state).get(spec_id)
-        or recorded_identity(spec_id)
-        or _shown_definition(tool_context.state, spec_id)
-        or load_log(tool_context.state).recorded_alternative(spec_id)
+    recorded = windowed_pins(tool_context.state).get(spec_id) or identity_on_record(
+        spec_id,
+        shown=pin_sources(tool_context.state),
+        end_open=True,
+        definition_lookup=load_log(tool_context.state).recorded_definition,
     )
     identity = recorded.identity if recorded is not None else None
     if (
@@ -2237,31 +2260,6 @@ async def _recorded_source(
         )
     except (PartNotResolvedError, ValueError):
         return None
-
-
-def _shown_definition(state: SessionState, spec_id: str) -> _RecordedSourceDefinition | None:
-    """The definition the block of `spec_id` the planner was shown states, when it hashes to `spec_id`.
-
-    A pin compiled in code during the request (a scope choice switched on the
-    plan card, `harness.graph.switch`, or an input put on its calculation's
-    basis, `planner.agent.compile_on_basis`) is held there and nowhere a
-    search recorded it, since no search returned it.
-    """
-    source = pin_sources(state).get(spec_id)
-    block = source.spec_block(spec_id) if source is not None else None
-    if block is None:
-        return None
-    try:
-        shown = source_from_spec_block(block)
-    except ValueError:
-        return None
-    if shown.identity is None:
-        return None
-    try:
-        caller_definition({"schema_version": 1, "spec_id": spec_id, "identity": shown.identity})
-    except (IdentityMismatch, IdentityUnusable):
-        return None
-    return _RecordedSourceDefinition(shown.identity, shown.groups, shown.resolved_sources)
 
 
 def _resolve_pin_block(
@@ -2973,7 +2971,12 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                 raise ValueError(
                     f"the search result carries no envelope under _meta[{SEARCH_ENVELOPE_META_KEY!r}]"
                 )
-            outcome = outcome_from_envelope(cast("Mapping[str, object]", envelope))
+            outcome = outcome_from_envelope(
+                cast("Mapping[str, object]", envelope),
+                entities=[
+                    EntityKey(name=entity.name, role=entity.role) for entity in requirement.entities
+                ],
+            )
         except ValueError as exc:
             log = await _finish(record.model_copy(update={"detail": str(exc)}))
             return problem(
@@ -3000,6 +3003,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
                     "detail": outcome.detail,
                     "reason": outcome.reason,
                     "ambiguous_sources": outcome.ambiguous_sources,
+                    "ambiguous_entities": outcome.ambiguous_entities,
                     "warnings": outcome.warnings,
                     "blocked_by": blocked_by,
                 }
@@ -3029,12 +3033,17 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
         )
         # A refused `source_code` is not a missing pin: the pin's source was
         # read, and the code cannot be served under any dataset, so the
-        # answer's own hint reaches the planner.
+        # answer's own hint reaches the planner. Nor is a pin judged while
+        # Search cannot tell which node an entity names: the entity is
+        # settled first, and the pin read again with it.
         code_refused = (
             requirement.source_code is not None and outcome.reason in SOURCE_CODE_REFUSALS
         )
         pinned_not_found = (
-            requirement.source_spec_id is not None and not pin_honoured and not code_refused
+            requirement.source_spec_id is not None
+            and not pin_honoured
+            and not code_refused
+            and not outcome.ambiguous_entities
         )
 
         # An honoured pin has already settled this requirement --
@@ -3050,6 +3059,8 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             hint_kind = (
                 ReferralKind.SOURCE_NAME_AMBIGUOUS
                 if outcome.ambiguous_sources
+                else ReferralKind.ENTITY_NAME_AMBIGUOUS
+                if outcome.ambiguous_entities
                 else _HINT_KIND.get(outcome.status)
             )
             if hint_kind is not None:
@@ -3115,6 +3126,9 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             "detail": outcome.detail,
             "ambiguous_sources": [
                 group.model_dump(mode="json") for group in outcome.ambiguous_sources
+            ],
+            "ambiguous_entities": [
+                group.model_dump(mode="json") for group in outcome.ambiguous_entities
             ],
             "warnings": warnings,
             "budget_remaining": budget_remaining,

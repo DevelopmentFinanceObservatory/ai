@@ -26,7 +26,10 @@ from typing import cast
 import rfc8785
 from common.place_type import FLOW_ROLE_COLUMNS, PartyClass
 from planner.records import (
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
+    EntityCandidate,
+    EntityKey,
     Period,
     ResolvedSourceMention,
     StatVarReading,
@@ -104,6 +107,8 @@ class DiscoveryOutcome(StrictModel):
     `diagnostics.warnings` followed by the part's own -- the one upstream
     signal that a role or time phrase was dropped from the search. Discovery
     sends one part per call, so a request-level warning bears on it.
+    `ambiguous_sources` and `ambiguous_entities` are a `no_data` answer's
+    choices between source references and between graph nodes.
     """
 
     status: DiscoveryStatus
@@ -112,6 +117,7 @@ class DiscoveryOutcome(StrictModel):
     reason: str | None = None
     warnings: tuple[PartWarning, ...] = ()
     ambiguous_sources: tuple[AmbiguousSourceReading, ...] = ()
+    ambiguous_entities: tuple[AmbiguousEntityReading, ...] = ()
 
 
 def resolved_source_mentions(part: Mapping[str, object]) -> tuple[ResolvedSourceMention, ...]:
@@ -180,13 +186,21 @@ def bound_refs(part: Mapping[str, object]) -> tuple[BoundEntity, ...]:
     return tuple(bound)
 
 
-def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
+def outcome_from_envelope(
+    envelope: Mapping[str, object], *, entities: Sequence[EntityKey] = ()
+) -> DiscoveryOutcome:
     """Read a single-part `search` envelope into a `DiscoveryOutcome`.
+
+    `entities` keys the entity rows the part was sent with, in row order. A
+    `no_data` answer's `ambiguous_entities` names each reading's entity by
+    them.
 
     Raises:
         ValueError: If the envelope does not carry exactly one part, the part's
             status is not one `search` documents, a `definite` part names no
-            spec, or a spec block it carries is not usable as a source.
+            spec, a spec block it carries is not usable as a source, or an
+            ambiguous group of a `no_data` part is malformed or pins no row of
+            `entities`.
     """
     parts = _sequence(envelope.get("parts"))
     if len(parts) != 1:
@@ -233,6 +247,7 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
                 AmbiguousSourceReading.model_validate(group)
                 for group in _sequence(no_data.get("ambiguous_sources"))
             ),
+            ambiguous_entities=ambiguous_entities(no_data, entities=entities),
         )
     unsupported = _mapping(part.get("unsupported"))
     detail = " ".join(
@@ -241,6 +256,82 @@ def outcome_from_envelope(envelope: Mapping[str, object]) -> DiscoveryOutcome:
         if part
     )
     return DiscoveryOutcome(status=status, detail=detail or None, warnings=warnings)
+
+
+def ambiguous_entities(
+    no_data: Mapping[str, object], *, entities: Sequence[EntityKey]
+) -> tuple[AmbiguousEntityReading, ...]:
+    """Read a `no_data` block's `ambiguous_entities` groups, one reading per entity a group pins.
+
+    `entities` keys the rows the part was sent with, in row order. Each
+    option settling group `g` (`entity_choice == g`) is the sent part with
+    the group's rows pinned to one candidate, and every option pins the same
+    rows that resolved to one node. The group's rows are therefore the
+    positions where its options' rows differ, read with no matching of text
+    or role. A group pinning two rows gives two readings with its
+    candidates, one per entity, since each entity is its own choice.
+
+    A group's candidates are those whose option posts the candidate's ref as
+    the `dcid` of every row the group covers, since the planner states the
+    picked candidate as each covered entity's `dcid`. A row asked for its
+    members posts a group node by the group's name and no dcid, and a pin
+    cannot ask for a group's members, so that candidate is left out.
+
+    Raises:
+        ValueError: If a group or candidate is malformed, or a group has fewer
+            than two options holding one row per sent entity, its options
+            differ in no row, or fewer than two of its candidates have an
+            option pinning its rows by dcid.
+    """
+    options = _sequence(no_data.get("options"))
+    readings: list[AmbiguousEntityReading] = []
+    for index, group in enumerate(_sequence(no_data.get("ambiguous_entities"))):
+        rows = [_option_rows(option) for option in options if option.get("entity_choice") == index]
+        if len(rows) < 2 or any(len(option_rows) != len(entities) for option_rows in rows):
+            raise ValueError(
+                f"search's ambiguous entity group {index} has {len(rows)} option(s), not two or "
+                f"more each holding the {len(entities)} entity row(s) discovery sent"
+            )
+        positions = [
+            position
+            for position in range(len(entities))
+            if any(option_rows[position] != rows[0][position] for option_rows in rows)
+        ]
+        if not positions:
+            raise ValueError(f"search's ambiguous entity group {index} pins no entity row")
+        posted = {
+            dcids.pop()
+            for option_rows in rows
+            if len(dcids := {option_rows[position].get("dcid") for position in positions}) == 1
+        }
+        candidates = [
+            candidate
+            for candidate in (
+                EntityCandidate.model_validate(
+                    {"ref": candidate.get("ref"), "label": candidate.get("label")}
+                )
+                for candidate in _sequence(group.get("candidates"))
+            )
+            if candidate.ref in posted
+        ]
+        if len(candidates) < 2:
+            raise ValueError(
+                f"search's ambiguous entity group {index} offers {len(candidates)} candidate(s) "
+                "whose option pins every row it covers by dcid, not two or more"
+            )
+        readings.extend(
+            AmbiguousEntityReading.model_validate(
+                {"text": group.get("text"), "candidates": candidates, "entity": entities[position]}
+            )
+            for position in positions
+        )
+    return tuple(readings)
+
+
+def _option_rows(option: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """The entity rows of an option's one-part `data_query`."""
+    parts = _sequence(_mapping(option.get("data_query")).get("parts"))
+    return _sequence(parts[0].get("entities")) if len(parts) == 1 else []
 
 
 def source_from_spec_block(block: Mapping[str, object]) -> SelectedSource:
@@ -707,8 +798,11 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
     for a worldwide total), and each `role_axis_facts` entry counts the members of
     a flow side the part left open. A count either field cannot state, such
     as a `members` that is not a list, is `None`, never 0. When both state
-    one column, the scope's count wins, since it lists the members it
-    counts. A column a `resolved.entities` entry binds is not open. Never
+    one column, the fact's count wins on a flow side (`FLOW_ROLE_COLUMNS`),
+    since `search` counts its parties there and leaves out the group totals
+    the scope lists, which a flow retrieval does not return; on the place
+    axis the scope's count wins, since it lists the members it counts. A
+    column a `resolved.entities` entry binds is not open. Never
     raises: `harness.tool_contracts` reads the search envelope with it
     too, where a malformed field must not fail the digest.
     """
@@ -718,7 +812,9 @@ def open_entity_axes_of(resolved: Mapping[str, object]) -> tuple[OpenEntityAxis,
         if (role := _text(fact.get("role"))) is not None:
             counts[role] = _count(fact.get("member_count"))
     scope = _mapping(resolved.get("scope"))
-    if (axis := _text(scope.get("axis"))) is not None:
+    if (axis := _text(scope.get("axis"))) is not None and (
+        axis not in FLOW_ROLE_COLUMNS or counts.get(axis) is None
+    ):
         members = scope.get("members")
         counts[axis] = len(members) if isinstance(members, list) else None
     return tuple(

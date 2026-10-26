@@ -94,7 +94,9 @@ def entities_phrase(
     The parts read "a", "a and b" or "a, b and c", and an `across` word reads
     in the singular, so "donors" gives "every donor". `member_counts` maps an
     `across` word to how many members the selected source holds on the axis
-    it covers, and a word with a count reads "all 50 recipients". A word
+    it covers in the plan's years, and a word with a count reads "all 50
+    recipients". A count below two is left unstated, so a word with one
+    member reads "every donor". A word
     naming the place party reads `EVERY_PLACE`, since such a retrieval holds
     every level of place and its count spans them all, or "every {level}"
     when a filter downstream of it keeps `level` (`kept_level`): "every
@@ -112,7 +114,7 @@ def entities_phrase(
         count = (member_counts or {}).get(word)
         if across_party(word) == "place":
             parts.append(EVERY_PLACE if level is None else f"every {level_noun(level)}")
-        elif count is not None:
+        elif count is not None and count > 1:
             parts.append(f"all {count:,} {pluralize(singular(word))}")
         else:
             parts.append(f"every {singular(word)}")
@@ -217,11 +219,13 @@ def among_phrase(
     of a requirement's `across` words; no entity on it is named, so there is
     no focus.
     `member_count` is how many members the selected source holds on that
-    axis, stated when known: "ranks all 55 donors the source holds".
+    axis in the plan's years, stated when known: "ranks all 55 donors the
+    source holds". A count below two is left unstated, as one member is no
+    population to count.
     """
     if among is RankAmong.NAMED:
         return "ranks exactly the entities named"
-    if across is not None and member_count is not None:
+    if across is not None and member_count is not None and member_count > 1:
         return f"ranks all {member_count:,} {pluralize(singular(across))} the source holds"
     if across is not None:
         return f"ranks every {singular(across)} the source holds"

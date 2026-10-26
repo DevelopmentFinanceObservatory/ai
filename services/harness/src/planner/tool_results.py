@@ -104,6 +104,7 @@ class ProblemCode(StrEnum):
     # a basis choice, so the input is searched for before the plan records
     # (`submission.service._aligned_bases`).
     BASIS_UNKNOWN = "basis_unknown"
+    MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 
 class Action(StrictModel):

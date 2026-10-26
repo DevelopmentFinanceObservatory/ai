@@ -64,6 +64,7 @@ from harness.planner_seam import (
     _WHICH_MEANT,
     PlannerSeam,
     PlannerSeamError,
+    StallKey,
     _check_branches,
     _clarifying_question_args,
     _pinnable_candidates,
@@ -2258,6 +2259,45 @@ def test_stalled_referral_stops_on_the_second_identical_referral_not_the_first(
 
     assert PlannerSeam._stalled_referral(first, counts) is False
     assert PlannerSeam._stalled_referral(second, counts) is stalled
+
+
+def _congo(*roles: str) -> dict[str, Any]:
+    """An `entity_name_ambiguous` referral with one reading per "Congo" of each role."""
+    return {
+        "outcome": "choice_required",
+        "kind": "entity_name_ambiguous",
+        "requirement_id": "aid",
+        "reason": "r",
+        "ambiguous_entities": [
+            {
+                "text": "Congo",
+                "candidates": [
+                    {"ref": "country/COD", "label": "Democratic Republic of the Congo"},
+                    {"ref": "country/COG", "label": "Republic of the Congo"},
+                ],
+                "entity": {"name": "Congo", "role": role},
+            }
+            for role in roles
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("rounds", "stalled"),
+    [
+        ((_congo("donor", "recipient"), _congo("recipient"), _congo("donor")), False),
+        ((_congo("donor", "recipient"), _congo("recipient"), _congo("recipient")), True),
+    ],
+    ids=["one-end-settled-per-round", "same-end-again"],
+)
+def test_an_entity_referral_covering_fewer_entities_is_progress(
+    rounds: tuple[dict[str, Any], ...], stalled: bool
+) -> None:
+    counts: dict[StallKey, int] = {}
+
+    *earlier, last = rounds
+    assert [PlannerSeam._stalled_referral(one, counts) for one in earlier] == [False] * len(earlier)
+    assert PlannerSeam._stalled_referral(last, counts) is stalled
 
 
 @pytest.mark.parametrize("kind", ["discovery_unavailable", "surface_unavailable"])
