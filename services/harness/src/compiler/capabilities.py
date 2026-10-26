@@ -144,7 +144,7 @@ CAPABILITIES: tuple[ToolCapability, ...] = (
             ToolOutput(extract=Extract.SPEC_IDS_FROM_ENVELOPE, artifact=ArtifactKind.SPEC_ID),
         ),
         implementation_version="1",
-        input_schema_hash="600b9684dbf35e24868084ff8dfa77c3b0fbfc4726df57d9ca573a594ec1fa7d",
+        input_schema_hash="36583e526d1531471a9ce1b8b768679da1396e0b9add58c9e5800242676c32d3",
         # Above data-mcp's `Settings.upstream_read_timeout_s` (50 s), itself above
         # the apis service's 45 s search deadline, so a slow search returns the apis service's own
         # 503 or 504 as a typed refusal before this call times out.

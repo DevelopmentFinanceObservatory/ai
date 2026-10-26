@@ -115,6 +115,7 @@ from translator.discovery import (
 from translator.mechanical import TranslatorCore, run_translate
 from translator.referral import (
     MAY_CARRY_CANDIDATES,
+    REPAIR_OF,
     Referral,
     ReferralKind,
     StalePin,
@@ -179,8 +180,9 @@ def _referral_payload(referral: Referral) -> dict[str, object]:
     and `not_issued` appear only when set, the cases the planner seam ends
     the entry on, and `source_mismatch` and `stop_code` likewise. `withheld`
     appears only when a source is withheld, each rendered without its
-    `spec_id` beside the scope it drops, since no pin may name it, and
-    `repair` only when one is stated.
+    `spec_id` beside the scope it drops, since no pin may name it,
+    `repair` only when one is stated, and `ambiguous_entities` only on an
+    `entity_name_ambiguous` referral.
     """
     selectable = referral.kind is not ReferralKind.NO_DATA
     excluded = {"candidates", "stale_pins", "withheld"}
@@ -1136,7 +1138,11 @@ def build_translator_core(
             # from, or the nearest-series relaxation found nothing, and a
             # referral naming no candidates there reports exactly that.
         ambiguous_sources = ()
-        if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS and requirement is not None:
+        ambiguous_entities = ()
+        if (
+            kind in {ReferralKind.SOURCE_NAME_AMBIGUOUS, ReferralKind.ENTITY_NAME_AMBIGUOUS}
+            and requirement is not None
+        ):
             key = requirement_revision(requirement)
             log = load_log(tool_context.state)
             matching = [
@@ -1144,7 +1150,10 @@ def build_translator_core(
                 for record in log.records
                 if record.requirement_id == requirement.id and record.requirement_key == key
             ]
-            ambiguous_sources = matching[-1].ambiguous_sources if matching else ()
+            if matching and kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
+                ambiguous_sources = matching[-1].ambiguous_sources
+            elif matching:
+                ambiguous_entities = matching[-1].ambiguous_entities
         try:
             referral = Referral(
                 kind=kind,
@@ -1152,9 +1161,10 @@ def build_translator_core(
                 requirement_id=requirement_id,
                 candidates=candidates,
                 ambiguous_sources=ambiguous_sources,
+                ambiguous_entities=ambiguous_entities,
                 no_data_reason=no_data_reason,
                 constraint=constraint,
-                repair=repair or scope_repair,
+                repair=REPAIR_OF.get(kind) or repair or scope_repair,
                 reference=(
                     reference or _logged_reference(reason)
                     if kind is ReferralKind.INTERNAL_FAILURE

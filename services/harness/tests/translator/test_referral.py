@@ -10,10 +10,12 @@ from typing import Any
 import pytest
 from compiler.compile import CompileIssueCode
 from planner.plan import UnsupportedOperation
+from planner.records import AmbiguousEntityReading, EntityCandidate, EntityKey
 from planner.tool_results import Outcome
 from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
 from pydantic import ValidationError
 from translator.referral import (
+    ENTITY_CHOICE_REPAIR,
     OUTCOME_OF,
     REFERRAL_STATE_KEY,
     Referral,
@@ -104,6 +106,54 @@ def test_an_ambiguous_source_carries_its_candidates(source: SourceFactory) -> No
         )
     with pytest.raises(ValidationError, match="carries no candidates"):
         Referral(kind=ReferralKind.UNSUPPORTED_ASK, reason="r", requirement_id="a", candidates=two)
+
+
+def test_an_ambiguous_entity_carries_the_graph_nodes_it_could_name() -> None:
+    def group(*refs: str) -> AmbiguousEntityReading:
+        return AmbiguousEntityReading(
+            text="Congo",
+            candidates=tuple(EntityCandidate(ref=ref, label=ref) for ref in refs),
+            entity=EntityKey(name="Congo", role="donor"),
+        )
+
+    two = (group("country/COD", "country/COG"),)
+    referral = Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id="a",
+        ambiguous_entities=two,
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+
+    assert referral.outcome is Outcome.CHOICE_REQUIRED
+    with pytest.raises(ValidationError, match="carries the offered graph nodes"):
+        Referral(
+            kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+            reason="r",
+            requirement_id="a",
+            repair=ENTITY_CHOICE_REPAIR,
+        )
+    with pytest.raises(ValidationError, match="carries the offered graph nodes"):
+        Referral(
+            kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+            reason="r",
+            requirement_id="a",
+            ambiguous_entities=(group("country/COD"),),
+            repair=ENTITY_CHOICE_REPAIR,
+        )
+    # The settle-or-ask guidance travels with the referral, and only with it.
+    with pytest.raises(ValidationError, match="carries its own guidance as repair"):
+        Referral(
+            kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+            reason="r",
+            requirement_id="a",
+            ambiguous_entities=two,
+        )
+    with pytest.raises(ValidationError, match="only an entity_name_ambiguous referral"):
+        Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a", ambiguous_entities=two)
+    # A referral with no ambiguity is stored as it was before the field existed.
+    plain = Referral(kind=ReferralKind.NO_DATA, reason="r", requirement_id="a")
+    assert "ambiguous_entities" not in json.loads(plain.model_dump_json())
 
 
 def test_a_no_data_referral_carries_its_nearest_sources_and_reason(source: SourceFactory) -> None:

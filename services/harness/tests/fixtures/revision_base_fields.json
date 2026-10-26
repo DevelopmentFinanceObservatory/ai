@@ -317,6 +317,12 @@
     "from_step",
     "output"
   ],
+  "planner.workflow.BoundEntity": [
+    "identity",
+    "text",
+    "role",
+    "refs"
+  ],
   "planner.workflow.ElectedMeasure": [
     "label",
     "alternatives"
