@@ -131,8 +131,11 @@ from planner.plan import (
 )
 from planner.records import (
     MAX_ENTITIES,
+    AmbiguousEntityReading,
     AmbiguousSourceReading,
     DenominatorScope,
+    EntityCandidate,
+    EntityKey,
     EvidenceIssue,
     EvidenceIssueCode,
     GroupBy,
@@ -155,7 +158,9 @@ from submission import service as submission_service
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    _choice_not_offered,
     _combination_unasked,
+    _entity_dcid_unoffered,
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
@@ -171,7 +176,9 @@ from translator.discovery import (
     save_log,
 )
 from translator.referral import (
+    ENTITY_CHOICE_REPAIR,
     OUTCOME_OF,
+    REPAIR_OF,
     Referral,
     ReferralKind,
     StalePin,
@@ -2501,23 +2508,39 @@ def test_propose_plan_clears_a_pending_referral(
     assert load_referral(ctx.state) is None
 
 
-def _referral_of(kind: ReferralKind, requirement_id: str) -> Referral:
-    """A valid `Referral` of `kind`, naming what that kind has to name."""
-    if kind is ReferralKind.SOURCE_NAME_AMBIGUOUS:
-        return Referral(
-            kind=kind,
-            reason="r",
-            requirement_id=requirement_id,
-            ambiguous_sources=(
-                AmbiguousSourceReading(
-                    text="shared",
-                    candidates=tuple(
-                        SourceNameCandidate(ref=f"provenance/{name}", label=name, kind="provenance")
-                        for name in ("a", "b")
-                    ),
+# The choices a `source_name_ambiguous` and an `entity_name_ambiguous` referral
+# each have to carry.
+_CHOICES_OF: dict[ReferralKind, dict[str, Any]] = {
+    ReferralKind.SOURCE_NAME_AMBIGUOUS: {
+        "ambiguous_sources": (
+            AmbiguousSourceReading(
+                text="shared",
+                candidates=tuple(
+                    SourceNameCandidate(ref=f"provenance/{name}", label=name, kind="provenance")
+                    for name in ("a", "b")
                 ),
             ),
         )
+    },
+    ReferralKind.ENTITY_NAME_AMBIGUOUS: {
+        "ambiguous_entities": (
+            AmbiguousEntityReading(
+                text="Congo",
+                candidates=tuple(
+                    EntityCandidate(ref=f"country/{code}", label=code) for code in ("COD", "COG")
+                ),
+                entity=EntityKey(name="Congo", role="donor"),
+            ),
+        ),
+        "repair": ENTITY_CHOICE_REPAIR,
+    },
+}
+
+
+def _referral_of(kind: ReferralKind, requirement_id: str) -> Referral:
+    """A valid `Referral` of `kind`, naming what that kind has to name."""
+    if kind in _CHOICES_OF:
+        return Referral(kind=kind, reason="r", requirement_id=requirement_id, **_CHOICES_OF[kind])
     if kind is ReferralKind.SOURCE_AMBIGUOUS:
         candidates = tuple(
             SelectedSource(
@@ -5973,18 +5996,29 @@ _SERVED_INSTRUCTION = planner_agent.planner_instruction(
 
 
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
-    """Every `ReferralKind` is named, by its own value, in the planner's instruction.
+    """Every `ReferralKind` is named, by its own value, in the planner's instruction,
+    unless every referral of it carries its own guidance as `repair` (`REPAIR_OF`).
 
     The planner reads a referral's `kind` verbatim off the function response,
     so a kind the instruction never names is one the model has to guess at.
     Describing a kind in prose alone does not satisfy this: the model
-    matches on the string it is sent.
+    matches on the string it is sent. A kind in `REPAIR_OF` is told in the
+    referral itself, which `Referral` refuses to send without that guidance.
     """
-    unnamed = [kind.value for kind in ReferralKind if kind.value not in _SERVED_INSTRUCTION]
+    unnamed = [
+        kind.value
+        for kind in ReferralKind
+        if kind.value not in _SERVED_INSTRUCTION and kind not in REPAIR_OF
+    ]
     assert unnamed == [], (
         f"referral kinds the planner is never told how to read: {unnamed}. "
         "Name each one in `_TRANSLATING` and say what the planner does about it."
     )
+    for kind in REPAIR_OF:
+        valid = _referral_of(kind, "a")
+        assert valid.repair == REPAIR_OF[kind]
+        with pytest.raises(ValidationError, match="carries its own guidance as repair"):
+            Referral.model_validate(valid.model_dump() | {"repair": None})
 
 
 def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable_referral() -> None:
@@ -9158,6 +9192,79 @@ def test_a_code_held_by_several_publishers_takes_the_picked_one_as_its_source(
     assert (
         _source_ref_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None) is None
     ) == valid
+
+
+@pytest.mark.parametrize(
+    ("entity", "referred", "previous", "valid"),
+    [
+        (Entity(name="Congo", role="donor", dcid="country/COG"), True, None, True),
+        (Entity(name="Congo", role="donor", dcid="country/XXX"), True, None, False),
+        (Entity(name="Congo", role="recipient", dcid="country/COG"), True, None, False),
+        (Entity(name="Congo", role="donor", dcid="country/COG"), False, None, False),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            False,
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            True,
+        ),
+        (
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+            False,
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            False,
+        ),
+        (Entity(name="Congo", role="donor"), False, None, True),
+    ],
+    ids=[
+        "offered",
+        "not_offered",
+        "another_entity",
+        "no_referral",
+        "kept_from_previous",
+        "changed_from_previous",
+        "unpinned",
+    ],
+)
+def test_an_entity_node_must_be_one_a_referral_offered_for_it(
+    decision, requirements, entity, referred, previous, valid
+):
+    dataset, derived = requirements
+    ctx = _FakeToolContext()
+    if referred:
+        save_referral(ctx.state, _referral_of(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id))
+
+    def plan_naming(named: Entity) -> Plan:
+        stated = dataset.model_copy(update={"entities": (named,)})
+        return Plan(
+            question="question", decisions=[decision()], evidence_requirements=[stated, derived]
+        )
+
+    refusal = _entity_dcid_unoffered(
+        plan_naming(entity),
+        load_referral(ctx.state),
+        plan_naming(previous) if previous is not None else None,
+    )
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def test_an_entity_referral_leaves_a_kept_pin_as_it_is(
+    decision, pinning_decision, requirement, derived_requirement
+):
+    # The referral offers graph nodes and no sources, so the pin it was
+    # discovered under stays until the entity is settled.
+    pinned = requirement(decision_ids=["source"], source_spec_id=SPEC_GHANA_AID)
+    ctx = _FakeToolContext()
+    save_referral(ctx.state, _referral_of(ReferralKind.ENTITY_NAME_AMBIGUOUS, pinned.id))
+    plan = Plan(
+        question="question",
+        decisions=[decision(), pinning_decision(SPEC_GHANA_AID, slot="source")],
+        evidence_requirements=[pinned, derived_requirement()],
+    )
+
+    assert _choice_not_offered(plan, load_referral(ctx.state), ToolContextSession(ctx)) is None
 
 
 @pytest.mark.parametrize("modifier", [{"source_ref": "provenance/a"}, {"source_exclude": True}])

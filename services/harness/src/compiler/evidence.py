@@ -96,7 +96,13 @@ from planner.records import (
     SpecId,
     StrictModel,
 )
-from planner.workflow import OpenEntityAxis, ResolvedEntity, ResolvedGroup, SelectedSource
+from planner.workflow import (
+    BoundEntity,
+    OpenEntityAxis,
+    ResolvedEntity,
+    ResolvedGroup,
+    SelectedSource,
+)
 from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from compiler.frame_columns import columns_on_axes
@@ -157,7 +163,7 @@ class RetrievalEvidence(StrictModel):
     `groups` are the named sets the source binds (`SelectedSource.groups`),
     `entity_refs` the refs the graph resolved the requirement's unmatched
     names to (`SelectedSource.entity_refs`), and `bound_refs` the refs
-    Search bound for each entity text (`SelectedSource.bound_refs`), all discovery's alone: at run time
+    Search bound for each entity row (`SelectedSource.bound_refs`), all discovery's alone: at run time
     the approved source's are read instead, as its open axes are.
 
     `axis_by_column` is the manifest's alone: each coverage dimension's label
@@ -189,7 +195,7 @@ class RetrievalEvidence(StrictModel):
     open_entity_axes: tuple[OpenEntityAxis, ...] | None = None
     groups: tuple[ResolvedGroup, ...] = ()
     entity_refs: dict[str, str] = Field(default_factory=dict)
-    bound_refs: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    bound_refs: tuple[BoundEntity, ...] = ()
     axis_by_column: dict[str, str | None] | None = None
     unit_ref: str | None = None
     unit_label: str | None = None
@@ -397,27 +403,95 @@ def resolve_entity(entity: Entity, resolved: Sequence[ResolvedEntity]) -> Resolv
     return matches[0] if len(matches) == 1 else None
 
 
+def bound_refs_of(entity: Entity, source: SelectedSource | RetrievalEvidence) -> tuple[str, ...]:
+    """The refs Search bound for the entity rows `entity` names (`SelectedSource.bound_refs`).
+
+    `Entity.name` names the rows whose identity, a pinned dcid or a
+    stated name, it equals case-folded and whose `role_text` fits its
+    role: names it, sits on its side of the flow, or is unstated, as is a
+    role the requirement leaves unstated. Else it names the rows whose
+    text it equals and whose role fits. So of a row written "Congo" from
+    and one written "Congo" to and named "Republic of the Congo", a
+    recipient "Congo" names the second. When no row fits its role, it
+    names the rows of its identity, else of its text, so a row bound on
+    the other side is still reported against the role asked. Empty when
+    it names no row.
+
+    An entity with a `dcid` names the rows pinning that node first, so two
+    entities written "Congo" and pinned apart each name their own row.
+    """
+    if pinned := _pinned_refs(entity, source):
+        return pinned
+    wanted = entity.name.casefold()
+    by_identity = [row for row in source.bound_refs if row.identity.casefold() == wanted]
+    by_text = [row for row in source.bound_refs if row.text.casefold() == wanted]
+
+    def fitting(rows: list[BoundEntity]) -> list[BoundEntity]:
+        return [row for row in rows if row.role is None or _role_fits(entity.role, row.role)]
+
+    return _refs_of(fitting(by_identity) or fitting(by_text) or by_identity or by_text)
+
+
+def _pinned_refs(entity: Entity, source: SelectedSource | RetrievalEvidence) -> tuple[str, ...]:
+    """The refs Search bound for the rows whose identity is `entity`'s `dcid`; empty without one."""
+    if entity.dcid is None:
+        return ()
+    return _refs_of([row for row in source.bound_refs if row.identity == entity.dcid])
+
+
+def _refs_of(rows: Sequence[BoundEntity]) -> tuple[str, ...]:
+    """The refs Search bound for `rows`, each once, in order."""
+    return tuple(dict.fromkeys(ref for row in rows for ref in row.refs))
+
+
+def resolve_bound(
+    entity: Entity, source: SelectedSource | RetrievalEvidence
+) -> ResolvedEntity | None:
+    """Return the one entity of `source` whose ref Search bound for the rows `entity` names
+    (`bound_refs_of`), or `None` when none or several do.
+
+    A stated role tells apart a ref resolved under several role columns.
+    """
+    return _one_by_ref(entity, source.entities, bound_refs_of(entity, source))
+
+
 def resolve_name(
     entity: Entity, source: SelectedSource | RetrievalEvidence
 ) -> ResolvedEntity | None:
-    """Return the one entity of `source` that `entity` names, by label or else by ref.
+    """Return the one entity of `source` that `entity` names, by the row Search bound, by label, or else by ref.
 
-    A name no label matches (`resolve_entity`) is looked up in the refs
-    Search bound for it as an entity text (`SelectedSource.bound_refs`),
-    so "G7" names the published total labelled "Group of Seven", and else
+    The refs Search bound for the rows `entity` names answer first
+    (`resolve_bound`), so "G7" names the published total labelled "Group
+    of Seven", and a donor "Congo" the Congo its own row pins whatever
+    the other Congo is labelled. Else its name is matched by label
+    (`resolve_entity`), and a name Search bound no row for is looked up
     in the refs the graph resolved the requirement's names to
     (`SelectedSource.entity_refs`), so "United States" names the entity
     labelled "United States of America". A stated role tells apart a ref
     resolved under several role columns, as it does a label.
+
+    An entity with a `dcid` names the entity of the refs Search bound for
+    the rows pinning it, else of the `dcid` itself, and no other.
     """
-    resolved = resolve_entity(entity, source.entities)
-    if resolved is not None:
+    if entity.dcid is not None:
+        refs = _pinned_refs(entity, source) or (entity.dcid,)
+        return _one_by_ref(entity, source.entities, refs)
+    bound = bound_refs_of(entity, source)
+    resolved = _one_by_ref(entity, source.entities, bound) or resolve_entity(
+        entity, source.entities
+    )
+    if resolved is not None or bound:
         return resolved
     name = entity.name.casefold()
-    refs = source.bound_refs.get(name) or (
-        (source.entity_refs[name],) if name in source.entity_refs else ()
-    )
-    matches = [one for one in source.entities if one.ref in refs]
+    refs = (source.entity_refs[name],) if name in source.entity_refs else ()
+    return _one_by_ref(entity, source.entities, refs)
+
+
+def _one_by_ref(
+    entity: Entity, resolved: Sequence[ResolvedEntity], refs: Sequence[str]
+) -> ResolvedEntity | None:
+    """The one of `resolved` whose ref is among `refs`, told apart by `entity`'s role; `None` when none or several are."""
+    matches = [one for one in resolved if one.ref in refs]
     if len(matches) > 1:
         matches = [one for one in matches if _role_fits(entity.role, one.role)]
     return matches[0] if len(matches) == 1 else None
@@ -429,14 +503,14 @@ def resolve_group(
     """Return the one named set of `source` that `entity` names, or `None` when none or several do.
 
     Matches `Entity.name` against the set's `label`, case-folded, or names
-    the set whose ref or published total Search bound for it as an entity
-    text (`SelectedSource.bound_refs`), so "G7" names the set Search
-    labels "Group of Seven". A stated role has to name the set's role
+    the set whose ref or published total Search bound for the rows it
+    names (`bound_refs_of`), so "G7" names the set Search labels "Group
+    of Seven". A stated role has to name the set's role
     column or sit on its side of the flow (`donor` and `origin`), so "G7"
     asked for as a recipient is not the G7 whose members give.
     """
     wanted = entity.name.casefold()
-    bound = source.bound_refs.get(wanted, ())
+    bound = bound_refs_of(entity, source)
     matches = [
         group
         for group in source.groups
@@ -719,6 +793,19 @@ def _resolved_by_ref(
     return resolved
 
 
+def _resolved_by_bound(
+    entity: Entity, evidence: RetrievalEvidence, approved: SelectedSource | None
+) -> ResolvedEntity | None:
+    """The entity whose ref Search bound for the rows `entity` names (`resolve_bound`), or `None`.
+
+    At discovery the source's own rows answer. A manifest states none, so
+    at run time the approved source's do.
+    """
+    if evidence.origin == "discovery":
+        return resolve_bound(entity, evidence)
+    return resolve_bound(entity, approved) if approved is not None else None
+
+
 def _named_group(
     entity: Entity, evidence: RetrievalEvidence, approved: SelectedSource | None
 ) -> ResolvedGroup | None:
@@ -926,10 +1013,12 @@ def _named_entity_issues(
 
     A name is met by a named set the source binds (`_group_present`), as
     its members or, unless the entity asks for its members, as its
-    published total (`_group_reading_issues`); by a resolved entity's
-    label; or, through `resolve_name`, by a ref Search bound for the name
-    as an entity text or the ref the graph resolved the name to, at run
-    time as the approved source resolved it (`_resolved_by_ref`).
+    published total (`_group_reading_issues`); by the entity whose ref
+    Search bound for the rows it names (`_resolved_by_bound`), at run time
+    as the approved source resolved it, so two rows written "Congo" each
+    meet their own; by a resolved entity's label; or, through
+    `resolve_name`, by the ref the graph resolved the name to, at run time
+    as the approved source resolved it (`_resolved_by_ref`).
 
     A name the approved source resolves and the retrieval holds no series
     for, such as a donor whose reporting stopped before the requirement's
@@ -946,6 +1035,18 @@ def _named_entity_issues(
                 required=[entity.name for entity in requirement.entities],
             )
         ]
+    issues, missing = _entity_findings(requirement, evidence, approved)
+    return [*issues, *(issue for _, issue in missing)]
+
+
+def _entity_findings(
+    requirement: DatasetRequirement,
+    evidence: RetrievalEvidence,
+    approved: SelectedSource | None,
+) -> tuple[list[EvidenceIssue], list[tuple[Entity, EvidenceIssue]]]:
+    """`_named_entity_issues` over a source that resolves entities: the
+    findings on the entities it meets, and each entity it misses with its
+    `entity_missing` finding."""
     labels = [entity.label for entity in evidence.entities]
     issues: list[EvidenceIssue] = []
     missing: list[Entity] = []
@@ -953,6 +1054,12 @@ def _named_entity_issues(
         group = _named_group(entity, evidence, approved)
         if group is not None and _group_present(entity, evidence, approved):
             issues.extend(_group_reading_issues(requirement, entity, group))
+            continue
+        if (bound := _resolved_by_bound(entity, evidence, approved)) is not None:
+            if evidence.origin == "discovery":
+                issues.extend(_role_issues(requirement, entity, bound))
+            elif all(one.ref != bound.ref for one in evidence.entities):
+                missing.append(entity)
             continue
         matches = entity_matches(entity, evidence.entities)
         if not matches:
@@ -985,23 +1092,27 @@ def _named_entity_issues(
             continue
         issues.extend(_role_issues(requirement, entity, resolved))
     present = [entity for entity in requirement.entities if entity not in missing]
+    gaps: list[tuple[Entity, EvidenceIssue]] = []
     for entity in missing:
         severity = _left_out_severity(requirement, entity, present, approved)
-        issues.append(
-            EvidenceIssue(
-                code=EvidenceIssueCode.ENTITY_MISSING,
-                severity=severity,
-                requirement_id=requirement.id,
-                detail=(
-                    f"the source resolves no entity named {entity.name!r}"
-                    if severity is Severity.ERROR
-                    else f"the retrieval holds no series for {entity.name!r}, so it is left out"
+        gaps.append(
+            (
+                entity,
+                EvidenceIssue(
+                    code=EvidenceIssueCode.ENTITY_MISSING,
+                    severity=severity,
+                    requirement_id=requirement.id,
+                    detail=(
+                        f"the source resolves no entity named {entity.name!r}"
+                        if severity is Severity.ERROR
+                        else f"the retrieval holds no series for {entity.name!r}, so it is left out"
+                    ),
+                    found=labels,
+                    required=entity.name,
                 ),
-                found=labels,
-                required=entity.name,
             )
         )
-    return issues
+    return issues, gaps
 
 
 def _left_out_severity(
@@ -1042,20 +1153,21 @@ def _approved_column(entity: Entity, approved: SelectedSource) -> str | None:
 
 def left_out_entities(
     requirement: DatasetRequirement,
-    issues: Sequence[EvidenceIssue],
+    evidence: RetrievalEvidence,
     approved: SelectedSource,
 ) -> dict[ResolvedEntity, EvidenceIssue]:
-    """Each entity `requirement` names that a run-time check left out
-    (`_left_out_severity`), as the approved source resolved it, with its
-    finding."""
-    by_name = {entity.name: entity for entity in requirement.entities}
+    """Each entity `requirement` names that a run-time check of `evidence`
+    left out (`_left_out_severity`), as the approved source resolved it,
+    with its finding. Each finding is paired with the entity it was made
+    for, so two entities written alike each answer for their own."""
+    if not requirement.entities or not evidence.entities:
+        return {}
+    _, missing = _entity_findings(requirement, evidence, approved)
     left_out: dict[ResolvedEntity, EvidenceIssue] = {}
-    for issue in issues:
-        if issue.code is not EvidenceIssueCode.ENTITY_MISSING or issue.severity is Severity.ERROR:
+    for entity, issue in missing:
+        if issue.severity is Severity.ERROR:
             continue
-        entity = by_name.get(str(issue.required))
-        resolved = resolve_name(entity, approved) if entity is not None else None
-        if resolved is not None:
+        if (resolved := resolve_name(entity, approved)) is not None:
             left_out[resolved] = issue
     return left_out
 

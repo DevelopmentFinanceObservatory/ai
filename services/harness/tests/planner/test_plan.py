@@ -813,14 +813,39 @@ def test_a_requirement_names_an_entity_beside_the_party_across_covers(
 # --- Derived requirement validation --------------------------------------------
 
 
-def test_dataset_entities_must_be_unique_by_name_and_role(requirement: RequirementFactory) -> None:
-    with pytest.raises(ValidationError, match="unique by name and role"):
+def test_dataset_entities_must_be_unique_by_name_role_and_node(
+    requirement: RequirementFactory,
+) -> None:
+    with pytest.raises(ValidationError, match="unique by name, role and node"):
         requirement(
             entities=[
                 Entity(name="Kenya", role="debtor"),
                 Entity(name="Kenya", role="debtor"),
             ]
         )
+    with pytest.raises(ValidationError, match="unique by name, role and node"):
+        requirement(
+            entities=[
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+            ]
+        )
+    with pytest.raises(ValidationError, match="dcid must be its own node"):
+        requirement(
+            entities=[
+                Entity(name="Congo", role="donor", dcid="country/COD"),
+                Entity(name="Congo", role="recipient", dcid="country/COD"),
+            ]
+        )
+
+    pinned_apart = requirement(
+        entities=[
+            Entity(name="Congo", role="donor", dcid="country/COD"),
+            Entity(name="Congo", role="donor", dcid="country/COG"),
+        ]
+    )
+
+    assert [entity.dcid for entity in pinned_apart.entities] == ["country/COD", "country/COG"]
 
 
 def test_a_rank_window_may_be_one_year_and_refuses_an_end_before_its_start() -> None:

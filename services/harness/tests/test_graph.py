@@ -130,6 +130,7 @@ from .orchestrator_fakes import (
     run_turn,
     visited_nodes,
 )
+from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 SPEC_A = "spec_" + "a" * 32
@@ -2018,6 +2019,29 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
     assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF_A): {"ref": REF_A, "view": {}}}
     entry = ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]
     assert frame_store_ref(entry) == REF_A
+
+
+@pytest.mark.parametrize(
+    ("whole", "named"),
+    [(DAC_DONORS, "from official donors (DAC)"), (ALL_DONORS, "from all 140 donors")],
+    ids=["dac_donors", "all_donors"],
+)
+async def test_a_share_frame_is_registered_with_the_whole_its_plan_divides_by(
+    decision: Callable[..., Decision], whole: dict[str, Any], named: str
+) -> None:
+    """The final frame of a share step carries the whole the approved plan's
+    denominator source holds, which `make_charts` writes into the card's title."""
+    plan = us_share_of_kenya_oda(decision, whole=whole, numerator=US_DONOR)
+    ctx = SimpleNamespace(state={"plan": plan.model_dump_json()})
+    plan_done = plan_done_node(executor=ScriptedExecutor(), run_ledger=InMemoryRunLedger())
+    node_input = {
+        "frame_refs": [REF_A],
+        "frame_ref_steps": [{"step_id": "share", "tool": "share_of", "is_final_step": True}],
+    }
+
+    [_ async for _ in plan_done(cast("Any", ctx), node_input)]
+
+    assert ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]["whole"] == named
 
 
 async def test_a_summed_familys_total_reaches_the_agent_in_the_hand_back(

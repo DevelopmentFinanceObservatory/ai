@@ -50,6 +50,7 @@ EXPECTED_CASE_IDS = {
         {
             "translates-before-inviting-approval",
             "takes-an-unmeetable-requirement-back-to-the-user",
+            "asks-which-congo-before-guessing",
         }
     ),
 }

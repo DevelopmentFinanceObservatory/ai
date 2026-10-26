@@ -38,6 +38,7 @@ same way.
 
 from __future__ import annotations
 
+import json
 import re
 import typing
 from collections.abc import Collection, Mapping, Sequence
@@ -45,7 +46,7 @@ from collections.abc import Collection, Mapping, Sequence
 from compiler.evidence import open_axes_for
 from compiler.shapes import breakdown_level
 from compiler.sources import stat_var_count, stat_var_count_is_floor
-from planner.parties import across_party, singular
+from planner.parties import across_party, flow_side, role_party, singular
 from planner.phrasing import (
     among_phrase,
     datasets_of,
@@ -64,6 +65,7 @@ from planner.plan import (
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
+    Entity,
     EvidenceRequirement,
     FilterRequirement,
     GrowthRequirement,
@@ -78,24 +80,27 @@ from planner.plan import (
     authored,
     authored_text,
     copy_origins,
+    dataset_of,
     frame_shapes,
     is_search_pin,
 )
 from planner.records import (
     Breakdown,
+    DenominatorScope,
     EntityIn,
     EvidenceIssue,
     GroupBy,
     GrowthChange,
     PeriodThreshold,
     PlaceLevel,
+    PlaceType,
     Predicate,
     Reduction,
     RollingWindow,
     StatVarReading,
     ValueThreshold,
 )
-from planner.shapes import FrameShape, RoleDimension, TimeLabel
+from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
 from planner.workflow import ReadingSetBy, SelectedSource, Workflow
 
 from harness.sentences import DECLINE_REASONS
@@ -403,6 +408,192 @@ def answer_scopes(plan: Plan) -> dict[str, str]:
     return {output: _scope_phrase(shapes[output], plan) for output in answering_results(plan)}
 
 
+def share_wholes(plan: Plan) -> dict[str, str]:
+    """The whole the shares each step of the compiled `plan` gives divide by, in words, by step id.
+
+    A share_of step's whole is `_divided_whole`'s. A step whose values are
+    still its input's shares keeps their whole (`_keeps_shares`). A step of
+    anything else, or of shares whose whole cannot be named, has no entry.
+    Empty before compile.
+    """
+    if plan.translation is None or plan.workflow is None:
+        return {}
+    shapes = frame_shapes(plan)
+    operations = {operation.id: operation for operation in plan.translation.operations}
+    wholes: dict[str, str] = {}
+    for step in plan.workflow.steps:
+        requirement = plan.requirement(operations[step.operation_id].requirement_id)
+        while _keeps_shares(requirement, shapes):
+            requirement = plan.requirement(requirement.input_id)
+        if isinstance(requirement, ShareOfRequirement) and (
+            whole := _divided_whole(requirement, plan)
+        ):
+            wholes[step.id] = whole
+    return wholes
+
+
+def _keeps_shares(
+    requirement: EvidenceRequirement, shapes: Mapping[str, FrameShape]
+) -> typing.TypeGuard[FilterRequirement | RankRequirement | AggregateRequirement]:
+    """Whether `requirement`'s values are its input's shares, or their
+    average, highest or lowest, so they stay shares of the same whole: a
+    filter, or a rank or an aggregate reducing by no total, whose output
+    holds a ratio (`ValueKind.RATIO`). A total of shares is no share of it,
+    and a rank kept per period with no `limit` writes positions."""
+    if isinstance(requirement, FilterRequirement):
+        return True
+    if isinstance(requirement, RankRequirement | AggregateRequirement):
+        return (
+            requirement.reduction is not Reduction.SUM
+            and shapes[requirement.id].value is ValueKind.RATIO
+        )
+    return False
+
+
+def _divided_whole(requirement: ShareOfRequirement, plan: Plan) -> str | None:
+    """The whole `requirement` divides by, in words, or `None` when it cannot be named.
+
+    The whole is the population the denominator's selected sources hold on
+    each role column (`_populations`): "from official donors (DAC)" for a
+    source binding that group's total, "from all 140 donors" for one leaving
+    the donors open. A denominator narrowed to fewer members than its
+    sources hold, or to one entity (`RequirementSide.entity`), has no whole.
+    A column where the numerator holds the same population
+    (`_Population.same`) is left out, since a share of health ODA from every
+    donor, read from the same dataset, divides by the same donors. A share
+    of one side by itself (`pools_its_own_axis`), or with a numerator of one
+    entity narrowed out of a frame, divides by every population its
+    denominator holds. A keyed share's `axis` column follows its `denominator_scope`:
+    `per_axis` divides each member by its own total, so that column is no
+    part of the whole; `pooled` divides by the total across the column's
+    members, which is part of it whatever the numerator holds there.
+    """
+    if requirement.denominator.entity is not None:
+        return None
+    denominator = _populations(plan.requirement(requirement.denominator.input_id), plan)
+    if denominator is None:
+        return None
+    numerator = (
+        None
+        if requirement.pools_its_own_axis or requirement.numerator.entity is not None
+        else _populations(plan.requirement(requirement.numerator.input_id), plan)
+    ) or {}
+    axis = None if requirement.axis is None else role_party(requirement.axis)
+    clauses: list[str] = []
+    for column, population in denominator.items():
+        on_axis = axis is not None and _column_party(column) == axis
+        if on_axis and requirement.denominator_scope is DenominatorScope.PER_AXIS:
+            continue
+        held = numerator.get(column)
+        if on_axis or held is None or not held.same(population):
+            clauses.append(f"{_preposition(column)} {population.phrase}")
+    return " and ".join(clauses) or None
+
+
+def _column_party(column: str) -> str:
+    """The party a source's role column holds: a side of a flow, or the place."""
+    return flow_side(column) or "place"
+
+
+def _preposition(column: str) -> str:
+    """The preposition a population on role column `column` takes: "from" on the
+    giving side of a flow, "to" on the receiving side, "in" for the place."""
+    side = flow_side(column)
+    if side is None:
+        return "in"
+    return "from" if side == "giving" else "to"
+
+
+class _Population(typing.NamedTuple):
+    """A population a source holds on one role column: its words, and what identifies it.
+
+    `identity` is the named set's graph ref (its published total's, or its
+    label for a set the graph holds no node for), or an open axis's column,
+    the source's count of its members and the source's dataset over any
+    window (`planner.plan.dataset_of`): the source records no members, so
+    two sources holding as many members are known to hold the same ones
+    only when they are one dataset. `None` for an axis the source did not
+    count or a source stating no identity, which nothing shows equal to
+    another.
+    """
+
+    phrase: str
+    identity: tuple[str, ...] | None
+
+    def same(self, other: _Population) -> bool:
+        """Whether `other` is known to be this population."""
+        return self.identity is not None and self.identity == other.identity
+
+
+def _populations(requirement: EvidenceRequirement, plan: Plan) -> dict[str, _Population] | None:
+    """The population `requirement`'s selected sources hold on each role column,
+    or `None` when a step between narrows them (`_reads_whole`).
+
+    A named set a source binds (`SelectedSource.groups`) is named by its
+    label, and an axis a source leaves open for an `across` word reads as
+    `entities_phrase` writes it, with the source's count of its members. A
+    column holding only named entities holds no population and has no entry.
+    """
+    datasets = _reads_whole(requirement, plan)
+    if datasets is None:
+        return None
+    populations: dict[str, _Population] = {}
+    for dataset in datasets:
+        source = _selected_source(dataset.id, plan)
+        if source is None:
+            continue
+        for group in source.groups:
+            identity = group.ref or group.total or group.label
+            populations.setdefault(group.role, _Population(group.label, ("group", identity)))
+        if not dataset.across:
+            continue
+        axes = open_axes_for(dataset.across, source.open_entity_axes)
+        if isinstance(axes, str):
+            continue
+        for word, axis in zip(dataset.across, axes, strict=True):
+            counts = {} if axis.member_count is None else {word: axis.member_count}
+            phrase = entities_phrase((), across=(word,), member_counts=counts)
+            identity = (
+                None
+                if axis.member_count is None or source.identity is None
+                else (
+                    axis.column,
+                    str(axis.member_count),
+                    json.dumps(dataset_of(source.identity), sort_keys=True),
+                )
+            )
+            populations.setdefault(axis.column, _Population(phrase, identity))
+    return populations
+
+
+def _reads_whole(
+    requirement: EvidenceRequirement, plan: Plan
+) -> tuple[DatasetRequirement, ...] | None:
+    """The dataset requirements `requirement` reads every member of, or `None`
+    when a step on the way keeps fewer members than they hold.
+
+    A total and a rank keeping every member pass their input's members on,
+    as does a filter keeping some years only. A filter on any other field,
+    a rank keeping its top members (`limit`), an aggregate or a rank
+    reducing by anything but a total (`Reduction.SUM`), whose values are no
+    total of the members, and any other step narrow them or read them in a
+    way no population names.
+    """
+    if isinstance(requirement, DatasetRequirement):
+        return (requirement,)
+    if isinstance(requirement, FilterRequirement):
+        if not all(isinstance(predicate, PeriodThreshold) for predicate in requirement.predicates):
+            return None
+    elif isinstance(requirement, RankRequirement | AggregateRequirement):
+        if requirement.reduction not in (None, Reduction.SUM):
+            return None
+        if isinstance(requirement, RankRequirement) and requirement.limit is not None:
+            return None
+    else:
+        return None
+    return _reads_whole(plan.requirement(requirement.input_id), plan)
+
+
 def _scope_phrase(shape: FrameShape, plan: Plan) -> str:
     """How many figures a result of `shape` gives, and over which years, in words.
 
@@ -648,23 +839,47 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     """The retrieval named by what it fetches and for whom.
 
     A compiled plan names its selected source, as `_sentence_dataset` does:
-    the source's `measure_label` and how many members the source holds on
-    each axis `across` covers (`_population_count`), since the requirement's
-    `measure` and `across` are the planner's words for what it asked: "every
-    recipient" over a source of 50 countries. Before compile, or where the
-    source states no label or count, the label keeps the requirement's words.
+    the source's `measure_label` and the parties it holds (`_parties`),
+    since the requirement's `measure` and `across` are the planner's words
+    for what it asked: "every recipient" over a source of 50 countries.
+    Before compile, or where the source states no label or count, the label
+    keeps the requirement's words.
     """
     source = _selected_source(requirement.id, plan)
     measure = requirement.measure
     if source is not None and source.measure_label is not None:
         measure = source.measure_label
+    return f"Fetch {measure} for {_parties(requirement, plan)}"
+
+
+def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | None = None) -> str:
+    """Who `requirement` retrieves, in words, as its selected source holds them.
+
+    The requirement's entities, then each `across` word: one on the side of
+    a flow where the source binds a named set (`SelectedSource.groups`)
+    reads as the set's label, since a source bound to the total for official
+    donors (DAC) holds those donors and not every donor, and any other with
+    how many members the source holds on its axis (`_population_count`), as
+    `entities_phrase` writes it, a place word with the `level` a filter
+    keeps. A set on a side no `across` word covers is left unsaid, as the
+    requirement leaves it. Before compile the requirement's own words.
+    """
+    source = _selected_source(requirement.id, plan)
+    sides = {across_party(word) for word in requirement.across}
+    groups = [
+        group
+        for group in (source.groups if source is not None else ())
+        if (side := flow_side(group.role)) is not None and side in sides
+    ]
+    entities = [*requirement.entities, *(Entity(name=group.label) for group in groups)]
+    grouped = {flow_side(group.role) for group in groups}
+    across = tuple(word for word in requirement.across if across_party(word) not in grouped)
     counts = {
         word: count
-        for word in requirement.across
+        for word in across
         if (count := _population_count(requirement, word, plan)) is not None
     }
-    parties = entities_phrase(requirement.entities, across=requirement.across, member_counts=counts)
-    return f"Fetch {measure} for {parties}"
+    return entities_phrase(entities, across=across, level=level, member_counts=counts)
 
 
 def _label_aggregate(requirement: AggregateRequirement, plan: Plan) -> str:
@@ -1004,19 +1219,29 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
             entity=requirement.denominator.entity,
         )
         return f"Share of {measure} per {requirement.axis}, {scope_text}."
+    divisor = _measure_of(denominator, plan)
+    # A denominator narrowed to fewer members than its sources hold names the
+    # step that narrows it, whose own line states the filter or limit, in
+    # place of the parties its sources hold. A filter keeping a level of place
+    # is named by that level.
+    narrowing = narrowing_step(denominator, plan)
+    if narrowing is not None and not (
+        isinstance(narrowing, FilterRequirement)
+        and all(isinstance(p, PeriodThreshold | PlaceLevel) for p in narrowing.predicates)
+    ):
+        return (
+            f"Share of {measure} as one figure overall, divided by one total of {divisor} "
+            f'over the rows "{_label(narrowing, plan)}" keeps.'
+        )
     # A pooled share over a frame that names no place reads one level of it, which
     # the denominator's level filter keeps.
     level = kept_level(denominator, plan)
     parties = "; ".join(
         dict.fromkeys(
-            entities_phrase(dataset.entities, across=dataset.across, level=level)
-            for dataset in datasets_of(denominator, plan)
+            _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
         )
     )
-    return (
-        f"Share of {measure} as one figure overall, divided by "
-        f"{_measure_of(denominator, plan)} ({parties})."
-    )
+    return f"Share of {measure} as one figure overall, divided by {divisor} ({parties})."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

@@ -132,6 +132,8 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.records import (
+    AmbiguousEntityReading,
+    EntityKey,
     GroupBy,
     Identifier,
     OpenPeriodFault,
@@ -1555,8 +1557,16 @@ def _choice_not_offered(
     referral is about: stated unpinned and otherwise unchanged, it would
     have the translator's search find those sources again
     (`_withheld_scope_dropped`).
+
+    An `entity_name_ambiguous` referral offers graph nodes and no sources,
+    so it leaves every pin as it is (`_entity_dcid_unoffered` checks its
+    choice).
     """
-    if referral is None or referral.outcome is not Outcome.CHOICE_REQUIRED:
+    if (
+        referral is None
+        or referral.outcome is not Outcome.CHOICE_REQUIRED
+        or referral.kind is ReferralKind.ENTITY_NAME_AMBIGUOUS
+    ):
         return None
     for requirement_id, candidates in referral.offered().items():
         try:
@@ -1883,6 +1893,51 @@ def _source_ref_unpicked(
     return None
 
 
+def _entity_dcid_unoffered(
+    plan: Plan, referral: Referral | None, previous: Plan | None
+) -> dict[str, object] | None:
+    """A new entity `dcid` must be a graph node Search offered for that entity.
+
+    The options are the candidates of the reading the open
+    `entity_name_ambiguous` referral (`referral`, as `_authored_referral`
+    gives it) holds for the entity's `(name, role)` in its requirement. The planner settles the choice when the
+    question decides it, so the user need not have picked it. An entity
+    whose `(name, role, dcid)` the previous plan states for the requirement
+    carries its settled choice forward.
+    """
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement):
+            continue
+        kept: set[tuple[str, str | None, str | None]] = set()
+        if previous is not None:
+            old = next((r for r in previous.evidence_requirements if r.id == requirement.id), None)
+            if isinstance(old, DatasetRequirement):
+                kept = {(e.name, e.role, e.dcid) for e in old.entities}
+        readings: tuple[AmbiguousEntityReading, ...] = ()
+        if (
+            referral is not None
+            and referral.kind is ReferralKind.ENTITY_NAME_AMBIGUOUS
+            and referral.requirement_id == requirement.id
+        ):
+            readings = referral.ambiguous_entities
+        for entity in requirement.entities:
+            if entity.dcid is None or (entity.name, entity.role, entity.dcid) in kept:
+                continue
+            offered = {
+                candidate.ref
+                for reading in readings
+                if reading.entity == EntityKey(name=entity.name, role=entity.role)
+                for candidate in reading.candidates
+            }
+            if entity.dcid not in offered:
+                return _invalid_plan(
+                    "An entity's dcid must be a graph node an entity_name_ambiguous referral "
+                    "offered for that entity. Leave dcid unset unless Search asked which node "
+                    "the entity is."
+                )
+    return None
+
+
 def _unrecordable(
     plan: Plan,
     view: SessionView,
@@ -1899,8 +1954,9 @@ def _unrecordable(
     (`_nothing_to_plan`); one that states none and makes a decline nothing
     earned is refused for the decline (`_decline_unearned`). A patch carries forward what it
     does not name, so the amended plan is checked whole for a source
-    reference the user did not pick (`_source_ref_unpicked`) and a pin a
-    pending source choice did not offer (`_choice_not_offered`), both
+    reference the user did not pick (`_source_ref_unpicked`), an entity
+    node no referral offered (`_entity_dcid_unoffered`) and a pin a
+    pending source choice did not offer (`_choice_not_offered`), each
     against `stated`, the plan before its split and `_window_pins`, with
     `referral`, the pending referral naming the requirements the model wrote
     (`_authored_referral`), for a
@@ -1929,6 +1985,7 @@ def _unrecordable(
         )
     return (
         _source_ref_unpicked(stated, referral, view, previous)
+        or _entity_dcid_unoffered(stated, referral, previous)
         or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous)
         or _decline_unearned(plan, previous, view)
