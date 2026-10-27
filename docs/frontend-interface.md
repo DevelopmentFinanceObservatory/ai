@@ -114,7 +114,7 @@ The server answers `/turn` and `/interrupt` with Server-Sent Events.
 | `component_ref`   | object \| null                          | optional; see section 8                                         |
 | `seed_spec`       | list of `Seed` \| null                  | optional; 1 to 6 Search results to start from; see 4.1.1        |
 | `auto_add`        | boolean                                 | optional; default `true`; see section 9                         |
-| `apply_choice`    | `{choice_id, option_id}` \| null        | optional; a clicked suggestion chip; see 4.1.2                  |
+| `apply_choice`    | object \| null                          | optional; a clicked suggestion chip; see 4.1.2                  |
 
 #### 4.1.1 Seeds from Search
 
@@ -227,7 +227,7 @@ for the dataset again.
 
 After an answer whose figures came from a fetch, `suggestions.items` can
 hold up to four chips of kind `apply_choice`:
-`{kind: "apply_choice", label, choice_id, option_id}`. Each moves one
+`{kind: "apply_choice", label, choice_id, option_id, turn, spec_id}`. Each moves one
 scope choice of the data the answer used (the sector's codes, a region's
 members, the provider scope or the measure basis) to another option
 Search can serve, such as "health, CRS 120 alone" or "including imputed
@@ -235,9 +235,13 @@ multilateral". `label` is the option's label, quoted after the part's
 words when the answer used several parts. Chips run sector first, then
 region, provider and measure basis. An option Search cannot serve has no
 chip, and an answer from a plan has none: its card carries the switch.
+`turn` is the number of the conversation turn whose answer offers the
+chip, counted from 1, and `spec_id` names the stored data the chip
+re-counts. Together they bind the chip to its answer.
 
-A click sends a `turn.request` with `apply_choice: {choice_id, option_id}`
-copied from the chip and no `message`, `seed_spec` or `component_ref`;
+A click sends a `turn.request` with
+`apply_choice: {choice_id, option_id, turn, spec_id}` copied from the
+chip and no `message`, `seed_spec` or `component_ref`;
 one beside any of them gets a 422. The turn re-counts the stored data
 with that option through the Search API, retrieves it, and answers from
 it with the usual basis line, without searching or planning. The
@@ -249,8 +253,11 @@ A chip that no longer applies gets a 422 `constraint_violation` before
 any stream starts, with `pointer: "/apply_choice"` and a `detail` to
 show:
 
-- `scope_choice_stale`: no stored answer holds the choice, or the choice
-  is already on that option.
+- `scope_choice_stale`: a later turn has answered, so the chip's answer is
+  no longer the latest; a switch on a later plan card has re-counted the
+  choice's data, so its newest data is no longer `spec_id`; no stored
+  answer holds the choice; or the choice is already on that option. A
+  client shows chips under the latest answer only.
 - `switch_option_unavailable`: the choice does not offer the option, or
   Search cannot serve it.
 

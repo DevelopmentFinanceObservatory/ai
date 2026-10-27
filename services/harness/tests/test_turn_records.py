@@ -922,11 +922,13 @@ def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve(
             label="health (CRS 120) and population and reproductive health (CRS 130)",
             choice_id=f"{scope['id']}:sector",
             option_id="sector:120+130",
+            spec_id=searched.spec_id,
         ),
         ScopeChip(
             label="grant equivalents",
             choice_id=f"{scope['id']}:measure_basis",
             option_id="measure_basis:grant_equivalent",
+            spec_id=searched.spec_id,
         ),
     ]
     assert scope_chips([searched.model_dump(mode="json")], specs={}) == []
@@ -970,11 +972,11 @@ def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_f
 
     chips = scope_chips([health, education], specs={})
 
-    assert [(chip.label.split(":")[0], chip.option_id) for chip in chips] == [
-        ('"health aid"', "sector:120+130"),
-        ('"education aid"', "sector:120+130"),
-        ('"health aid"', "region:members_and_residuals"),
-        ('"education aid"', "region:members_and_residuals"),
+    assert [(chip.label.split(":")[0], chip.option_id, chip.spec_id) for chip in chips] == [
+        ('"health aid"', "sector:120+130", health["spec_id"]),
+        ('"education aid"', "sector:120+130", "spec_edu"),
+        ('"health aid"', "region:members_and_residuals", health["spec_id"]),
+        ('"education aid"', "region:members_and_residuals", "spec_edu"),
     ]
 
 

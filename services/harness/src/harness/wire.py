@@ -795,11 +795,17 @@ class Seed(_WireModel):
 
 
 class ApplyChoice(_WireModel):
-    """A suggestion chip the user clicked (`ApplyChoiceSuggestion`): the scope
-    choice of a stored reading and the option it moves to."""
+    """A suggestion chip the user clicked (`ApplyChoiceSuggestion`), echoed
+    whole: the scope choice, the option it moves to, the conversation turn
+    whose answer offered the chip (`turn`, from 1), and the spec_id of the
+    reading it switches (`spec_id`). The route refuses it 422
+    `scope_choice_stale` when a later turn answered, or when the choice's
+    newest reading is no longer `spec_id`."""
 
     choice_id: str = Field(min_length=1)
     option_id: str = Field(min_length=1)
+    turn: int = Field(ge=1)
+    spec_id: str = Field(min_length=1)
 
 
 class TurnRequest(_WireModel):
@@ -822,8 +828,9 @@ class TurnRequest(_WireModel):
     the member was reserved, and the `seed` node reports the unused
     reference as a failed step.
 
-    `apply_choice` carries a chip's choice and option, with no message text:
-    the turn applies the option to the reading the answer used, with no
+    `apply_choice` carries a chip's choice, option, answer turn and reading,
+    with no message text: the turn applies the option to the reading the
+    answer used, with no
     search (`harness.graph.switch.apply_stored_choice`). It cannot come with
     a message, seeds or a card reference. A request carries `message` or
     `apply_choice`.
@@ -1455,12 +1462,16 @@ class SuggestionItem(_WireModel):
 class ApplyChoiceSuggestion(_WireModel):
     """A chip that moves one scope choice of the answer's readings to another
     option: a click sends a `TurnRequest` with `apply_choice {choice_id,
-    option_id}` and no message. `label` is the option's label."""
+    option_id, turn, spec_id}` and no message. `label` is the option's label,
+    `turn` the conversation turn whose answer offers the chip, counted from 1,
+    and `spec_id` the reading the chip switches."""
 
     kind: Literal["apply_choice"]
     label: str
     choice_id: str
     option_id: str
+    turn: int
+    spec_id: str
 
 
 class Suggestions(_WireModel):

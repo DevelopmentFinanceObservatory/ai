@@ -4563,31 +4563,60 @@ def _scoped_envelope(scope: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 1, "status": "definite", "parts": [part]}
 
 
-def _chip_body(choice_id: str, option_id: str) -> dict[str, Any]:
+def _chip_body(chip: Mapping[str, Any]) -> dict[str, Any]:
+    """The request a click on `chip`, an `apply_choice` suggestion, sends."""
     return {
         "kind": "turn.request",
         "schema_version": 1,
         "conversation_id": CONVERSATION,
-        "apply_choice": {"choice_id": choice_id, "option_id": option_id},
+        "apply_choice": {key: chip[key] for key in ("choice_id", "option_id", "turn", "spec_id")},
     }
 
 
+def _first_answer_chip(scope: dict[str, Any], choice_id: str, option_id: str) -> dict[str, Any]:
+    """A chip on the conversation's first answer, moving `scope`'s reading."""
+    return {
+        "choice_id": choice_id,
+        "option_id": option_id,
+        "turn": 1,
+        "spec_id": scope["compiled"]["spec_id"],
+    }
+
+
+_OPTION_REFUSED = {
+    "code": "requested_option_unavailable",
+    "title": "Requested Option Unavailable",
+    "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
+    "pointer": "/input/entries/0/scope_entries/1",
+    "retryable": False,
+}
+
+
 def _chip_app(
-    *script: types.Part, executor: Any = None, fetches: Sequence[Mapping[str, Any]] = ({},)
+    *script: types.Part,
+    executor: Any = None,
+    fetches: Sequence[Mapping[str, Any]] = ({},),
+    searches: int = 1,
+    refuse: bool = False,
 ) -> tuple[FastAPI, dict[str, Any], SearchStub]:
     """An app whose first turn searches US health aid to Africa, fetches it
     once per entry of `fetches` (each the fetch's `scope`, `stat_vars` or
     `breakdown`) and answers, then runs `script`; Search answers a chip moving
-    its sector to CRS 120 and 130. Returns the app, the scope and the Search
-    stub."""
+    its sector to CRS 120 and 130. The search finds health aid each of
+    `searches` times it is called. With `refuse`, Search refuses the chip.
+    Returns the app, the scope and the Search stub."""
     scope = _hashed_scope()
-    search = SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
+    search = (
+        SearchStub(refuse={scope["id"]: _OPTION_REFUSED})
+        if refuse
+        else SearchStub(answer={scope["id"]: _switched_answer(scope)[1]})
+    )
     app = _app(
         search_call("health aid to Africa", "health aid"),
         *(fetch_call(scope["compiled"]["spec_id"], **fetched) for fetched in fetches),
         _text("Health aid to Africa was this much."),
         *script,
-        resolver=CannedSearch(_scoped_envelope(scope)),
+        resolver=CannedSearch(*[_scoped_envelope(scope)] * searches),
         executor=executor,
         definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
     )
@@ -4636,7 +4665,11 @@ async def test_a_chip_fetches_the_switched_reading_narrowed_as_the_answer_fetche
     sector = f"{scope['id']}:sector"
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("health aid to Ghana and Kenya"))
-        await _stream(client, "/api/studio/turn", _chip_body(sector, "sector:120+130"))
+        await _stream(
+            client,
+            "/api/studio/turn",
+            _chip_body(_first_answer_chip(scope, sector, "sector:120+130")),
+        )
 
     calls = [call["args"] for call in executor.calls if call["tool"] == "get_data"]
     answer, chip = calls[: len(fetches)], calls[len(fetches) :]
@@ -4663,12 +4696,17 @@ async def test_a_chip_that_no_longer_applies_is_refused_with_its_constraint() ->
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
         answers = [
-            await client.post("/api/studio/turn", json=_chip_body(*pick), headers=AUTH)
+            await client.post(
+                "/api/studio/turn", json=_chip_body(_first_answer_chip(scope, *pick)), headers=AUTH
+            )
             for pick, _ in cases
         ]
         unknown = await client.post(
             "/api/studio/turn",
-            json={**_chip_body(sector, "sector:120+130"), "conversation_id": "conv_other"},
+            json={
+                **_chip_body(_first_answer_chip(scope, sector, "sector:120+130")),
+                "conversation_id": "conv_other",
+            },
             headers=AUTH,
         )
         turns = len(app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns)
@@ -4694,9 +4732,7 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
         first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
         chips = _frame(first, "suggestions")["items"]
         (chip,) = [c for c in chips if c["option_id"] == "sector:120+130"]
-        applied = await _stream(
-            client, "/api/studio/turn", _chip_body(chip["choice_id"], chip["option_id"])
-        )
+        applied = await _stream(client, "/api/studio/turn", _chip_body(chip))
         await _stream(client, "/api/studio/turn", _turn_body("thanks"))
         turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
 
@@ -4711,6 +4747,8 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
         "label": "health (CRS 120) and population and reproductive health (CRS 130)",
         "choice_id": f"{scope['id']}:sector",
         "option_id": "sector:120+130",
+        "turn": 1,
+        "spec_id": scope["compiled"]["spec_id"],
     }
     assert len(search.posted) == 1
     assert len(app.state.model.requests) == 5  # search, fetch, answer; the chip; thanks
@@ -4725,6 +4763,97 @@ async def test_a_chip_is_shown_applied_and_kept_and_each_step_is_recorded(
         "scope_choice.chips_shown",
         "scope_choice.kept",
     ]
+
+
+async def test_a_chip_search_refuses_is_recorded_as_not_applied(
+    otlp_spans: InMemorySpanExporter,
+) -> None:
+    """The turn keeps the chip it was asked to apply, and with no reading
+    Search compiled for it, the chip is recorded as not applied."""
+    app, _, search = _chip_app(_text("That could not be counted."), refuse=True)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        (chip,) = [
+            c for c in _frame(first, "suggestions")["items"] if c["option_id"] == "sector:120+130"
+        ]
+        await _stream(client, "/api/studio/turn", _chip_body(chip))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    events = [event.name for span in otlp_spans.get_finished_spans() for event in span.events]
+    assert len(search.posted) == 1
+    assert "spec_id" not in turns[1]["applied_choice"]
+    assert "scope_choice.not_applied" in events
+    assert "scope_choice.applied" not in events
+
+
+async def test_a_chip_applies_only_on_the_answer_it_was_offered_with() -> None:
+    """A chip on the Africa answer is stale once a newer answer, here the same
+    question asked for Ghana, stands: it is refused 422 before any stream, and
+    Search is asked nothing. The newer answer's own chip still applies."""
+    pin = _hashed_scope()["compiled"]["spec_id"]
+    app, scope, search = _chip_app(
+        search_call("health aid to Africa", "health aid"),
+        fetch_call(pin),
+        _text("Health aid to Ghana was this much."),
+        _text("Now with population."),
+        searches=2,
+    )
+    async with _client(app) as client:
+        africa = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        ghana = await _stream(client, "/api/studio/turn", _turn_body("health aid to Ghana"))
+        old, new = (
+            next(
+                c
+                for c in _frame(frames, "suggestions")["items"]
+                if c["option_id"] == "sector:120+130"
+            )
+            for frames in (africa, ghana)
+        )
+        refused = await client.post("/api/studio/turn", json=_chip_body(old), headers=AUTH)
+        applied = await _stream(client, "/api/studio/turn", _chip_body(new))
+        turns = app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns
+
+    assert (old["turn"], new["turn"]) == (1, 2)
+    assert old["spec_id"] == new["spec_id"] == pin
+    assert refused.status_code == 422
+    assert refused.json()["constraint_id"] == "scope_choice_stale"
+    assert refused.json()["pointer"] == "/apply_choice"
+    assert len(search.posted) == 1
+    assert _events(applied)[-1] == "done"
+    assert turns[2]["applied_choice"]["spec_id"] == _switched_answer(scope)[0]
+
+
+async def test_a_chip_whose_reading_a_plan_card_switch_moved_is_refused() -> None:
+    """The Africa answer stands as the latest answered turn, but a later turn
+    paused on its plan and a switch on the card moved the chip's choice to a
+    new reading: the chip would switch a reading the answer did not use, so it
+    is refused 422 as stale. The switch moved the sector and the chip moves
+    the region, an option the new reading still offers, so the reading alone
+    marks the chip stale."""
+    app, scope, search = _chip_app(*_plan())
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("health aid to Africa"))
+        (chip,) = [
+            c
+            for c in _frame(first, "suggestions")["items"]
+            if c["option_id"] == "region:members_and_residuals"
+        ]
+        paused = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        # The switch node stores the reading Search compiled for the switch on
+        # the paused turn, as `store_search` writes it.
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        moved = copy.deepcopy(conversation.turns[0]["readings"][-1])
+        pin, envelope = _switched_answer(scope)
+        moved["spec_id"] = pin
+        moved["scope"] = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
+        conversation.turn_readings = [*conversation.turn_readings, moved]
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+        refused = await client.post("/api/studio/turn", json=_chip_body(chip), headers=AUTH)
+
+    assert "plan.proposed" in _events(paused)
+    assert refused.status_code == 422
+    assert refused.json()["constraint_id"] == "scope_choice_stale"
+    assert search.posted == []
 
 
 async def test_answers_to_a_plan_are_refused() -> None:

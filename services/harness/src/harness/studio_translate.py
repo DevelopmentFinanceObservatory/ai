@@ -2269,9 +2269,12 @@ class _Translator:
                     text=self._final_text,
                 )
             )
+        # `close_turn` below appends this turn's record, so its number is the
+        # count of records before it, plus one.
+        turn = len(self._conversation.turns) + 1
         chips = (
             [
-                ApplyChoiceSuggestion(kind="apply_choice", **chip._asdict())
+                ApplyChoiceSuggestion(kind="apply_choice", turn=turn, **chip._asdict())
                 for chip in scope_chips(
                     self._conversation.turn_readings, specs=self._conversation.turn_specs
                 )

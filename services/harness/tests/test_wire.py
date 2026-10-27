@@ -476,7 +476,12 @@ _CHIP = {
     "kind": "turn.request",
     "schema_version": 1,
     "conversation_id": "conv_x",
-    "apply_choice": {"choice_id": "spec_base:sector", "option_id": "sector:120"},
+    "apply_choice": {
+        "choice_id": "spec_base:sector",
+        "option_id": "sector:120",
+        "turn": 1,
+        "spec_id": "spec_pin",
+    },
 }
 
 
@@ -489,10 +494,21 @@ _CHIP = {
             {"component_ref": {"component_id": "cmp_1", "intent": "follow_up"}}, id="with-card"
         ),
         pytest.param({"apply_choice": {"choice_id": "spec_base:sector"}}, id="without-option"),
-        pytest.param({"apply_choice": {"choice_id": "", "option_id": "x"}}, id="empty-choice"),
+        pytest.param(
+            {"apply_choice": {**_CHIP["apply_choice"], "choice_id": ""}}, id="empty-choice"
+        ),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "turn"}},
+            id="without-turn",
+        ),
+        pytest.param({"apply_choice": {**_CHIP["apply_choice"], "turn": 0}}, id="turn-zero"),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "spec_id"}},
+            id="without-reading",
+        ),
     ],
 )
-def test_a_chip_comes_alone_with_its_choice_and_option(change: dict[str, Any]) -> None:
+def test_a_chip_comes_alone_with_its_choice_option_and_origin(change: dict[str, Any]) -> None:
     accepted = STUDIO_REQUEST_ADAPTER.validate_python(_CHIP)
 
     assert isinstance(accepted, TurnRequest)

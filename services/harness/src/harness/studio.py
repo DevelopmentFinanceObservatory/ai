@@ -287,23 +287,40 @@ def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSON
 def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSONResponse:
     """The label of the option a chip moves to, or the HTTP refusal of a chip that cannot apply.
 
-    The chip's choice is read on the conversation's newest stored reading
-    holding it (`harness.turn_records.stored_choice`). A choice no reading
-    holds, or one already on the chip's option, is refused 422
-    `scope_choice_stale`, since the chip came from an answer the conversation
-    has moved past. An option the choice does not offer, or one Search cannot
-    serve, is refused 422 `switch_option_unavailable`, as a plan card's switch
-    is. `detail` is copy the client shows.
+    A chip applies only on the answer that offered it. It is refused 422
+    `scope_choice_stale` when that answer's turn (`ApplyChoice.turn`) is not
+    the conversation's latest answered turn, or when the newest reading
+    holding its choice (`harness.turn_records.stored_choice`), over the
+    recorded turns and a turn still paused on its plan, is not the reading
+    the chip switches (`ApplyChoice.spec_id`): a plan card's switch in a
+    later turn compiles a new reading of the same choice. The chip is stale
+    too when its choice is already on its option. An option the choice does
+    not offer, or one Search cannot serve, is refused 422
+    `switch_option_unavailable`, as a plan card's switch is. `detail` is copy
+    the client shows.
     """
+    answered = [
+        number
+        for number, turn in enumerate(conversation.turns, start=1)
+        if turn.get("assistant") and not turn.get("error")
+    ]
     readings = [reading for turn in conversation.turns for reading in turn.get("readings") or ()]
+    if not conversation.turn_recorded:
+        readings.extend(conversation.turn_readings)
     found = stored_choice(readings, pick.choice_id)
-    choice = found[1] if found is not None else None
+    reading, choice = found if found is not None else (None, None)
     option = (
         next((o for o in choice.options if o.option_id == pick.option_id), None)
         if choice is not None
         else None
     )
-    if choice is None or (option is not None and pick.option_id == choice.active):
+    if (
+        answered[-1:] != [pick.turn]
+        or reading is None
+        or choice is None
+        or reading.spec_id != pick.spec_id
+        or (option is not None and pick.option_id == choice.active)
+    ):
         constraint, detail = (
             "scope_choice_stale",
             "This answer has changed since that suggestion was offered, so nothing changed.",
@@ -1177,7 +1194,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # later searches send leave it out, as a plan card's switch does.
                 conversation.turn_user_message = f"count {chip_label}"
                 conversation.turn_user_words = ""
-                conversation.turn_applied_choice = pick.model_dump()
+                # The record's `spec_id` is the reading the `seed` node compiles,
+                # set once the chip applies, so the chip's own origin stays out.
+                conversation.turn_applied_choice = pick.model_dump(
+                    include={"choice_id", "option_id"}
+                )
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is

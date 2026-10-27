@@ -1193,11 +1193,13 @@ MAX_SCOPE_CHIPS = 4
 
 
 class ScopeChip(NamedTuple):
-    """One other option of a scope choice the answer's figures were counted on."""
+    """One other option of a scope choice the answer's figures were counted
+    on, and the spec_id of the reading that holds the choice."""
 
     label: str
     choice_id: str
     option_id: str
+    spec_id: str
 
 
 def scope_chips(
@@ -1227,6 +1229,7 @@ def scope_chips(
             reading
             for reading in (SearchReading.model_validate(r) for r in readings)
             if reading.scope is not None
+            and reading.spec_id is not None
             and reading.fetch is not None
             and reading.fetch.refusal_code is None
             and not reading.fetch.plan_step
@@ -1257,6 +1260,7 @@ def scope_chips(
             ),
             choice_id=choice.id,
             option_id=option.option_id,
+            spec_id=cast(str, reading.spec_id),  # `used` holds readings with a spec_id
         )
         for _, reading, choice, option in offered[:MAX_SCOPE_CHIPS]
     ]

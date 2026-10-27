@@ -6,13 +6,17 @@
       "kind": "apply_choice",
       "label": "health, CRS 120 alone",
       "choice_id": "spec_6176d83382fca6c596e00cb242a06803:sector",
-      "option_id": "sector:120"
+      "option_id": "sector:120",
+      "turn": 2,
+      "spec_id": "spec_0b7d6c7e1f2a4b5c8d9e0f1a2b3c4d5e"
     },
     {
       "kind": "apply_choice",
       "label": "Africa's countries only",
       "choice_id": "spec_6176d83382fca6c596e00cb242a06803:region",
-      "option_id": "region:members_only"
+      "option_id": "region:members_only",
+      "turn": 2,
+      "spec_id": "spec_0b7d6c7e1f2a4b5c8d9e0f1a2b3c4d5e"
     }
   ]
 }
