@@ -1004,8 +1004,9 @@ class StudioRunner:
         stream-fatal error frame instead of the pause or terminal frame it
         would have carried, and ends the stream there. Once a `plan.approved`
         frame is sent, the interrupt it answers records it
-        (`ConversationState.mark_approved_sent`) and is checkpointed, a failure
-        there logged alone. This is the one
+        (`ConversationState.mark_approved_sent`) and is checkpointed: a lost
+        segment ends the stream the same way, and any other failure there is
+        logged alone. This is the one
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
         async for frame in frames:
@@ -1034,6 +1035,14 @@ class StudioRunner:
                 conversation.mark_approved_sent(segment_id)
                 try:
                     await self.store.checkpoint(principal, conversation_id, segment_id)
+                except SegmentLost as exc:
+                    logger.warning(
+                        "studio segment lost after plan.approved: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                    )
+                    yield _checkpoint_failed_frame(conversation, exc)
+                    return
                 except Exception:
                     logger.warning(
                         "studio checkpoint after plan.approved failed: conversation %s segment %s",

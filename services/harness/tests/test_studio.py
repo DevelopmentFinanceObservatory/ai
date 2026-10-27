@@ -86,6 +86,7 @@ from harness.studio import (
 )
 from harness.studio_state import (
     ConversationState,
+    SegmentLost,
     StudioStore,
     _deserialize_pending,
     _PendingChoice,
@@ -107,6 +108,7 @@ from harness.wire import (
     ErrorCode,
     ErrorFrame,
     MessageDelta,
+    PlanApproved,
     PlanDecision,
     PlanDecisionOption,
     RetryMode,
@@ -6422,6 +6424,55 @@ async def test_a_pause_frame_is_not_sent_when_its_checkpoint_fails() -> None:
     assert error["error"] == "transient_unavailable"
     assert error["detail"] == classed_sentence(HarnessCode.STATE_NOT_SAVED, "retry_after_delay")
     assert is_user_sentence(error["detail"])
+
+
+@pytest.mark.parametrize(
+    ("failure", "relayed"),
+    [
+        pytest.param(SegmentLost("taken over"), ["plan.approved", "error"], id="segment-lost"),
+        pytest.param(
+            RuntimeError("db is down"),
+            ["plan.approved", "message.delta"],
+            id="other-failure",
+        ),
+    ],
+)
+async def test_a_lost_segment_after_plan_approved_ends_the_stream(
+    failure: Exception, relayed: list[str]
+) -> None:
+    """The save after `plan.approved` is sent fails. A lost segment ends the stream
+    with a stream-fatal error frame, as at every other checkpoint, since another
+    instance now owns the conversation; any other failure is logged and the stream
+    goes on."""
+    studio = _app().state.studio
+    conversation = await studio.store.create("u_a", CONVERSATION)
+    segment_id = studio.store.claim_segment("u_a", CONVERSATION)
+
+    async def failing_checkpoint(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    studio.store.checkpoint = failing_checkpoint  # type: ignore[method-assign]
+
+    async def frames() -> Any:
+        yield PlanApproved(
+            event="plan.approved",
+            seq=0,
+            plan_version_id="plan_1",
+            version=1,
+            title="Research plan",
+            steps=[],
+            choices=[],
+        )
+        yield MessageDelta(event="message.delta", seq=1, text="next")
+
+    sent = [
+        frame.event
+        async for frame in studio._checkpointed(
+            "u_a", CONVERSATION, segment_id, conversation, frames()
+        )
+    ]
+
+    assert sent == relayed
 
 
 async def test_a_remote_composition_write_during_a_stream_reaches_its_done_frame_and_the_ledger(

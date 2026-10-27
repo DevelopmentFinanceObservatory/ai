@@ -50,7 +50,8 @@ from __future__ import annotations
 import json
 import re
 import typing
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections import Counter
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -426,17 +427,22 @@ def _answer_requirement(plan: Plan, shown: Plan) -> str | None:
     return candidates[-1] if candidates else None
 
 
+# The plan card's title when no ask of the user's titles it (`card_title`).
+_PLAN_TITLE = "Research plan"
+
+
 def card_title(plan: Plan) -> str:
     """The plan card's title: the ask the answering step answers (`answer_step`), in the
     user's words with its first letter raised; the first ask when that step answers
-    none by name; "Research plan" for a plan given no asks."""
+    none by name; `_PLAN_TITLE` for a plan given no asks, or whose ask holds no
+    words."""
     requirement_id = _answer_requirement(plan, shown_plan(plan))
     number = answering_results(plan).get(requirement_id) if requirement_id else None
     if number is None and plan.asks:
         number = 0
-    if number is None:
-        return "Research plan"
-    ask = plan.asks[number].strip()
+    ask = plan.asks[number].strip() if number is not None else ""
+    if not ask:
+        return _PLAN_TITLE
     return f"{ask[0].upper()}{ask[1:]}"
 
 
@@ -654,29 +660,34 @@ def card_decision_text(text: str, plan: Plan) -> str:
 
 
 def _without_codes(decision: Decision) -> str:
-    """A sector decision's chosen label without the codes its option names,
-    which the card's Sector choice states: "health incl. population and
-    reproductive health (CRS 120 + 130)" reads "health incl. population and
-    reproductive health", "health, CRS 120 alone" reads "health". The codes
-    are read off the option's id ("sector:120+130")."""
-    option_id = decision.active_option_id or ""
+    """A sector decision's chosen label without the codes its option names
+    (`sector_words`)."""
+    return sector_words(decision.chosen, decision.active_option_id or "")
+
+
+def sector_words(label: str, option_id: str) -> str:
+    """A sector option's `label` without the codes its id names, which the
+    card's Sector choice states: "health incl. population and reproductive
+    health (CRS 120 + 130)" reads "health incl. population and reproductive
+    health", "health, CRS 120 alone" reads "health". The codes are read off
+    `option_id` ("sector:120+130")."""
     codes = option_id.partition(":")[2].split("+")
     if not all(code.isdigit() for code in codes):
-        return decision.chosen
+        return label
     stated = r"\s*\+\s*".join(re.escape(code) for code in codes)
     pattern = rf"\s*(?:\(CRS\s+{stated}\)|,\s*CRS\s+{stated}(?:\s+alone)?)$"
-    return re.sub(pattern, "", decision.chosen)
+    return re.sub(pattern, "", label)
 
 
-def _basis_free(measure: str, basis: Decision) -> str:
-    """`measure` without the words of any option `basis` offers, so a planner's
+def basis_free(measure: str, options: Iterable[str]) -> str:
+    """`measure` without the words of any of the basis `options`, so a planner's
     "health gross disbursements" reads "health" whichever basis holds. An
     option's words are its label up to its first comma ("gross
     disbursements, current USD"), with and without a bracketed note
     ("grant equivalents (OECD headline)"). A measure made of basis words
     alone ("gross disbursements") keeps them all, since nothing else names it."""
     phrases: set[str] = set()
-    for option in basis.options:
+    for option in options:
         words = option.split(",")[0].strip()
         phrases.update({words, re.sub(r"\s*\(.*?\)", "", words).strip()})
     free = measure
@@ -691,14 +702,14 @@ def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
     A retrieval no scope decision governs reads as `_label_dataset` names
     it. One a sector decision governs reads by the sector it chose, without
     its codes (`_without_codes`); one only a basis decision governs, by the
-    planner's measure without the basis words (`_basis_free`), the words
+    planner's measure without the basis words (`basis_free`), the words
     the question asked in.
     """
     governing = _governing(requirement, plan)
     if "sector" in governing:
         return _without_codes(governing["sector"])
     if "measure_basis" in governing:
-        return _basis_free(requirement.measure, governing["measure_basis"])
+        return basis_free(requirement.measure, governing["measure_basis"].options)
     source = _selected_source(requirement.id, plan)
     if source is not None and source.measure_label is not None:
         return source.measure_label
@@ -846,6 +857,50 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     return tuple(
         decision for decision in plan.decisions if listed.get(decision.slot) == decision.slot
     )
+
+
+def card_questions(plan: Plan) -> dict[str, str]:
+    """What each row of the plan card's choices asks, by the slot of the decision it lists.
+
+    The card lists the decisions `shown_decisions` lists less those that
+    qualify the answer (`Decision.caveat`), which reach it only as caveats.
+    A scope decision's row asks its axis's short name (`CHOICE_NAMES`).
+    Where another row settles the same axis, as for two sources Search
+    offers different options on, each adds the inputs it governs, named as
+    the card's labels name them (`_concepts`): "Basis: health". Any other
+    row asks the planner's question (`card_decision_text`).
+    """
+    rows = [decision for decision in shown_decisions(plan) if decision.caveat is None]
+    axes = Counter(decision.scope.axis for decision in rows if decision.scope is not None)
+    concepts = _concepts(plan) if any(count > 1 for count in axes.values()) else {}
+    questions: dict[str, str] = {}
+    for decision in rows:
+        name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None
+        if name is None:
+            questions[decision.slot] = card_decision_text(decision.description, plan)
+            continue
+        assert decision.scope is not None
+        governed = (
+            _governed_concepts(plan, decision, concepts) if axes[decision.scope.axis] > 1 else []
+        )
+        questions[decision.slot] = f"{name}: {_joined(governed)}" if governed else name
+    return questions
+
+
+def _governed_concepts(plan: Plan, decision: Decision, concepts: Mapping[str, str]) -> list[str]:
+    """The names `concepts` gives the retrievals pinning a source the row of scope
+    decision `decision` stands for (`listed_together`), in card order."""
+    pinned = {
+        member.fixes.source_spec_id
+        for member in listed_together(plan, decision.slot)
+        if member.fixes is not None and member.fixes.source_spec_id is not None
+    }
+    return [
+        name
+        for requirement_id, name in concepts.items()
+        if typing.cast(DatasetRequirement, plan.requirement(requirement_id)).source_spec_id
+        in pinned
+    ]
 
 
 def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:

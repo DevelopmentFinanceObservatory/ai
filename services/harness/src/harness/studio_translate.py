@@ -40,7 +40,7 @@ import functools
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1069,22 +1069,6 @@ def _search_default(decision: Decision | None) -> bool:
     )
 
 
-def _decision_question(
-    decision: Mapping[str, Any],
-    scoped: Mapping[str, Decision],
-    named: Callable[[str], str],
-) -> str:
-    """What a plan card decision asks: a scope choice's short name
-    (`plan_display.CHOICE_NAMES`), else the planner's question as the card
-    shows it (`plan_display.card_decision_text`)."""
-    scope = scoped.get(decision.get("slot", ""))
-    if scope is not None and scope.scope is not None:
-        name = plan_display.CHOICE_NAMES.get(scope.scope.axis)
-        if name is not None:
-            return name
-    return named(decision.get("description", ""))
-
-
 def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     """The scope choices of the card's `decisions` a switch may name, by choice id.
 
@@ -1783,7 +1767,7 @@ class _Translator:
                     )
                 conversation.latest_plan_version = version
             plan = _plan_from_payload(payload)
-            shown_slots = {decision.slot for decision in plan_display.shown_decisions(plan)}
+            questions = plan_display.card_questions(plan)
             scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
             named = functools.partial(plan_display.card_decision_text, plan=plan)
             revision = payload.get("revision")
@@ -1815,8 +1799,18 @@ class _Translator:
                 self._surface_recorder.set_step_order(
                     current_conversation_id.get(), step_order, step_labels
                 )
+            # A requirement cites only the card's rows: a caveat it cites
+            # reaches the card as a caveat alone.
             requirements = [
-                PlanRequirement(**cast("dict[str, Any]", row))
+                PlanRequirement.model_validate(row).model_copy(
+                    update={
+                        "decision_ids": [
+                            slot
+                            for slot in cast("list[str]", row["decision_ids"])
+                            if slot in questions
+                        ]
+                    }
+                )
                 for row in plan_display.requirement_rows(plan)
             ]
             operations = [
@@ -1837,7 +1831,7 @@ class _Translator:
             decisions = [
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
-                    question=_decision_question(decision, scoped, named),
+                    question=questions[decision.get("slot", "")],
                     chosen=named(decision.get("chosen", "")),
                     alternatives=(
                         [named(option) for option in decision["options"]]
@@ -1854,7 +1848,7 @@ class _Translator:
                     **_scope_members(scoped.get(decision.get("slot", "")), plan),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
-                if decision.get("slot") in shown_slots
+                if decision.get("slot") in questions
             ]
             choices = _switchable(decisions)
             card = PlanProposed(

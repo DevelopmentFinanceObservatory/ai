@@ -170,6 +170,7 @@ from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     AlignedPin,
+    Realignment,
     _choice_not_offered,
     _combination_unasked,
     _entity_dcid_unoffered,
@@ -6379,6 +6380,54 @@ async def test_a_declared_whole_replaces_the_planners_decision_on_its_source(
     assert "health incl. population and reproductive health" in stated.rationale
 
 
+async def test_a_restated_decision_a_carried_requirement_cites_stays_beside_a_whole(
+    decision: DecisionFactory,
+) -> None:
+    """The health part cites a decision of the planner's on the denominator's source.
+    An amendment restates that decision and the declared whole alone, now citing it
+    too: the part, carried, still cites it, so it stays, and the whole keeps its
+    citation."""
+    tools = _tools_reading(WholeCompiles())
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
+    source_choice = decision(
+        slot="denominator_source",
+        description="Source for total aid denominator",
+        options=["dac1_total_aid", "crs_total_aid"],
+        chosen="dac1_total_aid",
+        rationale="The search results identified DAC1 total aid as the measure for total aid.",
+    )
+    first = await _us_2023(
+        tools["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_total_gross",
+        declared=True,
+        own=[source_choice],
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole = plan.requirement(_WHOLE)
+
+    second = await tools["propose_plan"].func(
+        decisions=drafts([source_choice]),
+        evidence_requirements=[
+            whole.model_copy(update={"decision_ids": (*whole.decision_ids, source_choice.slot)})
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert source_choice.slot in {d.slot for d in plan.decisions}
+    assert source_choice.slot in plan.requirement(_PART).decision_ids
+    assert source_choice.slot in plan.requirement(_WHOLE).decision_ids
+
+
 @pytest.mark.parametrize(
     ("part", "whole", "stated"),
     [
@@ -6459,8 +6508,13 @@ async def test_a_share_over_a_total_counting_other_providers_is_served_only_when
     (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert stated.slot in plan.requirement(_SHARE).decision_ids
     assert stated.resolved_by is ResolvedBy.PLANNER_DEFAULT
-    assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in stated.rationale
-    assert "bilateral plus core contributions to multilaterals from OECD DAC1" in stated.rationale
+    assert (
+        "Health incl. population and reproductive health counts bilateral flows only, "
+        "from OECD Creditor Reporting System (CRS)."
+    ) in stated.rationale
+    assert (
+        "US total ODA counts bilateral plus core contributions to multilaterals, from OECD DAC1."
+    ) in stated.rationale
     reader_text = " ".join((stated.rationale, *stated.options))
     assert not [rid for rid in (_PART, _WHOLE, _SHARE) if rid in reader_text]
 
@@ -6508,12 +6562,13 @@ async def test_a_plan_at_the_decision_cap_still_carries_its_caveats(
         pytest.param("whole", None, id="one-scope"),
         pytest.param(
             "dac1_total_gross",
-            "OECD DAC1 does not say which providers its figures count",
+            "US total ODA, from OECD DAC1, does not say which providers it counts.",
             id="no-provider-record",
         ),
         pytest.param(
             "dac1_contributions",
-            "bilateral plus core contributions to multilaterals from OECD DAC1",
+            "US total ODA counts bilateral plus core contributions to multilaterals, "
+            "from OECD DAC1.",
             id="contributions-total",
         ),
     ],
@@ -6545,28 +6600,46 @@ async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inp
     stated = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert len(stated) == (whole_counts is not None)
     for noted in stated:
-        assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in noted.rationale
+        assert "counts bilateral flows only, from OECD Creditor Reporting System (CRS)." in (
+            noted.rationale
+        )
         assert whole_counts is not None and whole_counts in noted.rationale
 
 
+@pytest.mark.parametrize(
+    ("whole", "whole_counts"),
+    [
+        pytest.param(
+            "dac1_contributions",
+            "US total ODA counts bilateral plus core contributions to multilaterals, "
+            "from OECD DAC1.",
+            id="contributions-total",
+        ),
+        pytest.param(
+            "dac1_total_gross",
+            "US total ODA, from OECD DAC1, does not say which providers it counts.",
+            id="no-provider-record",
+        ),
+    ],
+)
 async def test_a_carried_share_restates_its_provider_difference_when_an_input_is_repinned(
-    decision: DecisionFactory,
+    decision: DecisionFactory, whole: str, whole_counts: str
 ) -> None:
-    """CRS bilateral health aid over the DAC1 total counting core contributions, the
-    share accepting the difference. A revision re-pins the part alone to the
-    inclusive CRS form, as a plan-card switch does, and carries the share: the
-    share's stated difference now names what the re-pinned part counts."""
+    """CRS bilateral health aid over the DAC1 total, the share accepting the
+    difference. A revision re-pins the part alone to the inclusive CRS form, as a
+    plan-card switch does, and carries the share: the share's stated difference now
+    names what the re-pinned part counts, one sentence per input naming its concept,
+    the provider scope it counts and its dataset, the scope's label said once though
+    the inclusive dataset's title opens with it."""
     tools = _tools_reading(WholeCompiles())
     ctx = _FakeToolContext()
-    _show_blocks(
-        ctx, us_2023_block("health"), us_2023_block("health_inclusive"), dac1_with_contributions()
-    )
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block("health_inclusive"), _us_block(whole))
     first = await _us_2023(
         tools["propose_plan"].func,
         ctx,
         decision(),
         part="health",
-        whole="dac1_contributions",
+        whole=whole,
         accept=True,
     )
     assert first["outcome"] == Outcome.OK.value, first
@@ -6588,8 +6661,12 @@ async def test_a_carried_share_restates_its_provider_difference_when_an_input_is
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
     assert stated.slot in plan.requirement(_SHARE).decision_ids
-    assert "bilateral plus imputed multilateral from" in stated.rationale
-    assert "bilateral flows only" not in stated.rationale
+    assert stated.rationale == (
+        "The question asks for the inputs as their datasets count them, so they may count "
+        "different providers' spending. Health incl. population and reproductive health "
+        "counts bilateral plus imputed multilateral, from OECD CRS and ONE Imputed "
+        f"Multilateral Sectors. {whole_counts}"
+    )
 
 
 def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: DecisionFactory) -> None:
@@ -6742,6 +6819,92 @@ async def test_a_declared_whole_that_cannot_be_counted_from_its_part_is_refused_
             "cause": cause,
         }
     assert load_plan(ctx.state) is None
+
+
+def _unreadable_scope(block: dict[str, Any]) -> dict[str, Any]:
+    """`block` with scope records this release cannot read."""
+    copied = json.loads(json.dumps(block))
+    copied["resolved"]["scope_choices"] = {"id": "not a scope"}
+    return copied
+
+
+@pytest.mark.parametrize(
+    ("source", "cause"),
+    [
+        pytest.param(None, "part_not_shown", id="pin-source-missing"),
+        pytest.param(PinSource(settled=True), "part_block_missing", id="block-missing"),
+        pytest.param(
+            PinSource(block=_unreadable_scope(us_2023_block("health")), settled=True),
+            "scope_unreadable",
+            id="scope-unreadable",
+        ),
+        pytest.param(
+            PinSource(block=us_2023_block("grants"), settled=True),
+            "axis_not_held",
+            id="no-sector-slot",
+        ),
+    ],
+)
+async def test_a_whole_compile_names_why_it_could_not_read_its_part(
+    source: PinSource | None, cause: str
+) -> None:
+    """A declared whole whose part's pin is not among the datasets shown, is shown
+    with no block, holds scope records this release cannot read, or offers no
+    sector choice binding a slot: each is refused under its own cause, with no
+    call to Search, so the planner repairs the right thing."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    pin = us_2023_block("health")["spec_id"]
+    save_pin_sources(ctx.state, {pin: source} if source is not None else {})
+
+    refused = await planner_agent.compile_whole(
+        cast(ToolSurface, surface),
+        Realignment(pin, (), _WHOLE, _WHOLE, whole_axis="sector"),
+        state=ctx.state,
+    )
+
+    assert refused is not None
+    assert refused["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value
+    assert refused["detail"]["whole"]["cause"] == cause
+    assert surface.calls == []
+
+
+@pytest.mark.parametrize(
+    ("source", "cause"),
+    [
+        pytest.param(PinSource(settled=True), "part_block_missing", id="block-missing"),
+        pytest.param(
+            PinSource(block=_unreadable_scope(us_2023_block("health")), settled=True),
+            "scope_unreadable",
+            id="scope-unreadable",
+        ),
+    ],
+)
+async def test_a_declared_whole_names_why_its_part_could_not_be_read(
+    decision: DecisionFactory, source: PinSource, cause: str
+) -> None:
+    """A whole declared over the US health part, pinned to a dataset the planner was
+    shown with no block or with scope records this release cannot read: the plan is
+    refused before any compile, under the cause `compile_whole` gives the same
+    failure."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    pin = us_2023_block("health")["spec_id"]
+    _show_blocks(ctx, us_2023_block("dac1_total_gross"))
+    save_pin_sources(ctx.state, {**pin_sources(ctx.state), pin: source})
+
+    refused = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_total_gross",
+        declared=True,
+    )
+
+    assert refused["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value, refused
+    assert refused["detail"]["whole"]["cause"] == cause
+    assert surface.calls == []
 
 
 @pytest.mark.parametrize(

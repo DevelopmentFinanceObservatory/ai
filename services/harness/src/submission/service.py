@@ -56,6 +56,7 @@ from compiler.sources import (
 )
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.plan_display import basis_free, sector_words
 from harness.scope_choices import (
     Option,
     PartScope,
@@ -468,6 +469,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(patch.decisions, aligned_after),
         evidence_requirements,
+        after=aligned_after,
         wholes=wholes.keys(),
     )
     settled, evidence_requirements = _measure_decisions(
@@ -4244,18 +4246,22 @@ def _declared_wholes(
     wholes: dict[str, str] = {}
     for whole, part, axis in declared:
         pin = part.source_spec_id
-        scope = part_scope(pin, _pin_block(pin, shown)) if pin is not None else None
-        if pin is None or scope is None or axis_slot(scope, axis) is None:
+        if pin is None:
             raise _Unservable(
                 share_whole_underivable(
                     whole_id=whole.id,
                     part_spec_id=pin,
-                    reason=(
-                        f"Search settled {part.id!r} on no one dataset"
-                        if pin is None
-                        else f"Search offers no {axis} choice on {part.id!r} to leave open"
-                    ),
-                    cause="part_unpinned" if pin is None else "axis_not_held",
+                    reason=f"Search settled {part.id!r} on no one dataset",
+                    cause="part_unpinned",
+                )
+            )
+        block = _pin_block(pin, shown)
+        scope = part_scope(pin, block)
+        if scope is None or axis_slot(scope, axis) is None:
+            reason, cause = unread_part(pin, axis, source=shown.get(pin), block=block, scope=scope)
+            raise _Unservable(
+                share_whole_underivable(
+                    whole_id=whole.id, part_spec_id=pin, reason=reason, cause=cause
                 )
             )
         options = own.get((whole.source_spec_id, axis), ())
@@ -4295,6 +4301,7 @@ def _without_replaced_whole_decisions(
     decisions: Sequence[Decision],
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
+    after: Sequence[EvidenceRequirement],
     wholes: Collection[str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
     """`decisions` and `evidence_requirements` less each planner decision only the
@@ -4304,10 +4311,12 @@ def _without_replaced_whole_decisions(
     its part's own dataset, so it can say something false of the plan, as
     "Source for total aid denominator: dac1 total aid" over a CRS whole.
     `_whole_decisions` states the whole in its place. A user's decision, and
-    one a requirement other than those wholes cites, stays.
+    one a requirement other than those wholes cites, stays. Citations are
+    read over `after`, the plan's requirements once the patch applies, so a
+    requirement the patch carries counts as well as one it states.
     """
     citers: dict[str, set[str]] = {}
-    for requirement in evidence_requirements:
+    for requirement in after:
         for slot in requirement.decision_ids:
             citers.setdefault(slot, set()).add(requirement.id)
     replaced = {
@@ -4425,9 +4434,9 @@ def _provider_difference_decisions(
     dataset input's scope record holds a provider scope and all match
     (`Option.provider_scope` of each active option): an input whose record
     states none may count other providers, since nothing says what it
-    counts. The decision says so in reader words, naming what each input
-    with a provider scope counts (`_side_name`, `_counts`) and each dataset
-    stating none. It is the planner's, qualifies the answer
+    counts. The decision says so in reader words, one sentence per input
+    naming what it counts, or that its dataset does not say
+    (`_provider_sentence`). It is the planner's, qualifies the answer
     (`Decision.caveat` `providers_differ`), and is cited by the calculation
     (`_scope_decisions`).
     """
@@ -4443,21 +4452,19 @@ def _provider_difference_decisions(
         decisions[step.id] = ()
         under = reached(step.id, reads)
         inputs = [
-            (block, _provider_option(block))
+            (requirement, block, _provider_option(block))
             for requirement in requirements
             if isinstance(requirement, DatasetRequirement)
             and requirement.id in under
             and requirement.source_spec_id is not None
             for block in [_pin_block(requirement.source_spec_id, shown)]
         ]
-        scopes = {provider.provider_scope if provider else None for _, provider in inputs}
+        scopes = {provider.provider_scope if provider else None for _, _, provider in inputs}
         if None not in scopes and len(scopes) < 2:
             continue
-        sides = " and ".join(
-            f"the {_side_name(block)} figures count {provider.label} from {_dataset_title(block)}"
-            if provider is not None
-            else f"{_dataset_title(block)} does not say which providers its figures count"
-            for block, provider in inputs
+        sides = " ".join(
+            _provider_sentence(requirement, block, provider)
+            for requirement, block, provider in inputs
         )
         try:
             decision = Decision(
@@ -4471,7 +4478,7 @@ def _provider_difference_decisions(
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
                 rationale=(
                     "The question asks for the inputs as their datasets count them, so they may "
-                    f"count different providers' spending: {sides}."
+                    f"count different providers' spending. {sides}"
                 ),
                 caveat="providers_differ",
             )
@@ -4480,6 +4487,47 @@ def _provider_difference_decisions(
             continue
         decisions[step.id] = (decision,)
     return decisions
+
+
+def _provider_sentence(
+    requirement: DatasetRequirement, block: Mapping[str, Any] | None, provider: Option | None
+) -> str:
+    """One sentence saying which providers' spending the input `requirement` counts:
+    "<concept> counts <provider label>, from <dataset>." with the input named as
+    the plan card names it (`_input_concept`), or that its dataset does not say. A
+    dataset title opening with the provider label, such as "bilateral plus imputed
+    multilateral (OECD CRS and ONE Imputed Multilateral Sectors)", is named by the
+    rest of it, so the label is said once."""
+    concept = _input_concept(requirement, block)
+    concept = f"{concept[:1].upper()}{concept[1:]}"
+    title = _dataset_title(block)
+    if provider is None:
+        return f"{concept}, from {title}, does not say which providers it counts."
+    if title.lower().startswith(provider.label.lower()):
+        rest = title[len(provider.label) :].strip()
+        title = rest.removeprefix("(").removesuffix(")").strip() or title
+    return f"{concept} counts {provider.label}, from {title}."
+
+
+def _input_concept(requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> str:
+    """What `requirement` fetches in the reader's words, read off its pin's scope
+    record the way the plan card reads it off the scope decisions
+    (`harness.plan_display._concept`): the sector its sector choice holds without
+    its codes, else the planner's measure without the words of any basis its basis
+    choice offers, else what Search says the dataset measures, else the planner's
+    measure."""
+    scope = part_scope(str((block or {}).get("spec_id")), block)
+    choices = {choice.axis: choice for choice in scope.choices} if scope is not None else {}
+    sector = choices.get(_SECTOR_AXIS)
+    if sector is not None and (held := sector.active_option) is not None:
+        return sector_words(held.label, held.option_id)
+    basis = choices.get(_BASIS_AXIS)
+    if basis is not None:
+        return basis_free(requirement.measure, (option.label for option in basis.options))
+    measure_label = ((block or {}).get("resolved") or {}).get("measure_label")
+    return (
+        measure_label if isinstance(measure_label, str) and measure_label else requirement.measure
+    )
 
 
 def _dataset_title(block: Mapping[str, Any] | None) -> str:
@@ -4524,6 +4572,32 @@ def axis_slot(scope: PartScope, axis: str) -> str | None:
     return next(iter(slots)) if len(slots) == 1 and slots <= held else None
 
 
+def unread_part(
+    part_pin: str,
+    axis: str,
+    *,
+    source: PinSource | None,
+    block: Mapping[str, Any] | None,
+    scope: PartScope | None,
+) -> tuple[str, str]:
+    """Why a declared whole's part pinned `part_pin` gives no choice on `axis` to
+    leave open, as a clause and its `share_whole_underivable` cause: the first
+    missing of its pin source (`part_not_shown`), that source's block
+    (`part_block_missing`), the block's scope choices (`scope_unreadable`) and a
+    choice on `axis` binding one slot (`axis_not_held`). `_declared_wholes` and
+    `planner.agent.compile_whole` both name a failure by it."""
+    if source is None:
+        return f"{part_pin} is not among the datasets Search showed this turn", "part_not_shown"
+    if block is None:
+        return f"no record of {part_pin} from Search is held", "part_block_missing"
+    if scope is None:
+        return (
+            f"Search's scope choices for {part_pin} are missing or unreadable",
+            "scope_unreadable",
+        )
+    return f"Search offers no {axis} choice on {part_pin} to leave open", "axis_not_held"
+
+
 def share_whole_underivable(
     *, whole_id: str, part_spec_id: str | None, reason: str, cause: str
 ) -> dict[str, object]:
@@ -4533,8 +4607,9 @@ def share_whole_underivable(
     choice on, or pin a total of the whole's own and drop `whole_of`.
     `part_spec_id` is the part's pin, `None` where it has none, `reason`
     says why no whole was compiled, as a clause, and `cause` names that
-    reason as a code: `part_unpinned`, `axis_not_held`, or `whole_refused`
-    when Search refuses the whole.
+    reason as a code: `part_unpinned`, `part_not_shown`, `part_block_missing`,
+    `scope_unreadable`, `axis_not_held`, or `whole_refused` when Search
+    refuses the whole (`planner.agent.compile_whole`).
     """
     return problem(
         ProblemCode.SHARE_WHOLE_UNDERIVABLE,

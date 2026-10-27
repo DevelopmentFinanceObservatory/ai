@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 from harness.plan_display import (
-    _basis_free,
     _label,
+    basis_free,
     card_decision_text,
     card_rows,
     card_summary,
@@ -608,7 +608,7 @@ def test_a_measure_reads_without_its_basis_words_unless_they_are_all_it_says(
         update={"options": ("gross disbursements, current USD", "net disbursements")}
     )
 
-    assert _basis_free(measure, basis) == named
+    assert basis_free(measure, basis.options) == named
 
 
 def _one_requirement_compiled_plan(
@@ -3211,6 +3211,13 @@ def test_the_card_states_a_recorded_plan_once_in_short_labels(
     assert card_title(plan) == title
     assert card_summary(plan) == summary
     assert [row["label"] for row in rows] == labels
+
+
+def test_a_card_answering_an_ask_of_only_whitespace_takes_the_plans_title() -> None:
+    plan = _recorded_plan("short")
+    plan = Plan.model_validate({**plan.model_dump(), "asks": [" \n "]})
+
+    assert card_title(plan) == "Research plan"
 
 
 @pytest.mark.parametrize("name", ["short", "long", "long_switched_to_net"])

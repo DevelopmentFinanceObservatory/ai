@@ -95,6 +95,7 @@ from submission.service import (
     share_whole_underivable,
     submit,
     unpinned_wanted,
+    unread_part,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
@@ -1526,27 +1527,28 @@ async def compile_whole(
     options, which every whole declaring the part and the axis on them pins.
 
     Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
-    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` when the part
-    offers no choice on the axis, Search refuses the whole (as
-    `requested_option_unavailable` where it cannot hold an option the part
-    holds), or answers with no one dataset.
+    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
+    naming why: the part's pin is not among the datasets shown
+    (`part_not_shown`), is shown with no block (`part_block_missing`), holds
+    scope choices this release cannot read (`scope_unreadable`), or offers no
+    choice on the axis binding one slot (`axis_not_held`); or Search refuses
+    the whole (as `requested_option_unavailable` where it cannot hold an
+    option the part holds), or answers with no one dataset (`whole_refused`).
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
-    sources = pin_sources(state)
-    source = sources.get(part_pin)
-    block = source.spec_block(part_pin) if source is not None else None
-    scope = part_scope(part_pin, block)
-    slot = axis_slot(scope, axis) if scope is not None else None
 
     def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
         return share_whole_underivable(
             whole_id=realignment.requirement_id, part_spec_id=part_pin, reason=reason, cause=cause
         )
 
+    sources = pin_sources(state)
+    source = sources.get(part_pin)
+    block = source.spec_block(part_pin) if source is not None else None
+    scope = part_scope(part_pin, block)
+    slot = axis_slot(scope, axis) if scope is not None else None
     if source is None or block is None or scope is None or slot is None:
-        return underivable(
-            f"Search offers no {axis} choice on {part_pin} to leave open", "axis_not_held"
-        )
+        return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
     identity = copy.deepcopy(scope.base.identity)
     for held in identity.get("slots") or ():
         if held.get("property") == slot:

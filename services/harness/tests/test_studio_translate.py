@@ -72,6 +72,7 @@ from planner.plan import (
     Decision,
     PinSource,
     Plan,
+    ResolvedBy,
     SessionState,
     UnsupportedOperation,
     plan_revision,
@@ -81,6 +82,7 @@ from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
+from .test_plan_display import _recorded_plan
 from .test_planner_seam import ScriptedPlannerLlm, _seam
 from .test_turn_records import (
     _EXAMPLE_LINE,
@@ -473,6 +475,87 @@ def test_a_plan_card_states_the_decisions_that_qualify_its_answer_as_caveats() -
     (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
 
     assert frame.caveats == [differ, whole]
+
+
+def _us_health_share(**updates: Any) -> Plan:
+    """The recorded US health share of US ODA in 2023 (`_recorded_plan`), each
+    field of `updates` set on it."""
+    plan = _recorded_plan("long")
+    return Plan.model_validate({**plan.model_dump(), **updates})
+
+
+def _card_of(plan: Plan) -> PlanProposed:
+    (frame,) = _translator()._interrupt_frames(
+        APPROVE_INTERRUPT, {"payload": {**plan.model_dump(mode="json"), "revision": None}}
+    )
+    return frame
+
+
+def test_a_caveat_reaches_the_card_only_as_a_caveat() -> None:
+    """The US health share whose inputs count different providers: the decision
+    saying so is listed under the card's caveats and is no row of its choices,
+    and every decision a requirement on the card cites is one of its rows."""
+    plan = _us_health_share()
+    differ = Decision(
+        slot="providers_differ_health_share",
+        description="Whether the inputs count the same providers' spending.",
+        options=("each input as its dataset counts it", "every input on one provider scope"),
+        chosen="each input as its dataset counts it",
+        resolved_by=ResolvedBy.PLANNER_DEFAULT,
+        rationale="The inputs count different providers' spending.",
+        caveat="providers_differ",
+    )
+    plan = _us_health_share(
+        decisions=[*plan.decisions, differ],
+        evidence_requirements=[
+            r.model_copy(update={"decision_ids": (*r.decision_ids, differ.slot)})
+            if r.id == "health_share"
+            else r
+            for r in plan.evidence_requirements
+        ],
+    )
+
+    card = _card_of(plan)
+
+    assert card.caveats == [differ.rationale]
+    rows = {row.id for row in card.decisions}
+    assert differ.slot not in rows
+    cited = {slot for requirement in card.requirements or () for slot in requirement.decision_ids}
+    assert cited and cited <= rows
+
+
+def test_two_choices_on_one_axis_each_name_the_input_they_govern() -> None:
+    """The US health share with the total's basis choice offering other options
+    than the health figures' one, as after a switch of the health figures to a
+    source served on gross alone: the card keeps a Basis row for each, and each
+    row names its input in the card's words. A choice alone on its axis keeps
+    its short name."""
+    plan = _us_health_share()
+    total_basis = "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
+
+    def narrowed(decision: Decision) -> Decision:
+        assert decision.scope is not None
+        states = tuple(
+            state
+            if state.option_id == "measure_basis:gross"
+            else state.model_copy(update={"status": "unavailable", "code": "basis_not_published"})
+            for state in decision.scope.options
+        )
+        return decision.model_copy(
+            update={"scope": decision.scope.model_copy(update={"options": states})}
+        )
+
+    plan = _us_health_share(
+        decisions=[narrowed(d) if d.slot == total_basis else d for d in plan.decisions]
+    )
+
+    card = _card_of(plan)
+
+    assert sorted(row.question for row in card.decisions if row.choice_id is not None) == [
+        "Basis: health incl. population and reproductive health",
+        "Basis: official development assistance",
+        "Sector",
+    ]
 
 
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
