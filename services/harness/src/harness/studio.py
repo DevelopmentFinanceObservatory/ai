@@ -73,6 +73,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.graph.switch import SWITCH_STOP
 from harness.provenance import ProvenanceStore
 from harness.seeds import seeds_slot
 from harness.sentences import failure_sentence
@@ -96,6 +97,7 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
     failure_detail,
+    held_labels,
     plan_approved,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
@@ -119,7 +121,6 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
-    PlanProposed,
     PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
@@ -133,6 +134,9 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 5.0
 SSE_MEDIA_TYPE = "text/event-stream"
+# How long a stream a Stop reached while a plan-card switch ran waits for the
+# `switch` node to offer the plan again before it ends as any Stop does.
+SWITCH_REOFFER_SECONDS = 10.0
 
 # The wire decision on a plan interrupt, as the record `/interrupt` keeps of it.
 _APPROVAL_DECISION = {
@@ -528,7 +532,14 @@ async def _sse_stream(
     `conversation.cancel_reason` (set alongside the event by whoever armed
     it, `POST /cancel` or `StudioRunner._locked`'s heartbeat). `"cancelled"`
     (a client's Stop, from this instance or another) closes the turn and
-    yields the stream-fatal `cancelled` error frame, same as always.
+    yields the stream-fatal `cancelled` error frame, same as always, except
+    on a stream running a plan-card switch (`conversation.switch_stop`
+    armed): the first Stop there sets `switch_stop` and the stream reads
+    on, ending on the `plan.proposed` the `switch` node offers with the
+    plan unchanged (`harness.graph.switch.SWITCH_STOP`). The cancel event
+    is armed again, so a second Stop ends the stream as any Stop does, and
+    so does the stream reaching `SWITCH_REOFFER_SECONDS` after the first
+    with no end: a Stop never leaves a stream open.
     `"segment_lost"` (this stream's segment lease was taken over, or this
     instance's own renewal could not keep it alive) yields a stream-fatal
     `transient_unavailable` frame without closing the turn. Another
@@ -559,6 +570,9 @@ async def _sse_stream(
         conversation.in_turn_span() if conversation is not None else nullcontext()
     )
     cancel_wait: asyncio.Future[Any] | None = None
+    # The loop time by which a stopped switch must have ended the stream.
+    reoffer_by: float | None = None
+    loop = asyncio.get_running_loop()
     open_steps = _OpenSteps()
     if conversation is not None:
         conversation.cancel_event = asyncio.Event()
@@ -574,14 +588,34 @@ async def _sse_stream(
                             race = {next_frame, cancel_wait} if cancel_wait else {next_frame}
                             done, _ = await asyncio.wait(
                                 race,
-                                timeout=heartbeat_seconds,
+                                timeout=heartbeat_seconds
+                                if reoffer_by is None
+                                else max(0.0, min(heartbeat_seconds, reoffer_by - loop.time())),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                             if next_frame in done:
                                 break
-                            if cancel_wait is not None and cancel_wait in done:
-                                await _unwind(next_frame)
+                            overdue = reoffer_by is not None and loop.time() >= reoffer_by
+                            if overdue or (cancel_wait is not None and cancel_wait in done):
                                 assert conversation is not None
+                                if overdue:
+                                    # The stopped switch offered nothing in time.
+                                    conversation.cancel_reason = "cancelled"
+                                stop = conversation.switch_stop
+                                if (
+                                    conversation.cancel_reason == "cancelled"
+                                    and stop is not None
+                                    and not stop.is_set()
+                                ):
+                                    stop.set()
+                                    reoffer_by = loop.time() + SWITCH_REOFFER_SECONDS
+                                    conversation.cancel_event = asyncio.Event()
+                                    conversation.cancel_reason = None
+                                    cancel_wait = asyncio.ensure_future(
+                                        conversation.cancel_event.wait()
+                                    )
+                                    continue
+                                await _unwind(next_frame)
                                 if conversation.cancel_reason == "segment_lost":
                                     # Another instance took the segment over.
                                     lost = failure_sentence(
@@ -662,6 +696,7 @@ async def _sse_stream(
             if conversation is not None:
                 conversation.cancel_event = None
                 conversation.cancel_reason = None
+                conversation.switch_stop = None
             await flush_telemetry()
 
 
@@ -683,11 +718,18 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
 
 
 async def _approved_first(
-    card: PlanProposed, conversation: ConversationState, frames: AsyncGenerator[Any]
+    pending: _PendingInterrupt, conversation: ConversationState, frames: AsyncGenerator[Any]
 ) -> AsyncGenerator[Any]:
-    """`frames` led by the `plan.approved` frame for the card the user approved,
-    so the client has the approved plan before the resumed run's first frame."""
-    yield plan_approved(card, seq=conversation.next_seq())
+    """`frames` led by the `plan.approved` frame for the card `pending` holds,
+    the one the user approved, so the client has the approved plan before
+    the resumed run's first frame."""
+    assert pending.card is not None
+    yield plan_approved(
+        pending.card,
+        seq=conversation.next_seq(),
+        baseline=conversation.turn_choice_baseline,
+        caveats=pending.caveats,
+    )
     async with aclosing(frames) as source:
         async for frame in source:
             yield frame
@@ -1539,6 +1581,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # leaves it for this same retry path to pick back up.
             pending.answer = requested_answer
             pending.resuming_segment = segment_id
+            if body.decision is InterruptDecision.SWITCH and pending.card is not None:
+                # What each choice held before the turn's first switch of
+                # it, which `plan.approved` names as `changed_from`.
+                conversation.turn_choice_baseline = {
+                    **held_labels(pending.card),
+                    **conversation.turn_choice_baseline,
+                }
             if resuming:
                 # A retry resuming the same answer again: the dead attempt
                 # may already have sent frames the client saw, carrying a
@@ -1642,6 +1691,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             }
             label = pending.choices[body.choice_id].options[body.option_id].label
             conversation.add_to_turn(f"count {label}", user_words=False)
+            # A Stop while the switch runs offers the plan unchanged
+            # (`_sse_stream`), so the card stays answerable.
+            conversation.switch_stop = asyncio.Event()
+            SWITCH_STOP.set(conversation.switch_stop)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
@@ -1660,7 +1713,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             message = types.Content(role="user", parts=[part])
             frames = studio._frames(principal=principal, conversation=conversation, message=message)
             if body.decision is InterruptDecision.APPROVE and pending.card is not None:
-                frames = _approved_first(pending.card, conversation, frames)
+                frames = _approved_first(pending, conversation, frames)
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(

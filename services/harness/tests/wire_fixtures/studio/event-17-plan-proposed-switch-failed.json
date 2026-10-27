@@ -86,9 +86,10 @@
   "revision": "rev_01j9ze2k7c",
   "summary": "Gross disbursements for health to Ethiopia from all donors, 2016\u20132024, in constant 2023 US dollars, from OECD CRS.",
   "switch_failed": {
-    "choice_id": "c1",
+    "choice_id": "req1:measure_basis",
     "option_id": "o2",
     "code": "operation_unsupported",
-    "reason": "The commitments option cannot be compared before and after 2021, so the plan keeps disbursements."
+    "reason": "The commitments option cannot be compared before and after 2021, so the plan keeps disbursements.",
+    "retryable": false
   }
 }

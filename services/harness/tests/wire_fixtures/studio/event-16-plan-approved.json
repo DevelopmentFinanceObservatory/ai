@@ -28,5 +28,8 @@
       "chosen": "Constant 2023 USD",
       "changed_from": "Current USD"
     }
+  ],
+  "caveats": [
+    "As asked, the inputs count different providers' spending: bilateral aid from the OECD CRS and all official development assistance from DAC1."
   ]
 }

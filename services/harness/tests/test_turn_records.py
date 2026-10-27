@@ -1381,6 +1381,7 @@ _CONTRACT_REASON_CODES = {
     "stated_choice_not_applied",
     "option_not_covered",
     "counts_core_contributions",
+    "contributions_counted",
 }
 
 

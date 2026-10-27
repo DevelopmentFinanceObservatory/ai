@@ -517,6 +517,38 @@ ignores it and an older harness omits it.
 
 `schema_version` stays 1.
 
+## Stable choice ids, a stopped switch and caveats (delta 23, v1.8)
+
+- `PlanDecision.choice_id` is `"<requirement id>:<axis>"`: the first
+  requirement pinning a source the row stands for, and the axis the
+  choice settles. A switch re-pins requirements and keeps their ids, so a
+  row keeps its `choice_id` on every plan of the conversation, and a switch
+  naming it resolves on any of them. `moved[].choice_id` and
+  `switch_failed.choice_id` use the same ids. A row whose sources no
+  requirement pins keeps Search's own id.
+- `PlanSwitchFailed.retryable`: whether the same switch can succeed if
+  asked again. The harness sets it from the failure: false when it will
+  repeat, such as an option Search cannot serve; true when Search could
+  not answer in time, and for a stopped switch.
+- A `/cancel` while a switch runs stops the switch, not the stream. The
+  stream ends on `plan.proposed` re-offering the unchanged plan under a
+  fresh `interrupt_id`, with `switch_failed.code` `switch_cancelled` and
+  `retryable` true, and the turn stays paused on it. A second `/cancel`
+  before then, or 10 seconds with no re-offer, ends the stream with the
+  `cancelled` error frame. A switch
+  that fails before it can re-offer the plan ends the turn as any failed
+  stream does.
+- `plan.approved.caveats`: the plan's decisions that qualify the answer,
+  such as a share whose two sides count different providers or a total
+  derived from its part's dataset, each one reader sentence; empty when
+  there are none.
+- `plan.approved.choices[].changed_from` is the label the choice held on
+  the card the turn's first switch of it was made from, set when the
+  choice now holds another label, whether the user switched it or a
+  switch moved it, across several switches.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -611,3 +643,8 @@ Fixture values that are samples:
 1. `PlanStep` gains `gives_answer`; `plan.proposed` gains `summary` and
    `switch_failed`; a new `plan.approved` frame carries the approved plan
    on the approve answer. All optional.
+1. `choice_id` is `"<requirement id>:<axis>"`, stable across switches;
+   `switch_failed` gains `retryable`; a `/cancel` during a switch
+   re-offers the unchanged plan on a live pause under `switch_cancelled`;
+   `plan.approved` gains `caveats`, and `changed_from` names the label
+   before the turn's first switch.

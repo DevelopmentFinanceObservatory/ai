@@ -376,7 +376,13 @@ The server stops the conversation's active stream and returns HTTP 204.
 The active stream may be running on a different server instance than the
 one that answers this request; the server finds it there too and stops
 it within about 5 seconds. The stopped stream ends with an `error` frame
-whose code is `cancelled`. The call is safe when nothing streams. A
+whose code is `cancelled`. A stream running a plan-card `switch` is the
+exception: `/cancel` stops the switch, and the stream ends on a
+`plan.proposed` re-offering the unchanged plan with a fresh
+`interrupt_id` and `switch_failed.code` `switch_cancelled`. Keep reading
+the stream after the call; a second `/cancel`, or 10 seconds with no
+re-offered plan, ends it with the `cancelled` error frame. The call is
+safe when nothing streams. A
 closed connection also stops the turn, but proxies can hide a closed
 connection. Use `/cancel` for the Stop button.
 
@@ -408,15 +414,15 @@ Notes on specific fields:
   `label`; show `description` when the user expands the step. `args`
   holds the tool arguments backing the step, for a client that wants to
   show more than the label.
-- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?, choice_id?, active_option_id?, options?}`, the choices the agent made for the user. A decision stating how Search counted a source carries the scope choice's `choice_id`, its `active_option_id` and every option as `{option_id, label, status, reason?, years?}`, where `status` is `available`, `partial` or `unavailable`, `reason` says why a partial or unavailable option is limited, and `years` are the years a partial option covers. A decision without `choice_id` is a planner decision.
+- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?, choice_id?, active_option_id?, options?}`, the choices the agent made for the user. A decision stating how Search counted a source carries the scope choice's `choice_id`, `"<requirement id>:<axis>"`, which stays the same on every plan of the conversation, switches included, its `active_option_id` and every option as `{option_id, label, status, reason?, years?}`, where `status` is `available`, `partial` or `unavailable`, `reason` says why a partial or unavailable option is limited, and `years` are the years a partial option covers. A decision without `choice_id` is a planner decision.
 - `plan.proposed.revision` is a string identifying the plan's approval
   key, distinct from the integer `version`. It sits beside `version`: a
   client that shows a version badge keeps using `version`.
 - `plan.proposed.actions[]` lists `switch` only when some decision has a `choice_id` and an option other than its `active_option_id` that is `available` or `partial`. Offer those options as the switch; show an `unavailable` one disabled, with its `reason`.
 - `plan.proposed.moved[]`: `{choice_id, from_label, to_label, reason}`, set on the plan a switch offers. Each entry is another scope choice the switch moved, with the option it held, the one it holds now, and a sentence saying why.
 - `plan.proposed.summary`: one plain sentence saying what is counted, for whom, when and from which source. `plan.proposed.steps[].gives_answer` is true on the one step whose result answers the question.
-- `plan.proposed.switch_failed`: `{choice_id, option_id, code, reason}`, set on the plan re-offered after a switch that did not apply. Show `reason` on the row of the choice `choice_id` names.
-- `plan.approved.steps[]`: `{label, gives_answer?}`. `plan.approved.choices[]`: `{question, chosen, changed_from?}`, each choice's short name, the option label it holds, and the label it held before a switch.
+- `plan.proposed.switch_failed`: `{choice_id, option_id, code, reason, retryable}`, set on the plan re-offered after a switch that did not apply. Show `reason` on the row of the choice `choice_id` names. Offer the same switch again only when `retryable` is true. A switch the user stopped carries `code` `switch_cancelled` and `retryable` true.
+- `plan.approved.steps[]`: `{label, gives_answer?}`. `plan.approved.choices[]`: `{question, chosen, changed_from?}`, each choice's short name, the option label it holds, and, when a switch of the turn changed it, the label it held on the card the first switch was made from. `plan.approved.caveats[]`: one sentence each for the plan's decisions that qualify the answer, such as a share whose two sides count different providers; show them with the approved plan.
 - `plan.proposed.requirements[]`: `{id, kind, sentence, decision_ids}`. It
   is the evidence behind the plan. `plan.proposed.operations[]`: `{id, kind, sentence, requirement_id?}`. It is the plan's computed steps.
   `sentence` on both is composed server-side and rendered as given, so
@@ -594,8 +600,10 @@ a loop:
    `plan.proposed` with a new `interrupt_id` and `revision`, the switched
    decision now `resolved_by: "user"`, and `moved` listing any other choice
    that moved with it. A switch approves nothing: answer the new card. When
-   Search cannot serve the switch, the stream sends `message.complete`
-   saying why and the same plan again, under a new `interrupt_id`.
+   the switch cannot apply, the stream sends the same plan again under a
+   new `interrupt_id`, with `switch_failed` saying why on the row. A
+   `/cancel` while the switch runs ends the stream the same way, under
+   `switch_cancelled`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
 
@@ -759,6 +767,7 @@ example of each frame and request.
 | `component_ref` edit: "rename it to …", then "turn it into a bar chart"                            | `component.revised`, then a replacement `component.created`                    |
 | "average annual rainfall in Middle Earth"                                                          | No data: honest `message.complete` → `done`, no card                           |
 | Any turn, then POST `/cancel`                                                                      | Stream ends with the `cancelled` error frame                                   |
+| A plan-card `switch`, then POST `/cancel` while it runs                                            | The same plan re-offered, `switch_failed.code` `switch_cancelled`              |
 | "quickly, life expectancy in Japan" with `auto_add: false`, then an `add` operation                | Cards stream without joining the canvas; the `add` response holds the manifest |
 | An ambiguous question that resolves to several readings                                            | `elicitation.request` pause; answer, free text, or skip                        |
 

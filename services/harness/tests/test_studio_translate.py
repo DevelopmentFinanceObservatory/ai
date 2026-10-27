@@ -61,7 +61,6 @@ from harness.wire import (
     PlanAsk,
     PlanDecision,
     PlanDecisionOption,
-    PlanMoved,
     PlanProposed,
     PlanStep,
     StepStatus,
@@ -70,6 +69,7 @@ from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
+    Decision,
     PinSource,
     Plan,
     SessionState,
@@ -308,7 +308,10 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
     block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
     scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
     cited = dataset.model_copy(
-        update={"decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped))}
+        update={
+            "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+            "source_spec_id": pin,
+        }
     )
     plan = Plan.model_validate(
         {
@@ -329,9 +332,10 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
     assert planners
     assert all(row.choice_id is row.options is row.active_option_id is None for row in planners)
     sector, region, basis = (rows[d.slot] for d in scoped)
-    base = _switchable_scope()["id"]
+    # The row's id is the requirement pinning the source and the axis, which
+    # a switch keeps.
     assert (sector.choice_id, sector.active_option_id, sector.chosen, sector.resolved_by) == (
-        f"{base}:sector",
+        f"{dataset.id}:sector",
         "sector:120",
         "health (CRS 120)",
         "user",
@@ -407,6 +411,7 @@ def test_a_plan_offered_again_after_a_failed_switch_names_the_option_and_why() -
         "option_id": "provider:inclusive",
         "code": "operation_unsupported",
         "reason": note,
+        "retryable": False,
     }
     payload = {
         **plan.model_dump(mode="json"),
@@ -421,10 +426,60 @@ def test_a_plan_offered_again_after_a_failed_switch_names_the_option_and_why() -
     assert frame.version == plan.version
 
 
+def test_a_plans_pause_keeps_the_decisions_that_qualify_its_answer_as_caveats() -> None:
+    """Each decision the plan marks as a caveat (`Decision.caveat`) gives its
+    reason for `plan.approved`, in plan order and once each; any other
+    decision gives none."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    differ = "The question asks for the inputs as their datasets count them."
+    whole = "Denominator: the total over every sector from the CRS, the same dataset."
+
+    def noted(slot: str, rationale: str, caveat: str | None) -> Decision:
+        return Decision.model_validate(
+            {
+                "slot": slot,
+                "description": "d",
+                "options": ["a", "b"],
+                "chosen": "a",
+                "resolved_by": "planner_default",
+                "rationale": rationale,
+                "caveat": caveat,
+            }
+        )
+
+    added = [
+        noted("inputs_differ", differ, "providers_differ"),
+        noted("other", "Not a caveat.", None),
+        noted("whole", whole, "derived_whole"),
+        # A second calculation stating the same sentence adds nothing.
+        noted("inputs_differ_again", differ, "providers_differ"),
+    ]
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    cited = dataset.model_copy(
+        update={"decision_ids": (*dataset.decision_ids, *(d.slot for d in added))}
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [*plan.decisions, *added],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    assert translator._conversation.pending[frame.interrupt_id].caveats == (differ, whole)
+
+
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
-    """Title, summary, step labels and, for each scope choice, its short name
-    and the option it holds; a choice the switch moved says what it held
-    before, a planner decision is no choice."""
+    """Title, summary, step labels, caveats and, for each scope choice, its
+    short name and the option it holds; a choice holding another label than
+    before the turn's first switch of it says what it held, one switched
+    back says nothing, and a planner decision is no choice."""
 
     def scope(choice_id: str, question: str, held: str) -> PlanDecision:
         return PlanDecision(
@@ -462,17 +517,15 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
             ),
         ],
         revision="rev_1",
-        moved=[
-            PlanMoved(
-                choice_id="c_region",
-                from_label="Africa incl. regional buckets",
-                to_label="Africa's countries only",
-                reason="r",
-            )
-        ],
     )
+    caveat = "The share's two sides count different providers' spending, as asked."
 
-    frame = plan_approved(card, seq=9)
+    frame = plan_approved(
+        card,
+        seq=9,
+        baseline={"c_basis": "gross disbursements", "c_region": "Africa incl. regional buckets"},
+        caveats=[caveat],
+    )
 
     assert frame.model_dump(mode="json", exclude_none=True) == {
         "event": "plan.approved",
@@ -491,6 +544,7 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
                 "changed_from": "Africa incl. regional buckets",
             },
         ],
+        "caveats": [caveat],
     }
 
 

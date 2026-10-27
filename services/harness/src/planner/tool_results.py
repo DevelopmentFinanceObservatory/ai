@@ -104,8 +104,8 @@ class ProblemCode(StrEnum):
     # a basis choice, so the input is searched for before the plan records
     # (`submission.service._aligned_bases`).
     BASIS_UNKNOWN = "basis_unknown"
-    # A share divides a sector part by a total from another dataset, and no
-    # total of the part's own dataset over every sector can be compiled for it
+    # A whole the planner declared (`planner.plan.DatasetRequirement.whole_of`)
+    # cannot be compiled from its part's own dataset with the axis left open
     # (`submission.service.share_whole_underivable`).
     SHARE_WHOLE_UNDERIVABLE = "share_whole_underivable"
     MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"

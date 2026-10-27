@@ -37,6 +37,7 @@ ScopeReasonCode = Literal[
     "stated_choice_not_applied",
     "option_not_covered",
     "counts_core_contributions",
+    "contributions_counted",
 ]
 
 # "<axis>:<value>": `sector:120+130`, `region:members_and_residuals`,
@@ -99,6 +100,10 @@ REASON_COPY: dict[str, str] = {
     "option_not_covered": "the data holds no series for this option",
     "counts_core_contributions": (
         "this total counts core contributions to multilaterals as the donor's aid, so it "
-        "cannot be limited to bilateral flows or to the imputed share"
+        "cannot be limited to bilateral flows"
+    ),
+    "contributions_counted": (
+        "this total already counts core contributions to multilaterals as the donor's aid, "
+        "in place of an imputed share of their spending"
     ),
 }

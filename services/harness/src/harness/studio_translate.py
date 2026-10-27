@@ -1038,14 +1038,15 @@ def _data_phrase(plan: PlannerPlan) -> str | None:
     return f"{phrase} and {len(datasets) - 1} more" if len(datasets) > 1 else phrase
 
 
-def _scope_members(decision: Decision | None) -> dict[str, Any]:
-    """The `PlanDecision` members a scope decision adds: the choice's id, its
-    active option and each option with its label, status, years and why it is
-    limited (`REASON_COPY`). Empty for any other decision."""
+def _scope_members(decision: Decision | None, plan: PlannerPlan) -> dict[str, Any]:
+    """The `PlanDecision` members a scope decision of `plan` adds: the id of
+    its row (`plan_display.choice_id`), its active option and each option
+    with its label, status, years and why it is limited (`REASON_COPY`).
+    Empty for any other decision."""
     if decision is None or decision.scope is None:
         return {}
     return {
-        "choice_id": decision.scope.choice_id,
+        "choice_id": plan_display.choice_id(plan, decision),
         "active_option_id": decision.active_option_id,
         "options": [
             PlanDecisionOption(
@@ -1103,32 +1104,49 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     return choices
 
 
-def plan_approved(card: PlanProposed, *, seq: int) -> PlanApproved:
-    """The `plan.approved` frame for the plan card the user approved.
-
-    Built from the card alone, so it states what the user saw: its title,
-    summary and step labels, and for each scope choice the short name
-    (`PlanDecision.question`) and the label of the option it held. A choice
-    a switch moved besides the one the user switched carries the label it
-    held before (`PlanMoved.from_label`) as `changed_from`.
-    """
-    moved_from = {moved.choice_id: moved.from_label for moved in card.moved or ()}
-    choices = []
-    for decision in card.decisions or ():
-        if decision.choice_id is None or decision.options is None:
-            continue
-        chosen = next(
+def held_labels(card: PlanProposed) -> dict[str, str]:
+    """The label of the option each scope choice of `card` holds, by choice id."""
+    return {
+        decision.choice_id: next(
             option.label
             for option in decision.options
             if option.option_id == decision.active_option_id
         )
-        choices.append(
-            PlanApprovedChoice(
-                question=decision.question,
-                chosen=chosen,
-                changed_from=moved_from.get(decision.choice_id),
-            )
+        for decision in card.decisions or ()
+        if decision.choice_id is not None and decision.options is not None
+    }
+
+
+def plan_approved(
+    card: PlanProposed,
+    *,
+    seq: int,
+    baseline: Mapping[str, str],
+    caveats: Sequence[str] = (),
+) -> PlanApproved:
+    """The `plan.approved` frame for the plan card the user approved.
+
+    Built from the card, so it states what the user saw: its title, summary
+    and step labels, and for each scope choice the short name
+    (`PlanDecision.question`) and the label of the option it held. A choice
+    holding another label than the one `baseline` keeps for its choice id,
+    the label on the card the turn's first switch of it was made from
+    (`ConversationState.turn_choice_baseline`), carries that label as
+    `changed_from`, whether the user switched it or a switch moved it.
+    `caveats` are the plan's own (`_PendingInterrupt.caveats`).
+    """
+    labels = held_labels(card)
+    choices = [
+        PlanApprovedChoice(
+            question=decision.question,
+            chosen=labels[decision.choice_id],
+            changed_from=held
+            if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
+            else None,
         )
+        for decision in card.decisions or ()
+        if decision.choice_id is not None
+    ]
     return PlanApproved(
         event="plan.approved",
         seq=seq,
@@ -1142,14 +1160,30 @@ def plan_approved(card: PlanProposed, *, seq: int) -> PlanApproved:
             for step in card.steps
         ],
         choices=choices,
+        caveats=list(caveats),
+    )
+
+
+def _caveats(plan: PlannerPlan) -> tuple[str, ...]:
+    """The reason of each decision of `plan` that qualifies the answer
+    (`Decision.caveat`), such as a share whose sides count different
+    providers, in plan order and as the card words it
+    (`plan_display.card_decision_text`), each sentence once."""
+    return tuple(
+        dict.fromkeys(
+            plan_display.card_decision_text(decision.rationale, plan)
+            for decision in plan.decisions
+            if decision.caveat is not None
+        )
     )
 
 
 def _switch_failed(payload: Mapping[str, Any]) -> PlanSwitchFailed | None:
     """The switch that did not apply, on a plan the `switch` node offers
     again unchanged (`harness.graph.switch`): the choice and option the user
-    picked, the refusal's code and the sentence saying why it failed.
-    `None` on any other plan."""
+    picked, the refusal's code, the sentence saying why it failed and
+    whether the same switch can succeed if asked again. `None` on any other
+    plan."""
     failed = payload.get("switch_failed")
     return PlanSwitchFailed.model_validate(failed) if failed else None
 
@@ -1793,7 +1827,7 @@ class _Translator:
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
-                    **_scope_members(scoped.get(decision.get("slot", ""))),
+                    **_scope_members(scoped.get(decision.get("slot", "")), plan),
                 )
                 for index, decision in enumerate(payload.get("decisions", []))
                 if decision.get("slot") in shown_slots
@@ -1834,6 +1868,7 @@ class _Translator:
                 step_labels=step_labels,
                 choices=choices,
                 card=card,
+                caveats=_caveats(plan),
             )
             return frames
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`

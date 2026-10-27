@@ -19,8 +19,9 @@ The plan card reads its own shorter text: `card_rows` gives each step a
 short label naming its work and the steps it reads, keeps the detail in its
 description, and marks the one step whose result answers (`answer_step`);
 `card_title` titles the card by that step's ask; `card_summary` says in one
-sentence what the answer counts, for whom, when and from which source; and
-`card_decision_text` and `CHOICE_NAMES` give a decision's words.
+sentence what the answer counts, for whom, when and from which source;
+`card_decision_text` and `CHOICE_NAMES` give a decision's words; and
+`choice_id` gives a scope choice's row the id every switch keeps.
 
 In `step_rows`, which the plan record and the planner read, a step's `label`
 names the work a workflow step does and the entity it does
@@ -650,14 +651,16 @@ def _basis_free(measure: str, basis: Decision) -> str:
     "health gross disbursements" reads "health" whichever basis holds. An
     option's words are its label up to its first comma ("gross
     disbursements, current USD"), with and without a bracketed note
-    ("grant equivalents (OECD headline)")."""
+    ("grant equivalents (OECD headline)"). A measure made of basis words
+    alone ("gross disbursements") keeps them all, since nothing else names it."""
     phrases: set[str] = set()
     for option in basis.options:
         words = option.split(",")[0].strip()
         phrases.update({words, re.sub(r"\s*\(.*?\)", "", words).strip()})
+    free = measure
     for phrase in sorted(filter(None, phrases), key=len, reverse=True):
-        measure = re.sub(rf"\b{re.escape(phrase)}\b", "", measure, flags=re.IGNORECASE)
-    return " ".join(measure.split()) or measure
+        free = re.sub(rf"\b{re.escape(phrase)}\b", "", free, flags=re.IGNORECASE)
+    return " ".join(free.split()) or measure
 
 
 def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
@@ -841,6 +844,51 @@ def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
     if row is None:
         return ()
     return tuple(decision for decision in plan.decisions if listed.get(decision.slot) == row)
+
+
+def choice_id(plan: Plan, decision: Decision) -> str:
+    """The id the plan card gives scope decision `decision`'s row: `"<requirement id>:<axis>"`.
+
+    The requirement is the first of `plan` pinning a source the row stands
+    for (`listed_together`). A switch re-pins requirements and keeps their
+    ids, so the row keeps its id through every switch of the conversation,
+    whichever decision of the row is listed. A row whose sources no
+    requirement pins keeps Search's own id for the choice.
+    """
+    assert decision.scope is not None, "only a scope decision has a choice id"
+    pinned = {
+        member.fixes.source_spec_id
+        for member in listed_together(plan, decision.slot) or (decision,)
+        if member.fixes is not None and member.fixes.source_spec_id is not None
+    }
+    return pinned_choice_id(plan, pinned, decision.scope.axis) or decision.scope.choice_id
+
+
+def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | None:
+    """`"<requirement id>:<axis>"` for the first requirement of `plan` pinning one
+    of `pinned`, the id `choice_id` gives a row standing for those sources;
+    `None` when no requirement pins any."""
+    first = next(
+        (
+            requirement
+            for requirement in plan.evidence_requirements
+            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id in pinned
+        ),
+        None,
+    )
+    return f"{first.id}:{axis}" if first is not None else None
+
+
+def chosen_scope_decision(plan: Plan, choice: str) -> Decision | None:
+    """The listed scope decision of `plan` whose row has id `choice` (`choice_id`), if any."""
+    return next(
+        (
+            decision
+            for decision in shown_decisions(plan)
+            if decision.scope is not None and choice_id(plan, decision) == choice
+        ),
+        None,
+    )
 
 
 def _listed_slots(plan: Plan) -> dict[str, str]:

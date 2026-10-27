@@ -9,7 +9,7 @@ mutations, `_next_manifest` for every new revision.
 
 Every durable field of a conversation, everything but the identity field
 `conversation_id` and the process-local `lock`, `cancel_event`,
-`cancel_reason`, `_telemetry_span` and `_composition_ops`, lives in a
+`cancel_reason`, `switch_stop`, `_telemetry_span` and `_composition_ops`, lives in a
 per-conversation ADK "ledger" session, the same session service the runner
 already uses, keyed `(app_name, user_id=principal,
 session_id=conversation_id)`. Any instance can load a conversation's ledger
@@ -391,6 +391,10 @@ class _PendingInterrupt:
     # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
+    # The plan's caveats, one reader sentence each, which `plan.approved`
+    # carries when the card is approved. Empty for an elicitation and a plan
+    # stating none.
+    caveats: tuple[str, ...] = ()
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -489,6 +493,11 @@ class ConversationState:
     # alive). `_sse_stream`'s cancel branch reads it once to pick the
     # frame; reset to `None` alongside `cancel_event` when the stream ends.
     cancel_reason: str | None = None
+    # Armed while a plan-card switch streams (`harness.graph.switch.
+    # SWITCH_STOP`): a Stop sets it, and the switch offers the plan
+    # unchanged instead of the stream ending. Reset to `None` when the
+    # stream ends.
+    switch_stop: asyncio.Event | None = None
     # The current turn's auto-add preference (delta 11); reset per turn.
     auto_add: bool = True
     # Digest entries for every component this conversation streamed,
@@ -554,6 +563,11 @@ class ConversationState:
     # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
     # with the turn's record as `applied_choice`.
     turn_applied_choice: dict[str, Any] | None = None
+    # The option label each scope choice of the turn's plan held on the card
+    # the user first switched it from, by the row's choice id, kept from the
+    # first switch of the turn on (`/interrupt`). `plan.approved` names it
+    # as `changed_from` for a choice that holds another label now.
+    turn_choice_baseline: dict[str, str] = field(default_factory=dict)
     turn_recorded: bool = False
     # The current turn's telemetry root span, opened by `begin_turn` on the
     # freshly minted `trace_id`, kept open across a pause for approval, and
@@ -1062,6 +1076,7 @@ class ConversationState:
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
+        self.turn_choice_baseline = {}
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1117,6 +1132,7 @@ _KEY_TURN_RECORDED = "studio:turn_recorded"
 _KEY_TURN_PLANS = "studio:turn_plans"
 _KEY_TURN_READINGS = "studio:turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
+_KEY_TURN_CHOICE_BASELINE = "studio:turn_choice_baseline"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -1194,7 +1210,7 @@ _RUN_ITEM_PREFIXES = (
 # `StudioStore.append_run_items`' fetch-fence-append cycles.
 _RUN_ITEMS_RETRY_ATTEMPTS = 3
 
-# Identity, the five process-local runtime objects, and the turn's spec
+# Identity, the six process-local runtime objects, and the turn's spec
 # blocks (`turn_specs`, read back from the turn's own ADK session by
 # `StudioStore.load`), which `_serialize_durable`/`_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
@@ -1203,6 +1219,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "lock",
         "cancel_event",
         "cancel_reason",
+        "switch_stop",
         "_telemetry_span",
         "_composition_ops",
         "_removal_unreported",
@@ -1254,6 +1271,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 for choice_id, choice in p.choices.items()
             },
             "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
+            "caveats": list(p.caveats),
         }
         for interrupt_id, p in pending.items()
     }
@@ -1280,6 +1298,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
         card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
+        caveats=tuple(entry.get("caveats") or ()),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -1338,6 +1357,7 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_TURN_PLANS: state.turn_plans,
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
+        _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -1405,6 +1425,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_readings = list(value)
         elif key == _KEY_TURN_APPLIED_CHOICE:
             state.turn_applied_choice = dict(value) if value else None
+        elif key == _KEY_TURN_CHOICE_BASELINE:
+            state.turn_choice_baseline = dict(value or {})
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):

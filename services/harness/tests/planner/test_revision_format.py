@@ -31,7 +31,17 @@ from typing import Any
 
 import pytest
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
-from planner.plan import AskBreakdown, DatasetRequirement, Plan, RankRequirement, plan_revision
+from planner.plan import (
+    AskBreakdown,
+    DatasetRequirement,
+    Plan,
+    QuotientRequirement,
+    RankRequirement,
+    RequirementSide,
+    ShareOfRequirement,
+    SumOfRequirement,
+    plan_revision,
+)
 from planner.records import (
     EvidenceIssue,
     EvidenceIssueCode,
@@ -139,6 +149,11 @@ def test_the_recorded_plans_hold_every_field_added_since_the_base_format() -> No
     walk(PlaceLevel(level=PlaceType.COUNTRY))
     # Nor does any hold an ask breakdown: exercise one listing a party.
     walk(AskBreakdown(ask=0, by=("donor",)))
+    # Nor any calculation dividing or adding two sides: exercise each.
+    part, whole = RequirementSide(input_id="part"), RequirementSide(input_id="whole")
+    walk(ShareOfRequirement(id="share", numerator=part, denominator=whole))
+    walk(QuotientRequirement(id="quotient", numerator=part, denominator=whole))
+    walk(SumOfRequirement(id="sum", left=part, right=whole))
     # Nor does any hold a compile warning: exercise an `EvidenceIssue`'s.
     walk(
         EvidenceIssue(

@@ -15,11 +15,15 @@ from typing import Any
 
 import pytest
 from harness.plan_display import (
+    _basis_free,
     _label,
     card_decision_text,
     card_rows,
     card_summary,
     card_title,
+    choice_id,
+    chosen_scope_decision,
+    listed_together,
     operation_rows,
     plan_words,
     requirement_rows,
@@ -494,7 +498,9 @@ def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
 ) -> None:
     """Two pins whose sector choices are the same share one row, the user's;
     basis choices whose options are not equally available keep a row each.
-    Each requirement cites the row standing for its own decision."""
+    Each requirement cites the row standing for its own decision. A row's id
+    is the first requirement pinning one of its sources and the axis,
+    whichever decision of the row is listed, and names that decision."""
     sector_a = _scope_decision(_SPEC_A, "sector")
     sector_b = _scope_decision(_SPEC_B, "sector", resolved_by=ResolvedBy.USER)
     basis_a = _scope_decision(_SPEC_A, "measure_basis")
@@ -530,6 +536,78 @@ def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
         "aid_a": ["measure", sector_b.slot, basis_a.slot],
         "aid_b": ["measure", sector_b.slot, basis_b.slot],
     }
+    assert [choice_id(plan, d) for d in (sector_a, sector_b, basis_a, basis_b)] == [
+        "aid_a:sector",
+        "aid_a:sector",
+        "aid_a:measure_basis",
+        "aid_b:measure_basis",
+    ]
+    assert chosen_scope_decision(plan, "aid_a:sector") == sector_b
+    # Search's own id for the choice names no row.
+    assert chosen_scope_decision(plan, f"{_SPEC_B}:sector") is None
+
+
+@pytest.mark.parametrize("merged", [False, True], ids=["apart", "merged"])
+def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
+    decision: DecisionFactory, merged: bool
+) -> None:
+    """The numerator's and the denominator's basis decisions on different
+    options are two rows, each with its own requirement's id. Switched to the
+    same option they become one row, which takes the first requirement's id
+    in plan order and stands for both, so a switch of it moves both; apart
+    again, each row has its own id back."""
+    numerator = _scope_decision(_SPEC_A, "measure_basis")
+    denominator = _scope_decision(_SPEC_B, "measure_basis")
+    if not merged:
+        denominator = denominator.model_copy(update={"chosen": "measure_basis:net label"})
+
+    def dataset(id: str, pin: str, cited: Decision) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure", cited.slot],
+            measure="aid",
+            entities=[Entity(name="Kenya", role="recipient")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    plan = Plan(
+        question="US health aid as a share of US aid",
+        decisions=[decision(), numerator, denominator],
+        evidence_requirements=[
+            dataset("health_aid", _SPEC_A, numerator),
+            dataset("total_aid", _SPEC_B, denominator),
+        ],
+    )
+
+    rows = [d for d in shown_decisions(plan) if d.scope is not None]
+    ids = [choice_id(plan, row) for row in rows]
+    if merged:
+        assert ids == ["health_aid:measure_basis"]
+        (row,) = rows
+        assert chosen_scope_decision(plan, "health_aid:measure_basis") == row
+        assert listed_together(plan, row.slot) == (numerator, denominator)
+    else:
+        assert ids == ["health_aid:measure_basis", "total_aid:measure_basis"]
+        assert [chosen_scope_decision(plan, id) for id in ids] == [numerator, denominator]
+
+
+@pytest.mark.parametrize(
+    ("measure", "named"),
+    [
+        ("health gross disbursements", "health"),
+        ("Gross disbursements", "Gross disbursements"),
+    ],
+    ids=["basis-words-dropped", "basis-words-alone-kept"],
+)
+def test_a_measure_reads_without_its_basis_words_unless_they_are_all_it_says(
+    measure: str, named: str
+) -> None:
+    basis = _scope_decision(_SPEC_A, "measure_basis").model_copy(
+        update={"options": ("gross disbursements, current USD", "net disbursements")}
+    )
+
+    assert _basis_free(measure, basis) == named
 
 
 def _one_requirement_compiled_plan(

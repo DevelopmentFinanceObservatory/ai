@@ -2740,6 +2740,24 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     assert pending.step_order == ("step_a",)
     assert pending.step_labels == {}
     assert (pending.questions, pending.legacy) == ((), False)
+    assert pending.caveats == ()
+
+
+def test_a_turns_choice_baseline_and_a_plans_caveats_reload_on_another_instance() -> None:
+    """The labels `plan.approved` names as `changed_from` and the caveats it
+    carries are durable, so an approve answered on another instance states
+    them."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+    state.pending["int_1"] = studio_state._PendingInterrupt(
+        adk_id="adk_1", kind="plan", caveats=("The share's sides count different providers.",)
+    )
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+
+    studio_state._apply_delta(reloaded, studio_state._serialize_durable(state))
+
+    assert reloaded.turn_choice_baseline == state.turn_choice_baseline
+    assert reloaded.pending["int_1"].caveats == state.pending["int_1"].caveats
 
 
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:

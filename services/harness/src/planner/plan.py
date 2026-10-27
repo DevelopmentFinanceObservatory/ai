@@ -652,6 +652,10 @@ class DecisionScope(StrictModel):
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
 
 
+# How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`).
+DecisionCaveat = Literal["providers_differ", "derived_whole"]
+
+
 class Decision(_Choice):
     """One methodological choice the plan makes explicit."""
 
@@ -667,6 +671,15 @@ class Decision(_Choice):
     # form and its `plan_revision`.
     scope: Annotated[DecisionScope | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda scope: scope is None
+    )
+    # Set only on a decision `propose_plan` writes for a choice that qualifies
+    # the answer, whose `rationale` says how: a calculation whose inputs count
+    # different providers (`providers_differ`) or a total compiled from its
+    # part (`derived_whole`) (`submission.service._provider_difference_decisions`,
+    # `_whole_decisions`). Absent from `DecisionDraft`, so the planner never
+    # sets it.
+    caveat: Annotated[DecisionCaveat | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda caveat: caveat is None
     )
 
     @model_validator(mode="after")
@@ -782,6 +795,18 @@ class DecisionDraft(_Choice):
             "requirements citing it. Empty when it is a rationale only."
         ),
     )
+
+
+class WholeOf(StrictModel):
+    """The part a dataset requirement is the whole of: that part's own dataset with one scope axis left open.
+
+    `propose_plan` compiles the whole from the part's pin, with the slot the
+    part's choice on `axis` binds unbound and every other choice held, and
+    pins the requirement to it (`submission.service._declared_wholes`).
+    """
+
+    part: Identifier = Field(description="The dataset requirement this one is the whole of.")
+    axis: Literal["sector"] = Field(description="The scope the whole leaves open.")
 
 
 # The compiler writes a pinned requirement's retrieval, and which column a
@@ -906,6 +931,16 @@ class DatasetRequirement(TaggedModel):
             "total by sector is split by, as is a ranking of which sectors received the most. "
             "Adds a role named for the dimension, which a rank's axis or an aggregate's "
             "group_by 'breakdown' reads. Needs stat_vars 'separate'."
+        ),
+    )
+    # Left out of every dump while unset, as `Entity.members` is.
+    whole_of: Annotated[WholeOf | None, HASHED_WHEN_SET] = Field(
+        default=None,
+        exclude_if=lambda whole_of: whole_of is None,
+        description=(
+            "Set on a share's total that is its part over every sector, as all US aid is "
+            "for US health aid: counted from the part's own dataset on the same providers, "
+            "with no search."
         ),
     )
 
@@ -1189,6 +1224,14 @@ class ComparisonRequirement(TaggedModel):
         return self
 
 
+# What `accept_provider_difference` means to the planner, on each calculation
+# that divides or adds its inputs (`submission.service._PROVIDER_ALIGNED`).
+ACCEPT_PROVIDER_DIFFERENCE = (
+    "Set only when the user asks for inputs counting different providers' spending, as "
+    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
+)
+
+
 class SumOfRequirement(TaggedModel):
     """Two single-series results added together, at each period both report.
 
@@ -1210,6 +1253,12 @@ class SumOfRequirement(TaggedModel):
     )
     left: RequirementSide = Field(description="One of the two series added together.")
     right: RequirementSide = Field(description="The series added to `left`.")
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @model_validator(mode="after")
     def _sides_read_different_requirements(self) -> SumOfRequirement:
@@ -1358,6 +1407,12 @@ class ShareOfRequirement(TaggedModel):
             "total, 'pooled' divides every entity by one total summed across the population."
         ),
     )
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @property
     def pools_its_own_axis(self) -> bool:
@@ -1424,6 +1479,12 @@ class QuotientRequirement(TaggedModel):
             "The denominator's name for the same entities, so each divides by its own "
             "counterpart: the role they state there, or 'country' where they state none."
         ),
+    )
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
     )
 
     @model_validator(mode="after")
@@ -2206,6 +2267,49 @@ def _check_reads_resolve(requirements_by_id: Mapping[str, EvidenceRequirement]) 
     cycle = _find_cycle(dict(requirements_by_id))
     if cycle is not None:
         raise ValueError(f"evidence requirements do not form a DAG; cycle: {list(cycle)!r}")
+
+
+def _check_wholes_name_their_parts(
+    requirements_by_id: Mapping[str, EvidenceRequirement],
+) -> None:
+    """Reject a `whole_of` that cannot be compiled from its part (`whole_of_fault`)."""
+    for requirement in requirements_by_id.values():
+        if isinstance(requirement, DatasetRequirement) and (
+            fault := whole_of_fault(requirement, requirements_by_id)
+        ):
+            raise ValueError(fault)
+
+
+def whole_of_fault(
+    whole: DatasetRequirement, requirements_by_id: Mapping[str, EvidenceRequirement]
+) -> str | None:
+    """Why the `whole_of` `whole` states cannot be compiled from its part, `None` when
+    it can or `whole` states none.
+
+    The whole is compiled from the part's pin with only the part's scope
+    widened, so the part is another dataset requirement, itself no whole,
+    and the whole counts the part's parties.
+    """
+    if whole.whole_of is None:
+        return None
+    part_id = whole.whole_of.part
+    part = requirements_by_id.get(part_id)
+    if not isinstance(part, DatasetRequirement) or part_id == whole.id:
+        return (
+            f"{whole.id!r} states whole_of part {part_id!r}, which is not another dataset "
+            "requirement of this plan"
+        )
+    if part.whole_of is not None:
+        return (
+            f"{whole.id!r} states whole_of part {part_id!r}, which is a whole itself; name the "
+            "part both are counted from"
+        )
+    if {*whole.entities, *whole.across} != {*part.entities, *part.across}:
+        return (
+            f"{whole.id!r} is the whole of {part_id!r}, counted from its dataset for the same "
+            "parties, so it states the same entities and `across`"
+        )
+    return None
 
 
 def _check_requirement_graph(
@@ -3011,9 +3115,9 @@ def repinned(
     and `source_exclude`, and `source_code` unless `exact_codes`, the codes
     `spec_id` is exactly (`exact_codes`), hold it. Discovery checks a pin
     against a stated source and searches again by it when they differ, so a
-    pin a scope switch (`harness.graph.switch`) or a share's whole compiled
-    from its part (`submission.service._share_wholes`) chose would otherwise
-    be searched back to the dataset it replaced.
+    pin a scope switch (`harness.graph.switch`) or `propose_plan`'s alignment
+    (`submission.service._aligned_bases`) chose would otherwise be searched
+    back to the dataset it replaced.
     """
     update: dict[str, Any] = {
         "source_spec_id": spec_id,
@@ -4067,6 +4171,7 @@ class Plan(StrictModel):
             if uncited:
                 raise ValueError(f"no evidence requirement cites the decisions {uncited!r}")
         _check_reads_resolve({r.id: r for r in self.evidence_requirements})
+        _check_wholes_name_their_parts({r.id: r for r in self.evidence_requirements})
         _check_first_years(self)
         split = split_of(self)
         if split.first_year_unknown:

@@ -671,9 +671,19 @@ def test_a_dropped_entry_states_the_option_asked_for_and_why_in_text_and_structu
     ]
 
 
-def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option() -> (
-    None
-):
+@pytest.mark.parametrize(
+    ("cause", "because"),
+    [
+        ("axis_absent", "this answer has no provider choice"),
+        ("cause_from_a_later_release", "Search could not apply it [cause_from_a_later_release]"),
+    ],
+    ids=["axis-absent", "unknown-cause"],
+)
+def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option(
+    cause: str, because: str
+) -> None:
+    """A cause this release has no words for says only that Search could not
+    apply the entry, never that it conflicts with another choice."""
     spec = _scope_spec()
     spec["resolved"]["scope_choices"]["dropped_entries"] = [
         {
@@ -683,7 +693,7 @@ def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_se
                 "provenance": "carried",
                 "origin": {"kind": "choice", "choice_id": "earlier:provider"},
             },
-            "cause": "axis_absent",
+            "cause": cause,
         }
     ]
 
@@ -691,7 +701,7 @@ def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_se
 
     assert (
         "Scope choice provider not applied: asked for provider:inclusive (carried), "
-        "because this answer has no provider choice."
+        f"because {because}."
     ) in render_digest(envelope).splitlines()
     dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
     assert dropped[0]["served"] is None
