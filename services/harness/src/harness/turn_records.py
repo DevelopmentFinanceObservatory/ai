@@ -64,6 +64,7 @@ from harness.scope_choices import (
     ScopeChoice,
     ServedScope,
     ShapeBinding,
+    block_dataset,
 )
 from harness.tool_contracts import requested_range, series_description
 
@@ -1338,6 +1339,10 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
     stated is not the one the part's choice on that axis holds. Then the
     part is named by Search's label for its block (`_served_name`), unquoted,
     or by Search's sentence for the pin when the block yields no label.
+
+    A part with no words of its own, or none left to name it by, is named
+    by what its block measures (`_served_name`, else `measure_label`), else
+    by the title of the dataset it counts from, and never by its spec_id.
     """
     scope = reading.scope
     assert scope is not None
@@ -1351,8 +1356,24 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
         for entry in stated
     )
     if repinned or contradicted:
-        return _served_name(block) or reading.sentence or str(reading.spec_id)
-    return f'"{reading.text or reading.sentence or reading.spec_id}"'
+        return _served_name(block) or reading.sentence or _unworded_name(block)
+    words = reading.text or reading.sentence
+    return f'"{words}"' if words else _unworded_name(block)
+
+
+def _unworded_name(block: Mapping[str, Any] | None) -> str:
+    """A part's name with none of its own words: what `block` measures, else the title of
+    the dataset it counts from, else "these figures"."""
+    resolved = (block or {}).get("resolved") or {}
+    measure = resolved.get("measure_label")
+    ref, title = block_dataset(block)
+    return (
+        _served_name(block)
+        or (measure if isinstance(measure, str) and measure else None)
+        or title
+        or (ref.rsplit("/", 1)[-1] if ref else None)
+        or "these figures"
+    )
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:

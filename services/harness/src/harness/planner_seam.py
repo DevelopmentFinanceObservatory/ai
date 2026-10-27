@@ -1433,10 +1433,8 @@ def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
             continue
         pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
         reading = readings.get(pin)
-        name = part_name(reading, blocks.get(pin)) if reading is not None else None
-        # `part_name` falls back to the spec_id, which no reader reads.
-        if name is not None and name != pin:
-            names[requirement.id] = name
+        if reading is not None:
+            names[requirement.id] = part_name(reading, blocks.get(pin))
     return plan_display.plan_words(plan, names=names)
 
 

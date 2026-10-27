@@ -35,6 +35,7 @@ from harness.turn_records import (
     chip_kept,
     loose_match_notes,
     open_prices,
+    part_name,
     render_readings,
     scope_chips,
 )
@@ -672,6 +673,40 @@ def test_a_reading_keeps_its_parts_scope_choices_and_a_reading_without_stores_no
     assert SearchReading.model_validate_json(json.dumps(dumped)) == reading
     assert dumped["scope"]["base"] == _scoped_part()["scope"]["base"]
     assert "scope" not in unscoped.model_dump(mode="json")
+
+
+@pytest.mark.parametrize("repinned", [False, True], ids=["searched", "compiled-again"])
+@pytest.mark.parametrize(
+    ("block", "name"),
+    [
+        pytest.param(
+            {"resolved": {"shape": {"label": "gross disbursements (health)"}}},
+            "gross disbursements (health)",
+            id="measure",
+        ),
+        pytest.param(
+            {"resolved": {"facets": {"provenance": {"label": "OECD DAC1"}}}},
+            "OECD DAC1",
+            id="dataset-title",
+        ),
+    ],
+)
+def test_a_part_with_no_words_of_its_own_is_named_by_what_it_counts_never_its_spec_id(
+    repinned: bool, block: dict[str, Any], name: str
+) -> None:
+    """A reading with no question text and no sentence, as Search answered it or
+    compiled again from a choice, is named by what its block measures, else by its
+    dataset's title, in the "Counted as" line and every sentence naming it."""
+    part = {**_scoped_part(), "variable": None}
+    if repinned:
+        part["scope"]["entries"][0]["origin"] = {"kind": "choice", "choice_id": "c"}
+    reading = SearchReading.from_part(part)
+    assert (reading.text, reading.sentence) == (None, None)
+
+    named = part_name(reading, block)
+
+    assert named == name
+    assert str(reading.spec_id) not in named
 
 
 def test_each_scope_choice_renders_one_line_that_sheds_its_label_with_the_detail() -> None:

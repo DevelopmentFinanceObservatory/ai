@@ -1524,16 +1524,20 @@ async def compile_whole(
     scope = part_scope(part_pin, block)
     slot = sector_slot(scope) if scope is not None else None
 
-    def underivable(reason: str) -> dict[str, object]:
+    def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
         return share_whole_underivable(
             step_id=realignment.step_id,
             whole_id=realignment.requirement_id,
             part_spec_id=part_pin,
             reason=reason,
+            cause=cause,
         )
 
     if source is None or block is None or scope is None or slot is None:
-        return underivable(f"Search offers no sector choice on {part_pin} to count every sector of")
+        return underivable(
+            f"Search offers no sector choice on {part_pin} to count every sector of",
+            "no_sector_choice",
+        )
     identity = copy.deepcopy(scope.base.identity)
     for held in identity.get("slots") or ():
         if held.get("property") == slot:

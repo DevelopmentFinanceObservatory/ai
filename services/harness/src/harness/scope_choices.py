@@ -31,7 +31,7 @@ line's words for reason codes, the ones the search digest uses
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal, NamedTuple, get_args
 
 from common.composite import manifest_components, year_spans, years_of
 from data_mcp.scope import (
@@ -53,6 +53,25 @@ ProviderScope = Literal["bilateral", "inclusive", "contributions"]
 DroppedCode = Literal["carried_choice_not_applied", "stated_choice_not_applied"]
 
 YearSpan = tuple[int, int]
+
+
+class BlockDataset(NamedTuple):
+    """The dataset a spec block counts from, as its `resolved.facets.provenance` names it:
+    `ref` (`provenance/OECDDAC1`) and `title` ("OECD DAC1"), each `None` when unstated."""
+
+    ref: str | None
+    title: str | None
+
+
+def block_dataset(block: Mapping[str, Any] | None) -> BlockDataset:
+    """The dataset `block`, a spec block, counts from (`BlockDataset`)."""
+    facets = ((block or {}).get("resolved") or {}).get("facets") or {}
+    provenance = facets.get("provenance") or {}
+    ref, title = provenance.get("ref"), provenance.get("label")
+    return BlockDataset(
+        ref if isinstance(ref, str) and ref else None,
+        title if isinstance(title, str) and title else None,
+    )
 
 
 def option_axis(option_id: str) -> str:
