@@ -47,6 +47,7 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlanDecision,
     PlanOperation,
     PlanProposed,
     PlanRequirement,
@@ -82,6 +83,7 @@ EVENT_FIXTURES = {
     "event-12-done.json": Done,
     "event-13-elicitation-skippable.json": ElicitationRequest,
     "event-14-elicitation-questions.json": ElicitationRequest,
+    "event-15-suggestions-apply-choice.json": Suggestions,
 }
 
 REQUEST_FIXTURES = {
@@ -97,6 +99,7 @@ REQUEST_FIXTURES = {
     "request-10-cancel.json": CancelRequest,
     "request-11-turn-seeded.json": TurnRequest,
     "request-12-interrupt-answers.json": InterruptResponse,
+    "request-13-turn-apply-choice.json": TurnRequest,
 }
 
 
@@ -345,6 +348,67 @@ def test_a_plan_proposed_without_the_new_fields_still_validates() -> None:
     assert all(step.args is None for step in frame.steps)
 
 
+_SCOPE_ROW: dict[str, Any] = {
+    "id": "scope_sector_spec_a",
+    "question": "Which sector codes the figures count.",
+    "chosen": "health (CRS 120)",
+    "reason": "The user's question asked for health (CRS 120).",
+    "resolved_by": "user",
+    "alternatives": ["health incl. population and reproductive health", "health (CRS 120)"],
+    "choice_id": "spec_base:sector",
+    "active_option_id": "sector:120",
+    "options": [
+        {"option_id": "sector:120+130", "label": "health incl. population", "status": "available"},
+        {
+            "option_id": "sector:120",
+            "label": "health (CRS 120)",
+            "status": "partial",
+            "reason": "imputed multilateral aid covers only some years",
+            "years": [[2011, 2024]],
+        },
+    ],
+}
+
+
+def test_a_plan_proposed_carries_a_scope_decision_with_its_choice_and_options() -> None:
+    raw = _load("event-03-plan-proposed.json")
+    raw["decisions"].append(_SCOPE_ROW)
+
+    raw["actions"].append("switch")
+    raw["moved"] = [
+        {
+            "choice_id": "spec_base:region",
+            "from_label": "Africa incl. regional buckets",
+            "to_label": "Africa's countries only",
+            "reason": "Regional buckets apply only to a summed region.",
+        }
+    ]
+
+    frame = STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+    assert isinstance(frame, PlanProposed)
+    assert frame.model_dump(mode="json", exclude_unset=True) == raw
+    assert all(d.choice_id is None for d in frame.decisions[:-1])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"choice_id": None},
+        {"active_option_id": None},
+        {"options": None},
+        {"active_option_id": "sector:999"},
+        {"options": [{**_SCOPE_ROW["options"][0], "status": "maybe"}]},
+    ],
+    ids=["no-choice", "no-active", "no-options", "active-not-offered", "unknown-status"],
+)
+def test_a_scope_decision_missing_or_misstating_a_member_is_refused(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        PlanDecision.model_validate({**_SCOPE_ROW, **change})
+
+
 def test_studio_frame_adapter_still_discriminates_plan_proposed() -> None:
     frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-03-plan-proposed.json"))
 
@@ -406,6 +470,114 @@ def test_an_interrupt_payload_must_be_text() -> None:
     # shape, the one member that differs.
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python({**answer, "payload": {"spec_id": "spec_1"}})
+
+
+_CHIP = {
+    "kind": "turn.request",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "apply_choice": {
+        "choice_id": "spec_base:sector",
+        "option_id": "sector:120",
+        "turn": 1,
+        "spec_id": "spec_pin",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"message": "health aid"}, id="with-message"),
+        pytest.param({"apply_choice": None}, id="neither-message-nor-chip"),
+        pytest.param(
+            {"component_ref": {"component_id": "cmp_1", "intent": "follow_up"}}, id="with-card"
+        ),
+        pytest.param({"apply_choice": {"choice_id": "spec_base:sector"}}, id="without-option"),
+        pytest.param(
+            {"apply_choice": {**_CHIP["apply_choice"], "choice_id": ""}}, id="empty-choice"
+        ),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "turn"}},
+            id="without-turn",
+        ),
+        pytest.param({"apply_choice": {**_CHIP["apply_choice"], "turn": 0}}, id="turn-zero"),
+        pytest.param(
+            {"apply_choice": {k: v for k, v in _CHIP["apply_choice"].items() if k != "spec_id"}},
+            id="without-reading",
+        ),
+    ],
+)
+def test_a_chip_comes_alone_with_its_choice_option_and_origin(change: dict[str, Any]) -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_CHIP)
+
+    assert isinstance(accepted, TurnRequest)
+    assert accepted.apply_choice is not None and accepted.message == ""
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_CHIP, **change})
+
+
+_SWITCH = {
+    "kind": "interrupt.response",
+    "schema_version": 1,
+    "conversation_id": "conv_x",
+    "interrupt_id": "plan_1",
+    "decision": "switch",
+    "choice_id": "spec_base:sector",
+    "option_id": "sector:120+130",
+    "plan_revision": "rev_1",
+}
+
+
+def test_a_switch_names_its_choice_option_and_plan_revision() -> None:
+    accepted = STUDIO_REQUEST_ADAPTER.validate_python(_SWITCH)
+
+    assert isinstance(accepted, InterruptResponse)
+    assert (accepted.decision, accepted.choice_id, accepted.option_id, accepted.plan_revision) == (
+        "switch",
+        "spec_base:sector",
+        "sector:120+130",
+        "rev_1",
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"choice_id": None}, id="switch-without-choice"),
+        pytest.param({"option_id": None}, id="switch-without-option"),
+        pytest.param({"plan_revision": None}, id="switch-without-revision"),
+        pytest.param({"option_id": ""}, id="switch-with-empty-option"),
+        pytest.param({"decision": "approve"}, id="approve-with-switch-members"),
+        pytest.param(
+            {"decision": "amend", "payload": "x", "choice_id": None}, id="amend-with-some"
+        ),
+    ],
+)
+def test_switch_members_come_together_and_only_with_switch(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python({**_SWITCH, **change})
+
+
+@pytest.mark.parametrize(
+    ("decision", "accepted"),
+    [("approve", True), ("amend", False), ("reject", False)],
+)
+def test_only_an_approve_may_name_the_plan_revision_alone(decision: str, accepted: bool) -> None:
+    body = {
+        **_SWITCH,
+        "decision": decision,
+        "choice_id": None,
+        "option_id": None,
+        "payload": "x" if decision == "amend" else None,
+    }
+    if accepted:
+        parsed = STUDIO_REQUEST_ADAPTER.validate_python(body)
+        assert isinstance(parsed, InterruptResponse)
+        assert parsed.plan_revision == "rev_1"
+    else:
+        with pytest.raises(ValidationError):
+            STUDIO_REQUEST_ADAPTER.validate_python(body)
 
 
 _ANSWER = {

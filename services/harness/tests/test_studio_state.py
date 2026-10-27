@@ -79,7 +79,7 @@ from planner.workflow import SelectedSource
 from . import drawn_cards
 from .resolved_revision import resolved_revision
 from .sqlite_session import sqlite_session_service
-from .test_turn_records import _top_donors
+from .test_turn_records import _scoped_part, _top_donors
 
 CONVERSATION = "conv_01test0000"
 
@@ -1788,6 +1788,29 @@ async def test_the_ledger_stores_a_turns_blocks_only_when_the_turn_closes(sessio
     resumed.close_turn(final_text="The top donor was the United States.")
 
     assert resumed.turns[-1]["specs"] == {used: blocks[used]}
+
+
+async def test_a_readings_scope_choices_survive_the_turns_close_and_a_reload(
+    session_service,
+) -> None:
+    """A later turn on another instance reads the scope choices a search stored,
+    which its searches carry."""
+    scoped = SearchReading.from_part(_scoped_part())
+    store_a = StudioStore(session_service, app_name="app")
+    state = await store_a.create("principal", CONVERSATION)
+    state.begin_turn()
+    state.turn_user_message = "health aid to Africa, CRS 120 alone"
+    state.turn_readings = [scoped.model_dump(mode="json")]
+    state.close_turn(final_text="Health aid to Africa was $1.2bn.")
+    await store_a.save("principal", CONVERSATION)
+
+    loaded = await StudioStore(session_service, app_name="app").load("principal", CONVERSATION)
+
+    assert loaded is not None
+    ledger = loaded.prior_ledger_state()
+    assert ledger is not None
+    (reading,) = (SearchReading.model_validate(stored) for stored in ledger["readings"])
+    assert reading.scope == scoped.scope
 
 
 async def test_round_trip_of_every_durable_field(session_service) -> None:

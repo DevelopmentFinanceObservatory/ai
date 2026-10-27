@@ -6,10 +6,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
-from harness.tool_contracts import graph_envelope
+from data_mcp.digest import _dropped_cause_words
+from data_mcp.search_tool import SearchContext
+from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReasonCode
+from harness.tool_contracts import graph_envelope, reading_facts
+from pydantic import ValidationError
 
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
 
@@ -73,6 +77,108 @@ def test_part_summary_preserves_explicit_comparison_intent(separate: bool | None
         assert summary["separate"] is True
     else:
         assert "separate" not in summary
+
+
+def _scope_choices() -> dict[str, Any]:
+    """A part's `resolved.scope_choices` as dfo-apis writes it."""
+    return json.loads((_DATA_MCP_FIXTURES / "scope_choices_us_health_africa.json").read_text())
+
+
+def test_a_stored_reading_holds_the_parts_scope_choices_and_the_model_sees_none() -> None:
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = _scope_choices()
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert PartScope.model_validate(scope) == PartScope.model_validate(_scope_choices())
+    # The identities stay as Search wrote them, so a switch posts them back unchanged.
+    assert scope["base"] == _scope_choices()["base"]
+    assert scope["compiled"]["identity"] == _scope_choices()["compiled"]["identity"]
+    shown = {key: value for key, value in summary.items() if key != "spec_block"}
+    assert "scope" not in shown
+    assert "scope_choices" not in json.dumps(shown)
+
+
+def test_a_field_search_adds_to_scope_choices_is_ignored_and_never_stored() -> None:
+    """A field a later dfo-apis release adds, on the record or inside an
+    option, leaves the part's scope choices readable and out of the stored
+    reading, which a strict read still takes back."""
+    added = _scope_choices()
+    added["rule_digest"] = "r1"
+    added["choices"][0]["options"][0]["availability"]["note"] = "new"
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    scope = reading_facts(part["spec"])["scope"]
+
+    assert scope == PartScope.model_validate(_scope_choices()).model_dump(mode="json")
+    assert PartScope.model_validate(scope) == PartScope.from_search(added)
+    with pytest.raises(ValidationError):
+        PartScope.model_validate(added)
+
+
+def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it() -> None:
+    """A later dfo-apis release adds an axis, a reason code, a component role and
+    a dropped entry's code. The record stays readable: the choice and entry on the
+    unknown axis are left out, the unknown reason code reads as none, the role is
+    kept as written, and the dropped entry's code follows its provenance."""
+    added = _scope_choices()
+    unknown_option = {
+        "option_id": "channel:ngo",
+        "label": "through NGOs",
+        "binding": {"kind": "provider", "scope": "bilateral"},
+        "availability": {"status": "available", "detail": {}},
+    }
+    added["choices"].append(
+        {
+            "id": f"{added['id']}:channel",
+            "axis": "channel",
+            "rule": "test_channel",
+            "provenance": "explicit",
+            "active": "channel:ngo",
+            "options": [unknown_option],
+        }
+    )
+    unknown_entry = {
+        "axis": "channel",
+        "option_id": "channel:ngo",
+        "provenance": "explicit",
+        "origin": {"kind": "text", "text": "NGOs", "start": 0, "end": 4},
+    }
+    added["entries"].append(unknown_entry)
+    added["choices"][2]["options"][1]["availability"]["code"] = "netting_withdrawn"
+    added["compiled"]["components"] = [{"role": "pooled", "identity": {}}]
+    added["dropped_entries"] = [
+        {"entry": added["entries"][0], "code": "entry_superseded", "cause": "superseded"},
+        {"entry": unknown_entry, "cause": "axis_absent"},
+    ]
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    stored = reading_facts(part["spec"])["scope"]
+
+    assert stored is not None
+    scope = PartScope.model_validate(stored)
+    assert [choice.axis for choice in scope.choices] == ["sector", "region", "measure_basis"]
+    assert [entry.axis for entry in scope.entries] == ["sector", "region"]
+    assert scope.choices[2].options[1].availability.code is None
+    assert [component.role for component in scope.compiled.components] == ["pooled"]
+    assert [(d.entry.axis, d.code) for d in scope.dropped_entries] == [
+        ("sector", "stated_choice_not_applied")
+    ]
+
+
+def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unreadable = _scope_choices()
+    del unreadable["base"]
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = unreadable
+
+    assert reading_facts(part["spec"])["scope"] is None
+    assert any("spec_1" in record.getMessage() for record in caplog.records)
 
 
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:
@@ -386,6 +492,39 @@ def test_a_part_summary_says_a_set_is_read_as_its_published_total(
     (summary,) = graph_envelope({"parts": [part]})["part_digests"]
 
     assert summary.get("group_readings") == readings
+
+
+@pytest.mark.parametrize(
+    ("alternatives", "offered"),
+    [
+        (
+            [{"label": "net disbursements", "axis": "what", "definition": {"spec_id": "spec_n"}}],
+            {"alternatives": [{"spec_id": "spec_n", "label": "net disbursements"}]},
+        ),
+        # Net and gross are both published, but the basis convention settles which one
+        # answers, so search lists no basis sibling and the part offers no count to ask.
+        (
+            [{"label": "constant prices", "axis": "unit", "definition": {"spec_id": "spec_c"}}],
+            {"other_prices": [{"spec_id": "spec_c", "label": "constant prices"}]},
+        ),
+        ([], {}),
+    ],
+    ids=["basis-sibling", "convention-settled-basis", "no-sibling"],
+)
+def test_a_part_summary_offers_a_count_only_when_search_lists_a_basis_sibling(
+    alternatives: list[dict[str, Any]], offered: dict[str, Any]
+) -> None:
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "measure_label": "gross disbursements",
+        "alternative_measures": alternatives,
+    }
+
+    (summary,) = graph_envelope({"parts": [part]})["part_digests"]
+
+    assert summary.get("alternatives") == offered.get("alternatives")
+    assert summary.get("other_prices") == offered.get("other_prices")
+    assert ("counted_as" in summary) is bool(offered)
 
 
 def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None:
@@ -858,3 +997,43 @@ def test_a_declined_answer_carries_its_reason_in_plain_words() -> None:
         "Search read this question as asking for a judgement and naming no data to show."
     )
     assert out_of_scope["scope_place"] is None
+
+
+_ENTRY = {
+    "axis": "sector",
+    "option_id": "sector:120",
+    "provenance": "carried",
+    "concept": "health",
+    "origin": {"kind": "choice", "choice_id": "spec_1:sector"},
+}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({**_ENTRY, "concept": ""}, id="empty-concept"),
+        pytest.param(
+            {**_ENTRY, "origin": {"kind": "choice", "choice_id": "c" * 201}}, id="long-id"
+        ),
+        pytest.param(
+            {**_ENTRY, "origin": {"kind": "text", "text": "net", "start": -1, "end": 3}},
+            id="negative-offset",
+        ),
+        pytest.param({**_ENTRY, "option_id": f"sector:{'1' * 200}"}, id="long-option"),
+    ],
+)
+def test_an_entry_search_context_refuses_is_one_a_scope_record_refuses(
+    entry: dict[str, Any],
+) -> None:
+    """A scope entry the harness reads is one it can carry to a later search."""
+    with pytest.raises(ValidationError):
+        SearchContext(carried_entries=[entry])
+    with pytest.raises(ValidationError):
+        ScopeEntry.model_validate(entry)
+
+
+def test_a_dropped_entry_and_a_basis_line_word_each_reason_code_alike() -> None:
+    """The search digest's words for a dropped entry's cause and the basis line's
+    words for a reason code are the same for every reason code."""
+    for code in get_args(ScopeReasonCode):
+        assert _dropped_cause_words(code, axis="sector", availability={}) == REASON_COPY[code]

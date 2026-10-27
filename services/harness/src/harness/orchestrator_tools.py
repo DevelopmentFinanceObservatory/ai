@@ -72,7 +72,7 @@ from compiler.sources import (
 )
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
-from data_mcp.search_tool import SearchPart
+from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
@@ -91,6 +91,7 @@ from planner.plan import (
     MAX_ASK_CHARS,
     MAX_PLAN_ASKS,
     AskBreakdown,
+    SessionState,
     earlier_block,
     recorded_identity,
 )
@@ -119,6 +120,7 @@ from harness.chart_binding import (
     select_binding_ok,
     top_members,
 )
+from harness.conversation import current_user_message
 from harness.dfo_faq import (
     CANNOT_DESCRIBE_DFO,
     DfoFaqUnavailable,
@@ -139,6 +141,7 @@ from harness.graph.state import (
     DescribedFrame,
     PendingAsk,
     PendingPlan,
+    conversation_readings,
     count_call,
     frame_store_ref,
     pending_action,
@@ -154,6 +157,7 @@ from harness.reply_figures import (
     with_coordinates,
 )
 from harness.rolling_cards import named_year
+from harness.scope_choices import PartScope, carried_entries
 from harness.studio_state import RecallPart, RecallRefusedError
 from harness.tool_contracts import (
     HarnessCode,
@@ -1457,8 +1461,17 @@ def _empty_outcome(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
-    """Add a `fetch` result to every stored search reading of its spec_id.
+def _attach_fetch(
+    tool_context: ToolContext,
+    result: dict[str, Any],
+    *,
+    served: Mapping[str, Any] | None = None,
+    args: Mapping[str, Any] | None = None,
+) -> None:
+    """Add a `fetch` result to every stored search reading of its spec_id,
+    with `served`, how `get_data` says the frame was counted
+    (`harness.scope_choices.served_facts`), when it said, and `args`, the
+    call's arguments that shape its frame (`FetchReading.args`).
 
     A spec_id that no reading holds as its own, but one offered as a
     candidate, as another count (`SearchReading.alternatives`) or as the
@@ -1504,9 +1517,11 @@ def _attach_fetch(tool_context: ToolContext, result: dict[str, Any]) -> None:
             update |= {"sibling_of": link, "counted_as": counted_as}
         searches.append(chosen.model_copy(update=update))
     state[ORCHESTRATOR_SEARCHES_KEY] = [
-        (reading.with_fetch(result) if reading.spec_id == spec_id else reading).model_dump(
-            mode="json"
-        )
+        (
+            reading.with_fetch(result, served=served, args=args)
+            if reading.spec_id == spec_id
+            else reading
+        ).model_dump(mode="json")
         for reading in searches
     ]
 
@@ -1592,11 +1607,44 @@ def _fetch_key(args: Mapping[str, Any], block: Mapping[str, Any] | None) -> str:
 
 class Resolver(Protocol):
     """Stands in for data-mcp `search`: the question and its search parts ->
-    the search digest (`harness.tool_contracts.resolver_digest`)."""
+    the search digest (`harness.tool_contracts.resolver_digest`).
+
+    `context` is the conversation a parsed search is made in
+    (`_search_context`); a raw-text search is sent none.
+    """
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]: ...
+
+
+def _search_context(state: SessionState) -> SearchContext:
+    """The conversation a parsed search is made in: the user's message for the
+    turn (`current_user_message`) and the entries carried from the scope
+    choices of every earlier search, the earlier turns' readings
+    (`ORCHESTRATOR_PRIOR_LEDGER_KEY`) and then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`), oldest first (`carried_entries`), less
+    the axes the planner's own words settled on a reading (`planner_axes`).
+    """
+    scoped = [reading for reading in conversation_readings(state) if reading.get("scope")]
+    scopes = [PartScope.model_validate(reading["scope"]) for reading in scoped]
+    planner = {
+        scope.compiled.spec_id: reading["planner_axes"]
+        for scope, reading in zip(scopes, scoped, strict=True)
+        if reading.get("planner_axes")
+    }
+    return SearchContext(
+        user_message=current_user_message.get() or None,
+        carried_entries=[
+            entry.model_dump(mode="json", exclude_none=True)
+            for entry in carried_entries(scopes, planner=planner)
+        ],
+    )
 
 
 def build_orchestrator_tools(
@@ -1741,9 +1789,12 @@ def build_orchestrator_tools(
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
         with other counts under `alternatives` and the same count in other
-        prices under `other_prices`, each with its spec_id and label, and
-        lists the `source_codes` of the indicators it found, each with the
-        publisher that issues it when search names one. And
+        prices under `other_prices`, each with its spec_id and label. A
+        definite part whose prices the user left open over several years
+        lists `open_prices`, the options of a prices question, the prices
+        search read first. A definite part lists the `source_codes` of the
+        indicators it found, each with the publisher that issues it when
+        search names one. And
         `skills`: background a result calls for, each by id and
         description, loaded with get_skill, and `more_skills`, how many
         more the result names.
@@ -1763,10 +1814,15 @@ def build_orchestrator_tools(
         if spent:
             return spent
         parts = parts or []
-        raw_text = as_text or not parts
-        wire_parts = [] if raw_text else [part.model_dump(exclude_none=True) for part in parts]
         try:
-            digest = await resolver(question=query, parts=wire_parts, raw_text=raw_text)
+            if as_text or not parts:
+                digest = await resolver(question=query, parts=[], raw_text=True)
+            else:
+                digest = await resolver(
+                    question=query,
+                    parts=[part.model_dump(exclude_none=True) for part in parts],
+                    context=_search_context(tool_context.state),
+                )
         except ResolverError as exc:
             # The service's own code and retry mode word the user's line for
             # the failed search.
@@ -1836,6 +1892,15 @@ def build_orchestrator_tools(
         spent = _spend(tool_context, "fetch")
         if spent:
             return spent
+        # The arguments that shape the frame, kept on the reading so a chip
+        # fetches the switched reading the same way.
+        shaped: dict[str, Any] = {}
+        if scope is not None:
+            shaped["scope"] = scope.model_dump(exclude_none=True)
+        if stat_vars is not None:
+            shaped["stat_vars"] = stat_vars
+        if breakdown is not None:
+            shaped["breakdown"] = breakdown.model_dump()
         args: dict[str, Any] = {"spec_id": spec_id}
         if scope is not None:
             args["scope"] = scope.model_dump(exclude_none=True)
@@ -1886,7 +1951,7 @@ def build_orchestrator_tools(
                     "same_data_as": earlier["spec_id"],
                 }
             )
-            _attach_fetch(tool_context, found)
+            _attach_fetch(tool_context, found, served=earlier.get("served"), args=shaped)
             return found
         try:
             data = await executor(tool="get_data", args=args)
@@ -1961,9 +2026,10 @@ def build_orchestrator_tools(
                 "summary": found["summary"],
                 **_period_note_entry(found),
                 "frames": [entry["frame"] for entry in found["frames"]],
+                **({"served": data["served"]} if data.get("served") else {}),
             }
             tool_context.state[_FETCHES_KEY] = fetches
-        _attach_fetch(tool_context, found)
+        _attach_fetch(tool_context, found, served=data.get("served"), args=shaped)
         return found
 
     def _canvas_series(tool_context: ToolContext) -> list[str]:

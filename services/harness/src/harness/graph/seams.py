@@ -108,3 +108,23 @@ class PlannerModel(Protocol):
         conversation_digest: dict[str, Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]: ...
+
+    async def revise(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Amend `prior_plan` with `evidence_requirements` and compile it again, calling no model.
+
+        The graph's `switch` node revises the plan this way once a switched
+        scope choice has its own spec_id: each requirement re-pinned to it is
+        restated, and every decision the pins state follows its pin.
+        `inherits` maps each new spec_id to the one it replaces. Answers as
+        `__call__` does: the revised plan, `PENDING_APPROVAL`, with its
+        summary, or a refusal. A refusal may leave the seam's own drafting
+        state changed, which the caller restores.
+        """
+        ...

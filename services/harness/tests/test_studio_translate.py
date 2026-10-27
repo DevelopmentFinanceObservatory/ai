@@ -10,9 +10,10 @@ mark `recommended`) needs no real event to exercise.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from compiler.surface import ProgressCallback, ToolCallResult, ToolSchema
@@ -25,9 +26,12 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.workflow import START, Workflow, node
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
+from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
-from harness.graph.state import APPROVE_INTERRUPT, STEP_PROGRESS_KEY
+from harness.graph.state import APPROVE_INTERRUPT, ORCHESTRATOR_PRIOR_LEDGER_KEY, STEP_PROGRESS_KEY
+from harness.orchestrator_tools import _search_context
 from harness.planner_seam import PlannerSeamError
+from harness.scope_choices import PartScope, carried_entries
 from harness.scripted_plan import scripted_plan
 from harness.seeds import SEED_STEP_TOOL
 from harness.sentences import DECLINE_REASONS, failure_sentence
@@ -47,20 +51,38 @@ from harness.studio_translate import (
     _Translator,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
-from harness.wire import CompositionActor, PlanAsk, StepStatus
+from harness.wire import (
+    CompositionActor,
+    MessageComplete,
+    MessageDelta,
+    PlanAsk,
+    PlanDecisionOption,
+    StepStatus,
+)
 from planner.agent import COMBINATION_OPTIONS
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
+    PinSource,
     Plan,
+    SessionState,
     UnsupportedOperation,
     plan_revision,
 )
 from planner.workflow import ToolId
+from submission.service import scope_choice_decisions
 
 from .failure_text import classed_sentence, is_user_sentence
 from .resolved_revision import resolved_revision
 from .test_planner_seam import ScriptedPlannerLlm, _seam
+from .test_turn_records import (
+    _EXAMPLE_LINE,
+    _example_part,
+    _fetched,
+    _scoped_part,
+    _served_identity,
+    _switchable_scope,
+)
 
 
 async def _dummy_executor(*, tool: str, args: dict[str, object]) -> dict[str, object]:
@@ -259,6 +281,108 @@ def test_a_plan_proposed_ask_without_asks_leaves_them_unset() -> None:
     (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, args)
 
     assert frame.asks is None
+
+
+def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> None:
+    """US health aid to Africa: each scope choice with another option to
+    switch to is a card row naming the choice, its active option and every
+    option, with why one out of reach is; a planner decision carries none."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    dataset = next(r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement))
+    pin = "spec_" + "e" * 32
+    scope = _switchable_scope()
+    grant = scope["choices"][2]["options"][2]
+    grant["availability"] = {
+        "status": "partial",
+        "years": [[2011, 2024]],
+        "code": "imputed_coverage",
+        "detail": {},
+    }
+    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
+    scoped = scope_choice_decisions({pin: PinSource(block=block, settled=True)})[pin]
+    cited = dataset.model_copy(
+        update={"decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped))}
+    )
+    plan = Plan.model_validate(
+        {
+            **plan.model_dump(),
+            "decisions": [*plan.decisions, *scoped],
+            "evidence_requirements": [
+                cited if r.id == dataset.id else r for r in plan.evidence_requirements
+            ],
+        }
+    )
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan)}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    rows = {row.id: row for row in frame.decisions}
+    planners = [rows[d.slot] for d in plan.decisions if d.scope is None and d.slot in rows]
+    assert planners
+    assert all(row.choice_id is row.options is row.active_option_id is None for row in planners)
+    sector, region, basis = (rows[d.slot] for d in scoped)
+    base = _switchable_scope()["id"]
+    assert (sector.choice_id, sector.active_option_id, sector.chosen, sector.resolved_by) == (
+        f"{base}:sector",
+        "sector:120",
+        "health (CRS 120)",
+        "user",
+    )
+    assert sector.reason == "The user's question asked for health (CRS 120)."
+    assert (region.active_option_id, region.resolved_by) == ("region:members_only", "user")
+    assert basis.options == [
+        PlanDecisionOption(
+            option_id="measure_basis:gross",
+            label="gross disbursements, current USD",
+            status="available",
+        ),
+        PlanDecisionOption(
+            option_id="measure_basis:net",
+            label="net disbursements",
+            status="unavailable",
+            reason="it conflicts with another choice",
+        ),
+        PlanDecisionOption(
+            option_id="measure_basis:grant_equivalent",
+            label="grant equivalents",
+            status="partial",
+            reason="imputed multilateral aid covers only some years",
+            years=[(2011, 2024)],
+        ),
+    ]
+    assert (basis.reason, basis.resolved_by) == ("Search's default for this question.", "default")
+    assert frame.actions == ["approve", "amend", "reject", "switch"]
+    assert frame.moved is None
+    # What a switch on this card may name: every shown choice, with its
+    # active option and each option's status.
+    choices = translator._conversation.pending[frame.interrupt_id].choices
+    assert set(choices) == {sector.choice_id, region.choice_id, basis.choice_id}
+    assert choices[basis.choice_id].active == "measure_basis:gross"
+    assert {k: o.status for k, o in choices[basis.choice_id].options.items()} == {
+        "measure_basis:gross": "available",
+        "measure_basis:net": "unavailable",
+        "measure_basis:grant_equivalent": "partial",
+    }
+
+
+def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_switch() -> None:
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    moved = {
+        "choice_id": "spec_" + "e" * 32 + ":region",
+        "from_label": "Africa incl. regional buckets",
+        "to_label": "Africa's countries only",
+        "reason": "Regional buckets apply only to a summed region.",
+    }
+    payload = {**plan.model_dump(mode="json"), "revision": plan_revision(plan), "moved": [moved]}
+    translator = _translator()
+
+    (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    assert frame.moved is not None
+    assert [entry.model_dump() for entry in frame.moved] == [moved]
+    assert frame.actions == ["approve", "amend", "reject"]
+    assert translator._conversation.pending[frame.interrupt_id].choices == {}
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:
@@ -1494,3 +1618,89 @@ def test_a_new_planner_run_after_a_refused_one_starts_its_own_line() -> None:
         ("Reworking the draft", StepStatus.COMPLETE),
         ("Working on a plan", StepStatus.RUNNING),
     ]
+
+
+def _answered(readings: list[dict[str, Any]]) -> tuple[_Translator, list[Any]]:
+    """A translator that closed a turn answering with `readings` and the frames it sent."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    translator._conversation.turn_user_message = "total health aid from the US to Africa"
+    translator._conversation.turn_readings = readings
+    translator._final_text = "The US gave $7.9bn."
+    return translator, translator.finish()
+
+
+@pytest.mark.parametrize("noted", [False, True], ids=["line-alone", "notes-and-line"])
+def test_the_answer_closes_with_the_code_text_and_the_next_turns_history_leaves_it_out(
+    monkeypatch: pytest.MonkeyPatch, noted: bool
+) -> None:
+    """The reply and the stored turn keep the loose-match notes and the basis
+    line the code appends; the digest a later turn's model reads holds the
+    answer alone, so the model has none of that text to restate before the
+    code appends its own."""
+    note = "The series used for health aid is a close match only."
+    monkeypatch.setattr(
+        studio_translate_module, "loose_match_notes", lambda *_, **__: [note] if noted else []
+    )
+    translator, frames = _answered([_fetched(_example_part())])
+    conversation = translator._conversation
+
+    deltas = [frame.text for frame in frames if isinstance(frame, MessageDelta)]
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    digest = conversation.conversation_digest_state()
+
+    notes = f"\n\n{note}" if noted else ""
+    assert complete.text == f"The US gave $7.9bn.{notes}\n\n{_EXAMPLE_LINE}"
+    assert "The US gave $7.9bn." + "".join(deltas) == complete.text
+    assert conversation.turn_final_text == complete.text
+    stored = conversation.turns[-1]
+    assert (stored["assistant"], stored.get("match_notes"), stored["basis_line"]) == (
+        "The US gave $7.9bn.",
+        note if noted else None,
+        _EXAMPLE_LINE,
+    )
+    assert digest is not None
+    assert digest["turns"][-1]["assistant"] == "The US gave $7.9bn."
+    assert "Counted as" not in json.dumps(digest)
+    assert note not in json.dumps(digest)
+
+
+def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line() -> None:
+    unscoped = _fetched({**_example_part(), "scope": None})
+
+    _, frames = _answered([unscoped])
+
+    assert not any(isinstance(frame, MessageDelta) for frame in frames)
+    assert next(f for f in frames if isinstance(f, MessageComplete)).text == "The US gave $7.9bn."
+
+
+def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line() -> None:
+    """A fetch that left out the regional buckets makes the line say so, but
+    the region choice stored is the declared default, which carries nothing: the next search carries the entries of the stored
+    choices, whatever the stored answer says."""
+    part = _scoped_part()
+    region = next(c for c in part["scope"]["choices"] if c["axis"] == "region")
+    region |= {"active": "region:members_and_residuals", "provenance": "default"}
+    reading = _fetched(part, _served_identity(residuals=False))
+    translator, _ = _answered([reading])
+    conversation = translator._conversation
+    scope = PartScope.model_validate(reading["scope"])
+
+    def carried() -> list[dict[str, Any]]:
+        state = {ORCHESTRATOR_PRIOR_LEDGER_KEY: conversation.prior_ledger_state()}
+        context = _search_context(cast("SessionState", state))
+        return [
+            entry.model_dump(mode="json", exclude_none=True) for entry in context.carried_entries
+        ]
+
+    stated = conversation.turns[-1]["basis_line"]
+    with_line = carried()
+    del conversation.turns[-1]["basis_line"]
+
+    assert "Africa's countries only" in stated
+    assert (
+        with_line
+        == carried()
+        == [entry.model_dump(mode="json", exclude_none=True) for entry in carried_entries([scope])]
+    )
+    assert [entry["option_id"] for entry in with_line] == ["sector:120"]

@@ -89,11 +89,12 @@ above that. These are character counts of the brief alone.
 from __future__ import annotations
 
 import contextvars
+import copy
 import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from common.telemetry import current_trace_id
@@ -108,7 +109,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from google.genai import types
-from planner.agent import PROPOSE_PLAN
+from planner.agent import PROPOSE_PLAN, ToolContextSession, declare_ready, with_source_reads
 from planner.operations import OperationKind
 from planner.plan import (
     AMENDMENT_ENTRY_STATE_KEY,
@@ -145,18 +146,28 @@ from planner.plan import (
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
+from submission.service import (
+    ALIGNED_PINS_STATE_KEY,
+    SEARCHED_PINS_STATE_KEY,
+    Proposal,
+    aligned_pins,
+    searched_pins,
+    submit,
+)
+from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import CutCalls, current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY, clear_compile_failures
 from translator.referral import USER_DECIDES
-from translator.tool import Translate, permitted_repair
+from translator.tool import Translate, build_translate, permitted_repair
 
 from harness import plan_display
-from harness.agents import create_planner_with_translator
+from harness.agents import build_tool_surface, create_planner_with_translator
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    store_search,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
@@ -402,6 +413,29 @@ ModelRequestCallback = Callable[[CallbackContext, LlmRequest], LlmResponse | Non
 ModelResponseCallback = Callable[[CallbackContext, LlmResponse], LlmResponse | None]
 
 
+@dataclass(frozen=True)
+class _RevisionSession(ToolContextSession):
+    """The session a revision's proposal is checked against (`PlannerSeam.revise`).
+
+    The user has spoken since the plan it amends was recorded: their switch
+    is the revision. A dataset that replaces one the user picked answering
+    an ask (`inherits`, the new spec_id to the one it replaces) counts as
+    picked too, so the measure decision a pin of it states stays theirs.
+    """
+
+    inherits: Mapping[str, str] = field(default_factory=dict)
+
+    def user_spoke_since(self, version: int) -> bool:
+        """Always: the revision answers the user's own switch."""
+        del version
+        return True
+
+    def elected_spec_ids(self) -> frozenset[str]:
+        """The spec_ids the user picked, and each that replaces one of them."""
+        elected = super().elected_spec_ids()
+        return elected | {new for new, old in self.inherits.items() if old in elected}
+
+
 class PlannerSeam:
     """`harness.graph.seams.PlannerModel`, implemented by `src/planner` and the translation it runs."""
 
@@ -424,10 +458,16 @@ class PlannerSeam:
         # `after_model_callbacks` run before the seam's own, so they see each
         # response as the model answered it, before `drop_thought_parts`
         # replaces one. `evals/planner_entry` runs the served planner this way.
+        # The surface and translation `propose_plan` runs, kept for `revise`,
+        # which records a proposal of its own with no model call.
+        self._surface = surface if surface is not None else build_tool_surface(settings=settings)
+        self._translate = (
+            translate if translate is not None else build_translate(surface=self._surface)
+        )
         self._agent = create_planner_with_translator(
             settings=settings,
             agent_settings=agent_settings,
-            surface=surface,
+            surface=self._surface,
             # The orchestrator states the plan's question in its brief
             # (`harness.graph.state.ORCHESTRATOR_BRIEF_KEY`) before the planner ever
             # runs (see `planner.agent.create_planner_agent`'s own
@@ -444,7 +484,7 @@ class PlannerSeam:
             # name a step.
             reads_user_words=False,
             prefix_cache=prefix_cache,
-            translate=translate,
+            translate=self._translate,
         )
         if model is not None:
             self._agent.model = model
@@ -661,6 +701,7 @@ class PlannerSeam:
             # node's own `NodeRunner` performs on the way to reporting the
             # pause (see `_persist_durable`'s own docstring).
             try:
+                store_aligned_readings(ctx, cast(SessionState, ctx.session.state))
                 self._persist_durable(ctx)
             finally:
                 current_cut_calls.reset(cut_calls_token)
@@ -722,10 +763,11 @@ class PlannerSeam:
             ctx.state[PIN_SOURCES_STATE_KEY] = ctx.session.state[PIN_SOURCES_STATE_KEY]
         # `UNSUPPORTED_STATE_KEY`, `OPTIONAL_DECLINES_STATE_KEY`,
         # `TERMINAL_DECLINES_STATE_KEY`, `REDUCTION_REFUSED_ASKS_STATE_KEY`,
-        # `COMPILE_FAILURES_STATE_KEY` and `AMENDMENT_ENTRY_STATE_KEY` too.
+        # `COMPILE_FAILURES_STATE_KEY`, `AMENDMENT_ENTRY_STATE_KEY`,
+        # `ALIGNED_PINS_STATE_KEY` and `SEARCHED_PINS_STATE_KEY` too.
         # The declines an ask-the-user resume still owes or may make, the
-        # failures it may repeat, and the amendment that opened it are this
-        # entry's own.
+        # failures it may repeat, the amendment that opened it and the pins
+        # compiled for its proposals are this entry's own.
         for key in (
             UNSUPPORTED_STATE_KEY,
             OPTIONAL_DECLINES_STATE_KEY,
@@ -733,9 +775,67 @@ class PlannerSeam:
             REDUCTION_REFUSED_ASKS_STATE_KEY,
             COMPILE_FAILURES_STATE_KEY,
             AMENDMENT_ENTRY_STATE_KEY,
+            ALIGNED_PINS_STATE_KEY,
+            SEARCHED_PINS_STATE_KEY,
         ):
             if key in ctx.session.state:
                 ctx.state[key] = ctx.session.state[key]
+
+    async def revise(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Amend `prior_plan` with `evidence_requirements` and translate it, calling no model.
+
+        `harness.graph.PlannerModel.revise`'s contract. The proposal runs
+        the chain `propose_plan` runs (`submission.service.submit`), reading
+        each first year it needs and compiling each input a calculation needs
+        on another basis or provider scope (`planner.agent.with_source_reads`), then
+        the translation, and the plan is ready when `declare_ready` says so.
+        A dataset requirement re-pinned to another spec_id cites the
+        decisions that pin states and drops those of the one it left, which
+        go with it. The proposal opens its own round count, as a planner
+        entry does. `inherits` maps each new spec_id to the one it
+        replaces (`_RevisionSession`).
+
+        Returns `{"plan", "summary"}` once the revised plan awaits approval,
+        or `{"refused": ...}` as `__call__` refuses, the revision recording
+        a version or not; the caller restores what it keeps.
+        """
+        state = cast(SessionState, ctx.state)
+        prior = Plan.model_validate(prior_plan)
+        save_plan(state, prior)
+        save_plan_rounds(state, 0)
+        view = _RevisionSession(tool_context=ctx, inherits=dict(inherits))
+        proposal = Proposal(
+            evidence_requirements=list(evidence_requirements), amends_version=prior.version
+        )
+        recorded = await with_source_reads(
+            lambda: submit(
+                view,
+                proposal,
+                question_fixed=True,
+                reads_user_words=False,
+                proposer=PROPOSE_PLAN_PROPOSER,
+            ),
+            state=state,
+            surface=self._surface,
+        )
+        store_aligned_readings(ctx, state)
+        if recorded.get("outcome") != Outcome.OK.value:
+            return self._refused(recorded)
+        answer = declare_ready({**recorded, "translation": await self._translate(ctx)}, ctx)
+        plan = load_plan(state)
+        if "summary" not in answer or plan is None:
+            blocked = answer.get("submission") or answer.get("translation")
+            return self._refused(
+                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer)
+            )
+        return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
     # -- one agent run ------------------------------------------------------
 
@@ -1528,6 +1628,69 @@ def _readings_ledger(readings: Sequence[Mapping[str, Any]]) -> RenderedReadings:
         newest_per_spec_id([SearchReading.model_validate(reading) for reading in readings]),
         budget=_READINGS_BUDGET,
     )
+
+
+def store_aligned_readings(ctx: Context, planner_state: SessionState) -> None:
+    """Store each pin compiled to put a calculation's inputs on one basis or provider scope as a reading of the conversation.
+
+    `planner_state` holds the pins (`submission.service.aligned_pins`), each
+    with Search's answer as a digest. A pin no reading of the conversation
+    names yet joins this turn's readings through `store_search`, as the
+    `switch` node stores a switched one: under the words of the reading it
+    was compiled from, keeping that reading's asked, held-open and share
+    roles, with its compiled scope on `SearchReading.scope`. Its block marks
+    the axes it was compiled on as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
+    so the reading reads it in `SearchReading.planner_axes` and
+    `harness.scope_choices.carried_entries` leaves that entry out.
+    Later turns then find it among the readings, and a switch on its
+    plan-card row finds its scope (`harness.graph.switch`).
+
+    Each dataset Search settled on for a calculation's input the planner
+    pinned none for (`submission.service.searched_pins`) joins them the same
+    way, under the words it was searched as, with the parties the search
+    named and held open, its block marking every axis those words settled
+    as the planner's.
+    """
+    held = aligned_pins(planner_state)
+    searched = [pin for pin in searched_pins(planner_state) if pin.spec_id and pin.digest]
+    if not held and not searched:
+        return
+    readings = [
+        SearchReading.model_validate(reading)
+        for reading in (
+            *(ctx.state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+            *(ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+        )
+    ]
+    stored = {reading.spec_id for reading in readings}
+    for pin in held:
+        if pin.spec_id in stored:
+            continue
+        origin = next(
+            (reading for reading in reversed(readings) if reading.spec_id == pin.origin), None
+        )
+        digest = copy.deepcopy(pin.digest)
+        if origin is not None:
+            (part,) = digest["part_digests"]
+            part["variable"] = origin.text
+        store_search(
+            cast(SessionState, ctx.state),
+            digest,
+            asked=[origin.asked_roles] if origin is not None else (),
+            held_open=[origin.open_roles] if origin is not None else (),
+            share_sides=[origin.share_over] if origin is not None else (),
+        )
+        stored.add(pin.spec_id)
+    for found in searched:
+        if found.spec_id in stored or found.digest is None:
+            continue
+        store_search(
+            cast(SessionState, ctx.state),
+            found.digest,
+            asked=[found.asked_roles],
+            held_open=[found.open_roles],
+        )
+        stored.add(found.spec_id)
 
 
 def _named(readings: Iterable[Mapping[str, Any]]) -> set[str]:

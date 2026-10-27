@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx2
 import pytest
 from analysis_mcp import server as analysis_server
@@ -161,6 +163,19 @@ async def test_lifespan_does_not_touch_the_frame_store_when_no_bucket_is_configu
     could beat a later, better-configured install to the holder."""
     async with server._lifespan(mcp):
         assert frame_store_is_set() is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_lifespan_logs_whether_search_sends_the_conversation_context(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, enabled: bool
+) -> None:
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", str(enabled).lower())
+
+    with caplog.at_level(logging.INFO, logger="data_mcp.server"):
+        async with server._lifespan(mcp):
+            pass
+
+    assert f"search_sends_conversation_context={enabled}" in caplog.text
 
 
 async def test_lifespan_installs_a_durable_frame_store_when_a_bucket_is_configured(

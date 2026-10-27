@@ -13,17 +13,30 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from harness.plan_display import requirement_rows
+from harness.scope_choices import (
+    REASON_COPY,
+    ScopeReasonCode,
+    ServedComponent,
+    ServedRole,
+    ServedScope,
+    served_facts,
+)
 from harness.turn_records import (
     PlanAsk,
     PlanRecord,
+    ScopeChip,
     SearchReading,
     WindowReading,
+    basis_line,
+    chip_kept,
     loose_match_notes,
+    open_prices,
     render_readings,
+    scope_chips,
 )
 from planner.plan import (
     CUT_MARKER,
@@ -620,6 +633,675 @@ def test_reading_reads_the_structured_fields_a_part_adds() -> None:
     assert lines[-1] == "   fetch refused: frame_too_large"
 
 
+def _scoped_part() -> dict[str, Any]:
+    """A definite part carrying the scope choices dfo-apis wrote for it, its
+    active options given readers' labels."""
+    scope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/scope_choices_us_health_africa.json"
+        ).read_text()
+    )
+    labels = {
+        "sector:120": "health, CRS 120 alone",
+        "region:members_only": "Africa's countries only",
+        "measure_basis:gross": "gross disbursements",
+    }
+    for choice in scope["choices"]:
+        for option in choice["options"]:
+            option["label"] = labels.get(option["option_id"], option["label"])
+    return {
+        "variable": "health aid",
+        "status": "definite",
+        "spec_id": scope["compiled"]["spec_id"],
+        "scope": scope,
+    }
+
+
+def test_a_reading_keeps_its_parts_scope_choices_and_a_reading_without_stores_no_key() -> None:
+    reading = SearchReading.from_part(_scoped_part())
+    dumped = reading.model_dump(mode="json")
+    unscoped = SearchReading.from_part({**_scoped_part(), "scope": None})
+
+    assert reading.scope is not None
+    assert [(c.axis, c.active, c.provenance) for c in reading.scope.choices] == [
+        ("sector", "sector:120", "explicit"),
+        ("region", "region:members_only", "carried"),
+        ("measure_basis", "measure_basis:gross", "default"),
+    ]
+    assert SearchReading.model_validate_json(json.dumps(dumped)) == reading
+    assert dumped["scope"]["base"] == _scoped_part()["scope"]["base"]
+    assert "scope" not in unscoped.model_dump(mode="json")
+
+
+def test_each_scope_choice_renders_one_line_that_sheds_its_label_with_the_detail() -> None:
+    reading = SearchReading.from_part(_scoped_part())
+    head = f'"health aid" definite {reading.spec_id}'
+
+    whole = render_readings([reading], budget=10_000).text
+    shed = render_readings([reading, reading], budget=600).text
+
+    assert whole.splitlines()[2:] == [
+        "   scope sector: sector:120 health, CRS 120 alone (explicit; 1 of 1 other options "
+        "available)",
+        "   scope region: region:members_only Africa's countries only (carried; 1 of 1 other "
+        "options available)",
+        "   scope measure_basis: measure_basis:gross gross disbursements (default; 1 of 2 other "
+        "options available)",
+    ]
+    # The oldest reading folds to its head; the other keeps one line per choice, unlabelled.
+    assert shed.splitlines()[1:] == [
+        f"1. {head}",
+        f"2. {head}",
+        "   scope sector: sector:120 (explicit; 1 of 1 other options available)",
+        "   scope region: region:members_only (carried; 1 of 1 other options available)",
+        "   scope measure_basis: measure_basis:gross (default; 1 of 2 other options available)",
+    ]
+
+
+# Reader labels, as dfo-apis writes them, for US health aid to Africa: health as
+# CRS 120 and 130, Africa with its regional buckets, gross disbursements.
+_EXAMPLE_LABELS = {
+    "sector:120+130": "health (CRS 120) and population and reproductive health (CRS 130)",
+    "sector:120": "health (CRS 120)",
+    "region:members_and_residuals": "Africa incl. regional buckets",
+    "region:members_only": "Africa's countries only",
+    "measure_basis:gross": "gross disbursements, current USD",
+    "measure_basis:net": "net disbursements",
+    "measure_basis:grant_equivalent": "grant equivalents",
+}
+_EXAMPLE_LINE = (
+    "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+    "Africa incl. regional buckets · gross disbursements, current USD."
+)
+
+
+def _example_part(variable: str = "health aid", **active: str) -> dict[str, Any]:
+    """`_scoped_part` settled by declared defaults alone: health as CRS 120
+    and 130, Africa with its regional buckets, gross disbursements, each
+    option labelled as `_EXAMPLE_LABELS` says. `active` replaces an axis's
+    active option."""
+    part = _scoped_part()
+    scope = part["scope"]
+    defaults = {
+        "sector": "sector:120+130",
+        "region": "region:members_and_residuals",
+        "measure_basis": "measure_basis:gross",
+    }
+    for choice in scope["choices"]:
+        choice["provenance"] = "default"
+        choice["active"] = active.get(choice["axis"], defaults[choice["axis"]])
+        for option in choice["options"]:
+            option["label"] = _EXAMPLE_LABELS[option["option_id"]]
+    scope["entries"] = []
+    return {**part, "variable": variable, "spec_id": scope["base"]["spec_id"]}
+
+
+def _switchable_scope() -> dict[str, Any]:
+    """The scope choices of `_scoped_part` (health as CRS 120 alone, the
+    user's words; Africa's countries only, carried; gross disbursements by
+    default, net out of reach beside CRS 120 alone), every option labelled as
+    `_EXAMPLE_LABELS` says."""
+    scope = _scoped_part()["scope"]
+    for choice in scope["choices"]:
+        for option in choice["options"]:
+            option["label"] = _EXAMPLE_LABELS[option["option_id"]]
+    return scope
+
+
+def _manifest(identity: dict[str, Any], *, spec_id: str = "spec_served") -> dict[str, Any]:
+    """A `get_data` manifest minted for `identity`, covering 2015 to 2024."""
+    return {
+        "definition": {"schema_version": 1, "spec_id": spec_id, "identity": identity},
+        "coverage": {
+            "rows": 30,
+            "dimensions": [],
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+    }
+
+
+def _served_identity(
+    *,
+    residuals: bool = True,
+    places: list[str] | None = None,
+    netting: str | None = "Gross",
+    **shape: str,
+):
+    """The example part's identity as a fetch served it: with or without the
+    regional bucket, narrowed to `places` when given, on `netting`, and
+    `shape` over its measure."""
+    identity = copy.deepcopy(_example_part()["scope"]["base"]["identity"])
+    if not residuals:
+        identity["entities"]["destination"] = ["country/GHA", "country/KEN"]
+    if places is not None:
+        identity["entities"]["destination"] = places
+    identity["slots"] = [s for s in identity["slots"] if s["property"] != "nettingBasis"]
+    if netting is not None:
+        identity["slots"].append(
+            {"property": "nettingBasis", "binding": {"state": "value", "ref": netting}}
+        )
+    identity["shape"] |= shape
+    return identity
+
+
+def _fetched(part: dict[str, Any], identity: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`part`'s reading after a fetch returned data, served as `identity` when given."""
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"},
+        served=served_facts(_manifest(identity)) if identity is not None else None,
+    )
+    return reading.model_dump(mode="json")
+
+
+def test_a_fetch_keeps_how_its_figures_were_served_on_a_reading_with_scope_choices() -> None:
+    facts = served_facts(_manifest(_served_identity()))
+    assert facts is not None
+    scoped = SearchReading.from_part(_example_part()).with_fetch({"summary": "30"}, served=facts)
+    unscoped = SearchReading.from_part({**_example_part(), "scope": None}).with_fetch(
+        {"summary": "30"}, served=facts
+    )
+
+    assert scoped.fetch is not None
+    assert scoped.fetch.served == ServedScope(
+        spec_id="spec_served",
+        roles=(
+            ServedRole(role="origin", members=1),
+            ServedRole(role="destination", members=2, residuals=("DACAfricaUnallocated",)),
+        ),
+        measured_property="amount",
+        netting_basis="Gross",
+        components=(ServedComponent(role="whole", periods=((2015, 2024),)),),
+    )
+    assert SearchReading.model_validate_json(scoped.model_dump_json()) == scoped
+    assert unscoped.model_dump(mode="json")["fetch"] == {"summary": "30", "refusal_code": None}
+    assert served_facts({"coverage": {}}) is None
+
+
+@pytest.mark.parametrize(
+    ("identity", "line"),
+    [
+        pytest.param(None, _EXAMPLE_LINE, id="no-served-record"),
+        pytest.param(_served_identity(), _EXAMPLE_LINE, id="served-as-chosen"),
+        pytest.param(
+            _served_identity(residuals=False),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa's countries only · "
+            "gross disbursements, current USD.",
+            id="buckets-dropped",
+        ),
+        pytest.param(
+            _served_identity(places=["country/GHA"]),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "gross disbursements, current USD.",
+            id="fetched-one-country-of-the-region",
+        ),
+        pytest.param(
+            _served_identity(netting="Net"),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · net disbursements.",
+            id="served-net",
+        ),
+        pytest.param(
+            _served_identity(netting=None, measured_property="commitment"),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · "
+            "gross disbursements, current USD (the figures served differ from this choice).",
+            id="served-on-no-listed-basis",
+        ),
+    ],
+)
+def test_the_basis_line_states_each_choice_as_the_figures_were_served(
+    identity: dict[str, Any] | None, line: str
+) -> None:
+    assert basis_line([_fetched(_example_part(), identity)], specs={}, plans=[]) == line
+
+
+def test_the_basis_line_states_each_label_as_search_wrote_it() -> None:
+    """The line holds no copy of its own for an option: a label search wrote
+    as the option id is stated as written."""
+    part = _scoped_part()
+    for choice in part["scope"]["choices"]:
+        for option in choice["options"]:
+            option["label"] = option["option_id"]
+
+    assert basis_line([_fetched(part)], specs={}, plans=[]) == (
+        "Counted as: sector:120 · region:members_only · measure_basis:gross."
+    )
+
+
+def test_a_plan_steps_served_record_leaves_the_planners_ledger_text_as_it_was() -> None:
+    """A reading a plan step retrieved keeps its served record for the basis
+    line, and the planner reads it as no fetch reached it."""
+    searched = SearchReading.from_part(_example_part())
+    retrieved = searched.with_served(served_facts(_manifest(_served_identity(residuals=False))))
+    planned = {"sources": [{"spec_id": searched.spec_id}]}
+
+    assert retrieved.fetch is not None and retrieved.fetch.served is not None
+    for budget in (10_000, 200):
+        assert (
+            render_readings([retrieved], budget=budget).text
+            == render_readings([searched], budget=budget).text
+        )
+    assert SearchReading.model_validate_json(retrieved.model_dump_json()) == retrieved
+    assert "Africa's countries only" in (
+        basis_line([retrieved.model_dump(mode="json")], specs={}, plans=[planned]) or ""
+    )
+
+
+def test_the_basis_line_speaks_only_for_parts_with_scope_choices_the_turn_used() -> None:
+    searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
+    refused = SearchReading.from_part(_example_part()).with_fetch({"code": "over_ceiling"})
+    unscoped = _fetched({**_example_part(), "scope": None})
+    planned = {"sources": [{"spec_id": _example_part()["spec_id"]}]}
+
+    assert (
+        basis_line([searched, refused.model_dump(mode="json"), unscoped], specs={}, plans=[])
+        is None
+    )
+    assert basis_line([searched], specs={}, plans=[planned]) == _EXAMPLE_LINE
+
+
+def test_a_fetched_two_choice_reading_offers_a_chip_per_option_search_can_serve() -> None:
+    """Health as CRS 120 alone and gross disbursements give one chip each for
+    CRS 120 and 130 and grant equivalents; net, out of reach beside CRS 120
+    alone, gives none. A reading the turn did not fetch, or a plan step
+    retrieved, offers no chip."""
+    scope = _switchable_scope()
+    scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
+    part = {**_scoped_part(), "scope": scope}
+    searched = SearchReading.from_part(part)
+    facts = served_facts(_manifest(_served_identity()))
+    assert facts is not None
+    planned = searched.with_served(facts)
+
+    chips = scope_chips([_fetched(part)], specs={})
+
+    assert chips == [
+        ScopeChip(
+            label="health (CRS 120) and population and reproductive health (CRS 130)",
+            choice_id=f"{scope['id']}:sector",
+            option_id="sector:120+130",
+            spec_id=searched.spec_id,
+        ),
+        ScopeChip(
+            label="grant equivalents",
+            choice_id=f"{scope['id']}:measure_basis",
+            option_id="measure_basis:grant_equivalent",
+            spec_id=searched.spec_id,
+        ),
+    ]
+    assert scope_chips([searched.model_dump(mode="json")], specs={}) == []
+    assert scope_chips([planned.model_dump(mode="json")], specs={}) == []
+
+
+_TWO_YEARS = {"kind": "range", "start_year": 2015, "end_year": 2020}
+
+
+@pytest.mark.parametrize(
+    ("scopes", "region_chip"),
+    [
+        ([{"window": _TWO_YEARS}], True),
+        ([{"entities": {"destination": ["Ghana", "Kenya"]}}], False),
+        ([{"window": _TWO_YEARS}, {"entities": {"destination": ["Ghana"]}}], False),
+    ],
+    ids=["period-only", "places-named", "places-named-by-a-later-fetch"],
+)
+def test_a_fetch_that_named_its_places_offers_no_region_chip(
+    scopes: list[dict[str, Any]], region_chip: bool
+) -> None:
+    """The chip refetches with each of the answer's fetches, and places one of
+    them names replace the region's members, so a region option would change
+    nothing; the other choices still offer theirs. No served record is needed
+    to tell."""
+    reading = SearchReading.from_part(_scoped_part())
+    for scope in scopes:
+        reading = reading.with_fetch({"summary": "30 observations"}, args={"scope": scope})
+
+    options = [chip.option_id for chip in scope_chips([reading.model_dump(mode="json")], specs={})]
+
+    assert reading.fetch is not None
+    assert [args["scope"] for args in reading.fetch.args] == scopes
+    assert ("region:members_and_residuals" in options) is region_chip
+    assert "sector:120+130" in options
+
+
+def _education_part() -> dict[str, Any]:
+    """`_scoped_part` asked for as education aid, under its own spec_id and base, so its
+    choices are its own."""
+    part = {**_scoped_part(), "variable": "education aid", "spec_id": "spec_edu"}
+    scope = part["scope"]
+    scope["id"] = scope["base"]["spec_id"] = "spec_edu_base"
+    for choice in scope["choices"]:
+        choice["id"] = f"spec_edu_base:{choice['axis']}"
+    return part
+
+
+def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_four() -> None:
+    health = _fetched(_scoped_part())
+    education = _fetched(_education_part())
+
+    chips = scope_chips([health, education], specs={})
+
+    assert [(chip.label.split(":")[0], chip.option_id, chip.spec_id) for chip in chips] == [
+        ('"health aid"', "sector:120+130", health["spec_id"]),
+        ('"education aid"', "sector:120+130", "spec_edu"),
+        ('"health aid"', "region:members_and_residuals", health["spec_id"]),
+        ('"education aid"', "region:members_and_residuals", "spec_edu"),
+    ]
+
+
+def test_a_choice_offers_chips_only_on_its_newest_reading() -> None:
+    """A switch compiled a newer reading of the same choices, and both were
+    fetched. A chip on the older reading would be refused as stale
+    (`stored_choice`), so only the newer reading offers chips, each named as
+    the only part offering them."""
+    older = _fetched(_scoped_part())
+    newer = _fetched({**_scoped_part(), "spec_id": "spec_switched"})
+
+    assert scope_chips([older, newer], specs={}) == scope_chips([newer], specs={})
+
+
+def test_chips_name_their_part_only_when_the_chips_offered_span_several_parts() -> None:
+    """Health offers four chips before education's measure-basis chip, which
+    the cut to four leaves out, so the chips offered name no part."""
+    health = _scoped_part()
+    sector = next(c for c in health["scope"]["choices"] if c["axis"] == "sector")
+    sector["options"].append(
+        {**sector["options"][0], "option_id": "sector:121", "label": "CRS 121"}
+    )
+    education = _education_part()
+    education["scope"]["choices"] = [
+        c for c in education["scope"]["choices"] if c["axis"] == "measure_basis"
+    ]
+
+    chips = scope_chips([_fetched(health), _fetched(education)], specs={})
+
+    assert {chip.spec_id for chip in chips} == {health["spec_id"]}
+    assert [chip.label for chip in chips][1] == "CRS 121"
+
+
+@pytest.mark.parametrize(
+    ("active", "kept"),
+    [("sector:120+130", True), ("sector:120", False)],
+    ids=["kept", "switched-back"],
+)
+def test_the_turn_after_a_chip_reverses_it_only_by_moving_its_choice_back(
+    active: str, kept: bool
+) -> None:
+    """A chip moved health from CRS 120 alone to CRS 120 and 130. The next turn
+    reverses it when its newest reading of that choice is back on CRS 120,
+    and keeps it otherwise, a turn that read no part with the choice included."""
+    part = _scoped_part()
+    scope = part["scope"]
+    scope["choices"][0]["active"] = active
+    applied = {
+        "choice_id": f"{scope['id']}:sector",
+        "option_id": "sector:120+130",
+        "from_option_id": "sector:120",
+    }
+
+    assert chip_kept(applied, [SearchReading.from_part(part).model_dump(mode="json")]) is kept
+    assert chip_kept(applied, []) is True
+
+
+def test_a_plan_reading_a_windowed_copy_uses_the_reading_it_was_copied_from() -> None:
+    """A search over 2024 found the part, and the plan reads 2015 to 2024
+    from a windowed copy of it: the copy's source names the reading it was
+    copied from, so the basis line speaks for that reading."""
+    plan = _plan("guatemala_top_donors")
+    (copy_id,) = (source.spec_id for source in PlanRecord.from_plan(plan).sources)
+    searched = SearchReading.from_part(_example_part()).model_dump(mode="json")
+    origin = _example_part()["spec_id"]
+
+    windowed = PlanRecord.from_plan(plan, windowed_from={copy_id: origin})
+    unmapped = PlanRecord.from_plan(plan)
+
+    assert [source.windowed_from for source in windowed.sources] == [origin]
+    assert "windowed_from" not in unmapped.model_dump(mode="json")["sources"][0]
+    assert (
+        basis_line([searched], specs={}, plans=[windowed.model_dump(mode="json")]) == _EXAMPLE_LINE
+    )
+    assert basis_line([searched], specs={}, plans=[unmapped.model_dump(mode="json")]) is None
+
+
+def test_parts_counted_alike_share_the_basis_line_and_others_each_get_a_clause() -> None:
+    def ghana(**active: str) -> dict[str, Any]:
+        part = _example_part("health aid to Ghana", **active)
+        return {**part, "spec_id": "spec_ghana"}
+
+    alike = [_fetched(_example_part()), _fetched(ghana())]
+    differ = [_fetched(_example_part()), _fetched(ghana(sector="sector:120"))]
+
+    assert basis_line(alike, specs={}, plans=[]) == _EXAMPLE_LINE
+    assert basis_line(differ, specs={}, plans=[]) == (
+        'Counted as: "health aid": health (CRS 120) and population and reproductive health '
+        "(CRS 130) · Africa incl. regional buckets · gross disbursements, current USD; "
+        '"health aid to Ghana": health (CRS 120) · Africa incl. regional buckets · '
+        "gross disbursements, current USD."
+    )
+
+
+def _composite_manifest(identity: dict[str, Any], **periods: list[list[int]]) -> dict[str, Any]:
+    """`_manifest` of a composite frame whose `trace.components` serve each role over its
+    `periods`, shaped as dfo-apis' `materialise.composite.ComponentSummary` writes them."""
+    return _manifest(identity) | {
+        "trace": {
+            "components": [
+                {"role": role, "periods": spans, "dropped_years": [], "rows": 10, "zero_rows": 0}
+                for role, spans in periods.items()
+            ]
+        }
+    }
+
+
+def test_a_fetch_keeps_the_components_of_a_composite_frame() -> None:
+    # Minted by dfo-apis' `tests/datasets_api/test_mint_composite.py` client.
+    manifest = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/mint_composite_kenya_education.json"
+        ).read_text()
+    )
+
+    facts = served_facts(manifest)
+
+    assert facts is not None
+    assert facts["components"] == [
+        {"role": "bilateral", "periods": [[2020, 2021]]},
+        {"role": "imputed", "periods": [[2020, 2021]]},
+    ]
+
+
+_INCLUSIVE = {
+    "id": "spec_choice:provider",
+    "axis": "provider",
+    "rule": "provider_scope",
+    "provenance": "explicit",
+    "active": "provider:inclusive",
+    "options": [
+        {
+            "option_id": "provider:bilateral",
+            "label": "bilateral aid only",
+            "binding": {"kind": "provider", "scope": "bilateral"},
+            "availability": {"status": "available"},
+        },
+        {
+            "option_id": "provider:inclusive",
+            "label": "including imputed multilateral aid",
+            "binding": {"kind": "provider", "scope": "inclusive"},
+            "availability": {
+                "status": "partial",
+                "years": [[2011, 2024]],
+                "code": "imputed_coverage",
+            },
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("choices", "manifest", "line"),
+    [
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], imputed=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE.removesuffix(".")
+            + " · bilateral plus imputed multilateral, 2011 to 2024.",
+            id="stacked",
+        ),
+        pytest.param(
+            [_INCLUSIVE],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], imputed=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE.removesuffix(".")
+            + " · bilateral plus imputed multilateral, 2011 to 2024.",
+            id="stacked-as-the-provider-choice",
+        ),
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(netting="Net"),
+                headline_net=[[2015, 2017]],
+                headline_ge=[[2018, 2024]],
+            ),
+            "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+            "Africa incl. regional buckets · net to 2017, grant equivalents from 2018.",
+            id="headline",
+        ),
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], regional_share=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE,
+            id="a-role-this-release-does-not-read",
+        ),
+    ],
+)
+def test_the_basis_line_states_a_composite_frame_from_its_served_components(
+    choices: list[dict[str, Any]], manifest: dict[str, Any], line: str
+) -> None:
+    part = _example_part()
+    part["scope"]["choices"].extend(copy.deepcopy(choices))
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"}, served=served_facts(manifest)
+    )
+
+    assert basis_line([reading.model_dump(mode="json")], specs={}, plans=[]) == line
+
+
+def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
+    """The spec block Search returns for US ODA counted on `netting`, with
+    the label it names the measure by, as dfo-apis writes it."""
+    label = f"{netting.lower()} disbursements (official development assistance)"
+    return {"spec_id": spec_id, "resolved": {"shape": {"label": label}}}
+
+
+@pytest.mark.parametrize(
+    ("switched", "total_name"),
+    [
+        pytest.param(
+            True, "net disbursements (official development assistance)", id="switched-to-net"
+        ),
+        pytest.param(False, '"ODA gross disbursements"', id="unswitched"),
+    ],
+)
+def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_serves(
+    switched: bool, total_name: str
+) -> None:
+    """A share of US aid to health: a switch of the total's basis to net
+    re-pins it, and the reading keeps the words written for the gross pin.
+    Search's label for the net pin names it instead. An unswitched total
+    keeps its words."""
+    total = _example_part("ODA gross disbursements", measure_basis="measure_basis:gross")
+    total["spec_id"] = "spec_total"
+    if switched:
+        basis = next(c for c in total["scope"]["choices"] if c["axis"] == "measure_basis")
+        basis["active"] = "measure_basis:net"
+        total["scope"]["entries"] = [
+            {
+                "axis": "measure_basis",
+                "option_id": "measure_basis:net",
+                "provenance": "explicit",
+                "origin": {"kind": "choice", "choice_id": basis["id"]},
+            }
+        ]
+    specs = {"spec_total": _total_block("spec_total", "Net" if switched else "Gross")}
+    readings = [_fetched(_example_part(sector="sector:120")), _fetched(total)]
+
+    assert basis_line(readings, specs=specs, plans=[]) == (
+        'Counted as: "health aid": health (CRS 120) · Africa incl. regional buckets · '
+        f"gross disbursements, current USD; {total_name}: health (CRS 120) and population "
+        "and reproductive health (CRS 130) · Africa incl. regional buckets · "
+        + ("net disbursements." if switched else "gross disbursements, current USD.")
+    )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "code", "why"),
+    [
+        ("carried", None, "an earlier choice did not apply here"),
+        ("explicit", "stated_choice_not_applied", "the option you asked for is not available here"),
+    ],
+    ids=["carried", "stated"],
+)
+def test_a_partial_option_and_a_dropped_entry_say_why(
+    provenance: str, code: str | None, why: str
+) -> None:
+    part = _example_part()
+    scope = part["scope"]
+    basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
+    basis["options"][0]["availability"] = {
+        "status": "partial",
+        "years": [[2011, 2024]],
+        "code": "imputed_coverage",
+        "detail": {},
+    }
+    origin = (
+        {"kind": "choice", "choice_id": "earlier:region"}
+        if provenance == "carried"
+        else {"kind": "text", "text": "African countries", "start": 0, "end": 17}
+    )
+    dropped = {
+        "entry": {
+            "axis": "region",
+            "option_id": "region:members_only",
+            "provenance": provenance,
+            "origin": origin,
+        },
+        "cause": "no_summed_region",
+    }
+    scope["dropped_entries"] = [dropped if code is None else {**dropped, "code": code}]
+
+    assert basis_line([_fetched(part)], specs={}, plans=[]) == (
+        "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
+        "Africa incl. regional buckets · gross disbursements, current USD (imputed "
+        f"multilateral aid covers only some years: 2011-2024) · {why}: Africa's countries only."
+    )
+
+
+# Every reason code `resolved.scope_choices` names.
+_CONTRACT_REASON_CODES = {
+    "provider_not_offered",
+    "imputed_coverage",
+    "basis_not_published",
+    "residuals_need_summed_region",
+    "conflicts_with",
+    "carried_choice_not_applied",
+    "stated_choice_not_applied",
+    "option_not_covered",
+}
+
+
+def test_every_reason_code_has_copy() -> None:
+    assert set(REASON_COPY) == set(get_args(ScopeReasonCode)) == _CONTRACT_REASON_CODES
+    assert all(REASON_COPY.values())
+
+
 def test_a_reading_with_no_text_heads_its_line_with_its_status() -> None:
     """A seed's reading has no question text, so its head names no quoted text."""
     reading = SearchReading.from_part(
@@ -982,3 +1664,91 @@ def test_plan_record_names_the_requirements_the_model_wrote(decision: Any) -> No
     assert [(warning.code, warning.requirement_id) for warning in record.warnings] == [
         ("window_short", "debt")
     ]
+
+
+_USD = {"basis": "fallback", "ref": "CurrencyUSD", "label": "US Dollar", "currency": "USD"}
+_CONSTANT_OFFER = {"spec_id": "spec_c", "label": "constant prices"}
+_SEVERAL_YEARS = {"start": 2015, "end": 2023, "source": "requested"}
+
+
+@pytest.mark.parametrize(
+    ("window", "unit", "unit_request", "other_prices", "options"),
+    [
+        (
+            _SEVERAL_YEARS,
+            _USD,
+            None,
+            [],
+            [{"label": "current prices"}, {"label": "constant prices"}],
+        ),
+        (
+            _SEVERAL_YEARS,
+            _USD,
+            None,
+            [_CONSTANT_OFFER],
+            [{"label": "current prices"}, _CONSTANT_OFFER],
+        ),
+        (
+            _SEVERAL_YEARS,
+            {
+                **_USD,
+                "basis": "bound",
+                "request_basis": {"currency": "bound", "prices": "fallback"},
+            },
+            {"currency": "EUR", "prices": "current"},
+            [],
+            [{"label": "current prices"}, {"label": "constant prices"}],
+        ),
+        ({"start": 2023, "end": 2023, "source": "requested"}, _USD, None, [_CONSTANT_OFFER], []),
+        (
+            _SEVERAL_YEARS,
+            {
+                "basis": "bound",
+                "ref": "ConstantUSD_2022",
+                "label": "Constant US Dollar",
+                "request_basis": {"currency": "bound", "prices": "bound", "base_year": "bound"},
+            },
+            {"currency": "USD", "prices": "constant", "base_year": 2022},
+            [],
+            [],
+        ),
+        (
+            _SEVERAL_YEARS,
+            {**_USD, "basis": "bound", "request_basis": {"currency": "bound", "prices": "bound"}},
+            {"currency": "USD", "prices": "current"},
+            [],
+            [],
+        ),
+        (_SEVERAL_YEARS, {"basis": "fallback", "ref": "Year", "label": "Years"}, None, [], []),
+        (_SEVERAL_YEARS, {"basis": "fallback", "ref": "ConstantUSD_2022"}, None, [], []),
+        (None, _USD, None, [], []),
+    ],
+    ids=[
+        "several-years-unstated",
+        "several-years-unstated-with-offer",
+        "currency-stated-prices-unstated",
+        "one-year",
+        "stated-constant",
+        "stated-current",
+        "not-money",
+        "native-constant",
+        "no-window",
+    ],
+)
+def test_prices_are_open_over_several_years_of_current_money_the_user_left_unpriced(
+    window: dict[str, Any] | None,
+    unit: dict[str, Any],
+    unit_request: dict[str, Any] | None,
+    other_prices: list[dict[str, str]],
+    options: list[dict[str, str]],
+) -> None:
+    identity: dict[str, Any] = {}
+    if unit_request is not None:
+        identity["facets"] = {"unit": {"state": "value", "request": unit_request}}
+    block = {
+        "spec_id": "spec_a",
+        "definition": {"identity": identity},
+        "resolved": {"facets": {"unit": unit}},
+    }
+
+    assert open_prices(block, window=window, other_prices=other_prices) == options

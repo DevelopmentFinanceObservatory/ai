@@ -47,10 +47,12 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import _api_client, errors, types
-from harness.graph.state import APPROVE_INTERRUPT
+from harness.graph.state import APPROVE_INTERRUPT, store_search
+from harness.orchestrator_tools import _search_context
 from harness.plan_display import shown_decisions
 from harness.planner_seam import _PLANNER_BRANCH, PlannerSeam, _reading_pin_sources
 from harness.prefix_cache import PrefixCache
+from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.studio_state import _turn_identities
 from harness.turn_records import RecordedIdentity, _periods
 from planner import agent as planner_agent
@@ -61,6 +63,7 @@ from planner.agent import (
     declare_ready,
     planner_instruction,
     read_full_history,
+    with_source_reads,
 )
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
 from planner.operations import (
@@ -111,12 +114,16 @@ from planner.plan import (
     UnsupportedOperation,
     WindowedPin,
     clear_unsupported,
+    current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
     is_dataset,
+    is_scope_choice,
+    is_search_pin,
     load_plan,
     load_plan_rounds,
     open_window,
+    pin_slot_moves,
     pin_sources,
     plan_revision,
     record_optional_decline,
@@ -125,6 +132,7 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    scope_choice_slot,
     search_pin_slot,
     split_of,
     stored_plan,
@@ -168,6 +176,8 @@ from submission.service import (
     _source_ref_unpicked,
     first_year_reads,
     identity_on_record,
+    scope_choice_decisions,
+    searched_pins,
 )
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -189,12 +199,24 @@ from translator.referral import (
 )
 from translator.tool import Translate, authored_answer, build_translate
 
+from ..basis_alignment import (
+    HEALTH,
+    TOTAL,
+    TOTAL_BILATERAL,
+    TOTAL_GROSS,
+    TOTAL_GROSS_BILATERAL,
+    BasisCompiles,
+    ProviderCompiles,
+    basis_block,
+    provider_block,
+)
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..decision_drafts import drafts
 from ..session_events import response_event
 from ..split_plan import split_draft
 from ..test_studio_translate import _translator as _studio_translator
+from ..test_turn_records import _switchable_scope
 
 # The `decision`, `requirement`, `derived_requirement` and `requirements`
 # fixtures, from conftest.py. Annotated structurally rather than imported: a
@@ -4447,6 +4469,1035 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
         synthesized.slot
     ]
     assert synthesized.slot in amended.requirement(dataset.id).decision_ids
+
+
+def _scoped_gross(*, basis_alternative: str = "available") -> dict[str, Any]:
+    """`_FRANCE_KENYA` carrying the US health to Africa scope choices
+    (`_switchable_scope`), its grant-equivalent basis `basis_alternative`."""
+    scope = _switchable_scope()
+    basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
+    grant = next(o for o in basis["options"] if o["option_id"] == "measure_basis:grant_equivalent")
+    grant["availability"] = {"status": basis_alternative, "detail": {}}
+    if basis_alternative == "unavailable":
+        grant["availability"] |= {"code": "basis_not_published"}
+    return {**_FRANCE_KENYA, "resolved": {**_FRANCE_KENYA["resolved"], "scope_choices": scope}}
+
+
+@pytest.mark.parametrize(
+    ("basis_alternative", "axes"),
+    [
+        ("available", ["sector", "region", "measure_basis"]),
+        ("partial", ["sector", "region", "measure_basis"]),
+        ("unavailable", ["sector", "region"]),
+    ],
+)
+def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
+    decision: DecisionFactory,
+    requirements: RequirementPair,
+    basis_alternative: str,
+    axes: list[str],
+) -> None:
+    """A pin of a source whose part carries scope choices gets one decision
+    per choice with another option that can be served, after the measure
+    decision and cited by the requirement pinning it: the user's where their
+    words or an earlier choice settled it, the planner's where Search's
+    default did. A basis choice whose only other options are out of reach
+    states none."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross(basis_alternative=basis_alternative))
+    dataset, derived = requirements
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[dataset.model_copy(update={"source_spec_id": _GROSS}), derived],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    scoped = [d for d in plan.decisions if is_scope_choice(d)]
+    assert [d.slot for d in plan.decisions] == [
+        "measure",
+        search_pin_slot(_GROSS),
+        *(scope_choice_slot(_GROSS, axis) for axis in axes),
+    ]
+    assert [(d.chosen, d.resolved_by) for d in scoped] == [
+        ("health (CRS 120)", ResolvedBy.USER),
+        ("Africa's countries only", ResolvedBy.USER),
+        ("gross disbursements, current USD", ResolvedBy.PLANNER_DEFAULT),
+    ][: len(axes)]
+    base = _switchable_scope()["id"]
+    assert [d.scope.choice_id for d in scoped if d.scope] == [f"{base}:{axis}" for axis in axes]
+    assert [d.active_option_id for d in scoped] == [
+        "sector:120",
+        "region:members_only",
+        "measure_basis:gross",
+    ][: len(axes)]
+    assert plan.requirement(dataset.id).decision_ids == (
+        "measure",
+        search_pin_slot(_GROSS),
+        *(d.slot for d in scoped),
+    )
+    assert set(scoped) <= set(shown_decisions(plan))
+
+
+def test_a_restated_requirement_citing_only_its_scope_decisions_still_cites_the_measure(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """A correction round restates the pinned requirement citing the scope
+    decisions it was shown and not the measure decision: a scope decision
+    states no measure, so the measure citation is added back."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross())
+    dataset, derived = requirements
+    pinned = dataset.model_copy(update={"source_spec_id": _GROSS})
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[pinned, derived],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    scope_slots = tuple(scope_choice_slot(_GROSS, axis) for axis in ("sector", "region"))
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=[
+            pinned.model_copy(update={"decision_ids": ("measure", *scope_slots)}),
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert search_pin_slot(_GROSS) in plan.requirement(dataset.id).decision_ids
+
+
+def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
+    decision: DecisionFactory, requirements: RequirementPair
+) -> None:
+    """With the model's decisions and the measure decision one short of
+    `MAX_PLAN_DECISIONS`, the first scope choice is written and the others
+    are neither written nor cited, and the plan is recorded."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_block(ctx, _scoped_gross())
+    dataset, derived = requirements
+    own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 2)]
+    cited = tuple(d.slot for d in own)
+
+    result = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts(own),
+        evidence_requirements=[
+            dataset.model_copy(update={"source_spec_id": _GROSS, "decision_ids": cited}),
+            derived.model_copy(update={"decision_ids": cited[:1]}),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert len(plan.decisions) == MAX_PLAN_DECISIONS
+    assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [
+        scope_choice_slot(_GROSS, "sector")
+    ]
+    assert plan.requirement(dataset.id).decision_ids[-2:] == (
+        search_pin_slot(_GROSS),
+        scope_choice_slot(_GROSS, "sector"),
+    )
+
+
+def test_a_repin_at_the_decision_cap_states_the_new_pins_scope_decision(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """A plan at `MAX_PLAN_DECISIONS` re-pins its US total from the grant-equivalent
+    count to the gross one. The old pin's decisions lose their last citation and
+    go, so the new pin's basis decision is written and cited in their place."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+        basis_block(TOTAL_GROSS, narrow=False, active="measure_basis:gross"),
+    )
+    own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 2)]
+    total = requirement(
+        id="total",
+        decision_ids=tuple(d.slot for d in own),
+        measure="US total ODA",
+        entities=[Entity(name="United States", role="donor")],
+        source_spec_id=TOTAL,
+    )
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts(own),
+        evidence_requirements=[total],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert len(plan.decisions) == MAX_PLAN_DECISIONS
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=[total.model_copy(update={"source_spec_id": TOTAL_GROSS})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    basis = scope_choice_slot(TOTAL_GROSS, "measure_basis")
+    assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [basis]
+    assert basis in plan.requirement("total").decision_ids
+
+
+def test_a_windowed_pin_takes_its_scope_decisions_to_the_copy(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """A pin over other years than its search's moves to a windowed copy,
+    and its scope decisions move with it, under the copy's slots."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    block = _scoped_gross()
+    _show_block(ctx, block)
+    dataset = requirement(
+        id="aid",
+        measure="official development assistance",
+        entities=[Entity(name="France", role="donor"), Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source_spec_id=_GROSS,
+    )
+    token = current_recorded_identity.set(_turn_identities({_GROSS: block}, ()).get)
+    try:
+        result = tools["propose_plan"].func(
+            question="q",
+            answer_mode=AnswerMode.SERIES,
+            decisions=drafts([decision()]),
+            evidence_requirements=[dataset],
+            tool_context=ctx,
+        )
+    finally:
+        current_recorded_identity.reset(token)
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (copy,) = windowed_pins(ctx.state).values()
+    scoped = [d for d in plan.decisions if is_scope_choice(d)]
+    assert [d.slot for d in scoped] == [
+        scope_choice_slot(copy.spec_id, axis) for axis in ("sector", "region", "measure_basis")
+    ]
+    assert {d.slot for d in scoped} <= set(plan.requirement("aid").decision_ids)
+
+
+def test_a_scope_decision_moved_to_a_copy_over_another_period_keeps_its_choice() -> None:
+    """A windowed copy of a pin takes the scope decisions of the pin under
+    the copy's slots, cited under them, with the same choice and options."""
+    sector = scope_choice_decisions({_GROSS: PinSource(block=_scoped_gross(), settled=True)})[
+        _GROSS
+    ][0]
+    citing = DatasetRequirement(
+        id="aid",
+        decision_ids=(sector.slot,),
+        measure="aid",
+        entities=[Entity(name="Africa", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source_spec_id=_GROSS,
+    )
+
+    (moved,), (moved_requirement,) = _repinned(
+        [sector],
+        [citing],
+        decision_pins={sector.slot: SPEC},
+        requirement_pins={citing.id: SPEC},
+        slots=pin_slot_moves(_GROSS, SPEC),
+    )
+
+    assert is_scope_choice(moved)
+    assert (moved.slot, moved.fixes) == (
+        scope_choice_slot(SPEC, "sector"),
+        DecisionFixes(source_spec_id=SPEC),
+    )
+    assert (moved.scope, moved.options, moved.chosen) == (
+        sector.scope,
+        sector.options,
+        sector.chosen,
+    )
+    assert moved_requirement.decision_ids == (moved.slot,)
+    assert not is_search_pin(moved)
+
+
+# --- a calculation's inputs on one measure basis ---
+
+
+def _share_of_health(
+    propose: Callable[..., Any],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    *,
+    total: str | None = TOTAL,
+    **intent: Any,
+) -> Any:
+    """Propose US health aid as a share of the US total, pinning `HEALTH` and `total`."""
+
+    def dataset(requirement_id: str, measure: str, pin: str | None) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    return propose(
+        question="What share of US aid goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total net ODA", total),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+        tool_context=ctx,
+        **intent,
+    )
+
+
+def _show_blocks(ctx: _FakeToolContext, *blocks: dict[str, Any]) -> None:
+    """Record each of `blocks` as a settled answer the planner was shown this entry."""
+    save_pin_sources(
+        ctx.state, {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks}
+    )
+
+
+async def test_a_share_of_a_donor_total_counts_the_total_on_the_narrower_parts_basis(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid counted gross on the CRS over the US total counted in grant
+    equivalents on DAC1: the total is compiled gross through the resubmit a switch
+    posts, the share reads both inputs gross, and the planner's decision says the
+    inputs were put on one basis."""
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+    )
+
+    result = await _share_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    total_scope = basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent")[
+        "resolved"
+    ]["scope_choices"]
+    assert (call["spec_id"], call["identity"]) == (
+        total_scope["base"]["spec_id"],
+        total_scope["base"]["identity"],
+    )
+    assert call["scope_entries"] == [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:measure_basis"},
+        }
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
+    bases = {
+        d.fixes.source_spec_id: d
+        for d in plan.decisions
+        if d.scope is not None and d.scope.axis == "measure_basis" and d.fixes is not None
+    }
+    assert {pin: d.active_option_id for pin, d in bases.items()} == {
+        HEALTH: "measure_basis:gross",
+        TOTAL_GROSS: "measure_basis:gross",
+    }
+    aligned = bases[TOTAL_GROSS]
+    assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert "one basis" in aligned.rationale
+    assert aligned.slot in plan.requirement("total").decision_ids
+    assert not any(d.fixes is not None and d.fixes.source_spec_id == TOTAL for d in plan.decisions)
+
+    # A restatement pinning the total as it was shown takes the compiled pin again.
+    again = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        amends_version=plan.version,
+    )
+    assert again["outcome"] == Outcome.OK.value, again
+    amended = load_plan(ctx.state)
+    assert amended is not None
+    assert amended.requirement("total").source_spec_id == TOTAL_GROSS  # type: ignore[union-attr]
+    assert len(surface.calls) == 1
+
+
+@pytest.mark.parametrize("compiled", [True, False], ids=["compiled-pin", "user-stated"])
+def test_a_basis_the_planner_compiled_in_an_earlier_turn_is_not_read_as_the_users(
+    decision: DecisionFactory, compiled: bool
+) -> None:
+    """A later turn shares health aid the user now states as net over the total a
+    previous turn compiled on gross. The compiled block's explicit basis entry is
+    the planner's, so the user's net is the one basis stated and the total is
+    wanted on net; the same entry as the user's own contrasts the two."""
+    ctx = _FakeToolContext()
+    total = basis_block(TOTAL, narrow=False, active="measure_basis:gross", provenance="explicit")
+    if compiled:
+        total[PLANNER_AXES_BLOCK_KEY] = ["measure_basis"]
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:net", provenance="explicit"),
+        total,
+    )
+
+    result = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    if compiled:
+        assert result["code"] == ProblemCode.BASES_UNALIGNED.value, result
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (TOTAL, ["measure_basis:net"])
+        ]
+    else:
+        assert result["outcome"] == Outcome.OK.value, result
+
+
+@pytest.mark.parametrize("provenance", ["explicit", "carried"], ids=["asked-now", "chose-earlier"])
+def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
+    decision: DecisionFactory, provenance: str
+) -> None:
+    """ "Health aid as a share of net ODA": the user stated net on the total alone,
+    in this question or by a choice earlier in the conversation, so the health
+    part, though narrower, is the input to compile, on net. With no tool surface
+    to compile through, the proposal is refused naming it."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance=provenance),
+    )
+
+    refused = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert refused["detail"] == {
+        "realign": [
+            {
+                "spec_id": HEALTH,
+                "option_ids": ["measure_basis:net"],
+                "requirement_id": "health",
+                "step_id": "share",
+            }
+        ]
+    }
+    assert load_plan(ctx.state) is None
+
+
+def test_a_share_whose_inputs_the_user_stated_on_different_bases_keeps_both(
+    decision: DecisionFactory,
+) -> None:
+    """ "Gross health aid as a share of net ODA": the user stated both bases, so the
+    calculation contrasts them and neither input moves."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross", provenance="explicit"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"),
+    )
+
+    result = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert (
+        plan.requirement("health").source_spec_id,  # type: ignore[union-attr]
+        plan.requirement("total").source_spec_id,  # type: ignore[union-attr]
+    ) == (HEALTH, TOTAL)
+
+
+async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
+    """A refusal asking two requirements pinning the US total to be counted gross
+    compiles the total on gross once, and the next proposal is answered."""
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
+    refusal = {
+        "code": ProblemCode.BASES_UNALIGNED.value,
+        "detail": {
+            "realign": [
+                {
+                    "spec_id": TOTAL,
+                    "option_ids": ["measure_basis:gross"],
+                    "requirement_id": requirement_id,
+                    "step_id": "share",
+                }
+                for requirement_id in ("total", "total_again")
+            ]
+        },
+    }
+    answers = iter([refusal, {"outcome": Outcome.OK.value}])
+
+    result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+
+    assert result == {"outcome": Outcome.OK.value}
+    assert surface.tools == ["resolve_definition"]
+
+
+async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refused(
+    decision: DecisionFactory,
+) -> None:
+    """The US total offers no gross count, so the share cannot read both inputs on
+    one basis: the plan is refused as unsupported, naming the input and the basis,
+    and nothing is compiled."""
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(
+            TOTAL, narrow=False, active="measure_basis:grant_equivalent", gross="unavailable"
+        ),
+    )
+
+    refused = await _share_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+
+    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
+    assert refused["detail"] == {
+        "operation": UnsupportedOperation.UNSUPPORTED_ASK.value,
+        "basis": {
+            "spec_id": TOTAL,
+            "option_ids": ["measure_basis:gross"],
+            "requirement_id": "total",
+            "step_id": "share",
+        },
+    }
+    assert surface.calls == []
+    assert load_plan(ctx.state) is None
+
+
+# --- a calculation's inputs on one provider scope ---
+
+
+def _sum_of_health(propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision) -> Any:
+    """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`."""
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    return propose(
+        question="US health aid plus US total aid?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total ODA", TOTAL),
+            SumOfRequirement(
+                id="sum",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="health"),
+                right=RequirementSide(input_id="total"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+
+@pytest.mark.parametrize(
+    ("health", "total", "realign"),
+    [
+        pytest.param(
+            ("provider:bilateral", "default"),
+            ("provider:inclusive", "default"),
+            [(TOTAL, ["provider:bilateral"], "total")],
+            id="narrowest-wins",
+        ),
+        pytest.param(
+            ("provider:bilateral", "default"),
+            ("provider:inclusive", "explicit"),
+            [(HEALTH, ["provider:inclusive"], "health")],
+            id="stated-wins",
+        ),
+    ],
+)
+@pytest.mark.parametrize("calculation", [_share_of_health, _sum_of_health], ids=["share", "sum"])
+def test_a_calculation_counts_its_inputs_on_one_provider_scope(
+    decision: DecisionFactory,
+    health: tuple[str, str],
+    total: tuple[str, str],
+    realign: list[tuple[str, list[str], str]],
+    calculation: Callable[..., Any],
+) -> None:
+    """US health aid counted bilateral beside the US total counted with imputed
+    multilateral flows: adding them counts the bilateral flows twice, so the
+    inputs are put on one provider scope, the one the user stated, else the
+    narrower part's. With no tool surface to compile through, the proposal is
+    refused naming the input to compile."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active=health[0], provenance=health[1]),
+        provider_block(TOTAL, narrow=False, active=total[0], provenance=total[1]),
+    )
+
+    refused = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert [
+        (r["spec_id"], r["option_ids"], r["requirement_id"]) for r in refused["detail"]["realign"]
+    ] == realign
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("calculation", "code"),
+    [
+        (_share_of_health, Outcome.OK.value),
+        (_sum_of_health, ProblemCode.OPERATION_UNSUPPORTED.value),
+    ],
+    ids=["share", "sum"],
+)
+def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_never_summed(
+    decision: DecisionFactory, calculation: Callable[..., Any], code: str
+) -> None:
+    """ "Bilateral health aid as a share of all US aid with multilateral": the share
+    contrasts the two scopes as stated. The same two inputs summed would count the
+    bilateral flows twice, so the sum is refused."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral", provenance="explicit"),
+        provider_block(TOTAL, narrow=False, active="provider:inclusive", provenance="explicit"),
+    )
+
+    result = calculation(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == ProblemCode.OPERATION_UNSUPPORTED.value:
+        assert result["detail"]["basis"] == {
+            "spec_id": TOTAL,
+            "option_ids": ["provider:bilateral"],
+            "requirement_id": "total",
+            "step_id": "sum",
+        }
+        assert load_plan(ctx.state) is None
+
+
+def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
+    """`block` with its part's base identity bound to `donors` as its origin, all
+    providers when empty."""
+    identity = block["resolved"]["scope_choices"]["base"]["identity"]
+    identity["entities"] = {"origin": donors} if donors else {}
+    return block
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "code"),
+    [
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/DEU"], "explicit"),
+            Outcome.OK.value,
+            id="disjoint-donors",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/DEU"], "carried"),
+            Outcome.OK.value,
+            id="disjoint-donors-one-carried",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/FRA", "country/DEU"], "explicit"),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="a-shared-donor",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            ([], "carried"),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="all-providers-carried",
+        ),
+    ],
+)
+def test_a_sum_over_different_stated_provider_scopes_is_refused_only_where_donors_overlap(
+    decision: DecisionFactory,
+    left: tuple[list[str], str],
+    right: tuple[list[str], str],
+    code: str,
+) -> None:
+    """France's bilateral aid plus Germany's with imputed multilateral flows counts no
+    flow twice, so the sum is served on the scopes as stated. A donor in both, or an
+    all-providers total beside a named donor, would count the bilateral flows twice. A
+    scope the user chose in an earlier turn counts as stated."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        _from_donors(
+            provider_block(HEALTH, narrow=False, active="provider:bilateral", provenance=left[1]),
+            left[0],
+        ),
+        _from_donors(
+            provider_block(TOTAL, narrow=False, active="provider:inclusive", provenance=right[1]),
+            right[0],
+        ),
+    )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+
+
+async def test_an_input_moving_on_basis_and_provider_scope_is_compiled_once_on_both(
+    decision: DecisionFactory,
+) -> None:
+    """The US total counted in grant equivalents with imputed multilateral flows,
+    read by two shares beside health aid counted gross and bilateral. Each total
+    moves on both axes, so the total is compiled once through one resubmit
+    posting both options, and the second requirement on the same pin and
+    options takes the same compiled pin."""
+    surface = ProviderCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral"),
+        provider_block(
+            TOTAL,
+            narrow=False,
+            active="provider:inclusive",
+            basis="measure_basis:grant_equivalent",
+        ),
+    )
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    def share(step_id: str, total_id: str) -> ShareOfRequirement:
+        return ShareOfRequirement(
+            id=step_id,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="health"),
+            denominator=RequirementSide(input_id=total_id),
+        )
+
+    result = await _tools_reading(surface)["propose_plan"].func(
+        question="What share of US aid, and of US ODA, goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total net ODA", TOTAL),
+            dataset("total_again", "US total ODA", TOTAL),
+            share("share", "total"),
+            share("share_again", "total_again"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    assert call["scope_entries"] == [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:measure_basis"},
+        },
+        {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:provider"},
+        },
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [
+        ("health", HEALTH),
+        ("total", TOTAL_GROSS_BILATERAL),
+        ("total_again", TOTAL_GROSS_BILATERAL),
+    ]
+
+
+async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planners_decision(
+    decision: DecisionFactory,
+) -> None:
+    """The US total is compiled on bilateral flows alone through the resubmit a switch
+    posts; the sum reads the compiled pin, and the provider decision on it is the
+    planner's, saying why."""
+    surface = ProviderCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        provider_block(HEALTH, narrow=True, active="provider:bilateral"),
+        provider_block(TOTAL, narrow=False, active="provider:inclusive"),
+    )
+
+    result = await _sum_of_health(_tools_reading(surface)["propose_plan"].func, ctx, decision())
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    assert call["scope_entries"][-1] == {
+        "axis": "provider",
+        "option_id": "provider:bilateral",
+        "provenance": "explicit",
+        "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:provider"},
+    }
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.requirement("total").source_spec_id == TOTAL_BILATERAL  # type: ignore[union-attr]
+    (aligned,) = [
+        d
+        for d in plan.decisions
+        if d.scope is not None
+        and d.scope.axis == "provider"
+        and d.fixes is not None
+        and d.fixes.source_spec_id == TOTAL_BILATERAL
+    ]
+    assert aligned.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert aligned.active_option_id == "provider:bilateral"
+
+
+async def test_a_basis_search_read_in_the_planners_words_is_never_the_users(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid counted gross over a US total the planner pinned no dataset
+    for. Search reads "net" in the planner's words for the total, an explicit
+    entry the user never stated: the total is compiled on the health aid's gross,
+    the narrower part's basis, and no later search carries net as the user's."""
+    surface = BasisCompiles(
+        searched={
+            "status": "definite",
+            "spec": basis_block(
+                TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"
+            ),
+        }
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    result = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [("health", HEALTH), ("total", TOTAL_GROSS)]
+    (searched,) = searched_pins(ctx.state)
+    assert searched.digest is not None
+    store_search(ctx.state, searched.digest, asked=[()], held_open=[()])
+    assert _search_context(ctx.state).carried_entries == []
+
+
+async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
+    decision: DecisionFactory,
+) -> None:
+    """Search answers the unpinned US total as ambiguous, so one basis cannot be
+    guaranteed for the share: the plan is refused as unsupported, naming the
+    input, and nothing is recorded."""
+    surface = BasisCompiles(searched={"status": "ambiguous"})
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    refused = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
+    assert refused["detail"] == {
+        "operation": UnsupportedOperation.UNSUPPORTED_ASK.value,
+        "basis": {
+            "spec_id": None,
+            "option_ids": [],
+            "requirement_id": "total",
+            "step_id": "share",
+        },
+    }
+    assert surface.tools == ["search"]
+    assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("retry_mode", "code", "held"),
+    [
+        ("retry_after_delay", ProblemCode.SURFACE_UNAVAILABLE, ()),
+        ("do_not_retry", ProblemCode.OPERATION_UNSUPPORTED, ("refused",)),
+    ],
+    ids=["retryable", "settled"],
+)
+async def test_a_refused_search_for_an_unpinned_input_is_held_only_when_it_settles(
+    decision: DecisionFactory, retry_mode: str, code: ProblemCode, held: tuple[str, ...]
+) -> None:
+    """Search refuses the search for the unpinned US total. A refusal that can
+    succeed later answers that the surface is unavailable and holds nothing, so
+    the next proposal searches again; one that cannot is held as a search that
+    settled on nothing, and the plan is refused as unsupported."""
+    surface = BasisCompiles(
+        search_refusal={"code": "upstream_unavailable", "retry_mode": retry_mode}
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    refused = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert refused["code"] == code.value, refused
+    assert tuple(pin.status for pin in searched_pins(ctx.state)) == held
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_search_for_an_unpinned_input_takes_only_the_time_the_entry_has_left(
+    decision: DecisionFactory,
+) -> None:
+    """The planner entry has a moment left and Search never answers the search
+    for the unpinned US total: the search is cut off when the entry's time runs
+    out, the refusal names why, and nothing is held."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+    token = current_discovery_time_left.set(lambda: 0.05)
+    try:
+        async with asyncio.timeout(2.0):
+            refused = await _share_of_health(
+                _tools_reading(_SilentSurface())["propose_plan"].func, ctx, decision(), total=None
+            )
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert "the planner entry had left" in refused["message"], refused
+    assert searched_pins(ctx.state) == ()
+
+
+@pytest.mark.parametrize(
+    ("two_axes", "option_ids"),
+    [
+        (False, ["measure_basis:gross"]),
+        (True, ["measure_basis:gross", "provider:bilateral"]),
+    ],
+    ids=["basis", "basis-and-provider"],
+)
+def test_nested_calculations_put_every_input_they_reach_on_one_basis(
+    decision: DecisionFactory, two_axes: bool, option_ids: list[str]
+) -> None:
+    """US health aid as a share of the sum of two US totals counted in grant
+    equivalents, and with imputed multilateral flows where `two_axes`. The sum
+    and the share read connected inputs, so all three take one option on each
+    axis, the narrowest part's: each total is asked for once on every option it
+    moves to, with no refusal for the totals the sum and the share both read."""
+    other_total = f"spec_{'5' * 32}"
+
+    def block(spec_id: str, *, narrow: bool, basis: str, provider: str) -> dict[str, Any]:
+        if two_axes:
+            return provider_block(spec_id, narrow=narrow, active=provider, basis=basis)
+        return basis_block(spec_id, narrow=narrow, active=basis)
+
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        block(HEALTH, narrow=True, basis="measure_basis:gross", provider="provider:bilateral"),
+        block(
+            TOTAL,
+            narrow=False,
+            basis="measure_basis:grant_equivalent",
+            provider="provider:inclusive",
+        ),
+        block(
+            other_total,
+            narrow=False,
+            basis="measure_basis:grant_equivalent",
+            provider="provider:inclusive",
+        ),
+    )
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    refused = _tools_by_name()["propose_plan"].func(
+        question="What share of US aid goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total net ODA", TOTAL),
+            dataset("other", "US other official flows", other_total),
+            SumOfRequirement(
+                id="both",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="total"),
+                right=RequirementSide(input_id="other"),
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="both"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert sorted((r["spec_id"], r["option_ids"]) for r in refused["detail"]["realign"]) == [
+        (TOTAL, option_ids),
+        (other_total, option_ids),
+    ]
 
 
 _MEASURE_FIXED = DecisionFixes(measure="external debt service paid")

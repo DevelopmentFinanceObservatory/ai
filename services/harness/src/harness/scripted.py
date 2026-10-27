@@ -307,6 +307,18 @@ class ScriptedPlannerModel:
             "summary": {"version": plan.version, "revision": plan_revision(plan)},
         }
 
+    async def revise(
+        self,
+        *,
+        ctx: Context,
+        prior_plan: dict[str, Any],
+        evidence_requirements: Sequence[Mapping[str, Any]],
+        inherits: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Refuse: the canned plan pins no source, so no switch reaches it."""
+        del ctx, prior_plan, evidence_requirements, inherits
+        return {"refused": {"text": "The scripted planner revises no plan.", "code": None}}
+
 
 class ScriptedSurface:
     """A `ToolSurface` over `harness.scripted_plan`'s own declared schemas.

@@ -54,6 +54,7 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionScope,
     Decline,
     Entity,
     EvidenceRequirement,
@@ -70,6 +71,7 @@ from planner.plan import (
     RankRequirement,
     RequirementSide,
     ResolvedBy,
+    ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
     Unit,
@@ -81,6 +83,7 @@ from planner.plan import (
     cut_user_text,
     frame_shapes,
     full_history,
+    is_scope_choice,
     load_plan,
     period_window,
     plan_revision,
@@ -88,6 +91,7 @@ from planner.plan import (
     restated_translation,
     retrieves_period,
     rolls_from_its_start,
+    scope_choice_slot,
     settle_decisions,
     split_of,
     windowed_pin,
@@ -4448,6 +4452,59 @@ def test_plan_revision_changes_when_a_source_spec_id_changes(
     assert plan_revision(repinned) != plan_revision(plan)
 
 
+def _scope(**overrides: Any) -> DecisionScope:
+    """A sector choice of two options, the second covering some years only."""
+    fields: dict[str, Any] = {
+        "choice_id": "spec_base:sector",
+        "axis": "sector",
+        "options": (
+            ScopeOptionState(option_id="sector:120+130", status="available"),
+            ScopeOptionState(
+                option_id="sector:120",
+                status="partial",
+                years=((2011, 2024),),
+                code="imputed_coverage",
+            ),
+        ),
+    }
+    return DecisionScope(**(fields | overrides))
+
+
+def test_a_scope_reference_enters_the_revision_only_once_set(
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+) -> None:
+    """A decision with no scope reference dumps and hashes as it did before
+    the field existed; one with a reference is another plan."""
+    slot = scope_choice_slot(_PIN, "sector")
+    plain = pinning_decision(_PIN, slot=slot)
+    scoped = pinning_decision(_PIN, slot=slot, scope=_scope())
+
+    def plan(decision: Decision) -> Plan:
+        return _plan(
+            decision,
+            evidence_requirements=[
+                requirement(source_spec_id=_PIN, decision_ids=[slot]),
+                derived_requirement(decision_ids=[slot]),
+            ],
+        )
+
+    assert "scope" not in plain.model_dump(mode="json")
+    assert "scope" not in revision_content(plan(plain))["decisions"][0]
+    assert plan_revision(plan(scoped)) != plan_revision(plan(plain))
+    assert Plan.model_validate_json(plan(scoped).model_dump_json()).decisions[0] == scoped
+    assert (is_scope_choice(plain), is_scope_choice(scoped)) == (False, True)
+    assert (plain.active_option_id, scoped.active_option_id) == (None, "sector:120+130")
+
+
+def test_a_scope_reference_states_one_option_state_per_option(
+    pinning_decision: DecisionFactory,
+) -> None:
+    with pytest.raises(ValidationError, match="option states for 2 options"):
+        pinning_decision(_PIN, scope=_scope(options=_scope().options[:1]))
+
+
 def test_plan_revision_is_stable_across_serialisation(
     decision: DecisionFactory, requirements: tuple[EvidenceRequirement, ...]
 ) -> None:
@@ -4923,6 +4980,34 @@ def test_a_plan_at_the_size_limit_validates_and_one_character_over_is_refused() 
     with pytest.raises(ValidationError) as refused:
         Plan.model_validate(plan_record(MAX_PLAN_RECORD_CHARS + 1))
     assert f"the plan is {MAX_PLAN_RECORD_CHARS + 1:,} characters" in str(refused.value)
+
+
+def test_the_size_limit_leaves_out_the_scope_decisions_code_writes() -> None:
+    """A plan at the size limit whose first decision becomes a scope
+    decision serialises past the limit and is recorded; the same decision
+    with no scope reference is refused."""
+    record = plan_record(MAX_PLAN_RECORD_CHARS)
+    slot = scope_choice_slot(_PIN, "sector")
+    first = record["decisions"][0]
+    record["decisions"][0] = {
+        **first,
+        "slot": slot,
+        "options": ["sector:120+130", "sector:120"],
+        "chosen": "sector:120+130",
+        "fixes": {"source_spec_id": _PIN},
+        "scope": _scope().model_dump(mode="json"),
+    }
+    cited = record["evidence_requirements"][0]
+    cited["decision_ids"] = [slot if s == first["slot"] else s for s in cited["decision_ids"]]
+    unscoped = copy.deepcopy(record)
+    del unscoped["decisions"][0]["scope"]
+
+    plan = Plan.model_validate(record)
+
+    assert record_chars(unscoped) > MAX_PLAN_RECORD_CHARS
+    assert is_scope_choice(plan.decisions[0])
+    with pytest.raises(ValidationError, match="characters"):
+        Plan.model_validate(unscoped)
 
 
 def test_the_size_refusal_names_the_parts_that_take_the_most() -> None:

@@ -79,6 +79,12 @@ RankLimit = Annotated[int, Field(ge=1, le=MAX_RANK_LIMIT)]
 # approve.
 SpecId = Annotated[str, Field(pattern=r"^spec_[0-9a-f]{32}$")]
 
+# Whether one of a Search part's scope choice options can be served
+# (`harness.scope_choices`). A plan's scope decision states it too
+# (`planner.plan.DecisionScope`), beside the choice's axis
+# (`data_mcp.scope.ScopeAxis`).
+OptionStatus = Literal["available", "partial", "unavailable"]
+
 
 class StrictModel(BaseModel):
     """A frozen record that rejects fields it does not declare.

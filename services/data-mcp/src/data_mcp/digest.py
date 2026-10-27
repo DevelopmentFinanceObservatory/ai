@@ -20,6 +20,8 @@ from typing import Any
 
 from common.skills import ordered_skill_ids
 
+from data_mcp.scope import REASON_COPY
+
 # Up to two nearest-real suggestions are ever rendered on a no_data part,
 # matching the engine's own cap on how many it returns.
 _NEAREST_REAL_CAP = 2
@@ -72,6 +74,23 @@ _CALLER_INPUT_WARNING_CODES: frozenset[str] = frozenset(
 # A sibling measure's `axis` and the words that introduce it on a definite
 # block's measure choice line, in the order the line names them.
 _CHOICE_AXIS_LEADS: dict[str, str] = {"what": "other counts", "unit": "other prices"}
+
+# The availability statuses of a scope option the caller can ask for.
+_OFFERED_STATUSES = frozenset({"available", "partial"})
+
+# The words for each cause Search gives a dropped scope entry
+# (`PartScope.dropped_entries[].cause`): what kept the entry out of the
+# compile, or a reason code of the option it asked for (`REASON_COPY`).
+# Causes with a parameter (`both_on_<axis>`, `blocks_every_<axis>_option:<conflict>`)
+# and a declared conflict's own cause are worded in `_dropped_cause_words`.
+_DROPPED_CAUSE_WORDS: dict[str, str] = {
+    "entry_on_axis": "another choice settles that axis",
+    "not_served": "the answer serves another option",
+    "option_unavailable": "that option is not available here",
+    "option_partial": "that option covers only some years",
+    "conflicts_with_entry": "it conflicts with another choice",
+    **REASON_COPY,
+}
 
 _BASIS_DISPLAY: dict[str, str] = {
     "declared_default": "(default)",
@@ -148,7 +167,9 @@ def render_answer(envelope: Mapping[str, Any]) -> dict[str, Any]:
     its diagnostics warnings sit beside `parts`. A spec is its
     `spec_id`, its rendered sentence as `label`, and the facts the digest's
     measure line states (`_measure`); a definite part's spec adds the
-    elected measure and its siblings (`_measure_choice`). A `no_data` part's flagged
+    elected measure and its siblings (`_measure_choice`), each scope
+    choice Search settled (`_scope_choices`) and each scope entry it left
+    out (`_dropped_scope_entries`). A `no_data` part's flagged
     match is left out, since the digest names it as a reason for the refusal
     and it is no spec to retrieve.
     """
@@ -213,7 +234,14 @@ def _answer_spec(spec: Mapping[str, Any], *, definite: bool) -> dict[str, Any]:
         "label": (spec.get("resolved") or {}).get("rendered_sentence"),
         **_measure(spec),
     }
-    return {**entry, **_measure_choice(spec)} if definite else entry
+    if not definite:
+        return entry
+    entry.update(_measure_choice(spec))
+    if scope_choices := _scope_choices(spec):
+        entry["scope_choices"] = scope_choices
+    if dropped := _dropped_scope_entries(spec):
+        entry["dropped_scope_entries"] = dropped
+    return entry
 
 
 def _answer_warning(warning: Mapping[str, Any]) -> dict[str, Any]:
@@ -516,7 +544,7 @@ def _spec_lines(spec: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _spec_block(spec: Mapping[str, Any]) -> str:
-    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, entities, facets, facet options."""
+    """A definite part's full block: sentence, spec_id, confidence, coverage, measure, measure choice, scope choices, dropped scope entries, entities, facets, facet options."""
     headline, confidence_line = _spec_lines(spec)
     lines = [headline, confidence_line]
     measure = _measure_line(spec)
@@ -525,6 +553,8 @@ def _spec_block(spec: Mapping[str, Any]) -> str:
     choice = _measure_choice_line(spec)
     if choice:
         lines.append(choice)
+    lines.extend(_scope_choice_lines(spec))
+    lines.extend(_dropped_scope_entry_lines(spec))
     resolved = spec.get("resolved") or {}
     entities = resolved.get("entities") or []
     if entities:
@@ -690,6 +720,159 @@ def _measure_choice_line(spec: Mapping[str, Any]) -> str | None:
         if named:
             pieces.append(f"{lead}: {', '.join(named)}")
     return f"{'; '.join(pieces)}."
+
+
+def _scope_choices(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Each scope choice Search settled for `spec`, as data, in wire order.
+
+    Reads `resolved.scope_choices.choices`. An entry is `{axis, provenance,
+    active, other_options}`: `active` is the option in force as
+    `{option_id, label}`, and `other_options` holds the option ids the
+    caller could ask for instead, the options whose availability is
+    `available` or `partial`. An unavailable option is left out. A choice
+    missing its axis or its active option is left out. Empty when Search
+    states no scope choice.
+    """
+    part_scope = (spec.get("resolved") or {}).get("scope_choices") or {}
+    choices: list[dict[str, Any]] = []
+    for choice in part_scope.get("choices") or []:
+        axis = choice.get("axis")
+        active_id = choice.get("active")
+        if not axis or not active_id:
+            continue
+        options = choice.get("options") or []
+        active = next((o for o in options if o.get("option_id") == active_id), {})
+        others = [
+            option["option_id"]
+            for option in options
+            if option.get("option_id") not in (None, active_id)
+            and (option.get("availability") or {}).get("status") in _OFFERED_STATUSES
+        ]
+        choices.append(
+            {
+                "axis": axis,
+                "provenance": choice.get("provenance"),
+                "active": {"option_id": active_id, "label": active.get("label") or active_id},
+                "other_options": others,
+            }
+        )
+    return choices
+
+
+def _scope_choice_lines(spec: Mapping[str, Any]) -> list[str]:
+    """One line per scope choice (`_scope_choices`): axis, active option, provenance, other options.
+
+    For example "Scope choice sector: Health incl. population and
+    reproductive health (default); 1 other option available [sector:120]."
+    The other options are counted and named by option id; no line names a
+    sample of codes or members. No line when Search states no scope choice.
+    """
+    lines = []
+    for choice in _scope_choices(spec):
+        others = choice["other_options"]
+        if others:
+            noun = "option" if len(others) == 1 else "options"
+            tail = f"{len(others)} other {noun} available [{', '.join(others)}]"
+        else:
+            tail = "no other option available"
+        active = choice["active"]["label"]
+        provenance = f" ({choice['provenance']})" if choice["provenance"] else ""
+        lines.append(f"Scope choice {choice['axis']}: {active}{provenance}; {tail}.")
+    return lines
+
+
+def _dropped_scope_entries(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Each entry Search left out of `spec`'s scope, as data, in wire order.
+
+    Reads `resolved.scope_choices.dropped_entries`: an option the request's
+    words asked for (`explicit`) or an earlier turn carried (`carried`) that
+    the part does not serve. An entry is `{axis, requested, provenance,
+    served, cause, reason}`: `requested` and `served` are `{option_id,
+    label}`, `served` the option the axis's choice holds instead, or `None`
+    when the part has no choice on that axis; `cause` is Search's code and
+    `reason` it in words (`_dropped_cause_words`). An option the part's
+    choice does not list is labelled by its id. An entry missing its axis or
+    option is left out. Empty when Search dropped no entry.
+    """
+    part_scope = (spec.get("resolved") or {}).get("scope_choices") or {}
+    choices = {choice.get("axis"): choice for choice in part_scope.get("choices") or []}
+    dropped: list[dict[str, Any]] = []
+    for item in part_scope.get("dropped_entries") or []:
+        entry = item.get("entry") or {}
+        axis, option_id = entry.get("axis"), entry.get("option_id")
+        if not axis or not option_id:
+            continue
+        choice = choices.get(axis) or {}
+        options = {option.get("option_id"): option for option in choice.get("options") or []}
+        requested = options.get(option_id) or {}
+        active_id = choice.get("active")
+        served = (
+            {
+                "option_id": active_id,
+                "label": (options.get(active_id) or {}).get("label") or active_id,
+            }
+            if active_id
+            else None
+        )
+        cause = item.get("cause") or ""
+        dropped.append(
+            {
+                "axis": axis,
+                "requested": {"option_id": option_id, "label": requested.get("label") or option_id},
+                "provenance": entry.get("provenance"),
+                "served": served,
+                "cause": cause,
+                "reason": _dropped_cause_words(
+                    cause, axis=axis, availability=requested.get("availability") or {}
+                ),
+            }
+        )
+    return dropped
+
+
+def _dropped_cause_words(cause: str, *, axis: str, availability: Mapping[str, Any]) -> str:
+    """`cause`, a dropped scope entry's cause code, in words.
+
+    A partial requested option adds the years it covers, as "(2011 to
+    2024)". A cause with no words of its own, such as a declared conflict's
+    cause, reads as a conflict and keeps its code in brackets.
+    """
+    if cause == "axis_absent":
+        words = f"this answer has no {axis} choice"
+    elif cause == "option_unknown":
+        words = f"this answer offers no such {axis} option"
+    elif cause.startswith("both_on_"):
+        words = f"two entries ask for the {cause.removeprefix('both_on_')} choice"
+    elif cause.startswith("blocks_every_"):
+        blocked = cause.removeprefix("blocks_every_").split("_option", 1)[0]
+        words = f"it rules out every {blocked} option"
+    else:
+        words = _DROPPED_CAUSE_WORDS.get(cause) or f"it conflicts with another choice [{cause}]"
+    spans = availability.get("years") or []
+    if availability.get("status") == "partial" and spans:
+        covered = ", ".join(f"{start} to {end}" for start, end in spans)
+        words = f"{words} ({covered})"
+    return words
+
+
+def _dropped_scope_entry_lines(spec: Mapping[str, Any]) -> list[str]:
+    """One line per dropped scope entry (`_dropped_scope_entries`): the option asked for, its provenance, the option served, and why.
+
+    For example "Scope choice provider not applied: asked for bilateral
+    plus imputed multilateral (explicit); served bilateral, because imputed
+    multilateral aid covers only some years (2011 to 2024)." No line when
+    Search dropped no entry.
+    """
+    lines = []
+    for dropped in _dropped_scope_entries(spec):
+        provenance = f" ({dropped['provenance']})" if dropped["provenance"] else ""
+        asked = f"asked for {dropped['requested']['label']}{provenance}"
+        served = dropped["served"]
+        lead = f"{asked}; served {served['label']}" if served else asked
+        lines.append(
+            f"Scope choice {dropped['axis']} not applied: {lead}, because {dropped['reason']}."
+        )
+    return lines
 
 
 def _entities_line(entities: Sequence[Mapping[str, Any]]) -> str:

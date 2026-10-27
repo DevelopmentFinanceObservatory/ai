@@ -1488,7 +1488,7 @@
       ]
     },
     {
-      "id": "orchestrator-live-a-donor-to-a-region-sums-only-the-region",
+      "id": "orchestrator-live-a-donor-to-a-region-sums-the-region-and-its-own-buckets",
       "modes": [
         "live"
       ],
@@ -1505,8 +1505,8 @@
       ],
       "rubrics": [
         {
-          "id": "region-answer-is-not-an-all-recipient-sum",
-          "property": "The answer to 'France's aid to Africa' covers the African countries only, or the turn asks the user a question or declines with a reason. It never adds recipient rows that are regional, income-group or all-developing-country totals to country rows, and no yearly figure it gives exceeds France's whole ODA to all recipients, which is about $18bn a year in recent years. This property always applies and is never inapplicable."
+          "id": "region-answer-stays-within-the-region",
+          "property": "The answer to 'France's aid to Africa' gives Africa's figure as the total the source publishes for the region, or as the African countries summed with the region's own regional and unspecified Africa rows, or the turn asks the user a question or declines with a reason. It never adds all-developing-country rows, income-group rows or another region's rows to Africa's figure, and no yearly figure it gives exceeds France's whole ODA to all recipients, which is about $18bn a year in recent years. This property always applies and is never inapplicable."
         }
       ]
     },
@@ -1597,7 +1597,7 @@
       ]
     },
     {
-      "id": "orchestrator-live-count-and-prices-are-asked-in-one-pause",
+      "id": "orchestrator-live-prices-are-asked-and-a-settled-basis-is-not",
       "modes": [
         "live"
       ],
@@ -1607,16 +1607,13 @@
           "elicitation_answers": [
             {
               "option": 2
-            },
-            {
-              "option": 2
             }
           ],
           "expect": {
             "terminal": "done",
             "min_components": 1,
             "elicitation": {
-              "min_questions": 2,
+              "min_questions": 1,
               "min_options": 2
             }
           }
@@ -1624,12 +1621,16 @@
       ],
       "rubrics": [
         {
-          "id": "count-and-prices-are-asked-together",
-          "property": "The turn asks how the aid is counted and whether the amounts are in current or constant prices as separate questions of one pause, before any figure is shown. Two pauses, one choice asked and the other left unasked, or a figure shown before the question, is a no. This property always applies and is never inapplicable."
+          "id": "prices-are-asked-before-any-figure",
+          "property": "The turn asks whether the amounts are in current or constant prices before any figure is shown. A figure shown before the question is a no. This property always applies and is never inapplicable."
         },
         {
-          "id": "the-fetch-follows-both-answers",
-          "property": "The figures shown after the answers are counted the way the answer to the counting question names and are in the prices the answer to the prices question names, as the closing message, a component title or a component source states. A figure counted or priced another way, with no sentence saying the chosen reading was unavailable, is a no. This property always applies and is never inapplicable."
+          "id": "the-basis-is-not-asked",
+          "property": "The turn does not ask the user how the aid is counted (gross against net disbursements): the basis convention settles the count for a donor's aid to a recipient, and a closing message, component title or source states the basis used. A question that offers gross and net disbursements as a choice is a no. This property always applies and is never inapplicable."
+        },
+        {
+          "id": "the-fetch-follows-the-price-answer",
+          "property": "The figures shown after the answer are in the prices the answer names, as the closing message, a component title or a component source states. A figure in other prices, with no sentence saying the chosen reading was unavailable, is a no. This property always applies and is never inapplicable."
         }
       ]
     },

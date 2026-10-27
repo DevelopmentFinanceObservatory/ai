@@ -51,11 +51,14 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 )
 from google.genai import types
 from harness import planner_seam
+from harness.graph import switch
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
 )
+from harness.orchestrator_tools import _search_context
 from harness.planner_seam import (
     _PLANNER_BRANCH,
     _SHARE_UNIT_CODES,
@@ -91,6 +94,7 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AggregateRequirement,
+    AnswerMode,
     AskBreakdown,
     DatasetRequirement,
     Decision,
@@ -102,8 +106,10 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    RequirementSide,
     ResolvedBy,
     SessionState,
+    ShareOfRequirement,
     Unit,
     amendment_entry,
     current_discovery_time_left,
@@ -114,6 +120,8 @@ from planner.plan import (
     pin_sources,
     plan_revision,
     rolls_from_its_start,
+    save_pin_sources,
+    save_plan,
 )
 from planner.records import GroupBy, Reduction, RelativePeriod
 from planner.settings import (
@@ -131,11 +139,14 @@ from planner.workflow import (
 )
 from planner.workflow import Workflow as PlanWorkflow
 from pydantic import Field
+from submission.service import scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 
+from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, TOTAL_NET, BasisCompiles, basis_block
 from .search_results import search_result_parts
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
+from .test_turn_records import _switchable_scope
 
 SPEC = "spec_" + "a" * 32
 SPEC_B = "spec_" + "b" * 32
@@ -4314,7 +4325,7 @@ async def test_a_last_five_years_plan_reads_the_first_year_once_and_pins_from_it
 
 async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> None:
     """The reading is over 2020-2024 and the plan states those years as fixed,
-    so no first year is needed and `resolve_definition` is never called."""
+    so no first year is needed and none is read."""
     reads = _DefinitionReads(_held_since_1995)
     fixed = _last_five_years_plan()
     dataset, growth, _ = fixed["evidence_requirements"]
@@ -4323,7 +4334,7 @@ async def test_a_plan_of_fixed_years_over_a_windowed_reading_reads_nothing() -> 
 
     _, state = await _run_the_planner(reads, [[("propose_plan", fixed)]])
 
-    assert reads.calls == []
+    assert reads.first_year_reads == []
     assert full_histories(state) == {}
     plan = load_plan(state)
     assert plan is not None
@@ -4407,3 +4418,408 @@ async def test_the_brief_marks_each_ask_with_the_parties_it_breaks_down_by(
         "'breakdown_not_kept' when the source this ask's answer pins cannot hold the party open"
         in prompt
     )
+
+
+# --- revise: a plan amended in code, with no model call ------------------------
+
+
+def _sector_switched(scope: dict[str, Any]) -> dict[str, Any]:
+    """`scope` with its sector switched on the plan card to CRS 120 and 130."""
+    switched = copy.deepcopy(scope)
+    sector = switched["choices"][0]
+    sector["active"] = "sector:120+130"
+    switched["entries"] = [
+        switched["entries"][1],
+        {
+            "axis": "sector",
+            "option_id": "sector:120+130",
+            "provenance": "explicit",
+            "concept": "health",
+            "origin": {"kind": "choice", "choice_id": sector["id"]},
+        },
+    ]
+    return switched
+
+
+async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no_model_call(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """The US health aid plan, its sector switched: the re-pinned requirement
+    runs through `propose_plan`'s chain and the translation, the old pin's
+    scope decisions go, the new pin's are written and cited, the switched
+    one the user's, and the planner's model is never asked."""
+    old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
+    scope = _switchable_scope()
+    blocks = {
+        old: {"spec_id": old, "resolved": {"scope_choices": scope}},
+        new: {"spec_id": new, "resolved": {"scope_choices": _sector_switched(scope)}},
+    }
+    shown = {spec_id: PinSource(block=block, settled=True) for spec_id, block in blocks.items()}
+    scoped = scope_choice_decisions({old: shown[old]})[old]
+    translated = _translated_plan(decision, requirement, derived_requirement)
+    dataset = next(r for r in translated.evidence_requirements if isinstance(r, DatasetRequirement))
+    pinned = dataset.model_copy(
+        update={
+            "source_spec_id": old,
+            "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+        }
+    )
+    plan = Plan.model_validate(
+        {
+            **translated.model_dump(),
+            "decisions": [*translated.decisions, *scoped],
+            "evidence_requirements": [
+                pinned if r.id == dataset.id else r for r in translated.evidence_requirements
+            ],
+        }
+    )
+    drafted: list[Plan] = []
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        draft = load_plan(tool_context.state)
+        assert draft is not None
+        drafted.append(draft)
+        assert translated.translation is not None and translated.workflow is not None
+        save_plan(
+            tool_context.state,
+            draft.with_translation(
+                translation=translated.translation, workflow=translated.workflow
+            ),
+        )
+        return {"outcome": "ok"}
+
+    llm = ScriptedPlannerLlm(script=[])
+    seam = PlannerSeam(
+        settings=Settings(), surface=FixtureSurface(schemas=[]), translate=translate, model=llm
+    )
+    revised_pin = pinned.model_copy(update={"source_spec_id": new})
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        save_pin_sources(cast(SessionState, ctx.state), shown)
+        return await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[revised_pin.model_dump(mode="json")],
+            inherits={new: old},
+        )
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="revise_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    outputs = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    (result,) = outputs
+    assert llm.captured_requests == []
+    revised = Plan.model_validate(result["plan"])
+    assert (revised.version, revised.status) == (2, PlanStatus.PENDING_APPROVAL)
+    assert [d.version for d in drafted] == [2]
+    (dataset_after,) = [
+        r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)
+    ]
+    assert dataset_after.source_spec_id == new
+    by_slot = {d.slot: d for d in revised.decisions}
+    assert not [slot for slot in by_slot if slot.endswith(old)]
+    sector = by_slot[f"scope_sector_{new}"]
+    assert (sector.chosen, sector.resolved_by, sector.rationale) == (
+        "health (CRS 120) and population and reproductive health (CRS 130)",
+        ResolvedBy.USER,
+        "The user chose health (CRS 120) and population and reproductive health (CRS 130) "
+        "on the plan.",
+    )
+    assert {f"scope_{axis}_{new}" for axis in ("sector", "region", "measure_basis")} <= set(
+        dataset_after.decision_ids
+    )
+    assert result["summary"]["revision"] == plan_revision(revised)
+
+
+async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(
+    decision: Any,
+) -> None:
+    """A revision of US health aid as a share of the US total compiles the total on
+    gross disbursements. The compiled pin joins the turn's readings under the
+    words and asked roles of the reading it was compiled from, with its compiled
+    scope and marked as the planner's, so the `switch` node resolves the target
+    of the compiled pin's basis row on the plan card and a later search carries
+    no basis from it."""
+    blocks = (
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+    )
+    shown = {block["spec_id"]: PinSource(block=block, settled=True) for block in blocks}
+    origin = SearchReading.model_validate(
+        {"text": "US total ODA", "status": "definite", "spec_id": TOTAL, "asked_roles": ["donor"]}
+    )
+
+    def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=requirement_id,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    health = dataset("health", HEALTH)
+    plan = Plan(
+        question="What share of US aid goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[decision()],
+        evidence_requirements=[
+            health,
+            dataset("total", TOTAL),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+    )
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {"outcome": "ok"}
+
+    surface = BasisCompiles()
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=cast(Any, surface),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        save_pin_sources(cast(SessionState, ctx.state), shown)
+        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [origin.model_dump(mode="json")]
+        await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[health.model_dump(mode="json")],
+            inherits={},
+        )
+        revised = load_plan(cast(SessionState, ctx.state))
+        assert revised is not None
+        (row,) = [
+            d
+            for d in revised.decisions
+            if d.scope is not None
+            and d.scope.axis == "measure_basis"
+            and d.fixes is not None
+            and d.fixes.source_spec_id == TOTAL_GROSS
+        ]
+        readings = switch._readings(ctx)
+        pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
+        return {
+            "stored": [(r.spec_id, r.planner_axes) for r in readings],
+            "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],
+            "carried": _search_context(cast(SessionState, ctx.state)).carried_entries,
+        }
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="align_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="align")]),
+        )
+        if event.output is not None
+    ]
+
+    assert len(surface.calls) == 1
+    assert result["stored"] == [(TOTAL_GROSS, ("measure_basis",)), (TOTAL, ())]
+    assert result["target"] == [
+        TOTAL_GROSS,
+        "US total ODA",
+        ["donor"],
+        f"{TOTAL}_base",
+        "measure_basis:gross",
+    ]
+    # A later "US total ODA" search carries no basis: the planner chose it.
+    assert result["carried"] == []
+
+
+_HEALTH_SWITCHED = f"spec_{'5' * 32}"
+
+
+_NET_SWITCH = basis_block(
+    _HEALTH_SWITCHED, narrow=True, active="measure_basis:net", provenance="explicit"
+)
+
+
+@pytest.mark.parametrize(
+    ("total_pin", "switched", "total_after", "tools"),
+    [
+        (
+            TOTAL,
+            _NET_SWITCH,
+            TOTAL_NET,
+            ["resolve_definition", "resolve_definition"],
+        ),
+        (
+            TOTAL,
+            basis_block(_HEALTH_SWITCHED, narrow=True, active="measure_basis:gross"),
+            TOTAL_GROSS,
+            ["resolve_definition"],
+        ),
+        (
+            None,
+            _NET_SWITCH,
+            TOTAL_NET,
+            ["search", "resolve_definition", "resolve_definition"],
+        ),
+    ],
+    ids=["basis-moves-both-inputs", "sector-moves-health-alone", "unpinned-total-moves-too"],
+)
+async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
+    decision: Any,
+    total_pin: str | None,
+    switched: dict[str, Any],
+    total_after: str,
+    tools: list[str],
+) -> None:
+    """US health aid in 2023 as a share of the US total, the total compiled on
+    the health aid's gross basis. A switch of the health aid's basis to net
+    compiles the total on net too; a switch of its sector alone leaves the
+    total on the gross pin compiled for it. A total the planner pinned no
+    dataset for, as in a plan whose translator found it, is searched for in
+    the translator's words and pinned before the plan records, so the switch
+    moves it too, and the search joins the turn's readings."""
+
+    def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=requirement_id,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source_spec_id=pin,
+        )
+
+    health = dataset("health", HEALTH)
+    plan = Plan(
+        question="What share of US aid went to health in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[decision()],
+        evidence_requirements=[
+            health,
+            dataset("total", TOTAL).model_copy(update={"source_spec_id": total_pin}),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+    )
+    blocks = (
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+    )
+    shown = {
+        block["spec_id"]: PinSource(block=block, settled=True)
+        for block in blocks
+        if total_pin is not None or block["spec_id"] != TOTAL
+    }
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {"outcome": "ok"}
+
+    surface = BasisCompiles()
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=cast(Any, surface),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        state = cast(SessionState, ctx.state)
+        save_pin_sources(state, shown)
+        await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[health.model_dump(mode="json")],
+            inherits={},
+        )
+        aligned = load_plan(state)
+        assert aligned is not None
+        save_pin_sources(
+            state,
+            {**pin_sources(state), _HEALTH_SWITCHED: PinSource(block=switched, settled=True)},
+        )
+        await seam.revise(
+            ctx=ctx,
+            prior_plan=aligned.model_dump(mode="json"),
+            evidence_requirements=[
+                health.model_copy(update={"source_spec_id": _HEALTH_SWITCHED}).model_dump(
+                    mode="json"
+                )
+            ],
+            inherits={_HEALTH_SWITCHED: HEALTH},
+        )
+        after = load_plan(state)
+        assert after is not None and after.version == aligned.version + 1
+        return {
+            "read": [r["spec_id"] for r in ctx.state.get(ORCHESTRATOR_SEARCHES_KEY) or []],
+            "pins": {
+                r.id: r.source_spec_id
+                for r in after.evidence_requirements
+                if isinstance(r, DatasetRequirement)
+            },
+            "bases": sorted(
+                (d.fixes.source_spec_id, d.chosen)
+                for d in after.decisions
+                if d.scope is not None and d.scope.axis == "measure_basis" and d.fixes is not None
+            ),
+        }
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="share_switch_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    assert result["pins"] == {"health": _HEALTH_SWITCHED, "total": total_after}
+    assert surface.tools == tools
+    if total_pin is None:
+        (part,) = surface.calls[0]["parts"]
+        assert part["variable"] == "total"
+        assert part["entities"] == [{"text": "United States", "role": "donor"}]
+        assert TOTAL in result["read"]
+    (health_basis, total_basis) = result["bases"]
+    assert health_basis[1] == total_basis[1]

@@ -48,8 +48,10 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast, override
 
-from compiler.surface import ToolSurface
+from compiler.sources import block_groups
+from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.planners import BuiltInPlanner
 from google.adk.tools.base_tool import BaseTool
@@ -59,23 +61,44 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
+from harness.scope_choices import (
+    ScopeChoice,
+    mark_planner_axes,
+    option_axis,
+    planner_axes,
+    switch_entries,
+)
+from harness.tool_contracts import resolver_digest
 from orchestrator.agent import _retrying
 from pydantic import JsonValue
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
     Admission,
+    AlignedPin,
     Combination,
     Proposal,
+    Realignment,
     ReferralAnswers,
-    identity_on_record,
+    SearchedPin,
+    Unpinned,
+    aligned_pins,
+    basis_unservable,
+    part_scope,
+    realignments_wanted,
+    save_aligned_pin,
+    save_searched_pin,
     submit,
+    unpinned_wanted,
 )
 from submission.service import PROPOSE_PLAN as PROPOSE_PLAN_PROPOSER
 from translator.discovery import (
+    SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    call_within_entry,
     load_log,
+    refusal_retryable,
     resolve_definition,
     resolved_spec,
 )
@@ -98,18 +121,21 @@ from planner.plan import (
     Decline,
     EvidenceRequirement,
     FullHistory,
+    PinSource,
     Plan,
     PlanStatus,
     SessionState,
     UnsupportedOperation,
     full_histories,
     full_history,
+    identity_on_record,
     load_plan,
     pin_sources,
     plan_revision,
     record_reduction_refused_asks,
     record_unsupported,
     save_full_history,
+    save_pin_sources,
     save_plan,
     save_plan_rounds,
     save_windowed_pins,
@@ -1344,6 +1370,279 @@ def _first_year_unreadable(
     )
 
 
+async def compile_on_basis(
+    surface: ToolSurface,
+    realignment: Realignment,
+    *,
+    state: SessionState,
+) -> dict[str, object] | None:
+    """Compile `realignment`'s pin on its calculation's options and hold the pin Search answers.
+
+    Posts the pin's base identity with its scope entries and each option, on
+    the axis it names (`harness.scope_choices.option_axis`), as an explicit
+    entry from its choice in place of the entry on that axis, the resubmit
+    a switch on the plan card posts (`harness.scope_choices.switch_entries`)
+    once per option, with the part's entity groups, through data-mcp's
+    `resolve_definition`, which stores the definition it answers. One
+    resubmit carries every option, so an input moving on the measure basis
+    and the provider scope is compiled once. The answer is shown to the
+    planner as a source of its own (`planner.plan.save_pin_sources`),
+    settled as the pin it was compiled from, and held as a
+    `submission.service.AlignedPin` with the answer's digest
+    (`harness.tool_contracts.resolver_digest`), its block marking those
+    axes as the planner's, beside any axis the origin's block marks
+    (`harness.scope_choices.mark_planner_axes`), so the next proposal pins
+    it and the planner seam stores it as a reading of the conversation
+    (`harness.planner_seam.store_aligned_readings`).
+
+    The compile takes the time a resubmit has
+    (`translator.discovery.call_within_entry`): the capability row's call
+    timeout, above data-mcp's resubmit budget, within the planner entry's
+    time left.
+
+    Returns `None` once the pin is held, or the refusal the proposal
+    answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
+    `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
+    one dataset.
+    """
+    sources = pin_sources(state)
+    source = sources.get(realignment.spec_id)
+    block = source.spec_block(realignment.spec_id) if source is not None else None
+    scope = part_scope(realignment.spec_id, block)
+    choices: dict[str, ScopeChoice] = (
+        {choice.axis: choice for choice in scope.choices} if scope is not None else {}
+    )
+    axes = [option_axis(option_id) for option_id in realignment.option_ids]
+
+    def unservable(reason: str) -> dict[str, object]:
+        return basis_unservable(
+            **realignment._asdict(),
+            reason=reason,
+            record=lambda operation: record_unsupported(state, operation),
+            proposer=PROPOSE_PLAN_PROPOSER,
+        )
+
+    missing = [axis for axis in axes if axis not in choices]
+    if source is None or block is None or scope is None or missing:
+        return unservable(
+            f"{realignment.requirement_id!r}'s dataset has no "
+            f"{' or '.join(missing or axes)} choice on record"
+        )
+    switched = scope.entries
+    for option_id in realignment.option_ids:
+        switched = tuple(
+            switch_entries(
+                scope.model_copy(update={"entries": switched}),
+                choice=choices[option_axis(option_id)],
+                option_id=option_id,
+            )
+        )
+    entries = [entry.model_dump(mode="json", exclude_none=True) for entry in switched]
+    try:
+        part = await resolve_definition(
+            surface,
+            spec_id=scope.base.spec_id,
+            identity=scope.base.identity,
+            groups=block_groups(block),
+            scope_entries=entries,
+        )
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            return _basis_uncompiled(realignment, str(exc))
+        return unservable(
+            f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
+            f"calculation's other inputs share ({exc.code or 'refused'})"
+        )
+    spec = part.get("spec") if part.get("status") == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
+    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
+        return unservable(
+            f"Search holds no one dataset counting {realignment.requirement_id!r} the way "
+            "its calculation's other inputs share"
+        )
+    digest = resolver_digest({"parts": [dict(part)]})
+    mark_planner_axes(digest, planner_axes(block) | set(axes))
+    compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
+    save_pin_sources(state, {**sources, spec_id: compiled})
+    save_aligned_pin(
+        state,
+        AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=realignment.option_ids,
+            spec_id=spec_id,
+            digest=digest,
+        ),
+    )
+    return None
+
+
+async def pin_by_search(
+    surface: ToolSurface,
+    unpinned: Unpinned,
+    *,
+    state: SessionState,
+) -> dict[str, object] | None:
+    """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
+
+    Posts the `search` part the translator's own discovery sends for the
+    requirement (`translator.discovery.search_part`), in the planner's words
+    and with no message of the user's, so every axis an entry settled on
+    Search's answer is marked as the planner's
+    (`harness.scope_choices.mark_planner_axes`). A `definite` answer is
+    shown to the planner as a source of its own
+    (`planner.plan.save_pin_sources`) and held as a
+    `submission.service.SearchedPin` with its digest, so the next proposal
+    pins it and the planner seam stores it as a reading of the conversation
+    (`harness.planner_seam.store_aligned_readings`). Any other answer is
+    held as a search that settled on nothing, under Search's part status, or
+    `refused` for a refusal, and the next proposal is refused
+    (`submission.service._aligned_bases`). The search takes the time the
+    translator's own discovery gives one
+    (`translator.discovery.call_within_entry`).
+
+    Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
+    Search did not answer, or refused in a way that can succeed later
+    (`translator.discovery.refusal_retryable`); nothing is held then, so the
+    next proposal searches again.
+    """
+    try:
+        answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [unpinned.part]})
+    except ToolSurfaceUnavailableError as exc:
+        return _search_unavailable(unpinned, str(exc))
+    if answer.is_error and refusal_retryable(answer):
+        refusal = answer.structured_content or {}
+        cause = refusal.get("message") or answer.text or "Search refused it for now"
+        return _search_unavailable(unpinned, str(cause))
+    envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
+    parts = envelope.get("parts") if isinstance(envelope, dict) else None
+    part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
+    status = part.get("status") if isinstance(part, dict) else None
+    spec = part.get("spec") if isinstance(part, dict) and status == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, dict) else None
+    searched = SearchedPin(
+        requirement_key=unpinned.requirement_key,
+        status="refused"
+        if answer.is_error
+        else status
+        if isinstance(status, str)
+        else "unreadable",
+        asked_roles=unpinned.asked_roles,
+        open_roles=unpinned.open_roles,
+    )
+    if not isinstance(spec_id, str) or not isinstance(envelope, dict):
+        save_searched_pin(state, searched)
+        return None
+    digest = resolver_digest(cast(dict[str, Any], envelope))
+    scope = part_scope(spec_id, digest["spec_block"])
+    mark_planner_axes(
+        digest,
+        (choice.axis for choice in scope.choices if choice.provenance != "default")
+        if scope is not None
+        else (),
+    )
+    shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
+    save_pin_sources(state, {**pin_sources(state), spec_id: shown})
+    save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+    return None
+
+
+def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a search of `unpinned` that can succeed later.
+
+    The same proposal can succeed later, so nothing in it needs changing.
+    """
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"{unpinned.requirement_id!r}, an input of {unpinned.step_id!r}, pins no dataset, "
+        f"and Search could not be asked for one: {cause}. The plan is sound and nothing was "
+        "recorded; propose it again.",
+        outcome=Outcome.REFUSED,
+        detail={"search": unpinned.model_dump(mode="json")},
+    )
+
+
+def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a compile on another basis or provider scope that did not complete.
+
+    The same proposal can succeed later, so nothing in it needs changing.
+    """
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"{realignment.requirement_id!r} could not be counted the way the other inputs of "
+        f"{realignment.step_id!r} are: {cause}. The plan is sound and nothing was recorded; "
+        "propose it again.",
+        outcome=Outcome.REFUSED,
+        detail={"basis": realignment.detail()},
+    )
+
+
+async def with_source_reads(
+    propose: Callable[[], dict[str, object]], *, state: SessionState, surface: ToolSurface
+) -> dict[str, object]:
+    """`propose`'s answer, once every read of a source it was refused for is made.
+
+    A refusal records nothing, so `propose` runs again once the read is held.
+    Two refusals ask for one. A plan rolling from a dataset's first year
+    needs that first year (`read_full_history`, held by
+    `planner.plan.save_full_history`): one read serves every requirement, and
+    every later proposal of the turn, that pins the dataset; an answer
+    stating no first year is held too, and the next refusal says so
+    (`first_year_read_failed`). A calculation one of whose inputs pins no
+    dataset while another carries a basis choice needs that input searched
+    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
+    requirement's content is made once. A calculation whose inputs are
+    counted on different measure bases or provider scopes needs each input
+    it names compiled on their shared options, every option of one input in
+    one compile (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
+    compiled on a set of options is asked for once, so a refusal naming one
+    is answered as it stands, and inputs sharing a pin and a set of options
+    compile it once (`_alignment_key`).
+    """
+    while True:
+        result = propose()
+        pin = _first_year_wanted(result)
+        if pin is not None:
+            if pin in full_histories(state):
+                return result
+            identity = _first_year_identity(pin, state)
+            if identity is None:
+                return result
+            try:
+                history = await read_full_history(surface, identity)
+            except DefinitionNotResolvedError as exc:
+                return _first_year_unreadable(result, exc)
+            save_full_history(state, pin, history)
+            continue
+        unpinned = unpinned_wanted(result)
+        if unpinned:
+            for item in unpinned:
+                refused = await pin_by_search(surface, item, state=state)
+                if refused is not None:
+                    return refused
+            continue
+        wanted = realignments_wanted(result)
+        done = {_alignment_key(pin.origin, pin.option_ids) for pin in aligned_pins(state)}
+        keys = [_alignment_key(item.spec_id, item.option_ids) for item in wanted]
+        if not wanted or any(key in done for key in keys):
+            return result
+        for item, key in zip(wanted, keys, strict=True):
+            if key in done:
+                continue
+            refused = await compile_on_basis(surface, item, state=state)
+            if refused is not None:
+                return refused
+            done.add(key)
+
+
+def _alignment_key(spec_id: str, option_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
+    """The compile that puts the pin `spec_id` on the options `option_ids`, as a key.
+
+    The options are sorted and deduplicated, so one compile naming the same
+    options in another order is the same work.
+    """
+    return spec_id, tuple(sorted(set(option_ids)))
+
+
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:
     """The refusal for an ask offering anything but one reading's picks under an entity referral, or `None`.
 
@@ -1573,29 +1872,18 @@ def build_planner_tools(
 
     @functools.wraps(propose_plan)
     async def propose_plan_reading(**arguments: Any) -> dict[str, object]:
-        """`propose_plan`, reading each first year it refuses for want of.
+        """`propose_plan`, making each source read it refuses for want of (`with_source_reads`).
 
         A refusal records nothing, so the proposal is made again once the
-        read is held (`planner.plan.save_full_history`). One read serves
-        every requirement, and every later proposal of the turn, that pins
-        the dataset; an answer stating no first year is held too, and the
-        next refusal says so (`first_year_read_failed`).
+        read is held: a dataset's first year, or a calculation's input
+        compiled on the basis its other inputs share.
         """
         assert surface is not None
-        state = arguments["tool_context"].state
-        while True:
-            result = propose_plan(**arguments)
-            pin = _first_year_wanted(result)
-            if pin is None or pin in full_histories(state):
-                return result
-            identity = _first_year_identity(pin, state)
-            if identity is None:
-                return result
-            try:
-                history = await read_full_history(surface, identity)
-            except DefinitionNotResolvedError as exc:
-                return _first_year_unreadable(result, exc)
-            save_full_history(state, pin, history)
+        return await with_source_reads(
+            lambda: propose_plan(**arguments),
+            state=arguments["tool_context"].state,
+            surface=surface,
+        )
 
     @functools.wraps(propose_plan)
     async def propose_plan_translating(**arguments: Any) -> dict[str, object]:

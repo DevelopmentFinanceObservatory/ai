@@ -109,11 +109,12 @@ The server answers `/turn` and `/interrupt` with Server-Sent Events.
 | `kind`            | `"turn.request"`                        | required                                                        |
 | `schema_version`  | `1`                                     | required                                                        |
 | `conversation_id` | string                                  | required (`session_id` is a deprecated alias; do not send both) |
-| `message`         | string                                  | required; the user's text                                       |
+| `message`         | string                                  | the user's text; required unless `apply_choice` is set          |
 | `surface`         | `"studio"` \| `"download"` \| `"embed"` | optional; default `"studio"`                                    |
 | `component_ref`   | object \| null                          | optional; see section 8                                         |
 | `seed_spec`       | list of `Seed` \| null                  | optional; 1 to 6 Search results to start from; see 4.1.1        |
 | `auto_add`        | boolean                                 | optional; default `true`; see section 9                         |
+| `apply_choice`    | object \| null                          | optional; a clicked suggestion chip; see 4.1.2                  |
 
 #### 4.1.1 Seeds from Search
 
@@ -222,17 +223,58 @@ name, `dataset <n> from Search` (its position in `seed_spec`, from 1),
 and Search's reason, and its reply tells the user and suggests searching
 for the dataset again.
 
+#### 4.1.2 Chips
+
+After an answer whose figures came from a fetch, `suggestions.items` can
+hold up to four chips of kind `apply_choice`:
+`{kind: "apply_choice", label, choice_id, option_id, turn, spec_id}`. Each moves one
+scope choice of the data the answer used (the sector's codes, a region's
+members, the provider scope or the measure basis) to another option
+Search can serve, such as "health, CRS 120 alone" or "including imputed
+multilateral". `label` is the option's label, quoted after the part's
+words when the answer used several parts. Chips run sector first, then
+region, provider and measure basis. An option Search cannot serve has no
+chip, and an answer from a plan has none: its card carries the switch.
+`turn` is the number of the conversation turn whose answer offers the
+chip, counted from 1, and `spec_id` names the stored data the chip
+re-counts. Together they bind the chip to its answer.
+
+A click sends a `turn.request` with
+`apply_choice: {choice_id, option_id, turn, spec_id}` copied from the
+chip and no `message`, `seed_spec` or `component_ref`;
+one beside any of them gets a 422. The turn re-counts the stored data
+with that option through the Search API, retrieves it, and answers from
+it with the usual basis line, without searching or planning. The
+Activity feed shows a "Count your choice" step and the retrieval. When
+Search cannot serve the option, the step fails with the note a plan
+card's switch shows, the agent says so, and the earlier answer stands.
+
+A chip that no longer applies gets a 422 `constraint_violation` before
+any stream starts, with `pointer: "/apply_choice"` and a `detail` to
+show:
+
+- `scope_choice_stale`: a later turn has answered, so the chip's answer is
+  no longer the latest; a switch on a later plan card has re-counted the
+  choice's data, so its newest data is no longer `spec_id`; no stored
+  answer holds the choice; or the choice is already on that option. A
+  client shows chips under the latest answer only.
+- `switch_option_unavailable`: the choice does not offer the option, or
+  Search cannot serve it.
+
 ### 4.2 `interrupt.response` → POST `/api/studio/interrupt`
 
-| Field             | Type                                                             | Notes                                                                                                 |
-| ----------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `kind`            | `"interrupt.response"`                                           | required                                                                                              |
-| `schema_version`  | `1`                                                              | required                                                                                              |
-| `conversation_id` | string                                                           | required                                                                                              |
-| `interrupt_id`    | string                                                           | required; copy it from the pausing frame; it is opaque and single-use                                 |
-| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"answer"` \| `"skip"` | required                                                                                              |
-| `payload`         | string \| null                                                   | required for `amend`; for `answer` only on an elicitation paused before delta 21; forbidden otherwise |
-| `answers`         | object \| null                                                   | required for `answer` (except as above): question id → answer; forbidden otherwise                    |
+| Field             | Type                                                                           | Notes                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `kind`            | `"interrupt.response"`                                                         | required                                                                                                                    |
+| `schema_version`  | `1`                                                                            | required                                                                                                                    |
+| `conversation_id` | string                                                                         | required                                                                                                                    |
+| `interrupt_id`    | string                                                                         | required; copy it from the pausing frame; it is opaque and single-use                                                       |
+| `decision`        | `"approve"` \| `"amend"` \| `"reject"` \| `"switch"` \| `"answer"` \| `"skip"` | required                                                                                                                    |
+| `payload`         | string \| null                                                                 | required for `amend`; for `answer` only on an elicitation paused before delta 21; forbidden otherwise                       |
+| `answers`         | object \| null                                                                 | required for `answer` (except as above): question id → answer; forbidden otherwise                                          |
+| `choice_id`       | string \| null                                                                 | required for `switch`: the decision's `choice_id`; forbidden otherwise                                                      |
+| `option_id`       | string \| null                                                                 | required for `switch`: one of that decision's `options[].option_id`; forbidden otherwise                                    |
+| `plan_revision`   | string \| null                                                                 | required for `switch`, optional for `approve`: the `revision` of the `plan.proposed` the user answered; forbidden otherwise |
 
 Each answer in `answers` is one of:
 
@@ -258,7 +300,25 @@ Each answer in `answers` is one of:
 
 Rules the server enforces with HTTP 422:
 
-- `approve`, `amend`, `reject` apply only to a `plan.proposed` pause.
+- `approve`, `amend`, `reject`, `switch` apply only to a `plan.proposed` pause.
+- `switch` carries no `payload`. Its `option_id` must be one the decision
+  offers as `available` or `partial`, other than its `active_option_id`; any
+  other is refused with `constraint_id: "switch_option_unavailable"`.
+- Send `plan_revision` with every `approve`, set to the `revision` of the
+  card the user approved. An `approve` without one approves whatever plan
+  is paused, so an approval sent from an out-of-date card cannot be told
+  apart.
+- A `switch` or `approve` whose `plan_revision` is not the paused plan's is
+  refused with HTTP 409 and `constraint_id: "plan_revision_stale"`. So is
+  one naming an `interrupt_id` a later card replaced, when its
+  `plan_revision` differs from that card's. The body is a ToolError plus
+  `current_plan`: the `plan.proposed` frame the stream sent for the plan
+  awaiting an answer, `seq` included. Replace the answered card with it,
+  show `detail`, and let the user answer again; do not feed the frame to
+  your `seq` ordering. `current_plan` is absent only for a pause stored
+  before cards were kept. Nothing is approved or switched.
+- `switch_option_unavailable` and `plan_revision_stale` both carry a
+  `detail` to show.
 - `answer`, `skip` apply only to an `elicitation.request` pause.
 - `answers` names every question id of the frame exactly once, and an
   `option_id` must be one that question offered.
@@ -324,20 +384,20 @@ connection. Use `/cancel` for the Stop button.
 
 Every frame has `event` and `seq`. The other fields per type:
 
-| `event`               | Fields                                                                                                                                         | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `message.delta`       | `text`                                                                                                                                         | Append this text to the streaming assistant message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `message.complete`    | `text`                                                                                                                                         | The full final message for the turn. Replaces the deltas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `plan.proposed`       | `interrupt_id`, `plan_version_id`, `version`, `title`, `steps[]`, `actions[]`, `decisions[]?`, `revision?`, `requirements[]?`, `operations[]?` | The plan card. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `plan.versioned`      | `plan_version_id`, `version`, `supersedes`, `changed[]?`                                                                                       | A new plan replaces the card `supersedes` names; a new `plan.proposed` follows. `version` rises after an amend and is 1, which can be lower than the superseded version, when the plan was drafted again.                                                                                                                                                                                                                                                                                                                |
-| `activity.step`       | `step_id`, `label`, `status`, `detail?`, `tool?`, `duration_ms?`, `produced?`, `progress?`                                                     | One execution step for the Activity feed. `step_id` is `s` plus the `seq` of the step's first frame, unique across the turn's segments; match a step's later frames by it, not by position. On the stream after an approval the plan steps run first; each plan step's final frame arrives in plan order, though steps that run at the same time may send their `running` frames in another order. Each plan step's `label` is that step's `label` on the plan card. A plan-step reference on this frame is a follow-up. |
-| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`         | A new card exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                            | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
-| `composition.updated` | `manifest`                                                                                                                                     | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                            | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `suggestions`         | `items[]`                                                                                                                                      | Follow-up chips. The list is empty in v1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `error`               | `error` (a ToolError object)                                                                                                                   | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `done`                | `trace_id`, `composition?`                                                                                                                     | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `event`               | Fields                                                                                                                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `message.delta`       | `text`                                                                                                                                                     | Append this text to the streaming assistant message.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `message.complete`    | `text`                                                                                                                                                     | The full final message for the turn. Replaces the deltas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `plan.proposed`       | `interrupt_id`, `plan_version_id`, `version`, `title`, `steps[]`, `actions[]`, `decisions[]?`, `revision?`, `requirements[]?`, `operations[]?`, `moved[]?` | The plan card. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `plan.versioned`      | `plan_version_id`, `version`, `supersedes`, `changed[]?`                                                                                                   | A new plan replaces the card `supersedes` names; a new `plan.proposed` follows. `version` rises after an amend and is 1, which can be lower than the superseded version, when the plan was drafted again.                                                                                                                                                                                                                                                                                                                |
+| `activity.step`       | `step_id`, `label`, `status`, `detail?`, `tool?`, `duration_ms?`, `produced?`, `progress?`                                                                 | One execution step for the Activity feed. `step_id` is `s` plus the `seq` of the step's first frame, unique across the turn's segments; match a step's later frames by it, not by position. On the stream after an approval the plan steps run first; each plan step's final frame arrives in plan order, though steps that run at the same time may send their `running` frames in another order. Each plan step's `label` is that step's `label` on the plan card. A plan-step reference on this frame is a follow-up. |
+| `component.created`   | `component_id`, `revision`, `type`, `catalog_version`, `min_catalog_version`, `payload`, `fact_summary`, `provenance`, `created_from?`                     | A new card exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `component.revised`   | `component_id`, `revision`, `changed[]`, `fact_summary`, `payload?`                                                                                        | An existing card has a new revision. When `payload` is absent, keep your cached payload and apply the `changed` fields from the new `fact_summary`/frame.                                                                                                                                                                                                                                                                                                                                                                |
+| `composition.updated` | `manifest`                                                                                                                                                 | The canvas changed. Re-render from this manifest.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `elicitation.request` | `interrupt_id`, `questions[]` (1 to 3), `skippable`                                                                                                        | One to three questions for the user. **Pauses the turn and ends the stream.**                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `suggestions`         | `items[]`                                                                                                                                                  | Follow-up chips: `apply_choice` chips (4.1.2), or none.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `error`               | `error` (a ToolError object)                                                                                                                               | The turn failed. **No `done` follows.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `done`                | `trace_id`, `composition?`                                                                                                                                 | The turn is complete. `composition` is the conversation's current manifest, or absent when the conversation has no canvas.                                                                                                                                                                                                                                                                                                                                                                                               |
 
 Notes on specific fields:
 
@@ -347,10 +407,12 @@ Notes on specific fields:
   `label`; show `description` when the user expands the step. `args`
   holds the tool arguments backing the step, for a client that wants to
   show more than the label.
-- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?}`, the choices the agent made for the user.
+- `plan.proposed.decisions[]`: `{id, question, chosen, reason, resolved_by, alternatives?, choice_id?, active_option_id?, options?}`, the choices the agent made for the user. A decision stating how Search counted a source carries the scope choice's `choice_id`, its `active_option_id` and every option as `{option_id, label, status, reason?, years?}`, where `status` is `available`, `partial` or `unavailable`, `reason` says why a partial or unavailable option is limited, and `years` are the years a partial option covers. A decision without `choice_id` is a planner decision.
 - `plan.proposed.revision` is a string identifying the plan's approval
   key, distinct from the integer `version`. It sits beside `version`: a
   client that shows a version badge keeps using `version`.
+- `plan.proposed.actions[]` lists `switch` only when some decision has a `choice_id` and an option other than its `active_option_id` that is `available` or `partial`. Offer those options as the switch; show an `unavailable` one disabled, with its `reason`.
+- `plan.proposed.moved[]`: `{choice_id, from_label, to_label, reason}`, set on the plan a switch offers. Each entry is another scope choice the switch moved, with the option it held, the one it holds now, and a sentence saying why.
 - `plan.proposed.requirements[]`: `{id, kind, sentence, decision_ids}`. It
   is the evidence behind the plan. `plan.proposed.operations[]`: `{id, kind, sentence, requirement_id?}`. It is the plan's computed steps.
   `sentence` on both is composed server-side and rendered as given, so
@@ -524,6 +586,12 @@ a loop:
    `plan.proposed`. Replace the card from that `plan.proposed`, and
    accept a `version` lower than the one it supersedes. When no plan can
    be drafted, the stream sends `message.complete` and `done`.
+1. After `switch`, the new stream sends `plan.versioned` and then a new
+   `plan.proposed` with a new `interrupt_id` and `revision`, the switched
+   decision now `resolved_by: "user"`, and `moved` listing any other choice
+   that moved with it. A switch approves nothing: answer the new card. When
+   Search cannot serve the switch, the stream sends `message.complete`
+   saying why and the same plan again, under a new `interrupt_id`.
 1. `reject` ends the turn. The stream sends `message.complete` and `done`.
    Nothing was computed.
 
@@ -543,7 +611,7 @@ decision, payload or answers than the one that actually resumed answers 409
 
 The `error` field of an `error` frame, and the body of every non-200
 response FROM THE STUDIO ROUTES' OWN CHECKS (404, 409, and the 422s in
-section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`. Two framework responses have a
+section 4), is a ToolError: `{error, retry, detail, constraint_id?, pointer?, fix?, retry_after_seconds?}`; the 409 `plan_revision_stale` body adds `current_plan` (section 4.2). Two framework responses have a
 different shape: 401 is `{"detail": "..."}`, and a request body that fails
 schema validation gets a 422 with `{"detail": [...]}` (FastAPI's format).
 
@@ -656,7 +724,7 @@ from (`min_catalog_version` currently equals it).
 
 ## 11. Known limits in this version
 
-- `suggestions.items` is always empty.
+- `suggestions.items` holds only `apply_choice` chips (4.1.2).
 - Some searches refuse with `capability_unavailable` ("identity does not
   reproduce spec_id"). This is a known upstream data gap. The search step
   shows `failed` and the agent answers without that data; a retry will not

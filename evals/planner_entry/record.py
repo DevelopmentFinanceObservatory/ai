@@ -32,7 +32,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from compiler.surface import ToolCallResult, ToolId, ToolSchema
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
+from data_mcp.search_tool import SearchContext
 from data_mcp.server import mcp
 from data_mcp.settings import Settings as DataSettings
 from entry import (
@@ -48,6 +49,7 @@ from entry import (
     quiet_logs,
     run_entry,
     save_recording,
+    search_context_meta,
     stray_recordings,
     surface_key,
 )
@@ -72,12 +74,23 @@ class RecordingResolver:
         self.skills: list[str] = []
 
     async def __call__(
-        self, *, question: str, parts: list[dict[str, Any]], raw_text: bool = False
+        self,
+        *,
+        question: str,
+        parts: list[dict[str, Any]],
+        raw_text: bool = False,
+        context: SearchContext | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = (
             {"raw_query": question} if raw_text else {"parts": parts, "raw_query": question}
         )
-        result = await self._client.call_tool("search", arguments, raise_on_error=False)
+        meta = search_context_meta(context)
+        result = await self._client.call_tool(
+            "search",
+            arguments,
+            raise_on_error=False,
+            meta={SEARCH_CONTEXT_META_KEY: meta} if meta is not None else None,
+        )
         if result.is_error:
             # The search tool answers this as an error, and the task is not recorded.
             refusal = dict(result.structured_content or {})
@@ -86,7 +99,13 @@ class RecordingResolver:
         if not isinstance(envelope, dict):
             raise RuntimeError(f"search answered no envelope for {question!r}")
         self.calls.append(
-            {"question": question, "parts": parts, "raw_text": raw_text, "envelope": envelope}
+            {
+                "question": question,
+                "parts": parts,
+                "raw_text": raw_text,
+                **({"context": meta} if meta is not None else {}),
+                "envelope": envelope,
+            }
         )
         digest = resolver_digest(envelope)
         self.skills += [skill["id"] for skill in digest.get("skills") or []]

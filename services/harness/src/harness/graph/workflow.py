@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any, cast
 
 from compiler.surface import ToolSurface
 from executor.completion import ResultPublisher
@@ -14,6 +17,7 @@ from executor.run import (
     default_label_refs,
 )
 from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
 from google.adk.workflow import START, BaseNode, Edge, Workflow, node
 
 from harness.conversation import current_conversation_id
@@ -31,6 +35,7 @@ from harness.graph.state import (
     AGENT_NAME,
     GraphState,
 )
+from harness.graph.switch import switch_node
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,42 @@ def planner_entry(planner: PlannerModel) -> PlannerEntry:
     )
 
 
+def _fetch_tool(orchestrator: LlmAgent) -> Callable[..., Awaitable[dict[str, Any]]] | None:
+    """The `fetch` tool among `orchestrator`'s tools (`harness.orchestrator_tools`),
+    called as the agent calls it; `None` without one.
+
+    An exception the tool raises is answered by the agent's own
+    `on_tool_error_callback`s (`orchestrator.tool_failures.answering_tool_failures`),
+    so a fetch that breaks inside DFO reads as the agent's own fetch would, and
+    one no callback answers is raised.
+    """
+    tool = next(
+        (
+            tool
+            for tool in orchestrator.tools
+            if isinstance(tool, FunctionTool) and tool.name == "fetch"
+        ),
+        None,
+    )
+    if tool is None:
+        return None
+    func = cast(Callable[..., Awaitable[dict[str, Any]]], tool.func)
+
+    async def fetch(*, tool_context: Any, **args: Any) -> dict[str, Any]:
+        try:
+            return await func(tool_context=tool_context, **args)
+        except Exception as error:
+            for callback in orchestrator.canonical_on_tool_error_callbacks:
+                answered = callback(tool, args, tool_context, error)
+                if inspect.isawaitable(answered):
+                    answered = await answered
+                if isinstance(answered, dict):
+                    return cast(dict[str, Any], answered)
+            raise
+
+    return fetch
+
+
 def create_root_workflow(
     *,
     planner: PlannerModel,
@@ -96,10 +137,13 @@ def create_root_workflow(
     derived results with their replay recipes before it completes
     (`executor.completion`); it also carries no default, and with `None` a
     run with a derived result never completes. The `seed` node carries on the
-    runs an earlier turn left unfinished (`harness.graph.resume`).
+    runs an earlier turn left unfinished (`harness.graph.resume`), and applies
+    a chip the user clicked, fetching its data with the orchestrator's own
+    `fetch` tool (`harness.graph.switch.apply_stored_choice`).
     `definition_surface` reaches the data-mcp the `seed` node resolves each seed's identity again through
     (`translator.discovery.resolve_definition`), a call the Activity feed
-    does not show. `max_concurrent_steps` bounds how many of one plan's
+    does not show, and the `switch` node and the `seed` node's chip post a
+    switched scope choice through (`harness.graph.switch`). `max_concurrent_steps` bounds how many of one plan's
     wave's tool calls the `execute` node's run may hold in flight against
     `tool_surface` at once (`executor.run.execute_approved_plan`'s own
     keyword of the same name). `fetch_series_stats` and `label_refs` are
@@ -115,6 +159,7 @@ def create_root_workflow(
     receive_seeds = seed_node(
         executor=executor,
         definition_surface=definition_surface,
+        fetch=_fetch_tool(orchestrator),
         resume=run_resumer(
             run_ledger=ledger,
             publisher=publisher,
@@ -143,6 +188,9 @@ def create_root_workflow(
     approve_n = node(approve, name="approve", rerun_on_resume=True)
     execute_n = node(execute, name="execute")
     plan_done_n = node(plan_done, name="plan_done")
+    switch_n = node(
+        switch_node(planner=planner, definition_surface=definition_surface), name="switch"
+    )
     return Workflow(
         name=AGENT_NAME,
         state_schema=GraphState,
@@ -157,6 +205,8 @@ def create_root_workflow(
             Edge(from_node=entry.planner, to_node=plan_done_n, route="refused"),
             Edge(from_node=approve_n, to_node=execute_n, route="approved"),
             Edge(from_node=approve_n, to_node=entry.planner, route="amend"),
+            Edge(from_node=approve_n, to_node=switch_n, route="switch"),
+            Edge(from_node=switch_n, to_node=approve_n, route="offer"),
             Edge(from_node=execute_n, to_node=entry.planner, route="replan"),
             Edge(from_node=execute_n, to_node=plan_done_n, route="ok"),
             (plan_done_n, orchestrate_n),

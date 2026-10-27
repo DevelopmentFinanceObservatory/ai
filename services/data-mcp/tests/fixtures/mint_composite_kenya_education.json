@@ -1,0 +1,235 @@
+{
+  "artifacts": [],
+  "citation": {
+    "sources": [
+      {
+        "label": "provenance/OECDCreditorReportingSystem",
+        "ref": "provenance/OECDCreditorReportingSystem"
+      },
+      {
+        "label": "provenance/ONEImputedMultilateralSectors",
+        "ref": "provenance/ONEImputedMultilateralSectors"
+      }
+    ],
+    "text": "provenance/OECDCreditorReportingSystem and provenance/ONEImputedMultilateralSectors (2026), via the Development Finance Observatory"
+  },
+  "content_version": "cv_290542e83628edb41df10e3f4e6af757",
+  "coverage": {
+    "dimensions": [
+      {
+        "axis": "origin",
+        "count": 1,
+        "label": "financingProvider",
+        "noun": {
+          "plural": "providers",
+          "singular": "provider"
+        }
+      },
+      {
+        "axis": "destination",
+        "count": 1,
+        "label": "financingRecipient",
+        "noun": {
+          "plural": "recipients",
+          "singular": "recipient"
+        }
+      },
+      {
+        "count": 2,
+        "label": "years"
+      }
+    ],
+    "rows": 36,
+    "window": {
+      "end_year": 2021,
+      "kind": "all",
+      "origin": "default",
+      "start_year": 2020
+    }
+  },
+  "definition": {
+    "identity": {
+      "entities": {
+        "destination": [
+          "country/KEN"
+        ]
+      },
+      "facets": {
+        "provenance": {
+          "ref": "provenance/ONEBilateralAndImputedMultilateral",
+          "state": "value"
+        }
+      },
+      "identity_version": "spec1",
+      "requested_window": {
+        "kind": "all"
+      },
+      "shape": {
+        "kind": "statvar_schema",
+        "measured_property": "amount",
+        "measurement_qualifier": "Nominal",
+        "population_type": "FinancialFlow",
+        "stat_type": "measuredValue"
+      },
+      "slots": [
+        {
+          "binding": {
+            "state": "unbound"
+          },
+          "property": "crsCooperationModality"
+        },
+        {
+          "binding": {
+            "ref": "CRSPurposeCode110",
+            "state": "value"
+          },
+          "property": "crsPurpose"
+        },
+        {
+          "binding": {
+            "state": "unbound"
+          },
+          "property": "crsTypeOfFinance"
+        },
+        {
+          "binding": {
+            "ref": "CRSTypeOfFlow10",
+            "state": "value"
+          },
+          "property": "crsTypeOfFlow"
+        },
+        {
+          "binding": {
+            "ref": "Disbursement",
+            "state": "value"
+          },
+          "property": "financialFlowType"
+        },
+        {
+          "binding": {
+            "ref": "Gross",
+            "state": "value"
+          },
+          "property": "nettingBasis"
+        }
+      ]
+    },
+    "schema_version": 1,
+    "spec_id": "spec_480389380c979ad45533b67c523e844b"
+  },
+  "schema_version": 1,
+  "series_count": 18,
+  "trace": {
+    "applied_window": {
+      "end_year": 2021,
+      "kind": "all",
+      "origin": "default",
+      "start_year": 2020
+    },
+    "components": [
+      {
+        "content_version": "cv_703dc494d480326e1e64a1ca985bb375",
+        "dropped_years": [
+          2019
+        ],
+        "facets": [
+          {
+            "axis": "provenance",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "facet_crs",
+            "ref": "provenance/OECDCreditorReportingSystem",
+            "selection_reason": "sole_candidate"
+          },
+          {
+            "axis": "unit",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "facet_crs",
+            "ref": "USD",
+            "selection_reason": "sole_candidate"
+          }
+        ],
+        "periods": [
+          [
+            2020,
+            2021
+          ]
+        ],
+        "provenance": "provenance/OECDCreditorReportingSystem",
+        "role": "bilateral",
+        "rows": 4,
+        "stat_vars": [
+          "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA01_CRSPurposeCode11330_Nominal",
+          "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11110_Nominal",
+          "dcid:Amount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_CRSTypeOfFinance110_CRSCooperationModalityA02_CRSPurposeCode11120_Nominal"
+        ],
+        "warnings": [],
+        "zero_rows": 0
+      },
+      {
+        "content_version": "cv_e2102db949aaff4b1d873d2370b41369",
+        "dropped_years": [],
+        "facets": [
+          {
+            "axis": "provenance",
+            "basis": "bound",
+            "default_policy": null,
+            "default_policy_version": null,
+            "dispatch_facet_id": "facet_imputed",
+            "ref": "provenance/ONEImputedMultilateralSectors",
+            "selection_reason": null
+          },
+          {
+            "axis": "unit",
+            "basis": "deployment_fallback",
+            "default_policy": "dfo/facet-policy/most-observations",
+            "default_policy_version": "1",
+            "dispatch_facet_id": "facet_imputed",
+            "ref": "USD",
+            "selection_reason": "sole_candidate"
+          }
+        ],
+        "periods": [
+          [
+            2020,
+            2021
+          ]
+        ],
+        "provenance": "provenance/ONEImputedMultilateralSectors",
+        "role": "imputed",
+        "rows": 32,
+        "stat_vars": [
+          "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11110_Nominal",
+          "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11120_Nominal",
+          "dcid:AttributedAmount_FinancialFlow_Gross_Disbursement_CRSTypeOfFlow10_DAC2aAidType106_CRSPurposeCode11130_Nominal"
+        ],
+        "warnings": [],
+        "zero_rows": 30
+      }
+    ],
+    "facets": [
+      {
+        "axis": "provenance",
+        "basis": "bound",
+        "default_policy": null,
+        "default_policy_version": null,
+        "dispatch_facet_id": "provenance/ONEBilateralAndImputedMultilateral",
+        "ref": "provenance/ONEBilateralAndImputedMultilateral",
+        "selection_reason": "the composite bilateral plus imputed multilateral (OECD CRS and ONE Imputed Multilateral Sectors)"
+      },
+      {
+        "axis": "unit",
+        "basis": "deployment_fallback",
+        "default_policy": "dfo/facet-policy/most-observations",
+        "default_policy_version": "1",
+        "dispatch_facet_id": "facet_crs",
+        "ref": "USD",
+        "selection_reason": "sole_candidate"
+      }
+    ]
+  },
+  "warnings": []
+}

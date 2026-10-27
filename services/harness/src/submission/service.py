@@ -4,9 +4,11 @@
 it states (`_Patch`), which plan it means (`_resolve_intent`) and that plan
 as the model wrote it (`planner.plan.authored`), the pins it
 moves back from their windowed copies (`_unwindowed_pins`), a referral the
-user has not answered (`_referral_unanswered`), the decisions it settles
-(`planner.plan.settle_decisions`), the measure decisions written on the
-model's behalf (`_measure_decisions`), the carried decisions it
+user has not answered (`_referral_unanswered`), the inputs of each
+calculation put on one measure basis and provider scope (`_aligned_bases`), the decisions it
+settles (`planner.plan.settle_decisions`), the measure decisions and then the
+scope decisions written on the model's behalf (`_measure_decisions`,
+`_scope_decisions`), the carried decisions it
 contradicts (`_contradicted_carried_decisions`: a planner's is dropped
 unless another requirement still rests on it), the carried planner
 decisions it leaves uncited (`_uncited_carried_decisions`), a user's
@@ -36,12 +38,13 @@ caller's.
 from __future__ import annotations
 
 import functools
+import logging
 import unicodedata
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import chain
-from typing import Annotated, Any, NamedTuple, Protocol
+from typing import Annotated, Any, NamedTuple, Protocol, cast
 
 from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
@@ -52,6 +55,7 @@ from compiler.sources import (
 )
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
+from harness.scope_choices import PartScope, ScopeChoice, option_axis, planner_axes
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -78,6 +82,7 @@ from planner.plan import (
     Decision,
     DecisionDraft,
     DecisionFixes,
+    DecisionScope,
     Decline,
     Entity,
     EvidenceRequirement,
@@ -90,6 +95,7 @@ from planner.plan import (
     RankRequirement,
     RecordedDefinition,
     ResolvedBy,
+    ScopeOptionState,
     SessionState,
     SumOfRequirement,
     UnsupportedOperation,
@@ -106,7 +112,9 @@ from planner.plan import (
     fixes_changes,
     full_histories,
     full_history,
+    identity_on_record,
     inputs_of,
+    is_scope_choice,
     is_search_pin,
     keep_years_admits,
     licences_restated,
@@ -122,12 +130,13 @@ from planner.plan import (
     open_window,
     period_licences_held,
     period_window,
+    pin_slot_moves,
     pin_sources,
-    recorded_identity,
+    reached,
     roles_not_kept,
+    scope_choice_slot,
     search_pin_slot,
     settle_decisions,
-    shown_identity,
     split_of,
     unstated_period_reductions,
     unstated_result_scopes,
@@ -141,23 +150,30 @@ from planner.records import (
     GroupBy,
     Identifier,
     OpenPeriodFault,
-    ResolvedSourceMention,
     RollingIssue,
     RollingPlanError,
+    StrictModel,
     Year,
 )
 from planner.shapes import PLACE_PHRASE, pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
-from planner.workflow import OpenEntityAxis, ResolvedGroup, SelectedSource
+from planner.workflow import OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 from pydantic_core import to_jsonable_python
-from translator.discovery import load_log, requirement_open_roles, requirement_revision
+from translator.discovery import (
+    load_log,
+    requirement_open_roles,
+    requirement_revision,
+    search_part,
+)
 from translator.referral import USER_DECIDES, Referral, ReferralKind, load_referral
 from translator.tool import authored_answer
 
 # What a combination ask asks about: the `sum_of` requirement's id and the
 # datasets its sides read (`_sum_datasets`).
 type Combination = tuple[str, frozenset[str]]
+
+logger = logging.getLogger(__name__)
 
 
 class ReferralAnswers(NamedTuple):
@@ -330,7 +346,7 @@ def submit(
     )
 
 
-def admit(
+def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     view: SessionView,
     proposal: Proposal,
     *,
@@ -418,6 +434,19 @@ def admit(
     )
     user_settled = _user_settled_measures(measures, view, pins)
     evidence_requirements = _stated_source_given_way(evidence_requirements, referral, view)
+    aligned = aligned_pins(view.state)
+    realigned = _aligned_bases(
+        _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+        evidence_requirements,
+        shown=pins,
+        aligned=aligned,
+        searched=searched_pins(view.state),
+        view=view,
+        proposer=proposer,
+    )
+    if isinstance(realigned, dict):
+        return realigned
+    evidence_requirements = realigned
     settled, evidence_requirements = _measure_decisions(
         settle_decisions(
             patch.decisions,
@@ -427,6 +456,13 @@ def admit(
         previous=previous,
         measures=measures,
         user_settled=user_settled,
+    )
+    settled, evidence_requirements = _scope_decisions(
+        settled,
+        evidence_requirements,
+        previous=previous,
+        scopes=scope_choice_decisions(pins),
+        removed=removed_decisions,
     )
     requirements_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
@@ -2562,11 +2598,13 @@ def _repinned(
     `decision_pins` maps a decision's slot, `requirement_pins` a dataset
     requirement's id, to the spec_id it pins after the move; anything either
     map does not name is returned as it was. `slots` maps the slot of a
-    decision `propose_plan` wrote for a search pin (`planner.plan.
-    is_search_pin`) to the one its moved pin takes (`search_pin_slot`): that
-    decision is rewritten for its new pin, and every citation of it cites the
-    new slot, so it stays a search pin. A measure choice (`MeasureChoice`)
-    keeps its options, since it reads the same over any period.
+    decision `propose_plan` wrote for a pin, a search pin's
+    (`planner.plan.is_search_pin`) or a scope choice's
+    (`planner.plan.is_scope_choice`), to the one its moved pin takes
+    (`planner.plan.pin_slot_moves`): that decision is rewritten for its new
+    pin, and every citation of it cites the new slot, so it stays one code
+    wrote. A measure choice (`MeasureChoice`) keeps its options, and a scope
+    choice its choice and options, since each reads the same over any period.
     """
     moved_decisions: list[Decision] = []
     for decision in decisions:
@@ -2577,7 +2615,7 @@ def _repinned(
         update: dict[str, object] = {
             "fixes": decision.fixes.model_copy(update={"source_spec_id": pin})
         }
-        if is_search_pin(decision) and decision.slot in slots:
+        if (is_search_pin(decision) or is_scope_choice(decision)) and decision.slot in slots:
             update["slot"] = slots[decision.slot]
         moved_decisions.append(decision.model_copy(update=update))
     moved_requirements: list[EvidenceRequirement] = []
@@ -2622,7 +2660,9 @@ def _unwindowed_pins(
             and (origin := to_origin.get(requirement.source_spec_id or ""))
         },
         slots={
-            search_pin_slot(copy): search_pin_slot(origin) for copy, origin in to_origin.items()
+            slot: moved
+            for copy, origin in to_origin.items()
+            for slot, moved in pin_slot_moves(copy, origin).items()
         },
     )
 
@@ -2795,52 +2835,6 @@ def _open_window(
     return open_window(first_year)
 
 
-@dataclass(frozen=True)
-class _ShownDefinition:
-    """The definition of a dataset the planner was shown, as its block carries it,
-    with the sets its places were asked for as."""
-
-    identity: Mapping[str, Any]
-    groups: tuple[ResolvedGroup, ...] = ()
-    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
-
-
-def identity_on_record(
-    pin: str,
-    *,
-    shown: Mapping[str, PinSource],
-    end_open: bool,
-    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
-) -> RecordedDefinition | None:
-    """The definition on record for `pin`; `None` when none is.
-
-    The definition is the one a search in the conversation recorded
-    (`planner.plan.recorded_identity`), else the one `definition_lookup`
-    answers: `admit` passes the discovery log's
-    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
-    a candidate the translator offered. For a requirement stating
-    `period_end_open` it is otherwise the one the block the planner was
-    shown carries (`planner.plan.shown_identity`): the translator can find
-    a closed requirement's pin by searching its stated years, and no search
-    finds a definition with no end year. A shown block that is not readable
-    as a source (`source_from_spec_block`) puts none on record.
-    """
-    recorded: RecordedDefinition | None = recorded_identity(pin)
-    if recorded is None and definition_lookup is not None:
-        recorded = definition_lookup(pin)
-    if recorded is not None or not end_open or pin not in shown:
-        return recorded
-    identity = shown_identity(pin, shown[pin])
-    block = shown[pin].spec_block(pin)
-    if identity is None or block is None:
-        return None
-    try:
-        source = source_from_spec_block(block)
-    except ValueError:
-        return None
-    return _ShownDefinition(identity, source.groups, source.resolved_sources)
-
-
 def first_year_reads(state: SessionState) -> list[Mapping[str, Any]]:
     """The identity of each dataset the planner was shown whose first year `propose_plan`
     can still read in `state`.
@@ -2971,8 +2965,10 @@ def _window_pins(
         pinned = targets.get(decision.slot, set())
         if len(pinned) == 1 and pinned != {pin}:
             decision_pins[decision.slot] = next(iter(pinned))
-            if is_search_pin(decision):
-                slots[decision.slot] = search_pin_slot(decision_pins[decision.slot])
+            if is_search_pin(decision) or is_scope_choice(decision):
+                slots[decision.slot] = pin_slot_moves(pin, decision_pins[decision.slot])[
+                    decision.slot
+                ]
     requirement_pins = {
         requirement_id: copy.spec_id for requirement_id, copy in copies.items() if copy is not None
     }
@@ -3050,7 +3046,12 @@ def _measure_decisions(
             return None
         for slot in requirement.decision_ids:
             cited = known.get(slot)
-            if cited is not None and cited.fixes is not None and cited.fixes.source_spec_id == pin:
+            if (
+                cited is not None
+                and cited.fixes is not None
+                and cited.fixes.source_spec_id == pin
+                and not is_scope_choice(cited)
+            ):
                 return None
         return pin
 
@@ -3185,6 +3186,949 @@ def _user_settled_rewrites(
         ):
             rewritten.append(_measure_decision(decision.slot, pin, choice, user=user))
     return rewritten
+
+
+# Why the planner moved an input's choice on each axis it aligns (`_aligned_bases`).
+_ALIGNED_REASONS: dict[str, str] = {
+    "measure_basis": "so that every input of the calculation is on one basis",
+    "provider": "so that every input of the calculation counts the same spending",
+}
+
+# What each scope decision asks, by the axis its choice settles.
+_SCOPE_QUESTIONS: dict[str, str] = {
+    "sector": "Which sector codes the figures count.",
+    "region": "Which places the region's figures count.",
+    "measure_basis": "Which basis the figures are measured on.",
+    "provider": "Whose spending the figures count.",
+}
+
+
+def scope_choice_decisions(shown: Mapping[str, PinSource]) -> dict[str, tuple[Decision, ...]]:
+    """The scope decisions a pin of each spec_id of `shown` states, in the order Search lists its choices.
+
+    Read from the source's spec block (`resolved.scope_choices`,
+    `harness.scope_choices.PartScope`). A block carrying none, or one this
+    release cannot read, states none. Each choice is one decision
+    (`_scope_decision`), when it states one; a choice on an axis the block
+    marks as the planner's (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`)
+    is the planner's decision.
+    """
+    decisions: dict[str, tuple[Decision, ...]] = {}
+    for spec_id, source in shown.items():
+        block = source.spec_block(spec_id)
+        scope = part_scope(spec_id, block)
+        if scope is None:
+            continue
+        planner = planner_axes(block)
+        written = tuple(
+            decision
+            for choice in scope.choices
+            if (decision := _scope_decision(spec_id, choice, scope=scope, planner=planner))
+            is not None
+        )
+        if written:
+            decisions[spec_id] = written
+    return decisions
+
+
+def part_scope(spec_id: str, block: Mapping[str, Any] | None) -> PartScope | None:
+    """The scope choices `block`, the spec block of `spec_id`, carries; `None` when it carries none or none this release reads."""
+    raw = ((block or {}).get("resolved") or {}).get("scope_choices")
+    if raw is None:
+        return None
+    try:
+        return PartScope.from_search(raw)
+    except ValidationError as exc:
+        logger.warning("scope choices unreadable: spec_id=%s: %s", spec_id, exc)
+        return None
+
+
+def _scope_decision(
+    pin: str, choice: ScopeChoice, *, scope: PartScope, planner: Collection[str] = frozenset()
+) -> Decision | None:
+    """The decision a pin of `pin` states for `choice`, or `None` when it states none.
+
+    It states one when another option than the active one can be served,
+    whole or for some years (`available` or `partial`). Its options are the
+    choice's labels, unavailable ones included, so the card can say why
+    each is out of reach. A choice a `Decision` cannot state, its labels
+    repeated or past a limit of the plan's, states none. The user settled it
+    when an explicit or carried entry of `scope` did: an explicit one from a
+    choice (`ChoiceOrigin`) is a switch on the plan card. Else Search's
+    default did. A choice on an axis of `planner`, the axes the planner's
+    own words or alignment settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`),
+    is the planner's: a switch of the measure basis or provider scope there
+    compiled the pin on the option of a calculation's other inputs
+    (`_aligned_bases`), and is stated whatever else the pin could be served on.
+    """
+    active = choice.active_option
+    switched = any(
+        entry.axis == choice.axis and entry.origin.kind == "choice" for entry in scope.entries
+    )
+    by_planner = choice.axis in planner and choice.provenance != "default"
+    aligned = by_planner and switched and choice.axis in _ALIGNED_REASONS
+    if active is None or not (
+        aligned
+        or any(
+            option.availability.status != "unavailable"
+            for option in choice.options
+            if option.option_id != choice.active
+        )
+    ):
+        return None
+    if aligned:
+        rationale = f"Counted as {active.label} {_ALIGNED_REASONS[choice.axis]}."
+    elif by_planner:
+        rationale = f"The plan's wording of this input asked for {active.label}."
+    elif choice.provenance == "explicit" and switched:
+        rationale = f"The user chose {active.label} on the plan."
+    elif choice.provenance == "explicit":
+        rationale = f"The user's question asked for {active.label}."
+    elif choice.provenance == "carried":
+        rationale = f"The user chose {active.label} earlier in the conversation."
+    else:
+        rationale = "Search's default for this question."
+    try:
+        return Decision(
+            slot=scope_choice_slot(pin, choice.axis),
+            description=_SCOPE_QUESTIONS[choice.axis],
+            options=tuple(option.label for option in choice.options),
+            chosen=active.label,
+            resolved_by=ResolvedBy.PLANNER_DEFAULT
+            if by_planner or choice.provenance == "default"
+            else ResolvedBy.USER,
+            rationale=rationale,
+            fixes=DecisionFixes(source_spec_id=pin),
+            scope=DecisionScope(
+                choice_id=choice.id,
+                axis=choice.axis,
+                options=tuple(
+                    ScopeOptionState(
+                        option_id=option.option_id,
+                        status=option.availability.status,
+                        years=option.availability.years,
+                        code=option.availability.code,
+                    )
+                    for option in choice.options
+                ),
+            ),
+        )
+    except ValidationError as exc:
+        logger.warning("scope decision not stated: spec_id=%s axis=%s: %s", pin, choice.axis, exc)
+        return None
+
+
+def _scope_decisions(
+    decisions: Sequence[Decision],
+    evidence_requirements: Sequence[EvidenceRequirement],
+    *,
+    previous: Plan | None,
+    scopes: Mapping[str, Sequence[Decision]],
+    removed: Collection[str],
+) -> tuple[list[Decision], list[EvidenceRequirement]]:
+    """Add the scope decisions each pin in this call's requirements states, and cite them.
+
+    Runs after the model's decisions and the measure decisions
+    (`_measure_decisions`), so those come first under the cap. Each dataset
+    requirement of `evidence_requirements` pinning a spec_id of `scopes`
+    cites that pin's scope decisions; one citing a scope decision for a pin
+    it no longer states has that citation dropped. A decision whose slot is
+    new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
+    past that it is neither written nor cited, and the basis line still
+    states its choice. The count is every slot this call states and every
+    slot of `previous` it does not remove that stays: one a requirement
+    still cites once this call's citations are patched, the scope decisions
+    of this call's pins among them, or a user's, which
+    `_uncited_carried_decisions` may keep. A planner's decision no
+    requirement cites any more, such as a re-pinned dataset's scope
+    decision, is swept and not counted. The count never falls short of the
+    plan's own, so the cap never refuses. One `previous` records as Search's
+    default is restated when Search now says otherwise, unless this call
+    states its slot; a user's stands.
+
+    Args:
+        decisions: This call's decisions, the measure decisions included.
+        evidence_requirements: This call's own requirements.
+        previous: The plan this call amends, or `None`.
+        scopes: The scope decisions a pin of each spec_id states
+            (`scope_choice_decisions`).
+        removed: The slots this call removes.
+
+    Returns:
+        `decisions` with each new or restated scope decision appended, and
+        `evidence_requirements` citing them.
+    """
+    carried = previous.decisions if previous is not None else ()
+    known = {decision.slot: decision for decision in (*carried, *decisions)}
+    stated = {decision.slot for decision in decisions}
+    citations = [
+        [
+            slot
+            for slot in requirement.decision_ids
+            if not (
+                (decision := known.get(slot)) is not None
+                and is_scope_choice(decision)
+                and decision.fixes is not None
+                and decision.fixes.source_spec_id != requirement.source_spec_id
+            )
+        ]
+        if isinstance(requirement, DatasetRequirement)
+        else list(requirement.decision_ids)
+        for requirement in evidence_requirements
+    ]
+    restated = {requirement.id for requirement in evidence_requirements}
+    cited_after = {
+        *(slot for cited in citations for slot in cited),
+        *(
+            slot
+            for requirement in (previous.evidence_requirements if previous is not None else ())
+            if requirement.id not in restated
+            for slot in requirement.decision_ids
+        ),
+        *(
+            derived.slot
+            for requirement in evidence_requirements
+            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+            for derived in scopes.get(requirement.source_spec_id, ())
+        ),
+    }
+    held = stated | {
+        decision.slot
+        for decision in carried
+        if decision.slot not in removed
+        and (decision.slot in cited_after or decision.resolved_by is not ResolvedBy.PLANNER_DEFAULT)
+    }
+    written: list[Decision] = []
+    patched: list[EvidenceRequirement] = []
+    for requirement, cited in zip(evidence_requirements, citations, strict=True):
+        if not isinstance(requirement, DatasetRequirement):
+            patched.append(requirement)
+            continue
+        pin = requirement.source_spec_id
+        for derived in scopes.get(pin, ()) if pin is not None else ():
+            standing = known.get(derived.slot)
+            if standing is None:
+                if len(held) >= MAX_PLAN_DECISIONS:
+                    continue
+                held.add(derived.slot)
+                known[derived.slot] = derived
+                written.append(derived)
+            elif (
+                standing != derived
+                and standing.resolved_by is ResolvedBy.PLANNER_DEFAULT
+                and derived.slot not in stated
+            ):
+                known[derived.slot] = derived
+                written.append(derived)
+            if derived.slot not in cited:
+                cited.append(derived.slot)
+        patched.append(
+            requirement
+            if tuple(cited) == requirement.decision_ids
+            else requirement.model_copy(update={"decision_ids": tuple(cited)})
+        )
+    return [*decisions, *written], patched
+
+
+# The session slot holding each pin compiled to put a calculation's inputs
+# on one measure basis or provider scope (`AlignedPin`), which `_aligned_bases` reads and
+# `planner.agent.with_source_reads` writes.
+ALIGNED_PINS_STATE_KEY = "planner:aligned_pins"
+
+# The identity slots whose bound code makes a part a sector or restricted
+# one: the CRS purpose code, type of finance and cooperation modality. They
+# mirror the slots dfo-apis reads a part's shape from for its basis
+# convention (`search.scope.basis.identity_part_shape` there).
+_NARROWING_SLOTS = frozenset({"crsPurpose", "crsTypeOfFinance", "crsCooperationModality"})
+
+_BASIS_AXIS = "measure_basis"
+_PROVIDER_AXIS = "provider"
+
+# The axes a calculation's inputs are counted on one option of (`_aligned_bases`),
+# and what figures counted on different options of each mix, or of either for an
+# input with no pin to name an option on.
+_ALIGNED_AXES = (_BASIS_AXIS, _PROVIDER_AXIS)
+_MIXED: dict[str | None, str] = {
+    _BASIS_AXIS: "counted on different measure bases",
+    _PROVIDER_AXIS: "counting different providers' spending",
+    None: "counted on different measure bases or provider scopes",
+}
+
+
+class AlignedPin(StrictModel):
+    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
+
+    `option_ids` holds one option per axis moved, measure basis or provider
+    scope, sorted (`Realignment.option_ids`). `digest` is Search's answer
+    as a search's digest (`harness.tool_contracts.resolver_digest`), which
+    the planner seam stores as a reading of the conversation.
+    """
+
+    origin: str
+    option_ids: tuple[str, ...]
+    spec_id: str
+    digest: dict[str, Any]
+
+
+def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
+    """The pins `ALIGNED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(AlignedPin.model_validate(raw) for raw in state.get(ALIGNED_PINS_STATE_KEY) or ())
+
+
+def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
+    """Hold `pin`, in place of any pin compiled from the same origin on the same options."""
+    kept = [
+        held
+        for held in aligned_pins(state)
+        if (held.origin, held.option_ids) != (pin.origin, pin.option_ids)
+    ]
+    state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+
+
+# The session slot holding each search code made for a calculation's input
+# the planner pinned no dataset for (`SearchedPin`), which `_aligned_bases`
+# reads and `planner.agent.with_source_reads` writes.
+SEARCHED_PINS_STATE_KEY = "planner:searched_pins"
+
+
+class SearchedPin(StrictModel):
+    """Search's answer for a dataset requirement the planner pinned no dataset for.
+
+    `requirement_key` is the requirement's searched content
+    (`translator.discovery.requirement_revision`), so a requirement restated
+    with other words, parties or years is searched again. `spec_id` is the
+    dataset Search settled on and `digest` its answer as a search's digest
+    (`harness.tool_contracts.resolver_digest`), which the planner seam stores
+    as a reading of the conversation; both are `None` when Search settled on
+    no one dataset, and `_aligned_bases` then refuses the plan. `status` is
+    the status Search answered the part with (`definite`, `ambiguous`,
+    `candidates`, `no_data`), `refused` for a refusal that cannot succeed
+    later, or `unreadable` for an answer holding no one part. `asked_roles` and `open_roles` are the parties the search named
+    and held open.
+    """
+
+    requirement_key: str
+    status: str
+    spec_id: str | None = None
+    digest: dict[str, Any] | None = None
+    asked_roles: tuple[str, ...] = ()
+    open_roles: tuple[str, ...] = ()
+
+
+def searched_pins(state: SessionState) -> tuple[SearchedPin, ...]:
+    """The searches `SEARCHED_PINS_STATE_KEY` holds, oldest first; empty when unset."""
+    return tuple(
+        SearchedPin.model_validate(raw) for raw in state.get(SEARCHED_PINS_STATE_KEY) or ()
+    )
+
+
+def save_searched_pin(state: SessionState, pin: SearchedPin) -> None:
+    """Hold `pin`, in place of any search of the same requirement content."""
+    kept = [held for held in searched_pins(state) if held.requirement_key != pin.requirement_key]
+    state[SEARCHED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
+
+
+class Unpinned(StrictModel):
+    """One input of a calculation the planner pinned no dataset for, to search for in code.
+
+    `requirement_id` is the dataset requirement and `step_id` the
+    calculation whose inputs it joins. `requirement_key` is its searched
+    content (`translator.discovery.requirement_revision`), `part` the
+    `search` part the translator's own discovery sends for it
+    (`translator.discovery.search_part`), and `asked_roles` and `open_roles`
+    the parties that part names and holds open.
+    """
+
+    requirement_id: str
+    step_id: str
+    requirement_key: str
+    part: dict[str, Any]
+    asked_roles: tuple[str, ...]
+    open_roles: tuple[str, ...]
+
+
+def _unpinned(requirement: DatasetRequirement, step_id: str) -> Unpinned:
+    """The search for `requirement`, an unpinned input of `step_id`."""
+    return Unpinned(
+        requirement_id=requirement.id,
+        step_id=step_id,
+        requirement_key=requirement_revision(requirement),
+        part=search_part(requirement, requirement.measure),
+        asked_roles=tuple(entity.role for entity in requirement.entities if entity.role),
+        open_roles=tuple(requirement_open_roles(requirement)),
+    )
+
+
+def unpinned_wanted(result: Mapping[str, object]) -> list[Unpinned]:
+    """The inputs a `BASIS_UNKNOWN` refusal asks to search for; empty for any other answer."""
+    if result.get("code") != ProblemCode.BASIS_UNKNOWN.value:
+        return []
+    detail = cast("Mapping[str, Any]", result.get("detail") or {})
+    return [Unpinned.model_validate(entry) for entry in detail.get("search") or ()]
+
+
+class Realignment(NamedTuple):
+    """One input a calculation needs compiled on another measure basis, provider scope, or both.
+
+    `spec_id` is the pin as Search first answered it, `option_ids` the
+    options to compile it on, one per axis it moves on, sorted so one set
+    of options has one form. `requirement_id` is the dataset requirement
+    pinning it and `step_id` the calculation that wants its first option.
+    """
+
+    spec_id: str
+    option_ids: tuple[str, ...]
+    requirement_id: str
+    step_id: str
+
+    def detail(self) -> dict[str, object]:
+        """This realignment as a refusal's detail states it."""
+        return {**self._asdict(), "option_ids": list(self.option_ids)}
+
+
+def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
+    """The inputs a `BASES_UNALIGNED` refusal asks to compile on other options; empty for any other answer."""
+    if result.get("code") != ProblemCode.BASES_UNALIGNED.value:
+        return []
+    detail = cast("Mapping[str, Any]", result.get("detail") or {})
+    return [
+        Realignment(
+            spec_id=entry["spec_id"],
+            option_ids=tuple(entry["option_ids"]),
+            requirement_id=entry["requirement_id"],
+            step_id=entry["step_id"],
+        )
+        for entry in detail.get("realign") or ()
+    ]
+
+
+@dataclass(frozen=True)
+class _InputBasis:
+    """The option one dataset requirement's pin is counted on, on one aligned axis.
+
+    `pin` is the spec_id the requirement states and `origin` the pin it was
+    compiled from (itself, unless a proposal of this entry put it on another
+    option). `choice` is the origin's choice on the axis (`_ALIGNED_AXES`), so
+    an option the user stated reads as theirs whatever the pin was aligned
+    to. `stated` says the user stated it: an explicit entry settled the
+    choice, or a carried one, the user's choice earlier in the conversation,
+    and the origin's block does not mark the axis as the planner's
+    (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
+    `providers` are the donors the origin's part binds on its `origin` role,
+    empty for a part counting every provider.
+    """
+
+    requirement_id: str
+    pin: str
+    origin: str
+    choice: ScopeChoice
+    stated: bool
+    rank: int
+    providers: frozenset[str]
+
+    def shares_providers(self, other: _InputBasis) -> bool:
+        """Whether this input and `other` can count one provider's flows: a donor both
+        bind, or a part counting every provider beside any other."""
+        return not self.providers or not other.providers or bool(self.providers & other.providers)
+
+    def label(self, option_id: str) -> str:
+        """The reader's label of `option_id` on this input, or the id when the choice lists none."""
+        return next(
+            (option.label for option in self.choice.options if option.option_id == option_id),
+            option_id,
+        )
+
+
+def _part_rank(identity: Mapping[str, Any]) -> int:
+    """How narrow a part of `identity` is: 2 when it binds a sector or restriction
+    (`_NARROWING_SLOTS`), 1 when it binds a recipient, 0 for a donor-only total."""
+    bound = {
+        slot.get("property")
+        for slot in identity.get("slots") or ()
+        if isinstance(slot, Mapping)
+        and (slot.get("binding") or {}).get("state") in ("value", "set")
+    }
+    if bound & _NARROWING_SLOTS:
+        return 2
+    return 1 if (identity.get("entities") or {}).get("destination") else 0
+
+
+def _input_bases(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    shown: Mapping[str, PinSource],
+    origins: Mapping[str, str],
+    axis: str,
+) -> dict[str, _InputBasis]:
+    """The option each dataset requirement of `requirements` is counted on along `axis`, by requirement id.
+
+    A requirement whose pin's origin (`origins`) was not shown, or carries no
+    choice on `axis`, has none.
+    """
+    bases: dict[str, _InputBasis] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        pin = requirement.source_spec_id
+        origin = origins.get(pin, pin)
+        source = shown.get(origin)
+        block = source.spec_block(origin) if source is not None else None
+        scope = part_scope(origin, block)
+        choice = (
+            next((c for c in scope.choices if c.axis == axis), None) if scope is not None else None
+        )
+        if scope is None or choice is None:
+            continue
+        bases[requirement.id] = _InputBasis(
+            requirement_id=requirement.id,
+            pin=pin,
+            origin=origin,
+            choice=choice,
+            stated=choice.provenance != "default" and axis not in planner_axes(block),
+            rank=_part_rank(scope.base.identity),
+            providers=frozenset((scope.base.identity.get("entities") or {}).get("origin") or ()),
+        )
+    return bases
+
+
+def _aligned_bases(
+    requirements: Sequence[EvidenceRequirement],
+    evidence_requirements: Sequence[EvidenceRequirement],
+    *,
+    shown: Mapping[str, PinSource],
+    aligned: Sequence[AlignedPin],
+    searched: Sequence[SearchedPin],
+    view: SessionView,
+    proposer: Proposer,
+) -> list[EvidenceRequirement] | dict[str, object]:
+    """This call's requirements with every input of a calculation pinned on one measure basis and one provider scope, or the refusal that stops the plan.
+
+    A dataset input the planner pinned no dataset for is pinned first to the
+    dataset Search settled on for it (`searched`), since its basis is
+    unknown until a dataset is pinned. An input of a calculation another of
+    whose inputs carries a basis or provider choice, with no search of it
+    held yet, answers `BASIS_UNKNOWN`, naming each to search for
+    (`Unpinned`). `planner.agent.with_source_reads` searches for them and
+    proposes again.
+    One whose search settled on no one dataset answers
+    `OPERATION_UNSUPPORTED`, since one basis or provider scope cannot be
+    guaranteed for it.
+
+    A calculation reading several inputs (a comparison, sum, share, quotient
+    or join) contrasts sector and region, and keeps those as stated. On
+    each axis of `_ALIGNED_AXES`, the measure basis and the provider scope
+    (bilateral flows alone, or with imputed multilateral flows), it
+    contrasts its inputs only when the user stated different options on
+    them (explicit or carried entries naming different options, an entry
+    this planner compiled excluded, as `_InputBasis.stated` reads them).
+    Otherwise its dataset inputs with a choice on the axis are counted on
+    one option. Calculations sharing an input, such as a sum read by a
+    share, form one group and take one option for every input any of them
+    reaches (`_shared_basis`): the one the user stated on any of them, else
+    the one the narrowest part is counted on (`_part_rank`), the first such
+    input in plan order on a tie. A group whose inputs the user stated on
+    different options has no one option, and each of its calculations takes
+    its own. A sum whose inputs the user stated on different provider
+    scopes is refused where two of them can count one donor's flows (a
+    donor both bind, or a part counting every provider beside any other),
+    since an inclusive figure already holds the bilateral one and the sum
+    would count it twice. A sum over disjoint donors, such as France's
+    bilateral aid plus Germany's inclusive aid, is served as stated.
+
+    An input already on its options keeps its origin pin. Another is pinned
+    to the pin compiled from its origin on the options it moves to, one per
+    axis (`aligned`), and the requirement is restated under it, appended
+    when only the plan this call amends states it. An input with no such
+    pin yet answers `BASES_UNALIGNED`, naming each to compile with every
+    option it moves to (`Realignment`). `planner.agent.with_source_reads`
+    compiles them and proposes again. An input whose choice does not offer
+    the option, or offers it unavailable, and an input two calculations
+    want on different options of one axis answer `OPERATION_UNSUPPORTED`.
+
+    Args:
+        requirements: Every requirement the plan states once this call's
+            patch lands (`_requirements_after`).
+        evidence_requirements: This call's own requirements.
+        shown: The datasets the planner was shown (`planner.plan.pin_sources`).
+        aligned: The pins compiled so far (`aligned_pins`).
+        searched: The searches made so far for unpinned inputs (`searched_pins`).
+        view: The session, where an `unsupported` answer is recorded.
+        proposer: The tool a refusal's `action` names.
+    """
+    held = {pin.requirement_key: pin for pin in searched}
+    found = {
+        requirement.id: pin.spec_id
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is None
+        and (pin := held.get(requirement_revision(requirement))) is not None
+        and pin.spec_id is not None
+    }
+    unsearched = {
+        requirement.id: requirement
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is None
+        and requirement_revision(requirement) not in held
+    }
+    requirements = [_pinned(requirement, found) for requirement in requirements]
+    evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
+    origins = {pin.spec_id: pin.origin for pin in aligned}
+    compiled = {(pin.origin, pin.option_ids): pin.spec_id for pin in aligned}
+    by_axis = {
+        axis: _input_bases(requirements, shown=shown, origins=origins, axis=axis)
+        for axis in _ALIGNED_AXES
+    }
+    reads: dict[str, Sequence[str]] = {
+        input_id: () for requirement in requirements for input_id in inputs_of(requirement)
+    }
+    reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
+    steps = [step for step in requirements if len(inputs_of(step)) >= 2]
+    unsettled = {
+        requirement.id: pin
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement)
+        and requirement.source_spec_id is None
+        and (pin := held.get(requirement_revision(requirement))) is not None
+        and pin.spec_id is None
+    }
+    unpinned: dict[str, Unpinned] = {}
+    for step in steps:
+        under = reached(step.id, reads)
+        if not any(bases.keys() & under for bases in by_axis.values()):
+            continue
+        for requirement_id in sorted(unsettled.keys() & under):
+            return _basis_unservable(
+                view,
+                proposer,
+                step_id=step.id,
+                requirement_id=requirement_id,
+                reason=(
+                    f"Search settles {requirement_id!r} on no one dataset "
+                    f"({unsettled[requirement_id].status}), so how it is counted cannot be matched "
+                    "to the other inputs'"
+                ),
+            )
+        for requirement_id in sorted(unsearched.keys() & under):
+            if requirement_id not in unpinned:
+                unpinned[requirement_id] = _unpinned(unsearched[requirement_id], step.id)
+    if unpinned:
+        return _basis_unknown(list(unpinned.values()))
+    if all(len(bases) < 2 for bases in by_axis.values()):
+        return _with_found(evidence_requirements, requirements, found)
+    try:
+        targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
+    except _Unservable as exc:
+        return exc.problem
+    wanted, repinned = _realigned_pins(targets, by_axis, compiled=compiled)
+    if wanted:
+        return _bases_unaligned(wanted, by_axis)
+    return _with_found(evidence_requirements, requirements, {**found, **repinned})
+
+
+def _alignment_targets(
+    steps: Sequence[EvidenceRequirement],
+    reads: Mapping[str, Sequence[str]],
+    by_axis: Mapping[str, Mapping[str, _InputBasis]],
+    *,
+    view: SessionView,
+    proposer: Proposer,
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """The option each input of `steps` is counted on, by its requirement id and axis, with the calculation that wants it (`_aligned_bases`).
+
+    On each axis, the calculations whose inputs share one option
+    (`_shared_basis`) are joined into connected groups by the inputs they
+    share, and each takes its group's option, or its own when the group's
+    inputs were stated on different options.
+
+    Raises:
+        _Unservable: When the inputs of one calculation cannot be counted on one option.
+    """
+    targets: dict[tuple[str, str], tuple[str, str]] = {}
+    for axis, bases in by_axis.items():
+        aligning: list[tuple[EvidenceRequirement, list[_InputBasis], str]] = []
+        for step in steps:
+            under = reached(step.id, reads)
+            inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
+            if len(inputs) < 2:
+                continue
+            own = _shared_basis(inputs)
+            if own is not None:
+                aligning.append((step, inputs, own))
+            elif (
+                axis == _PROVIDER_AXIS
+                and isinstance(step, SumOfRequirement)
+                and (pair := _double_counted(inputs)) is not None
+            ):
+                first, other = pair
+                raise _Unservable(
+                    _basis_unservable(
+                        view,
+                        proposer,
+                        step_id=step.id,
+                        requirement_id=other.requirement_id,
+                        spec_id=other.origin,
+                        option_id=first.choice.active,
+                        reason=(
+                            f"{step.id!r} adds {first.requirement_id!r}, counted as "
+                            f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
+                            f"counted as {other.label(other.choice.active)}, and a figure "
+                            "including imputed multilateral flows already holds the bilateral "
+                            "ones and the sum counts them twice"
+                        ),
+                    )
+                )
+        groups: list[set[str]] = []
+        for _, inputs, _ in aligning:
+            joined = {basis.requirement_id for basis in inputs}
+            for group in [group for group in groups if group & joined]:
+                joined |= group
+                groups.remove(group)
+            groups.append(joined)
+        group_target = {
+            requirement_id: _shared_basis([b for r, b in bases.items() if r in group])
+            for group in groups
+            for requirement_id in group
+        }
+        for step, inputs, own in aligning:
+            target = group_target[inputs[0].requirement_id] or own
+            for basis in inputs:
+                held_target, held_by = targets.setdefault(
+                    (basis.requirement_id, axis), (target, step.id)
+                )
+                option = next((o for o in basis.choice.options if o.option_id == target), None)
+                if held_target != target:
+                    reason = (
+                        f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
+                        f"counts it as {basis.label(held_target)}, and one dataset "
+                        "requirement is counted one way"
+                    )
+                elif option is None or option.availability.status == "unavailable":
+                    reason = (
+                        f"{step.id!r} counts its inputs as {basis.label(target)}, and "
+                        f"{basis.requirement_id!r}'s dataset, counted as "
+                        f"{basis.label(basis.choice.active)}, is not served that way"
+                    )
+                else:
+                    continue
+                raise _Unservable(
+                    _basis_unservable(
+                        view,
+                        proposer,
+                        step_id=step.id,
+                        requirement_id=basis.requirement_id,
+                        spec_id=basis.origin,
+                        option_id=target,
+                        reason=reason,
+                    )
+                )
+    return targets
+
+
+def _realigned_pins(
+    targets: Mapping[tuple[str, str], tuple[str, str]],
+    by_axis: Mapping[str, Mapping[str, _InputBasis]],
+    *,
+    compiled: Mapping[tuple[str, tuple[str, ...]], str],
+) -> tuple[list[Realignment], dict[str, str]]:
+    """The inputs still to compile on their `targets`, and the pins of the inputs compiled already, by requirement id (`_aligned_bases`).
+
+    An input is compiled from its origin once on every option it moves to,
+    one per axis, so a gross inclusive total wanted net and bilateral is
+    one compile, and `compiled` holds it under the origin and those options.
+    """
+    moves: dict[str, list[tuple[str, str]]] = {}
+    for (requirement_id, axis), (target, step_id) in targets.items():
+        moved = moves.setdefault(requirement_id, [])
+        if by_axis[axis][requirement_id].choice.active != target:
+            moved.append((target, step_id))
+    wanted: list[Realignment] = []
+    repinned: dict[str, str] = {}
+    for requirement_id, moved in moves.items():
+        basis = next(bases[requirement_id] for bases in by_axis.values() if requirement_id in bases)
+        option_ids = tuple(sorted(target for target, _ in moved))
+        pin = compiled.get((basis.origin, option_ids)) if moved else basis.origin
+        if pin is None:
+            wanted.append(Realignment(basis.origin, option_ids, requirement_id, moved[0][1]))
+        elif pin != basis.pin:
+            repinned[requirement_id] = pin
+    return wanted, repinned
+
+
+class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bases` answers
+    """Carries the `OPERATION_UNSUPPORTED` problem out of an alignment helper."""
+
+    def __init__(self, problem: dict[str, object]) -> None:
+        super().__init__(problem.get("code"))
+        self.problem = problem
+
+
+def _double_counted(inputs: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBasis] | None:
+    """The first two inputs of `inputs` the user stated on different options that can
+    count one provider's flows (`_InputBasis.shares_providers`); `None` when none can."""
+    stated = [basis for basis in inputs if basis.stated]
+    return next(
+        (
+            (first, other)
+            for index, first in enumerate(stated)
+            for other in stated[index + 1 :]
+            if first.choice.active != other.choice.active and first.shares_providers(other)
+        ),
+        None,
+    )
+
+
+def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
+    """The option `inputs` are counted on together on their axis, or `None` when the user stated different ones.
+
+    The one option the user stated on any of them (`_InputBasis.stated`),
+    else the one the narrowest part is counted on (`_part_rank`), the first
+    such input on a tie.
+    """
+    stated = {basis.choice.active for basis in inputs if basis.stated}
+    if len(stated) > 1:
+        return None
+    return next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
+
+
+def _pinned(requirement: EvidenceRequirement, pins: Mapping[str, str]) -> EvidenceRequirement:
+    """`requirement` pinned to the dataset `pins` names for it, or as it stands."""
+    if isinstance(requirement, DatasetRequirement) and requirement.id in pins:
+        return requirement.model_copy(update={"source_spec_id": pins[requirement.id]})
+    return requirement
+
+
+def _with_found(
+    evidence_requirements: Sequence[EvidenceRequirement],
+    requirements: Sequence[EvidenceRequirement],
+    pins: Mapping[str, str],
+) -> list[EvidenceRequirement]:
+    """This call's requirements, each pinned as `pins` says, then every other requirement `pins` re-pins, restated.
+
+    The others are requirements only the plan this call amends states.
+    """
+    restated = [_pinned(requirement, pins) for requirement in evidence_requirements]
+    own = {requirement.id for requirement in evidence_requirements}
+    restated.extend(
+        _pinned(requirement, pins)
+        for requirement in requirements
+        if requirement.id in pins and requirement.id not in own
+    )
+    return restated
+
+
+def _basis_unknown(unpinned: Sequence[Unpinned]) -> dict[str, object]:
+    """Return the `BASIS_UNKNOWN` problem naming each unpinned input of a calculation to search for.
+
+    `planner.agent.with_source_reads` answers it by searching for each and
+    proposing again, so the planner sees it only where no tool surface
+    reaches Search.
+    """
+    named = "; ".join(f"{item.requirement_id!r}, an input of {item.step_id!r}" for item in unpinned)
+    return problem(
+        ProblemCode.BASIS_UNKNOWN,
+        f"A calculation's inputs must share one measure basis and provider scope, and these "
+        f"pin no dataset, so how they are counted is unknown: {named}. Search is asked for each before the plan is "
+        "recorded, and could not be reached to do so; propose the plan again.",
+        outcome=Outcome.REFUSED,
+        detail={"search": [item.model_dump(mode="json") for item in unpinned]},
+    )
+
+
+def _bases_unaligned(
+    wanted: Sequence[Realignment], by_axis: Mapping[str, Mapping[str, _InputBasis]]
+) -> dict[str, object]:
+    """Return the `BASES_UNALIGNED` problem naming each input to compile on its calculation's basis or provider scope.
+
+    `by_axis` holds each input's choice by axis. `planner.agent.with_source_reads`
+    answers it by compiling each and proposing again, so the planner sees it
+    only where no tool surface reaches Search.
+    """
+
+    def move(item: Realignment) -> str:
+        bases = [
+            (by_axis[option_axis(option_id)][item.requirement_id], option_id)
+            for option_id in item.option_ids
+        ]
+        wanted = " and as ".join(
+            f"{basis.label(option_id)} in place of {basis.label(basis.choice.active)}"
+            for basis, option_id in bases
+        )
+        return f"{item.requirement_id!r}, an input of {item.step_id!r}, is wanted as {wanted}"
+
+    moves = "; ".join(move(item) for item in wanted)
+    return problem(
+        ProblemCode.BASES_UNALIGNED,
+        f"A calculation's inputs are counted on different measure bases or provider scopes: "
+        f"{moves}. Search compiles each on its calculation's options before the plan is "
+        "recorded, and could not be reached to do so; propose the plan again.",
+        outcome=Outcome.REFUSED,
+        detail={"realign": [item.detail() for item in wanted]},
+    )
+
+
+def _basis_unservable(
+    view: SessionView,
+    proposer: Proposer,
+    *,
+    step_id: str,
+    requirement_id: str,
+    spec_id: str | None = None,
+    option_id: str | None = None,
+    reason: str,
+) -> dict[str, object]:
+    """Record and return the `OPERATION_UNSUPPORTED` problem for a calculation whose inputs cannot share one basis or provider scope.
+
+    `detail.basis` names the calculation, the input, and its pin and the
+    option it cannot be counted on, `None` and no option for an input with
+    no pin.
+    """
+    return basis_unservable(
+        spec_id=spec_id,
+        option_ids=(option_id,) if option_id is not None else (),
+        requirement_id=requirement_id,
+        step_id=step_id,
+        reason=reason,
+        record=view.record_unsupported,
+        proposer=proposer,
+    )
+
+
+def basis_unservable(
+    *,
+    spec_id: str | None,
+    option_ids: Sequence[str],
+    requirement_id: str,
+    step_id: str,
+    reason: str,
+    record: Callable[[UnsupportedOperation], None],
+    proposer: Proposer,
+) -> dict[str, object]:
+    """Record and return the `OPERATION_UNSUPPORTED` problem for an input that cannot be counted on its calculation's basis or provider scope.
+
+    The arguments are a `Realignment`'s fields: the calculation
+    (`step_id`), the input, its pin, `None` where it has none, and the
+    options it is wanted on. Figures mixed on one axis are named by that
+    axis, and with no option or options on both axes by either (`_MIXED`).
+    `reason` says why, as a clause. `record` records the `unsupported`
+    answer. `detail.basis` holds the fields.
+    """
+    axes = {option_axis(option_id) for option_id in option_ids}
+    mixed = _MIXED[next(iter(axes)) if len(axes) == 1 else None]
+    operation = UnsupportedOperation.UNSUPPORTED_ASK
+    record(operation)
+    refused = _unsupported(
+        UnsupportedPlanError(operation, f"{reason}, so {step_id!r} would mix figures {mixed}"),
+        proposer,
+    )
+    detail = cast("dict[str, object]", refused["detail"])
+    detail["basis"] = {
+        "spec_id": spec_id,
+        "option_ids": list(option_ids),
+        "requirement_id": requirement_id,
+        "step_id": step_id,
+    }
+    return refused
 
 
 def _uncited_carried_decisions(

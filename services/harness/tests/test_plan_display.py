@@ -17,6 +17,7 @@ from harness.plan_display import (
     operation_rows,
     requirement_rows,
     share_wholes,
+    shown_decisions,
     shown_plan,
     step_rows,
 )
@@ -41,6 +42,7 @@ from planner.plan import (
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    DecisionScope,
     Entity,
     EvidenceRequirement,
     FilterRequirement,
@@ -52,8 +54,11 @@ from planner.plan import (
     QuotientRequirement,
     RankRequirement,
     RequirementSide,
+    ResolvedBy,
+    ScopeOptionState,
     ShareOfRequirement,
     SumOfRequirement,
+    scope_choice_slot,
 )
 from planner.records import (
     Breakdown,
@@ -439,6 +444,85 @@ def test_requirement_rows_carries_id_kind_decision_ids_and_sentence(
     assert sum_row["sentence"].endswith(
         "for each year both report; years one side lacks are left out."
     )
+
+
+def _scope_decision(
+    pin: str,
+    axis: typing.Literal["sector", "measure_basis"],
+    *,
+    resolved_by: ResolvedBy = ResolvedBy.PLANNER_DEFAULT,
+    other: typing.Literal["available", "unavailable"] = "available",
+) -> Decision:
+    """The scope decision `propose_plan` writes for `axis` of a pin of `pin`:
+    two options, the first chosen, the other `other`."""
+    ids = {
+        "sector": ("sector:120+130", "sector:120"),
+        "measure_basis": ("measure_basis:gross", "measure_basis:net"),
+    }[axis]
+    return Decision(
+        slot=scope_choice_slot(pin, axis),
+        description=f"How {axis} is counted.",
+        options=(f"{ids[0]} label", f"{ids[1]} label"),
+        chosen=f"{ids[0]} label",
+        resolved_by=resolved_by,
+        rationale="Search's default for this question.",
+        fixes=DecisionFixes(source_spec_id=pin),
+        scope=DecisionScope(
+            choice_id=f"{pin}:{axis}",
+            axis=axis,
+            options=(
+                ScopeOptionState(option_id=ids[0], status="available"),
+                ScopeOptionState(
+                    option_id=ids[1],
+                    status=other,
+                    code="conflicts_with" if other == "unavailable" else None,
+                ),
+            ),
+        ),
+    )
+
+
+def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
+    decision: DecisionFactory,
+) -> None:
+    """Two pins whose sector choices are the same share one row, the user's;
+    basis choices whose options are not equally available keep a row each.
+    Each requirement cites the row standing for its own decision."""
+    sector_a = _scope_decision(_SPEC_A, "sector")
+    sector_b = _scope_decision(_SPEC_B, "sector", resolved_by=ResolvedBy.USER)
+    basis_a = _scope_decision(_SPEC_A, "measure_basis")
+    basis_b = _scope_decision(_SPEC_B, "measure_basis", other="unavailable")
+
+    def dataset(id: str, pin: str, *cited: Decision) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=id,
+            decision_ids=["measure", *(d.slot for d in cited)],
+            measure="health aid",
+            entities=[Entity(name="Africa", role="recipient")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    plan = Plan(
+        question="Health aid to Africa from two donors",
+        decisions=[decision(), sector_a, basis_a, sector_b, basis_b],
+        evidence_requirements=[
+            dataset("aid_a", _SPEC_A, sector_a, basis_a),
+            dataset("aid_b", _SPEC_B, sector_b, basis_b),
+        ],
+    )
+
+    assert [d.slot for d in shown_decisions(plan)] == [
+        "measure",
+        basis_a.slot,
+        sector_b.slot,
+        basis_b.slot,
+    ]
+    rows = {row["id"]: row["decision_ids"] for row in requirement_rows(plan)}
+    assert rows == {
+        "aid_a": ["measure", sector_b.slot, basis_a.slot],
+        "aid_b": ["measure", sector_b.slot, basis_b.slot],
+    }
 
 
 def _one_requirement_compiled_plan(
@@ -2402,6 +2486,68 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
             copy_gap.replace("'debt_history'", "'debt'"),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("axes", "measure"),
+    [
+        (
+            ("sector", "measure_basis"),
+            "net disbursements (official development assistance) for sector:120+130 label",
+        ),
+        (("measure_basis",), "net disbursements (official development assistance)"),
+        ((), "gross ODA disbursements to health"),
+    ],
+    ids=["sector-and-basis", "basis", "no-scope-choice"],
+)
+def test_a_step_reading_a_scoped_dataset_names_its_measure_as_search_counts_it(
+    decision: DecisionFactory,
+    axes: tuple[typing.Literal["sector", "measure_basis"], ...],
+    measure: str,
+) -> None:
+    """The planner wrote "gross ODA disbursements to health" for the pin it
+    chose; a switch on the plan card re-pinned the dataset on net
+    disbursements. A step reading a dataset whose basis or sector a scope
+    decision settles names the source's measure and the sector chosen, so its
+    label and sentence follow the pin; with no such decision they keep the
+    planner's words."""
+    compiled = _retrieve_then_aggregate_plan(decision)
+    assert compiled.workflow is not None
+    scoped = [_scope_decision(_SPEC_A, axis) for axis in axes]
+    dataset, totals = compiled.evidence_requirements
+    assert isinstance(dataset, DatasetRequirement)
+    plan = compiled.model_copy(
+        update={
+            "decisions": [*compiled.decisions, *scoped],
+            "evidence_requirements": [
+                dataset.model_copy(
+                    update={
+                        "measure": "gross ODA disbursements to health",
+                        "decision_ids": (*dataset.decision_ids, *(d.slot for d in scoped)),
+                    }
+                ),
+                totals,
+            ],
+            "workflow": compiled.workflow.model_copy(
+                update={
+                    "sources": [
+                        source.model_copy(
+                            update={
+                                "measure_label": "net disbursements (official development assistance)"
+                            }
+                        )
+                        for source in compiled.workflow.sources
+                    ]
+                }
+            ),
+        }
+    )
+
+    labels = {row["id"]: row["label"] for row in step_rows(plan)}
+    sentences = {row["id"]: row["sentence"] for row in requirement_rows(plan)}
+
+    assert labels["annual_totals"] == f"Total {measure} by year"
+    assert sentences["annual_totals"] == f"The total of {measure}, grouped by year."
 
 
 # --- The whole a share divides by ---------------------------------------------

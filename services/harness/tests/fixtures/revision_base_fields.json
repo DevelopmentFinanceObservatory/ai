@@ -157,6 +157,11 @@
     "change",
     "per_period"
   ],
+  "planner.plan.DecisionScope": [
+    "choice_id",
+    "axis",
+    "options"
+  ],
   "planner.plan.Decline": [
     "ask",
     "code"
@@ -238,6 +243,12 @@
   "planner.plan.RollingCopy": [
     "copy_id",
     "origin_id"
+  ],
+  "planner.plan.ScopeOptionState": [
+    "option_id",
+    "status",
+    "years",
+    "code"
   ],
   "planner.plan.ShareOfRequirement": [
     "kind",

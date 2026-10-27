@@ -49,6 +49,7 @@ from data_mcp.series_statistics import SeriesStatisticsSchemaError
 from data_mcp.server import mcp
 from data_mcp.settings import Settings
 from data_mcp.stat_var_list import (
+    COMPONENT_STAT_VARS_OMITTED_KEY,
     MAX_LISTED_STAT_VARS,
     STAT_VARS_OMITTED_KEY,
     with_stat_var_list,
@@ -2035,6 +2036,41 @@ async def test_a_long_stat_var_list_is_left_out_of_the_result_and_read_back_whol
         restored = await with_stat_var_list(structured)
     assert restored["trace"]["resolved_stat_vars"] == response["trace"]["resolved_stat_vars"]
     assert STAT_VARS_OMITTED_KEY not in restored
+
+
+@pytest.mark.parametrize(
+    ("bilateral", "omitted"), [(MAX_LISTED_STAT_VARS - 16, False), (6_310, True)]
+)
+async def test_a_composite_s_long_member_lists_are_left_out_of_the_result_and_read_back_whole(
+    bilateral: int, omitted: bool
+) -> None:
+    stored = _stored_definition()
+    response = _manifest_response(spec_id=stored.spec_id)
+    members = [entry["ref"] for entry in _stat_var_entries(bilateral + 16)]
+    response["trace"] = {
+        "components": [
+            {"role": "bilateral", "periods": [[2011, 2024]], "stat_vars": members[:bilateral]},
+            {"role": "imputed", "periods": [[2011, 2024]], "stat_vars": members[bilateral:]},
+        ]
+    }
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path in ("/api/datasets", f"/api/datasets/{stored.spec_id}/cv_1"):
+            return httpx2.Response(200, json=response)
+        raise AssertionError(f"unexpected call to {request.url.path}")
+
+    result = await _call_get_data(handler, _StubStore(stored), {"spec_id": stored.spec_id})
+
+    structured = result.structured_content
+    assert structured is not None
+    listed = [len(c["stat_vars"]) for c in structured["trace"]["components"]]
+    assert listed == ([0, 0] if omitted else [bilateral, 16])
+    assert structured.get(COMPONENT_STAT_VARS_OMITTED_KEY) == (bilateral + 16 if omitted else None)
+    async with _client(handler) as upstream:
+        client_holder.set_client(upstream)
+        restored = await with_stat_var_list(structured)
+    assert restored["trace"]["components"] == response["trace"]["components"]
+    assert COMPONENT_STAT_VARS_OMITTED_KEY not in restored
 
 
 async def test_a_snapshot_listing_other_stat_vars_than_the_result_left_out_is_refused() -> None:

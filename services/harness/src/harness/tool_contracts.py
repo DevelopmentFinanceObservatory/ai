@@ -26,7 +26,9 @@ from compiler.sources import (
     total_reading,
 )
 from data_mcp.digest import source_codes
+from pydantic import ValidationError
 
+from harness.scope_choices import PartScope, planner_axes
 from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
@@ -547,7 +549,12 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `coverage_kind` is `resolved.coverage.kind` (`exact`, `breadth`,
     `bare`); `requested_window_kind` the identity's `requested_window.kind`
     (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
-    `_wide_facts` reads them. These are keys
+    `_wide_facts` reads them; `scope` is `resolved.scope_choices` as
+    `_scope` reads it, and `planner_axes` the axes the planner's own words
+    settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
+    are the named sets the part's places were asked for as
+    (`compiler.sources.block_groups`), which a later resubmit of the reading,
+    such as a chip's, posts again. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -563,7 +570,26 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "requested_window_kind": requested.get("kind") if isinstance(requested, Mapping) else None,
         "entity_roles": facts["entity_roles"],
         "open_entity_axes": facts["open_entity_axes"],
+        "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
+        "planner_axes": sorted(planner_axes(spec)),
+        "entity_groups": [group.model_dump(mode="json") for group in block_groups(spec)],
     }
+
+
+def _scope(spec_id: object, scope: object) -> dict[str, Any] | None:
+    """`scope`, a block's `resolved.scope_choices`, as `PartScope` JSON.
+
+    `None` when the block carries none, or carries one this release cannot
+    read, which is logged: the reading then stores no scope choices, and
+    the search still answers.
+    """
+    if scope is None:
+        return None
+    try:
+        return PartScope.from_search(scope).model_dump(mode="json")
+    except ValidationError as exc:
+        logger.warning("scope choices of %s left unread: %s", spec_id, exc)
+        return None
 
 
 def chosen_part(spec: Mapping[str, Any], *, variable: str | None) -> dict[str, Any]:

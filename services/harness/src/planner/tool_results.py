@@ -96,6 +96,14 @@ class ProblemCode(StrEnum):
     USER_DECISION_CONTRADICTED = "user_decision_contradicted"
     USER_DECISION_DROPPED = "user_decision_dropped"
     SHARED_DECISION_CONTRADICTED = "shared_decision_contradicted"
+    # A calculation's inputs are counted on different measure bases or
+    # provider scopes, and an input still needs compiling on the options they
+    # share (`submission.service._aligned_bases`).
+    BASES_UNALIGNED = "bases_unaligned"
+    # An input of a calculation pins no dataset while another input carries
+    # a basis choice, so the input is searched for before the plan records
+    # (`submission.service._aligned_bases`).
+    BASIS_UNKNOWN = "basis_unknown"
     MEASURE_FIXED_BY_PIN = "measure_fixed_by_pin"
 
 

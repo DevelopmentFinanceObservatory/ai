@@ -30,7 +30,7 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, model_valid
 from harness.tool_contracts import (
     reading_facts,
 )
-from harness.turn_records import Origin, SearchReading
+from harness.turn_records import Origin, SearchReading, open_prices
 
 # The ADK app name every stored conversation's sessions are keyed under.
 AGENT_NAME = "dfo_analyst_graph"
@@ -81,6 +81,17 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
 ORCHESTRATOR_UNAVAILABLE_KEY = "orchestrator:unavailable"
+# The chip a turn applies, as `{"choice_id", "option_id"}` JSON
+# (`harness.wire.ApplyChoice`), seeded by `harness.studio` for a turn
+# requested with `apply_choice`; `seed` applies it
+# (`harness.graph.switch.apply_stored_choice`) and `turn_budgets` reads it.
+APPLY_CHOICE_STATE_KEY = "apply_choice"
+# The chip `seed` applied this turn: `{"choice_id", "option_id",
+# "from_option_id", "spec_id"}`, the option it moved from and the spec_id
+# Search compiled. `harness.studio` keeps it with the turn's record
+# (`ConversationState.turn_applied_choice`), where the next turn reads whether
+# the user kept it.
+ORCHESTRATOR_APPLIED_KEY = "orchestrator:applied_choice"
 # Ask number -> the terminal frames of the latest run of this plan call that
 # computed that ask (`_kept_asks`), written by `execute` when a run stops and
 # read by `plan_done`; cleared by `plan_start` and `plan_done`.
@@ -252,12 +263,19 @@ BUDGETS = {
 }
 # The download surface fetches one dataset and never plans.
 DOWNLOAD_BUDGETS = {**BUDGETS, "fetch": 1, "plan": 0}
+# A turn applying a chip answers from the data `seed` fetched for it, so it
+# neither searches nor plans.
+APPLY_CHOICE_BUDGETS = {**BUDGETS, "search": 0, "plan": 0}
 
 
 def turn_budgets(state: Any) -> dict[str, int]:
-    """The calls this turn may make of each orchestrator tool: `DOWNLOAD_BUDGETS`
-    on the download surface, `BUDGETS` otherwise. `state` is any mapping-like
-    read of session state (`Context.state`, a dict)."""
+    """The calls this turn may make of each orchestrator tool:
+    `APPLY_CHOICE_BUDGETS` on a turn applying a chip
+    (`APPLY_CHOICE_STATE_KEY`), `DOWNLOAD_BUDGETS` on the download surface,
+    `BUDGETS` otherwise. `state` is any mapping-like read of session state
+    (`Context.state`, a dict)."""
+    if state.get(APPLY_CHOICE_STATE_KEY):
+        return APPLY_CHOICE_BUDGETS
     return DOWNLOAD_BUDGETS if state.get("surface") == "download" else BUDGETS
 
 
@@ -370,7 +388,9 @@ def store_search(
     `asked` holds each part's asked flow parties by position, and
     `held_open` those it asked to hold open, and `share_sides` the sides
     its `share_of` operations run over; each is empty when no part's are
-    known.
+    known. A `definite` part whose prices are open over several years reads
+    with `open_prices`, the options of its prices question
+    (`harness.turn_records.open_prices`).
     """
     specs = dict(state.get(ORCHESTRATOR_SPECS_KEY) or {})
     spec_warnings = dict(state.get(ORCHESTRATOR_SPEC_WARNINGS_KEY) or {})
@@ -389,6 +409,12 @@ def store_search(
         if part.get("spec_block") and part.get("spec_id"):
             blocks[part["spec_id"]] = part["spec_block"]
             facts = reading_facts(part["spec_block"])
+            if prices := open_prices(
+                part["spec_block"],
+                window=part.get("window"),
+                other_prices=part.get("other_prices") or (),
+            ):
+                reading["open_prices"] = prices
         if mentions := reading.get("resolved_sources"):
             blocks = {
                 spec_id: {**block, "_resolved_sources": mentions}
@@ -413,6 +439,16 @@ def store_search(
     return readings
 
 
+def conversation_readings(state: SessionState) -> list[dict[str, Any]]:
+    """The conversation's stored search readings as JSON, oldest first: the
+    earlier turns' (`ORCHESTRATOR_PRIOR_LEDGER_KEY`), then this turn's
+    (`ORCHESTRATOR_SEARCHES_KEY`)."""
+    return [
+        *(state.get(ORCHESTRATOR_PRIOR_LEDGER_KEY) or {}).get("readings", []),
+        *(state.get(ORCHESTRATOR_SEARCHES_KEY) or []),
+    ]
+
+
 def state_json(ctx: Context, key: str, default: Any = None) -> Any:
     """Decode a JSON blob out of session state, `default` when absent."""
     raw = ctx.state.get(key)
@@ -430,6 +466,8 @@ class GraphState(BaseModel):
     # also takes. Host-seeded fresh per turn under `planner.plan.SEEDS_STATE_KEY`;
     # `seed` reads it once and clears it.
     seeds: str | None = None
+    # The chip a turn applies, as JSON, under `APPLY_CHOICE_STATE_KEY`.
+    apply_choice: str | None = None
     awaiting_approve: bool = False
     plan: str | None = None
     replans: int = 0

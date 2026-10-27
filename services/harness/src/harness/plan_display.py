@@ -83,6 +83,7 @@ from planner.plan import (
     copy_origins,
     dataset_of,
     frame_shapes,
+    is_scope_choice,
     is_search_pin,
     side_entities,
 )
@@ -268,12 +269,25 @@ def shown_decisions(plan: Plan) -> tuple[Decision, ...]:
     the source's spec_id, since the plan names that source in words where
     it lists its sources. One that chooses how the flow is counted, by the
     measures' labels, is listed; pins making the same choice share one
-    listed decision (`_listed_slots`).
+    listed decision (`_listed_slots`). Every scope decision
+    (`planner.plan.is_scope_choice`) is listed, and sources whose choices
+    are the same share one.
     """
     listed = _listed_slots(plan)
     return tuple(
         decision for decision in plan.decisions if listed.get(decision.slot) == decision.slot
     )
+
+
+def listed_together(plan: Plan, slot: str) -> tuple[Decision, ...]:
+    """The decisions of `plan` the card's row for `slot` stands for: the
+    decision under `slot` and every one listed with it (`_listed_slots`);
+    empty when no decision of `plan` holds `slot`."""
+    listed = _listed_slots(plan)
+    row = listed.get(slot)
+    if row is None:
+        return ()
+    return tuple(decision for decision in plan.decisions if listed.get(decision.slot) == row)
 
 
 def _listed_slots(plan: Plan) -> dict[str, str]:
@@ -285,13 +299,20 @@ def _listed_slots(plan: Plan) -> dict[str, str]:
     user settled, else the first. Their options are left out of the
     comparison, since the card and the plan record show no options, and two
     sources offering different other counts make the same choice. A search
-    pin whose choice names a spec_id has no entry. Every other decision maps
-    to its own slot.
+    pin whose choice names a spec_id has no entry. Scope decisions of
+    several sources map to one of them, chosen the same way, when they
+    settle the same axis on the same option with the same options, each as
+    available as in the others, so the row reads true for every source it
+    stands for. Every other decision maps to its own slot.
     """
     listed: dict[str, str] = {}
-    same_choice: dict[tuple[str, str], list[Decision]] = {}
+    same_choice: dict[tuple[object, ...], list[Decision]] = {}
     for decision in plan.decisions:
-        if not is_search_pin(decision):
+        if is_scope_choice(decision):
+            assert decision.scope is not None
+            key = (decision.scope.axis, decision.chosen, decision.options, decision.scope.options)
+            same_choice.setdefault(key, []).append(decision)
+        elif not is_search_pin(decision):
             listed[decision.slot] = decision.slot
         elif not _SPEC_ID.search(decision.chosen):
             same_choice.setdefault((decision.description, decision.chosen), []).append(decision)
@@ -801,7 +822,7 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
     requirements, it ultimately reads.
     """
     if isinstance(requirement, DatasetRequirement):
-        return requirement.measure
+        return _dataset_measure(requirement, plan)
     if isinstance(
         requirement, (AggregateRequirement, GrowthRequirement, RankRequirement, FilterRequirement)
     ):
@@ -821,6 +842,38 @@ def _measure_of(requirement: EvidenceRequirement, plan: Plan) -> str:
         right = _measure_of(plan.requirement(requirement.right_id), plan)
         return f"{left} joined with {right}"
     raise AssertionError(f"unhandled requirement kind: {requirement!r}")
+
+
+# The scope axes whose choice settles what a dataset's measure counts: the
+# basis it is counted on and the sector codes it covers.
+_MEASURE_AXES = frozenset({"measure_basis", "sector"})
+
+
+def _dataset_measure(requirement: DatasetRequirement, plan: Plan) -> str:
+    """The measure `requirement` fetches, in words.
+
+    The planner's `measure`, unless a scope decision the requirement cites
+    settles its basis or its sector and the compiled plan names the source.
+    Then the words are the source's `measure_label`, as `_label_dataset`
+    names the retrieval, which states the basis the source counts, followed
+    by the sector option the sector decision chose. The planner wrote its
+    words for the source it pinned, and a switch on the plan card re-pins
+    the requirement in code (`harness.graph.switch`), as an input put on its
+    calculation's basis is (`submission.service._aligned_bases`), so only
+    Search's words follow every pin.
+    """
+    governing = {
+        decision.scope.axis: decision
+        for decision in plan.decisions
+        if decision.scope is not None
+        and decision.scope.axis in _MEASURE_AXES
+        and decision.slot in requirement.decision_ids
+    }
+    source = _selected_source(requirement.id, plan)
+    if not governing or source is None or source.measure_label is None:
+        return requirement.measure
+    sector = governing.get("sector")
+    return f"{source.measure_label} for {sector.chosen}" if sector else source.measure_label
 
 
 def _divided(

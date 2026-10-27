@@ -53,8 +53,10 @@ from typing import Annotated, Any, Literal, NamedTuple, Protocol, get_args
 
 import rfc8785
 from common.hashed_fields import HASHED_WHEN_SET, revision_content
+from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -80,6 +82,7 @@ from planner.records import (
     GrowthChange,
     Identifier,
     OpenPeriodFault,
+    OptionStatus,
     Period,
     PeriodThreshold,
     PlaceLevel,
@@ -435,9 +438,10 @@ class DecisionFixes(StrictModel):
 
     `settle_decisions` writes it from the field names a `DecisionDraft`
     lists, reading each value off the requirements that cite the decision.
-    `propose_plan` sets `source_spec_id` on the measure decision it writes
-    for a pin (`submission.service._measure_decisions`) and moves it with the
-    pin (`submission.service._repinned`). Every requirement citing a decision
+    `propose_plan` sets `source_spec_id` on the measure and scope decisions
+    it writes for a pin (`submission.service._measure_decisions`,
+    `_scope_decisions`) and moves it with the pin
+    (`submission.service._repinned`). Every requirement citing a decision
     states each value it fixes, `source_spec_id` aside (`fix_disagreements`).
     """
 
@@ -616,6 +620,38 @@ class _Choice(StrictModel):
         return self
 
 
+# The longest scope choice id, option id and reason code a scope decision
+# holds, and the most year spans a partial option lists. A choice id is a
+# spec_id and an axis (51 characters at most), an option id an axis and a
+# value such as `sector:120+130`, and a partial option covers one span or a
+# few; each limit sits several times above that.
+MAX_SCOPE_ID_CHARS = 200
+MAX_SCOPE_YEAR_SPANS = 50
+
+
+class ScopeOptionState(StrictModel):
+    """One option of a scope choice as Search offered it for the pinned part:
+    its id, whether it can be served, the years a partial option covers and
+    the reason code of a partial or unavailable one."""
+
+    option_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    status: OptionStatus
+    years: tuple[tuple[int, int], ...] | None = Field(default=None, max_length=MAX_SCOPE_YEAR_SPANS)
+    code: str | None = Field(default=None, max_length=MAX_SCOPE_ID_CHARS)
+
+
+class DecisionScope(StrictModel):
+    """The scope choice a scope decision states (`harness.scope_choices.ScopeChoice`).
+
+    `choice_id` names the choice and `axis` the axis it settles. `options`
+    holds one state per `Decision.options` label, in the same order.
+    """
+
+    choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
+    axis: ScopeAxis
+    options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
+
+
 class Decision(_Choice):
     """One methodological choice the plan makes explicit."""
 
@@ -625,6 +661,30 @@ class Decision(_Choice):
             "The requirement fields this decision settles; unset when it is a rationale only."
         ),
     )
+    # Set only on a decision `propose_plan` writes for a scope choice of a
+    # pinned source (`submission.service._scope_decisions`). Left out of
+    # every dump while unset, so a plan stating none keeps its serialised
+    # form and its `plan_revision`.
+    scope: Annotated[DecisionScope | None, HASHED_WHEN_SET] = Field(
+        default=None, exclude_if=lambda scope: scope is None
+    )
+
+    @model_validator(mode="after")
+    def _scope_states_each_option(self) -> Decision:
+        """Reject a scope decision whose option states do not match its options one for one."""
+        if self.scope is not None and len(self.scope.options) != len(self.options):
+            raise ValueError(
+                f"a scope decision states {len(self.scope.options)} option states for "
+                f"{len(self.options)} options"
+            )
+        return self
+
+    @property
+    def active_option_id(self) -> str | None:
+        """The option id of `chosen` on a scope decision; `None` on any other."""
+        if self.scope is None:
+            return None
+        return self.scope.options[self.options.index(self.chosen)].option_id
 
 
 def search_pin_slot(spec_id: str) -> str:
@@ -647,6 +707,39 @@ def is_search_pin(decision: Decision) -> bool:
         and fixes.source_spec_id is not None
         and decision.slot == search_pin_slot(fixes.source_spec_id)
     )
+
+
+def scope_choice_slot(spec_id: str, axis: ScopeAxis) -> str:
+    """The `Decision.slot` `propose_plan` records the scope choice on `axis` of a pin of `spec_id` under.
+
+    Derived from the pin as `search_pin_slot` is, so each source's choices
+    have slots of their own.
+    """
+    return f"scope_{axis}_{spec_id}"
+
+
+def is_scope_choice(decision: Decision) -> bool:
+    """Whether `decision` is one `propose_plan` wrote for a scope choice of a pinned source."""
+    fixes = decision.fixes
+    return (
+        decision.scope is not None
+        and fixes is not None
+        and fixes.source_spec_id is not None
+        and decision.slot == scope_choice_slot(fixes.source_spec_id, decision.scope.axis)
+    )
+
+
+def pin_slot_moves(origin: str, target: str) -> dict[str, str]:
+    """Each slot `propose_plan` may write for a pin of `origin`, mapped to the one a pin of `target` takes.
+
+    The measure decision's (`search_pin_slot`) and one scope decision's per
+    axis (`scope_choice_slot`), so a moved pin renames every decision code
+    wrote for it and every citation of one.
+    """
+    moves = {search_pin_slot(origin): search_pin_slot(target)}
+    for axis in get_args(ScopeAxis):
+        moves[scope_choice_slot(origin, axis)] = scope_choice_slot(target, axis)
+    return moves
 
 
 # The name of each `DecisionFixes` field a `DecisionDraft` may list.
@@ -3545,8 +3638,9 @@ def _same(first: Any, second: Any) -> bool:
 
 
 # The `DecisionFixes` field no requirement is held to. Code writes
-# `source_spec_id` on the decision a pin states and moves it with the pin
-# (`submission.service._measure_decisions`, `_repinned`); a draft cannot name it.
+# `source_spec_id` on the decisions a pin states and moves it with the pin
+# (`submission.service._measure_decisions`, `_scope_decisions`, `_repinned`);
+# a draft cannot name it.
 _UNCHECKED_FIXES = frozenset({"source_spec_id"})
 
 
@@ -3838,7 +3932,9 @@ class Plan(StrictModel):
         planner's brief can carry. The message names the measured size and the
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
-        copies `whole_history_split` adds.
+        copies `whole_history_split` adds. The size leaves out the scope
+        decisions `propose_plan` writes (`is_scope_choice`): the model cannot
+        shorten them, and `MAX_PLAN_DECISIONS` bounds how many a plan holds.
         """
         written = authored(self)
         if len(written.evidence_requirements) > MAX_PLAN_REQUIREMENTS:
@@ -3847,6 +3943,11 @@ class Plan(StrictModel):
                 f"over the {MAX_PLAN_REQUIREMENTS} a plan may take"
             )
         record = written.model_dump(mode="json", include=_MODEL_AUTHORED)
+        record["decisions"] = [
+            dumped
+            for dumped, decision in zip(record["decisions"], written.decisions, strict=True)
+            if not is_scope_choice(decision)
+        ]
         size = _serialised_chars(record)
         if size <= MAX_PLAN_RECORD_CHARS:
             return self
@@ -5582,6 +5683,56 @@ def recorded_identity(spec_id: str) -> RecordedDefinition | None:
     `spec_id`; `None` outside a conversation or when none recorded one."""
     lookup = current_recorded_identity.get()
     return lookup(spec_id) if lookup is not None else None
+
+
+class _ShownDefinition(NamedTuple):
+    """The definition of a dataset the planner was shown, as its block carries it,
+    with the sets its places were asked for as."""
+
+    identity: Mapping[str, Any]
+    groups: tuple[ResolvedGroup, ...] = ()
+    resolved_sources: tuple[ResolvedSourceMention, ...] = ()
+
+
+def identity_on_record(
+    pin: str,
+    *,
+    shown: Mapping[str, PinSource],
+    end_open: bool,
+    definition_lookup: Callable[[str], RecordedDefinition | None] | None = None,
+) -> RecordedDefinition | None:
+    """The definition on record for `pin`; `None` when none is.
+
+    The definition is the one a search in the conversation recorded
+    (`recorded_identity`), else the one `definition_lookup` answers:
+    `submission.service.admit` and the translator pass the discovery log's
+    (`translator.discovery.DiscoveryLog.recorded_definition`), which holds
+    each source the translator offered. With `end_open` it is otherwise the
+    one the block the planner was shown carries (`shown_identity`). Admission
+    asks for it only for a requirement stating `period_end_open`: the
+    translator can find a closed requirement's pin by searching its stated
+    years, and no search finds a definition with no end year. The translator
+    always asks for it, since a pin compiled in code during the request (a
+    scope choice switched on the plan card, `harness.graph.switch`, or an
+    input put on its calculation's basis, `planner.agent.compile_on_basis`)
+    is held there and nowhere a search recorded it. A shown block that is
+    not readable as a source (`compiler.sources.source_from_spec_block`)
+    puts none on record.
+    """
+    recorded: RecordedDefinition | None = recorded_identity(pin)
+    if recorded is None and definition_lookup is not None:
+        recorded = definition_lookup(pin)
+    if recorded is not None or not end_open or pin not in shown:
+        return recorded
+    identity = shown_identity(pin, shown[pin])
+    block = shown[pin].spec_block(pin)
+    if identity is None or block is None:
+        return None
+    try:
+        source = source_from_spec_block(block)
+    except ValueError:
+        return None
+    return _ShownDefinition(identity, source.groups, source.resolved_sources)
 
 
 # The seconds a discovery call made now may take inside a planner entry. That is

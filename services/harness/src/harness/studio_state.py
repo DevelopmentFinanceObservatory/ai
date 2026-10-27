@@ -82,6 +82,7 @@ from harness.wire import (
     CompositionManifest,
     ErrorCode,
     PinOp,
+    PlanProposed,
     RemoveOp,
     ReorderOp,
     RetryMode,
@@ -323,6 +324,25 @@ class _PendingQuestion:
     skippable: bool = False
 
 
+@dataclass(frozen=True)
+class _PendingOption:
+    """One option of a scope choice the plan card shows, as `/interrupt`
+    checks a switch against it: its label and whether it can be served
+    (`available`, `partial`, `unavailable`)."""
+
+    label: str
+    status: str
+
+
+@dataclass(frozen=True)
+class _PendingChoice:
+    """A scope choice the plan card shows, as `/interrupt` checks a switch
+    against it: its active option and each option by id."""
+
+    active: str
+    options: dict[str, _PendingOption] = field(default_factory=dict)
+
+
 @dataclass
 class _PendingInterrupt:
     """One wire interrupt id, mapped back to its ADK interrupt."""
@@ -363,6 +383,14 @@ class _PendingInterrupt:
     # recorded alongside `resuming_segment` so a retried resume can be
     # verified against what actually resumed.
     answer: dict[str, Any] | None = None
+    # A plan's scope choices the card shows, by choice id: what a switch on
+    # this card may name. Empty for an elicitation, a plan with none, and a
+    # plan paused before choices were kept.
+    choices: dict[str, _PendingChoice] = field(default_factory=dict)
+    # A plan's `plan.proposed` frame as the stream sent it: the card a
+    # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
+    # None for an elicitation and a plan paused before cards were kept.
+    card: PlanProposed | None = None
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -501,7 +529,12 @@ class ConversationState:
     # updates this).
     timed_out_calls: set[str] = field(default_factory=set)
     # The current turn's record-in-progress; reset by begin_turn.
+    # `turn_user_message` is the history record's text: the message, each
+    # amendment and answer, and each switch on a plan card (`add_to_turn`).
+    # `turn_user_words` holds the user's own words alone, the switches left
+    # out, and is what the turn's searches send Search as `user_message`.
     turn_user_message: str = ""
+    turn_user_words: str = ""
     turn_final_text: str = ""
     turn_components: list[dict[str, Any]] = field(default_factory=list)
     # The turn's plan records and search readings as JSON, and the spec
@@ -515,6 +548,12 @@ class ConversationState:
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
+    # by `harness.studio`; once the graph's `seed` node applied it, as that
+    # node wrote it, with `from_option_id` and `spec_id`
+    # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
+    # with the turn's record as `applied_choice`.
+    turn_applied_choice: dict[str, Any] | None = None
     turn_recorded: bool = False
     # The current turn's telemetry root span, opened by `begin_turn` on the
     # freshly minted `trace_id`, kept open across a pause for approval, and
@@ -797,18 +836,42 @@ class ConversationState:
             text = [render_readings(readings, budget=_RECALL_TEXT_BUDGET).text]
         return {"part": part, "turn": turn, "user": record["user"], "text": text}
 
-    def close_turn(self, *, final_text: str, error: str | None = None) -> None:
+    def add_to_turn(self, line: str, *, user_words: bool) -> None:
+        """Add `line` to the turn's record as `(then: line)`, and to
+        `turn_user_words` too when the user wrote it (an amendment, an
+        answer). A switch's line names an option's label, which Search would
+        read as scope the user stated, so it goes in the record only."""
+        self.turn_user_message += f"\n(then: {line})"
+        if user_words:
+            self.turn_user_words += f"\n(then: {line})"
+
+    def close_turn(
+        self,
+        *,
+        final_text: str,
+        error: str | None = None,
+        match_notes: str | None = None,
+        basis_line: str | None = None,
+    ) -> None:
         """Append the turn's record, once -- the resume protocol can end a
         turn from more than one code path. The turn's telemetry span ends
-        with the user's message and `final_text` as its input and output, and
-        at level `ERROR` naming the `error` code when there is one."""
+        with the user's message and the reply as its input and output, and
+        at level `ERROR` naming the `error` code when there is one.
+
+        `match_notes` (`harness.turn_records.loose_match_notes`) and
+        `basis_line` (`harness.turn_records.basis_line`) are the text the code
+        appends to the reply after the model's `final_text`, in that order.
+        The record keeps each under its own key, beside the answer, so the
+        conversation digest (`_history_turn`) shows a later turn's model the
+        answer alone, and that model has no text of the code's own to copy."""
         if self.turn_recorded:
             return
         self.turn_recorded = True
+        appended = [text for text in (match_notes, basis_line) if text]
         end_turn_span(
             self._telemetry_span,
             request=self.turn_user_message,
-            response=final_text,
+            response="\n\n".join([final_text, *appended]) if appended else final_text,
             error=error,
         )
         self._telemetry_span = None
@@ -816,12 +879,18 @@ class ConversationState:
             "user": self.turn_user_message,
             "assistant": final_text,
         }
+        if match_notes:
+            record["match_notes"] = match_notes
+        if basis_line:
+            record["basis_line"] = basis_line
         if self.turn_components:
             record["cards"] = list(self.turn_components)
         if error:
             record["error"] = error
         if self.turn_plans:
             record["plans"] = list(self.turn_plans)
+        if self.turn_applied_choice:
+            record["applied_choice"] = dict(self.turn_applied_choice)
         # A source only the translator or the canvas found is read here too,
         # so a later turn's planner is shown it beside the ones a search
         # returned (`prior_ledger_state`).
@@ -986,11 +1055,13 @@ class ConversationState:
             # what was asked, with the error marked as abandoned.
             self.close_turn(final_text=self.turn_final_text, error="abandoned")
         self.turn_user_message = ""
+        self.turn_user_words = ""
         self.turn_final_text = ""
         self.turn_components = []
         self.turn_plans = []
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_applied_choice = None
         self.turn_recorded = False
         self._telemetry_span = start_turn_span(self.trace_id, session_id=self.conversation_id)
 
@@ -1039,11 +1110,13 @@ _KEY_SEGMENT = "studio:segment"
 _KEY_AUTO_ADD = "studio:auto_add"
 _KEY_TIMED_OUT_CALLS = "studio:timed_out_calls"
 _KEY_TURN_USER_MESSAGE = "studio:turn_user_message"
+_KEY_TURN_USER_WORDS = "studio:turn_user_words"
 _KEY_TURN_FINAL_TEXT = "studio:turn_final_text"
 _KEY_TURN_COMPONENTS = "studio:turn_components"
 _KEY_TURN_RECORDED = "studio:turn_recorded"
 _KEY_TURN_PLANS = "studio:turn_plans"
 _KEY_TURN_READINGS = "studio:turn_readings"
+_KEY_TURN_APPLIED_CHOICE = "studio:turn_applied_choice"
 
 # `StudioStore.checkpoint`'s fetch-merge-append cycles, capping how long a
 # conversation under sustained contention retries before it raises.
@@ -1170,6 +1243,17 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "step_labels": dict(p.step_labels),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
+            "choices": {
+                choice_id: {
+                    "active": choice.active,
+                    "options": {
+                        option_id: {"label": option.label, "status": option.status}
+                        for option_id, option in choice.options.items()
+                    },
+                }
+                for choice_id, choice in p.choices.items()
+            },
+            "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
         }
         for interrupt_id, p in pending.items()
     }
@@ -1185,6 +1269,17 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         step_labels=dict(entry.get("step_labels") or {}),
         resuming_segment=entry.get("resuming_segment"),
         answer=entry.get("answer"),
+        choices={
+            choice_id: _PendingChoice(
+                active=choice["active"],
+                options={
+                    option_id: _PendingOption(label=option["label"], status=option["status"])
+                    for option_id, option in choice["options"].items()
+                },
+            )
+            for choice_id, choice in (entry.get("choices") or {}).items()
+        },
+        card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -1236,11 +1331,13 @@ def _serialize_durable(state: ConversationState) -> dict[str, Any]:
         _KEY_AUTO_ADD: state.auto_add,
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
+        _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
         _KEY_TURN_COMPONENTS: state.turn_components,
         _KEY_TURN_RECORDED: state.turn_recorded,
         _KEY_TURN_PLANS: state.turn_plans,
         _KEY_TURN_READINGS: state.turn_readings,
+        _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
     }
     for index, turn in enumerate(state.turns):
         data[f"{_TURN_ITEM_PREFIX}{index:04d}"] = turn
@@ -1294,6 +1391,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.timed_out_calls = set(value)
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
+        elif key == _KEY_TURN_USER_WORDS:
+            state.turn_user_words = value
         elif key == _KEY_TURN_FINAL_TEXT:
             state.turn_final_text = value
         elif key == _KEY_TURN_COMPONENTS:
@@ -1304,6 +1403,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_plans = list(value)
         elif key == _KEY_TURN_READINGS:
             state.turn_readings = list(value)
+        elif key == _KEY_TURN_APPLIED_CHOICE:
+            state.turn_applied_choice = dict(value) if value else None
         elif key.startswith(_TURN_ITEM_PREFIX):
             _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
         elif key.startswith(_COMPONENT_ITEM_PREFIX):

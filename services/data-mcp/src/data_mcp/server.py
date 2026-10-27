@@ -96,6 +96,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     regardless of which service's lifespan wins the install race.
     """
     settings = Settings()
+    logger.info("search_sends_conversation_context=%s", settings.search_sends_conversation_context)
     # `_build_store` can construct a real `storage.Client()`, which touches
     # ADC and possibly the metadata server -- `to_thread` crosses that onto a
     # worker thread instead of blocking the event loop at startup, matching

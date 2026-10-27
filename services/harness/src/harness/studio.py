@@ -58,10 +58,16 @@ from planner.plan import SEEDS_STATE_KEY, current_earlier_block, current_recorde
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
-from harness.conversation import current_conversation_id, current_conversation_key
+from harness.conversation import (
+    current_conversation_id,
+    current_conversation_key,
+    current_user_message,
+)
 from harness.graph.seams import Executor
 from harness.graph.state import (
     AGENT_NAME,
+    APPLY_CHOICE_STATE_KEY,
+    ORCHESTRATOR_APPLIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -93,10 +99,12 @@ from harness.studio_translate import (
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
+from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     ActivityStep,
     AddOp,
+    ApplyChoice,
     CancelRequest,
     ComponentRefIntent,
     CompositionActor,
@@ -110,6 +118,7 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
     StepStatus,
@@ -170,14 +179,27 @@ def _elicitation_refusal(pending: _PendingInterrupt, body: InterruptResponse) ->
 
 
 def _interrupt_refusal(
-    pending: _PendingInterrupt | None, body: InterruptResponse
+    pending_by_id: dict[str, _PendingInterrupt], body: InterruptResponse
 ) -> JSONResponse | None:
     """Everything that can be wrong with an interrupt.response, as one HTTP
     refusal: unknown id, a decision foreign to the interrupt kind, an
-    elicitation's answers (`_elicitation_refusal`), and the plan payload
+    elicitation's answers (`_elicitation_refusal`), the plan payload
     discipline (delta 12: amend carries the text it acts on, the other
-    decisions must not smuggle one)."""
+    decisions must not smuggle one), an approve's revision, and a switch's
+    revision and option (`_switch_refusal`).
+
+    An answer naming a plan revision that is not the one awaiting an answer
+    gets that plan's card back (`_stale_plan_refusal`), including when its
+    interrupt is gone because a later card replaced it."""
+    pending = pending_by_id.get(body.interrupt_id)
     if pending is None:
+        current = _current_plan(pending_by_id)
+        if (
+            body.plan_revision is not None
+            and current is not None
+            and body.plan_revision != current.plan_revision
+        ):
+            return _stale_plan_refusal(current)
         return _tool_error_response(
             ToolError(
                 error=ErrorCode.NOT_FOUND,
@@ -189,7 +211,12 @@ def _interrupt_refusal(
     allowed = (
         {InterruptDecision.ANSWER, InterruptDecision.SKIP}
         if pending.kind == "elicitation"
-        else {InterruptDecision.APPROVE, InterruptDecision.AMEND, InterruptDecision.REJECT}
+        else {
+            InterruptDecision.APPROVE,
+            InterruptDecision.AMEND,
+            InterruptDecision.REJECT,
+            InterruptDecision.SWITCH,
+        }
     )
     detail: str | None = None
     fix: str | None = None
@@ -205,6 +232,10 @@ def _interrupt_refusal(
             detail = "decision 'amend' requires a text payload"
     elif body.payload is not None:
         detail = f"decision {body.decision.value!r} does not take a payload"
+    elif body.decision is InterruptDecision.SWITCH:
+        return _switch_refusal(pending, body)
+    elif body.plan_revision is not None and body.plan_revision != pending.plan_revision:
+        return _stale_plan_refusal(pending)
     if detail is None:
         return None
     return _tool_error_response(
@@ -215,6 +246,130 @@ def _interrupt_refusal(
             fix=fix,
         ),
         status_code=422,
+    )
+
+
+def _switch_refusal(pending: _PendingInterrupt, body: InterruptResponse) -> JSONResponse | None:
+    """What is wrong with a `switch` on a plan card, as one HTTP refusal, or `None`.
+
+    A switch names the revision of the plan the user saw, or is refused
+    409 `plan_revision_stale`. It moves a choice the card shows
+    (`_PendingInterrupt.choices`) to an option the card offers as available
+    or partial, other than the active one, or is refused 422
+    `switch_option_unavailable`. `detail` is copy the card shows.
+    """
+    if body.plan_revision != pending.plan_revision:
+        return _stale_plan_refusal(pending)
+    choice = pending.choices.get(body.choice_id or "")
+    option = choice.options.get(body.option_id or "") if choice is not None else None
+    if choice is None:
+        detail = "That choice cannot be switched on this plan."
+    elif option is None:
+        detail = "That option is not offered for this choice."
+    elif body.option_id == choice.active:
+        detail = f"The plan already counts {option.label}."
+    elif option.status == "unavailable":
+        detail = f"{option.label} cannot be counted for this plan."
+    else:
+        return None
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.CORRECT_AND_RETRY,
+            constraint_id="switch_option_unavailable",
+            detail=detail,
+            fix="choose an option the plan card offers",
+        ),
+        status_code=422,
+    )
+
+
+def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSONResponse:
+    """The label of the option a chip moves to, or the HTTP refusal of a chip that cannot apply.
+
+    A chip applies only on the answer that offered it. It is refused 422
+    `scope_choice_stale` when that answer's turn (`ApplyChoice.turn`) is not
+    the conversation's latest answered turn, or when the newest reading
+    holding its choice (`harness.turn_records.stored_choice`), over the
+    recorded turns and a turn still paused on its plan, is not the reading
+    the chip switches (`ApplyChoice.spec_id`): a plan card's switch in a
+    later turn compiles a new reading of the same choice. The chip is stale
+    too when its choice is already on its option. An option the choice does
+    not offer, or one Search cannot serve, is refused 422
+    `switch_option_unavailable`, as a plan card's switch is. `detail` is copy
+    the client shows.
+    """
+    answered = [
+        number
+        for number, turn in enumerate(conversation.turns, start=1)
+        if turn.get("assistant") and not turn.get("error")
+    ]
+    readings = [reading for turn in conversation.turns for reading in turn.get("readings") or ()]
+    if not conversation.turn_recorded:
+        readings.extend(conversation.turn_readings)
+    found = stored_choice(readings, pick.choice_id)
+    reading, choice = found if found is not None else (None, None)
+    option = (
+        next((o for o in choice.options if o.option_id == pick.option_id), None)
+        if choice is not None
+        else None
+    )
+    if (
+        answered[-1:] != [pick.turn]
+        or reading is None
+        or choice is None
+        or reading.spec_id != pick.spec_id
+        or (option is not None and pick.option_id == choice.active)
+    ):
+        constraint, detail = "scope_choice_stale", CHIP_STALE_NOTE
+    elif option is None:
+        constraint, detail = "switch_option_unavailable", "That option is not offered here."
+    elif option.availability.status == "unavailable":
+        constraint, detail = (
+            "switch_option_unavailable",
+            f"{option.label} cannot be counted for this answer.",
+        )
+    else:
+        return option.label
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id=constraint,
+            detail=detail,
+            pointer="/apply_choice",
+        ),
+        status_code=422,
+    )
+
+
+def _current_plan(pending_by_id: dict[str, _PendingInterrupt]) -> _PendingInterrupt | None:
+    """The plan pause awaiting an answer, or `None`: the latest plan entry
+    no segment is resuming."""
+    return next(
+        (
+            pending
+            for pending in reversed(pending_by_id.values())
+            if pending.kind == "plan" and pending.resuming_segment is None
+        ),
+        None,
+    )
+
+
+def _stale_plan_refusal(current: _PendingInterrupt) -> JSONResponse:
+    """409 `plan_revision_stale`: the answer names a plan the user is no
+    longer being asked about. The body carries `current`'s card as the
+    stream sent it, for the client to show in place of the one answered."""
+    return _tool_error_response(
+        PlanRevisionStaleError(
+            error=ErrorCode.EDIT_CONFLICT,
+            retry=RetryMode.REFRESH_THEN_RETRY,
+            constraint_id="plan_revision_stale",
+            detail="This plan has changed since you chose. Choose again on the plan shown now.",
+            fix="answer the plan in current_plan",
+            current_plan=current.card,
+        ),
+        status_code=409,
     )
 
 
@@ -509,8 +664,8 @@ async def _sse_stream(
 
 
 def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
-    """Keep the plan records, search readings and spec blocks `event` writes
-    to the turn's session state, for `ConversationState.close_turn` to store
+    """Keep the plan records, search readings, spec blocks and applied chip
+    `event` writes to the turn's session state, for `ConversationState.close_turn` to store
     with the turn. Each key holds the turn's whole value, so the latest
     write replaces. The blocks stay in process (`turn_specs`) until the turn
     closes."""
@@ -521,6 +676,8 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_readings = list(delta[ORCHESTRATOR_SEARCHES_KEY])
     if ORCHESTRATOR_SPECS_KEY in delta:
         conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
+    if ORCHESTRATOR_APPLIED_KEY in delta:
+        conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
 
 async def _unwind(pending: asyncio.Future[Any]) -> None:
@@ -980,9 +1137,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             conversation = await studio.store.load(principal, body.conversation_id)
             if conversation is None:
-                if body.component_ref is not None:
-                    # The client refers to state (a card to edit, or to
-                    # follow up on) this store never had.
+                if body.component_ref is not None or body.apply_choice is not None:
+                    # The client refers to state (a card to edit or to follow
+                    # up on, or a chip under an answer) this store never had.
                     lock.release()
                     return _unknown_conversation_response(body.conversation_id)
                 try:
@@ -1016,9 +1173,29 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     status_code=404,
                 )
+            chip_label: str | None = None
+            if (pick := body.apply_choice) is not None:
+                label = _chip_label(conversation, pick)
+                if isinstance(label, JSONResponse):
+                    lock.release()
+                    return label
+                chip_label = label
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
-            conversation.turn_user_message = body.message
+            if pick is None:
+                conversation.turn_user_message = body.message
+                conversation.turn_user_words = body.message
+            else:
+                # The history record names the option the chip counts. Search
+                # would read its label as scope the user stated, so the words
+                # later searches send leave it out, as a plan card's switch does.
+                conversation.turn_user_message = f"count {chip_label}"
+                conversation.turn_user_words = ""
+                # The record's `spec_id` is the reading the `seed` node compiles,
+                # set once the chip applies, so the chip's own origin stays out.
+                conversation.turn_applied_choice = pick.model_dump(
+                    include={"choice_id", "option_id"}
+                )
             # Set in the request task's context (each request gets a fresh
             # one, so nothing leaks across requests); the streamed generator
             # and every task spawned under it inherit the value, which is
@@ -1028,6 +1205,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # must not share a canvas.
             current_conversation_id.set(f"{principal}/{body.conversation_id}")
             current_conversation_key.set((principal, body.conversation_id))
+            current_user_message.set(conversation.turn_user_words)
             current_earlier_block.set(conversation.earlier_block)
             current_recorded_identity.set(conversation.recorded_identity)
             # This request's model-call bounds, read by every model call the
@@ -1120,6 +1298,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             elif body.seed_spec is not None:
                 # One reference, the reserved shape: `graph.seed` reports it unused.
                 state[SEEDS_STATE_KEY] = json.dumps(body.seed_spec.model_dump(mode="json"))
+            if body.apply_choice is not None:
+                # `graph.seed` applies the chip, and the turn neither searches nor plans.
+                state[APPLY_CHOICE_STATE_KEY] = json.dumps(body.apply_choice.model_dump())
             try:
                 await studio._ensure_session(
                     user_id=principal, session_id=conversation.session_id, state=state
@@ -1129,7 +1310,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 return _streaming_conflict_response(
                     "another request is streaming on this conversation"
                 )
-            message = types.Content(role="user", parts=[types.Part.from_text(text=body.message)])
+            text = body.message if chip_label is None else f"Count {chip_label}."
+            message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(
@@ -1247,7 +1429,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 lock.release()
                 return _unknown_conversation_response(body.conversation_id)
             pending = conversation.pending.get(body.interrupt_id)
-            refusal = _interrupt_refusal(pending, body)
+            refusal = _interrupt_refusal(conversation.pending, body)
             if refusal is not None:
                 lock.release()
                 return refusal
@@ -1263,8 +1445,20 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     question_id: answer.model_dump(mode="json")
                     for question_id, answer in body.answers.items()
                 }
+            if body.decision is InterruptDecision.SWITCH:
+                # Likewise a retry switching to another option.
+                requested_answer["switch"] = {
+                    "choice_id": body.choice_id,
+                    "option_id": body.option_id,
+                }
             resuming = pending.resuming_segment is not None
-            if not resuming and pending.kind == "plan":
+            # A switch revises the plan and approves nothing, so it leaves
+            # no approval record.
+            if (
+                not resuming
+                and pending.kind == "plan"
+                and body.decision is not InterruptDecision.SWITCH
+            ):
                 # Recorded once per interrupt id, on its first answer only:
                 # a resumed retry of the SAME answer (below) must not
                 # duplicate it. The record is of the act, not of what the
@@ -1408,7 +1602,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 # The turn's history record must carry the answers or the
                 # next turn's digest shows only the un-refined ask.
                 for line in _answered_lines(pending, given):
-                    conversation.turn_user_message += f"\n(then: {line})"
+                    conversation.add_to_turn(line, user_words=True)
         elif body.decision is InterruptDecision.APPROVE:
             # The plan is keyed on its revision hash (`plan_revision`), and
             # the approval dated by the record of its first answer, so a
@@ -1425,13 +1619,26 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
             if recorded is not None:
                 answer["at"] = recorded.at.isoformat()
+        elif body.decision is InterruptDecision.SWITCH:
+            # The graph's `switch` node revises the plan in code and offers
+            # it again; the turn's history record carries the choice.
+            assert body.choice_id is not None and body.option_id is not None
+            answer = {
+                "approved": None,
+                "switch": {"choice_id": body.choice_id, "option_id": body.option_id},
+            }
+            label = pending.choices[body.choice_id].options[body.option_id].label
+            conversation.add_to_turn(f"count {label}", user_words=False)
         else:  # amend: a stated non-approval routes the graph to the planner
             answer = {"approved": None, "amendment": body.payload}
             # An amendment refines the question, so the turn's history record
             # carries it.
-            conversation.turn_user_message += f"\n(then: {body.payload})"
+            conversation.add_to_turn(str(body.payload), user_words=True)
         current_conversation_id.set(f"{principal}/{body.conversation_id}")
         current_conversation_key.set((principal, body.conversation_id))
+        # The user's words as amended, so a search after the resume reads the
+        # refined ask and no switch's label.
+        current_user_message.set(conversation.turn_user_words)
         current_earlier_block.set(conversation.earlier_block)
         current_recorded_identity.set(conversation.recorded_identity)
         start_turn_budget(settings)

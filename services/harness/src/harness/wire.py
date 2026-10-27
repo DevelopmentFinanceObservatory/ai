@@ -794,6 +794,20 @@ class Seed(_WireModel):
     operations: list[SeedOperation] = Field(default_factory=list, max_length=MAX_SEED_OPERATIONS)
 
 
+class ApplyChoice(_WireModel):
+    """A suggestion chip the user clicked (`ApplyChoiceSuggestion`), echoed
+    whole: the scope choice, the option it moves to, the conversation turn
+    whose answer offered the chip (`turn`, from 1), and the spec_id of the
+    reading it switches (`spec_id`). The route refuses it 422
+    `scope_choice_stale` when a later turn answered, or when the choice's
+    newest reading is no longer `spec_id`."""
+
+    choice_id: str = Field(min_length=1)
+    option_id: str = Field(min_length=1)
+    turn: int = Field(ge=1)
+    spec_id: str = Field(min_length=1)
+
+
 class TurnRequest(_WireModel):
     """POST /api/studio/turn -- start or continue a turn.
 
@@ -813,12 +827,19 @@ class TurnRequest(_WireModel):
     so it seeds nothing: the turn runs from the question, as it did while
     the member was reserved, and the `seed` node reports the unused
     reference as a failed step.
+
+    `apply_choice` carries a chip's choice, option, answer turn and reading,
+    with no message text: the turn applies the option to the reading the
+    answer used, with no
+    search (`harness.graph.switch.apply_stored_choice`). It cannot come with
+    a message, seeds or a card reference. A request carries `message` or
+    `apply_choice`.
     """
 
     kind: Literal["turn.request"]
     schema_version: Literal[1]
     conversation_id: str = _CONVERSATION_ID
-    message: str
+    message: str = ""
     surface: Surface = Surface.STUDIO
     component_ref: ComponentRef | None = None
     seed_spec: (
@@ -828,6 +849,28 @@ class TurnRequest(_WireModel):
     # but are NOT appended to the composition; the client adds them later
     # with a composition.mutate "add" op (the Auto-add toggle).
     auto_add: bool = True
+    apply_choice: ApplyChoice | None = None
+
+    @model_validator(mode="after")
+    def _a_chip_comes_alone(self) -> TurnRequest:
+        """Refuse a request with neither `message` nor `apply_choice`, and an
+        `apply_choice` beside message text, seeds or a card reference."""
+        if self.apply_choice is None:
+            if "message" not in self.model_fields_set:
+                raise ValueError("turn.request requires message or apply_choice")
+            return self
+        stated = [
+            name
+            for name, value in (
+                ("message", self.message),
+                ("seed_spec", self.seed_spec),
+                ("component_ref", self.component_ref),
+            )
+            if value
+        ]
+        if stated:
+            raise ValueError(f"apply_choice does not take {', '.join(stated)}")
+        return self
 
     @model_validator(mode="after")
     def _seeds_start_a_turn_not_an_edit(self) -> TurnRequest:
@@ -850,6 +893,9 @@ class InterruptDecision(StrEnum):
     # ask closes the turn. The planner's ask counts it as the user declining
     # to choose, and the planner plans on without a pick of theirs.
     SKIP = "skip"
+    # Plan only. The user moves one scope choice to another of its options;
+    # the plan is revised in code and offered again. It approves nothing.
+    SWITCH = "switch"
 
 
 class OptionAnswer(_WireModel):
@@ -885,9 +931,14 @@ class InterruptResponse(_WireModel):
     is opaque (delta 7 -- the fixtures' literal `"approve"` is a sample
     value). An elicitation's `answer` carries `answers`, one entry per
     question id of the frame, exactly. `payload` carries the amendment text
-    for a plan's `amend`. Both are absent for approve, reject and skip. The
-    response to this POST is a NEW SSE stream continuing the same turn
-    (delta 1).
+    for a plan's `amend`. Both are absent for approve, reject, skip and
+    switch. A plan's `switch` carries `choice_id` (a `PlanDecision.choice_id`),
+    `option_id` (one of that decision's options) and `plan_revision` (the
+    `PlanProposed.revision` the user saw), all three. An `approve` may carry
+    `plan_revision` alone, and is refused when it is not the paused plan's;
+    without one it approves the paused plan, as older clients do. Every
+    other decision carries none of them. The response to this POST is a NEW SSE stream
+    continuing the same turn (delta 1).
     """
 
     kind: Literal["interrupt.response"]
@@ -901,6 +952,33 @@ class InterruptResponse(_WireModel):
     payload: str | None = None
     # An elicitation's `answer`: each question id of the frame to its answer.
     answers: dict[str, ElicitationAnswer] | None = None
+    # A plan's `switch`: the scope choice, the option it moves to, and the
+    # revision of the plan the user switched on. An `approve` may carry the
+    # revision alone.
+    choice_id: str | None = Field(default=None, min_length=1)
+    option_id: str | None = Field(default=None, min_length=1)
+    plan_revision: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _switch_members_come_with_switch(self) -> InterruptResponse:
+        """Refuse a `switch` missing one of its three members, and any other
+        decision carrying one, save an `approve`'s `plan_revision`."""
+        members = {
+            "choice_id": self.choice_id,
+            "option_id": self.option_id,
+            "plan_revision": self.plan_revision,
+        }
+        if self.decision is InterruptDecision.SWITCH:
+            missing = [name for name, value in members.items() if value is None]
+            if missing:
+                raise ValueError(f"decision 'switch' requires {', '.join(missing)}")
+            return self
+        if self.decision is InterruptDecision.APPROVE:
+            del members["plan_revision"]
+        stated = [name for name, value in members.items() if value is not None]
+        if stated:
+            raise ValueError(f"decision {self.decision.value!r} does not take {', '.join(stated)}")
+        return self
 
 
 class MutationOp(StrEnum):
@@ -1045,9 +1123,27 @@ class DecisionResolvedBy(StrEnum):
     USER = "user"
 
 
+class PlanDecisionOption(_WireModel):
+    """One option of a scope choice on the plan card: `reason` says, in a
+    reader's words, why a partial or unavailable option is limited, and
+    `years` are the years a partial option covers."""
+
+    option_id: str
+    label: str
+    status: Literal["available", "partial", "unavailable"]
+    reason: str | None = None
+    years: list[tuple[int, int]] | None = None
+
+
 class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
-    one-line reason -- what makes the plan reviewable."""
+    one-line reason -- what makes the plan reviewable.
+
+    A decision stating how Search counted a source carries the scope
+    choice's id (`choice_id`), its active option (`active_option_id`) and
+    every option (`options`), all three together. One without `choice_id`
+    is a planner decision.
+    """
 
     id: str
     question: str
@@ -1055,12 +1151,43 @@ class PlanDecision(_WireModel):
     reason: str
     resolved_by: DecisionResolvedBy
     alternatives: list[str] | None = None
+    choice_id: str | None = None
+    active_option_id: str | None = None
+    options: list[PlanDecisionOption] | None = None
+
+    @model_validator(mode="after")
+    def _scope_members_come_together(self) -> PlanDecision:
+        """Refuse a scope choice missing one of its three members, or whose
+        active option is not among its options."""
+        members = (self.choice_id, self.active_option_id, self.options)
+        if all(member is None for member in members):
+            return self
+        if any(member is None for member in members):
+            raise ValueError("choice_id, active_option_id and options are set together")
+        assert self.options is not None
+        if self.active_option_id not in {option.option_id for option in self.options}:
+            raise ValueError(f"active option {self.active_option_id!r} is not among the options")
+        return self
 
 
 class PlanAction(StrEnum):
     APPROVE = "approve"
     AMEND = "amend"
     REJECT = "reject"
+    # Listed only when some decision has a `choice_id` with an option other
+    # than its active one that is available or partial.
+    SWITCH = "switch"
+
+
+class PlanMoved(_WireModel):
+    """A scope choice a switch moved besides the one the user switched:
+    the option it held (`from_label`), the one it holds now (`to_label`)
+    and why, as a sentence."""
+
+    choice_id: str
+    from_label: str
+    to_label: str
+    reason: str
 
 
 class PlanRequirement(_WireModel):
@@ -1121,6 +1248,18 @@ class PlanProposed(_WireModel):
     # Delta 20 (v1.5): the outputs the user asked for, in the order the
     # brief lists them; absent when the plan was given none.
     asks: list[PlanAsk] | None = None
+    # On the plan a switch offers: each other scope choice the switch moved.
+    moved: list[PlanMoved] | None = None
+
+
+class PlanRevisionStaleError(ToolError):
+    """The 409 `plan_revision_stale` body of POST /api/studio/interrupt: a
+    ToolError plus `current_plan`, the `plan.proposed` frame the stream sent
+    for the plan now awaiting an answer, exactly as sent (its `seq`
+    included). The client replaces the card the user answered with it.
+    Absent only for a pause stored before cards were kept."""
+
+    current_plan: PlanProposed | None = None
 
 
 class PlanVersioned(_WireModel):
@@ -1314,17 +1453,35 @@ class ElicitationRequest(_WireModel):
 
 
 class SuggestionItem(_WireModel):
+    """A chip that sends `prompt` as the user's next message."""
+
     label: str
     prompt: str
 
 
+class ApplyChoiceSuggestion(_WireModel):
+    """A chip that moves one scope choice of the answer's readings to another
+    option: a click sends a `TurnRequest` with `apply_choice {choice_id,
+    option_id, turn, spec_id}` and no message. `label` is the option's label,
+    `turn` the conversation turn whose answer offers the chip, counted from 1,
+    and `spec_id` the reading the chip switches."""
+
+    kind: Literal["apply_choice"]
+    label: str
+    choice_id: str
+    option_id: str
+    turn: int
+    spec_id: str
+
+
 class Suggestions(_WireModel):
-    """Follow-up chips. May be empty in v1 (delta 8 -- the frame is
-    additive)."""
+    """Follow-up chips. Empty unless the answer used readings with scope
+    choices, which give one `ApplyChoiceSuggestion` per other option it can
+    serve (`harness.turn_records.scope_chips`)."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)
-    items: list[SuggestionItem]
+    items: list[SuggestionItem | ApplyChoiceSuggestion]
 
 
 class ErrorFrame(_WireModel):

@@ -6,8 +6,11 @@ for. The door's field names are close to the tool's without matching them
 `variable_text`/`time_text`/`unit_text`/`role_text`, and a source's `exclude`
 flag versus the wire's `polarity`), so `to_wire_request` translates. A success
 result puts the digest in `content`, a small model-facing answer in
-`structuredContent`, and the upstream envelope in `_meta` (see `data_mcp.search_result`). Rendering the digest and the answer
-lives in `data_mcp.digest`; the shared upstream client lives in
+`structuredContent`, and the upstream envelope in `_meta` (see
+`data_mcp.search_result`). A caller in a conversation sends a `SearchContext`
+in the request's `_meta`, which a parsed request carries to Search when
+`Settings.search_sends_conversation_context` is on. Rendering the digest and
+the answer lives in `data_mcp.digest`; the shared upstream client lives in
 `data_mcp.client_holder`.
 """
 
@@ -18,8 +21,17 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, Self
 
+from fastmcp.server.dependencies import fastmcp_request_ctx
 from fastmcp.tools import ToolResult
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from opentelemetry import trace
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from data_mcp.client_holder import get_client
 from data_mcp.deadline import CallDeadline
@@ -27,7 +39,9 @@ from data_mcp.definition_store import IdentityMismatch, StoredDefinition
 from data_mcp.definition_writes import put_definitions, stored_definition
 from data_mcp.digest import render_answer, render_digest
 from data_mcp.errors import UpstreamError
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from data_mcp.scope import MAX_USER_MESSAGE_CHARS, ScopeEntry
+from data_mcp.search_result import SEARCH_CONTEXT_META_KEY, SEARCH_ENVELOPE_META_KEY
+from data_mcp.settings import Settings
 from data_mcp.tool_errors import ToolRefusal, from_upstream_error, to_tool_result
 
 logger = logging.getLogger(__name__)
@@ -45,6 +59,7 @@ _MAX_PART_SOURCES = 8
 _MAX_SOURCE_TEXT_CHARS = 120
 _MAX_SOURCE_REF_CHARS = 200
 _MAX_RAW_QUERY_CHARS = 2000
+_MAX_CARRIED_ENTRIES = 16
 _MAX_PART_OPERATIONS = 8
 _MAX_OPERATION_PHRASE_CHARS = 200
 _MAX_FORECAST_TARGET_YEAR = 2200
@@ -299,15 +314,52 @@ class SearchPart(BaseModel):
     )
 
 
-def to_wire_request(parts: Sequence[SearchPart] | None, raw_query: str | None) -> dict[str, Any]:
+class SearchContext(BaseModel):
+    """The conversation a search is made in, sent by the harness in the request's
+    `_meta` under `SEARCH_CONTEXT_META_KEY`.
+
+    `user_message` is the user's own words for the turn, amendments and
+    answers included, from which Search reads intent and explicit scope.
+    `carried_entries` are the scope entries the conversation settled on
+    earlier parts, oldest first, each with provenance `carried`, in Search's
+    `Entry` shape (`data_mcp.scope.ScopeEntry`). Search attaches each to a
+    part by axis and concept.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_message: str | None = Field(default=None, min_length=1)
+    carried_entries: list[ScopeEntry] = Field(default_factory=list)
+
+
+def to_wire_request(
+    parts: Sequence[SearchPart] | None,
+    raw_query: str | None,
+    *,
+    context: SearchContext | None = None,
+) -> dict[str, Any]:
     """Translate tool-facing parts into the parsed door's wire request body, or,
     with no parts, `raw_query` into the raw-text door's, where Search reads the
-    question itself."""
+    question itself.
+
+    A parsed body carries `context`'s user message and carried entries as
+    the input's `user_message` and `carried_entries`, each when set, within
+    the door's limits: the message's last 4,000 characters, since a turn's
+    amendments and answers are appended to it, and the 16 newest entries,
+    the list being oldest first. The raw-text door takes neither.
+    """
     input_block: dict[str, Any]
     if parts:
         input_block = {"kind": "parsed", "parts": [_wire_part(part) for part in parts]}
         if raw_query is not None:
             input_block["raw_query"] = raw_query
+        if context is not None and context.user_message is not None:
+            input_block["user_message"] = context.user_message[-MAX_USER_MESSAGE_CHARS:]
+        if context is not None and context.carried_entries:
+            input_block["carried_entries"] = [
+                entry.model_dump(mode="json", exclude_none=True)
+                for entry in context.carried_entries[-_MAX_CARRIED_ENTRIES:]
+            ]
     else:
         if raw_query is None:
             raise ValueError("a search with no parts needs raw_query, the question Search reads")
@@ -433,7 +485,11 @@ async def _register_definitions(envelope: Mapping[str, Any]) -> ToolResult | Non
 
     A node with no `definition`, or a `definition` with no `spec_id`, is
     skipped silently. Each spec's `resolved.alternative_measures` entries are
-    written too (`_verified_siblings`). Returns a refusal `ToolResult` in
+    written too (`_verified_siblings`). A spec's `resolved.scope_choices`
+    writes nothing: its compiled identity is the spec's own, its base is the
+    identity a switch posts back to Search, and its options carry no
+    spec_id. An option is registered only once Search compiles it, which it
+    does for an available option alone. Returns a refusal `ToolResult` in
     place of the search's own result when a spec's definition identity doesn't
     reproduce its own spec_id, or when the store itself can't be written to;
     returns `None` otherwise, including when there was nothing to write. Awaited before
@@ -450,6 +506,14 @@ async def _register_definitions(envelope: Mapping[str, Any]) -> ToolResult | Non
             definitions.append(stored)
         definitions.extend(_verified_siblings(node))
     return await put_definitions(definitions)
+
+
+def _request_context() -> object | None:
+    """The context the current request's `_meta` carries, unread; `None` when it
+    carries none or no MCP request is in flight."""
+    request_context = fastmcp_request_ctx.get()
+    meta = request_context.meta if request_context is not None else None
+    return meta.get(SEARCH_CONTEXT_META_KEY) if meta else None
 
 
 def _unusable_envelope(exc: Exception) -> ToolResult:
@@ -653,7 +717,21 @@ async def search(
                 detail="search needs `parts`, or `raw_query` for Search to read as text",
             )
         )
-    wire = to_wire_request(parts, raw_query)
+    sent = _request_context()
+    if sent is not None and not Settings().search_sends_conversation_context:
+        logger.debug("search context dropped: search_sends_conversation_context is off")
+        trace.get_current_span().set_attribute("dfo.search.context_dropped", True)
+        sent = None
+    try:
+        context = None if sent is None else SearchContext.model_validate(sent)
+    except ValidationError as exc:
+        return to_tool_result(
+            ToolRefusal.request_invalid(
+                pointer=f"/_meta/{SEARCH_CONTEXT_META_KEY}",
+                detail=f"the search context is not a SearchContext: {exc}",
+            )
+        )
+    wire = to_wire_request(parts, raw_query, context=context)
     envelope = await resolve_and_register(wire)
     if isinstance(envelope, ToolResult):
         return envelope

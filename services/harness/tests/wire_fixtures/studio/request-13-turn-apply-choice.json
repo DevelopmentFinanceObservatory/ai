@@ -1,0 +1,11 @@
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "session_id": "sess_01j9zc0000",
+  "apply_choice": {
+    "choice_id": "spec_6176d83382fca6c596e00cb242a06803:sector",
+    "option_id": "sector:120",
+    "turn": 2,
+    "spec_id": "spec_0b7d6c7e1f2a4b5c8d9e0f1a2b3c4d5e"
+  }
+}
