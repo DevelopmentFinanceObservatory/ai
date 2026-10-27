@@ -271,22 +271,28 @@ def ambiguous_entities(
     or role. A group pinning two rows gives two readings with its
     candidates, one per entity, since each entity is its own choice.
 
-    A group's candidates are those whose option posts the candidate's ref as
-    the `dcid` of every row the group covers, since the planner states the
-    picked candidate as each covered entity's `dcid`. A row asked for its
-    members posts a group node by the group's name and no dcid, and a pin
-    cannot ask for a group's members, so that candidate is left out.
+    A group's candidates are those whose option the planner can restate. An
+    option posting the candidate's ref as the `dcid` of every row the group
+    covers is stated by that ref as each covered entity's `dcid`. A row asked
+    for its members takes a group's own node by the group's registered name,
+    posted as the row's `text` with `members` and no dcid, since a pin cannot
+    ask for a group's members; that candidate is kept with the name as its
+    `restate_as`. Such an option carries no ref, so it is the candidate's by
+    the `label` Search gives the option, the candidate's name. A candidate
+    Search gives no option, a group node with no registered name, is no
+    choice Search can replay and is left out.
 
     Raises:
         ValueError: If a group or candidate is malformed, or a group has fewer
             than two options holding one row per sent entity, its options
-            differ in no row, or fewer than two of its candidates have an
-            option pinning its rows by dcid.
+            differ in no row, an option pins no one candidate by dcid or by a
+            group's name, or fewer than two of its candidates have an option.
     """
     options = _sequence(no_data.get("options"))
     readings: list[AmbiguousEntityReading] = []
     for index, group in enumerate(_sequence(no_data.get("ambiguous_entities"))):
-        rows = [_option_rows(option) for option in options if option.get("entity_choice") == index]
+        settling = [option for option in options if option.get("entity_choice") == index]
+        rows = [_option_rows(option) for option in settling]
         if len(rows) < 2 or any(len(option_rows) != len(entities) for option_rows in rows):
             raise ValueError(
                 f"search's ambiguous entity group {index} has {len(rows)} option(s), not two or "
@@ -299,25 +305,42 @@ def ambiguous_entities(
         ]
         if not positions:
             raise ValueError(f"search's ambiguous entity group {index} pins no entity row")
-        posted = {
-            dcids.pop()
-            for option_rows in rows
-            if len(dcids := {option_rows[position].get("dcid") for position in positions}) == 1
-        }
-        candidates = [
-            candidate
-            for candidate in (
-                EntityCandidate.model_validate(
-                    {"ref": candidate.get("ref"), "label": candidate.get("label")}
-                )
-                for candidate in _sequence(group.get("candidates"))
+        stated = [
+            EntityCandidate.model_validate(
+                {"ref": candidate.get("ref"), "label": candidate.get("label")}
             )
-            if candidate.ref in posted
+            for candidate in _sequence(group.get("candidates"))
+        ]
+        posted: set[str] = set()
+        named: list[tuple[object, str | None]] = []
+        for option, option_rows in zip(settling, rows, strict=True):
+            covered = [option_rows[position] for position in positions]
+            dcids = {row.get("dcid") for row in covered}
+            if len(dcids) == 1 and isinstance(dcid := dcids.pop(), str):
+                posted.add(dcid)
+            else:
+                named.append((option.get("label"), _members_name(covered)))
+        restated: dict[str, str] = {}
+        for label, name in named:
+            owners = [candidate for candidate in stated if candidate.label == label]
+            if name is None or len(owners) != 1 or owners[0].ref in posted or label in restated:
+                raise ValueError(
+                    f"search's ambiguous entity group {index} has an option, {label!r}, that "
+                    "pins no one candidate by dcid or by a group's name"
+                )
+            restated[owners[0].label] = name
+        candidates = [
+            candidate.model_copy(update={"restate_as": restated[candidate.label]})
+            if candidate.ref not in posted
+            else candidate
+            for candidate in stated
+            if candidate.ref in posted or candidate.label in restated
         ]
         if len(candidates) < 2:
             raise ValueError(
                 f"search's ambiguous entity group {index} offers {len(candidates)} candidate(s) "
-                "whose option pins every row it covers by dcid, not two or more"
+                "whose option pins every row it covers by dcid or by a group's name, not two "
+                "or more"
             )
         readings.extend(
             AmbiguousEntityReading.model_validate(
@@ -326,6 +349,14 @@ def ambiguous_entities(
             for position in positions
         )
     return tuple(readings)
+
+
+def _members_name(rows: Sequence[Mapping[str, object]]) -> str | None:
+    """The group name `rows` all post asking for its members with no dcid, else `None`."""
+    if any(row.get("dcid") is not None or row.get("members") is not True for row in rows):
+        return None
+    names = {_text(row.get("text")) for row in rows}
+    return names.pop() if len(names) == 1 else None
 
 
 def _option_rows(option: Mapping[str, object]) -> list[Mapping[str, object]]:

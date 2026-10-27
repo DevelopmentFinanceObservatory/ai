@@ -46,7 +46,7 @@ import asyncio
 import functools
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 from compiler.surface import ToolSurface
 from data_mcp.definition_writes import windowed_identity
@@ -67,6 +67,7 @@ from submission.service import (
     Admission,
     Combination,
     Proposal,
+    ReferralAnswers,
     identity_on_record,
     submit,
 )
@@ -78,7 +79,13 @@ from translator.discovery import (
     resolve_definition,
     resolved_spec,
 )
-from translator.referral import USER_DECIDES, clear_referral, load_referral
+from translator.referral import (
+    USER_DECIDES,
+    Referral,
+    ReferralKind,
+    clear_referral,
+    load_referral,
+)
 from translator.tool import Translate, authored_answer
 
 from planner.declaration import PlanTool
@@ -900,13 +907,14 @@ def _user_spoke_since_recorded(tool_context: ToolContext, version: int) -> bool:
 def _answered_since_referral(tool_context: ToolContext) -> bool:
     """Whether the user has answered an ask the planner raised after seeing the
     translator's referral (`_answers_since_referral`)."""
-    return _answers_since_referral(tool_context)[0]
+    return _answers_since_referral(tool_context).answered
 
 
-def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[str]]:
+def _answers_since_referral(tool_context: ToolContext) -> ReferralAnswers:
     """Whether the user has answered an ask the planner raised after seeing the
-    translator's referral, and the spec_ids they picked answering those asks,
-    read off this session's event history as `_elected_spec_ids` reads it.
+    translator's referral, the spec_ids they picked answering those asks, and the
+    spec_ids offered by those asks still unanswered, read off this session's event
+    history as `_elected_spec_ids` reads it.
 
     The referral reaches the planner in the `translation` of the response that recorded the
     plan, `propose_plan`'s, carrying its `kind` and `requirement_id`. This walks the session
@@ -929,14 +937,31 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
 
     A spec_id counts as picked when an answer names it and the ask it answers,
     the nearest preceding one with its `id`, offered it, as `_elected_spec_ids`
-    pairs them. A pick made before the referral is not counted.
+    pairs them. A pick made before the referral is not counted. Picks keep the
+    order the answers came in. An ask with no answer, a skip included, leaves
+    every id it offered unanswered. An ask whose response has no `result`,
+    one the tool or ADK refused, never reached the user, so it offered
+    nothing. A pending ask has no response and stays unanswered.
+
+    `picked_ever` holds the user's standing picks since the first referral,
+    which a later translation does not clear. An answered ask, picked or in
+    the user's own words, replaces every earlier pick among the ids it
+    offered, so the latest answer about a reading stands and a free-text
+    answer releases it to the planner. A message the user typed
+    (`_user_message`) or an amendment of the approval card (`_is_amendment`)
+    releases them all.
     """
     answered = False
     referral: tuple[object, object] | None = None
     asks: dict[str, dict[str, frozenset[str]]] = {}
-    picked: set[str] = set()
+    replied: set[str] = set()
+    picked: list[str] = []
+    picked_ever: list[str] = []
     for event in tool_context.session.events:
         if not (event.content and event.content.parts):
+            continue
+        if _user_message(event):
+            picked_ever.clear()
             continue
         for part in event.content.parts:
             call = part.function_call
@@ -952,10 +977,22 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
                 continue
             body = response.response or {}
             if response.name == REQUEST_INPUT_FUNCTION_CALL_NAME:
-                if response.id not in asks or not _is_answer(body):
+                if _is_amendment(body):
+                    picked_ever.clear()
+                if response.id not in asks:
+                    continue
+                if "result" not in body:
+                    del asks[response.id]
+                    continue
+                if not _is_answer(body):
                     continue
                 answered = True
-                picked.update(_picks(body.get("result"), asks[response.id]))
+                replied.add(response.id)
+                offered = {spec_id for ids in asks[response.id].values() for spec_id in ids}
+                picks = _picks(body.get("result"), asks[response.id])
+                picked.extend(picks)
+                picked_ever = [pick for pick in picked_ever if pick not in offered]
+                picked_ever.extend(picks)
             elif "translation" in body:
                 translation = body["translation"]
                 referral = (
@@ -965,8 +1002,21 @@ def _answers_since_referral(tool_context: ToolContext) -> tuple[bool, frozenset[
                 )
                 answered = False
                 asks.clear()
+                replied.clear()
                 picked.clear()
-    return answered, frozenset(picked)
+    unanswered = frozenset(
+        spec_id
+        for call_id, offered in asks.items()
+        if call_id not in replied
+        for spec_ids in offered.values()
+        for spec_id in spec_ids
+    )
+    return ReferralAnswers(
+        answered=answered,
+        picked=tuple(picked),
+        unanswered=unanswered,
+        picked_ever=tuple(picked_ever),
+    )
 
 
 def _refused_combination(body: dict[str, Any]) -> Combination | None:
@@ -1064,7 +1114,7 @@ class ToolContextSession:
         """`_elected_spec_ids` over the call's session."""
         return _elected_spec_ids(self.tool_context)
 
-    def answers_since_referral(self) -> tuple[bool, frozenset[str]]:
+    def answers_since_referral(self) -> ReferralAnswers:
         """`_answers_since_referral` over the call's session."""
         return _answers_since_referral(self.tool_context)
 
@@ -1292,6 +1342,76 @@ def _first_year_unreadable(
         outcome=Outcome.REFUSED,
         detail=detail,
     )
+
+
+def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:
+    """The refusal for an ask offering anything but one reading's picks under an entity referral, or `None`.
+
+    While an `entity_name_ambiguous` referral is pending, an ask that offers
+    candidates offers those of one reading in its `ambiguous_entities`, each
+    under its `pick` (`planner.records.entity_pick`), and offers all of them.
+    Studio shows an ask as one single-select question, so one answer settles
+    one entity, an id that names no pick would come back as an answer nothing
+    reads, and an ask leaving a candidate out would make the planner's choice
+    the user's. An ask with no candidates, as for free text or a combination,
+    passes.
+    """
+    if referral is None or referral.kind is not ReferralKind.ENTITY_NAME_AMBIGUOUS:
+        return None
+    offered = _candidate_ids(candidates)
+    readings = {
+        candidate.pick: reading.entity
+        for reading in referral.ambiguous_entities
+        for candidate in reading.candidates
+    }
+    unknown = sorted(offered - readings.keys())
+    if unknown:
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            f"spec_id {unknown[0]!r} is no candidate's `pick` in the pending referral's "
+            "`ambiguous_entities`. Offer one reading's candidates, each under its `pick` "
+            "unchanged.",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    touched = {readings[spec_id] for spec_id in offered}
+    if len(touched) > 1:
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            "These candidates come from more than one reading in `ambiguous_entities`. Ask "
+            "about each reading in an `adk_request_input` call of its own.",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    if touched and offered != {pick for pick, entity in readings.items() if entity in touched}:
+        return problem(
+            ProblemCode.INVALID_ARGUMENTS,
+            "These candidates leave out some of their reading's candidates in "
+            "`ambiguous_entities`. Offer every candidate of the reading, each under its `pick`.",
+            outcome=Outcome.INVALID_INPUT,
+        )
+    return None
+
+
+class _AskTool(LongRunningFunctionTool):
+    """The planner's ask, refusing a call that would not bind its answer to one entity reading.
+
+    The function and so the declaration the model reads are `ask_user`'s. The
+    referral pending in the call's session decides what the ask may offer
+    (`_entity_ask_unbound`), which the function, holding no `ToolContext`,
+    cannot read.
+    """
+
+    @override
+    async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
+        referral = load_referral(tool_context.state)
+        plan = load_plan(tool_context.state)
+        if referral is not None and plan is not None and plan.rolling_copies:
+            referral = Referral.model_validate(
+                authored_answer(referral.model_dump(mode="json"), split_of(plan))
+            )
+        refusal = _entity_ask_unbound(referral, args.get("candidates"))
+        if refusal is not None:
+            return refusal
+        return await super().run_async(args=args, tool_context=tool_context)
 
 
 def build_planner_tools(
@@ -1525,7 +1645,7 @@ def build_planner_tools(
         _PROPOSE_PLAN_ARGUMENTS | _FIXED_ARGUMENTS if question_fixed else _PROPOSE_PLAN_ARGUMENTS
     )
     return [
-        LongRunningFunctionTool(ask_user),
+        _AskTool(ask_user),
         PlanTool(proposing, arguments=arguments),
         FunctionTool(reject_plan),
     ]

@@ -309,8 +309,14 @@ async def test_a_stored_role_reaches_search_as_the_party_word_it_stands_for(
             Entity(name="Congo", role="donor", dcid="country/COD"),
             {"text": "Congo", "dcid": "country/COD", "role": "donor"},
         ),
+        # A group's own node picked on a row asked for its members goes by the
+        # group's registered name, as Search's option posts it, with no dcid.
+        (
+            Entity(name="Central Africa (UN)", role="recipient", members=True),
+            {"text": "Central Africa (UN)", "role": "recipient", "members": True},
+        ),
     ],
-    ids=["set-alone", "set-members", "party-set-members", "pinned-node"],
+    ids=["set-alone", "set-members", "party-set-members", "pinned-node", "restated-group"],
 )
 async def test_an_entity_reaches_search_with_the_words_and_node_the_plan_states(
     surface: McpSurface,

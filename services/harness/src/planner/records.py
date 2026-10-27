@@ -712,10 +712,24 @@ class AmbiguousSourceReading(StrictModel):
 
 
 class EntityCandidate(StrictModel):
-    """A graph node Search offers for ambiguous entity wording: its dcid and label."""
+    """A graph node Search offers for ambiguous entity wording: its dcid and label.
+
+    `restate_as` is set when the candidate is a group's own node on a row
+    asked for its members: Search's option posts the group's registered name
+    with `members` and no dcid, since a pinned group node cannot ask for its
+    members, so the entity states that name in place of the `ref`. It is left
+    out of a dump while unset.
+
+    `pick` is the id an ask offers the candidate under, naming the
+    requirement and the reading as well as the candidate (`entity_pick`). The
+    referral holding the reading fills it (`AmbiguousEntityReading.picked_under`),
+    and it is left out of a dump while unset.
+    """
 
     ref: str
     label: str
+    restate_as: str | None = Field(default=None, exclude_if=lambda name: name is None)
+    pick: str = Field(default="", exclude_if=lambda pick: not pick)
 
 
 class EntityKey(StrictModel):
@@ -723,6 +737,21 @@ class EntityKey(StrictModel):
 
     name: str
     role: str | None = None
+
+
+def entity_pick(requirement_id: str, entity: EntityKey, choice: str) -> str:
+    """The id an ask offers a candidate under for the reading about `entity` in `requirement_id`.
+
+    The requirement, then the entity's role, then its name, then `choice`,
+    the candidate's node or the group name it is restated as
+    (`EntityCandidate.restate_as`), so an answer naming it says which entity
+    of which requirement the user settled as well as how:
+    "flows|donor|Congo|country/COD" and "flows|recipient|Congo|country/COD"
+    are two different answers, and a later referral about the same
+    requirement offers the same ids for the same readings. An entity with no
+    role leaves its field empty.
+    """
+    return f"{requirement_id}|{entity.role or ''}|{entity.name}|{choice}"
 
 
 class AmbiguousEntityReading(StrictModel):
@@ -737,3 +766,20 @@ class AmbiguousEntityReading(StrictModel):
     text: str
     candidates: tuple[EntityCandidate, ...]
     entity: EntityKey
+
+    def picked_under(self, requirement_id: str) -> AmbiguousEntityReading:
+        """This reading with each candidate's `pick` naming it within `requirement_id` (`entity_pick`)."""
+        return self.model_copy(
+            update={
+                "candidates": tuple(
+                    candidate.model_copy(
+                        update={
+                            "pick": entity_pick(
+                                requirement_id, self.entity, candidate.restate_as or candidate.ref
+                            )
+                        }
+                    )
+                    for candidate in self.candidates
+                )
+            }
+        )

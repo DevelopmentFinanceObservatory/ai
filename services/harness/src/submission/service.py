@@ -136,6 +136,7 @@ from planner.plan import (
 )
 from planner.records import (
     AmbiguousEntityReading,
+    EntityCandidate,
     EntityKey,
     GroupBy,
     Identifier,
@@ -157,6 +158,26 @@ from translator.tool import authored_answer
 # What a combination ask asks about: the `sum_of` requirement's id and the
 # datasets its sides read (`_sum_datasets`).
 type Combination = tuple[str, frozenset[str]]
+
+
+class ReferralAnswers(NamedTuple):
+    """What the user said to the asks raised after the pending referral (`SessionView.answers_since_referral`).
+
+    `answered` says whether any of those asks has an answer. `picked` holds the
+    candidate ids the answers picked, in the order they were given, so a later
+    answer about the same choice comes after the one it replaces. `unanswered`
+    holds every candidate id an ask offered that has no answer, skipped or
+    dismissed included; an ask the tool or ADK refused offered nothing.
+    `picked_ever` holds the user's standing picks from asks raised under any
+    referral of the session, which a later referral does not clear: a later
+    answer to an ask offering the same ids replaces them, and a message the
+    user typed or an amendment of the approval card releases them all.
+    """
+
+    answered: bool
+    picked: tuple[str, ...]
+    unanswered: frozenset[str]
+    picked_ever: tuple[str, ...]
 
 
 class SessionView(Protocol):
@@ -181,8 +202,8 @@ class SessionView(Protocol):
         """Every spec_id the user chose answering an ask that offered it."""
         ...
 
-    def answers_since_referral(self) -> tuple[bool, frozenset[str]]:
-        """Whether the user answered an ask raised after the pending referral, and the spec_ids those answers picked."""
+    def answers_since_referral(self) -> ReferralAnswers:
+        """What the user answered to the asks raised after the pending referral."""
         ...
 
     def combination_picks(self) -> tuple[dict[Combination, str | None], bool]:
@@ -1461,7 +1482,7 @@ def _referral_unanswered(
         existing is None
         or referral is None
         or referral.kind not in USER_DECIDES
-        or view.answers_since_referral()[0]
+        or view.answers_since_referral().answered
     ):
         return None
     return problem(
@@ -1520,7 +1541,7 @@ def _stated_source_given_way(
     if referral is None or not referral.source_mismatch:
         return list(requirements)
     offered = {candidate.spec_id for candidate in referral.candidates}
-    chosen = offered & view.answers_since_referral()[1]
+    chosen = offered.intersection(view.answers_since_referral().picked)
     return [
         requirement.model_copy(update={"source": None})
         if isinstance(requirement, DatasetRequirement)
@@ -1887,7 +1908,7 @@ def _source_ref_unpicked(
     (`referral`, as `_authored_referral` gives it) offers for the requirement's `source` wording, or for its `source_code`
     when more than one publisher holds the code.
     """
-    picked = view.answers_since_referral()[1]
+    picked = view.answers_since_referral().picked
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement) or requirement.source_ref is None:
             continue
@@ -1927,6 +1948,18 @@ def _source_ref_unpicked(
     return None
 
 
+def _kept_entities(
+    previous: Plan | None, requirement_id: str
+) -> set[tuple[str, str | None, str | None]]:
+    """The `(name, role, dcid)` of each entity the previous plan states for `requirement_id`."""
+    if previous is None:
+        return set()
+    old = next((r for r in previous.evidence_requirements if r.id == requirement_id), None)
+    if not isinstance(old, DatasetRequirement):
+        return set()
+    return {(e.name, e.role, e.dcid) for e in old.entities}
+
+
 def _entity_dcid_unoffered(
     plan: Plan, referral: Referral | None, previous: Plan | None
 ) -> dict[str, object] | None:
@@ -1935,18 +1968,17 @@ def _entity_dcid_unoffered(
     The options are the candidates of the reading the open
     `entity_name_ambiguous` referral (`referral`, as `_authored_referral`
     gives it) holds for the entity's `(name, role)` in its requirement. The planner settles the choice when the
-    question decides it, so the user need not have picked it. An entity
+    question decides it, so the user need not have picked it. A candidate
+    restated by a group's name (`EntityCandidate.restate_as`) offers no
+    node, since Search refuses a pinned group asked for its members; the
+    entity restating it states no `dcid` (`_restated`). An entity
     whose `(name, role, dcid)` the previous plan states for the requirement
     carries its settled choice forward.
     """
     for requirement in plan.evidence_requirements:
         if not isinstance(requirement, DatasetRequirement):
             continue
-        kept: set[tuple[str, str | None, str | None]] = set()
-        if previous is not None:
-            old = next((r for r in previous.evidence_requirements if r.id == requirement.id), None)
-            if isinstance(old, DatasetRequirement):
-                kept = {(e.name, e.role, e.dcid) for e in old.entities}
+        kept = _kept_entities(previous, requirement.id)
         readings: tuple[AmbiguousEntityReading, ...] = ()
         if (
             referral is not None
@@ -1962,6 +1994,7 @@ def _entity_dcid_unoffered(
                 for reading in readings
                 if reading.entity == EntityKey(name=entity.name, role=entity.role)
                 for candidate in reading.candidates
+                if candidate.restate_as is None
             }
             if entity.dcid not in offered:
                 return _invalid_plan(
@@ -1970,6 +2003,108 @@ def _entity_dcid_unoffered(
                     "the entity is."
                 )
     return None
+
+
+def _entity_dcid_unpicked(
+    plan: Plan, referral: Referral | None, view: SessionView, previous: Plan | None
+) -> dict[str, object] | None:
+    """An entity must state the candidate the user picked for it, when they were asked.
+
+    An ask raised after the open `entity_name_ambiguous` referral (`referral`,
+    as `_authored_referral` gives it) offers one reading's candidates under
+    their `pick` ids (`planner.records.entity_pick`), so an answer names the
+    entity as well as the candidate. The latest pick for a reading fixes how
+    its entity is stated. An entity with a `dcid` is the reading of its
+    `(name, role)` in the referral's requirement, and has to state the picked
+    node. An entity restating a group's name (`_restated`) no longer carries
+    the reading's name, so it is the reading of each candidate it restates,
+    and has to be the pick of one of them. A reading an ask offered that the
+    user has not answered stays unsettled until they do. A reading nobody
+    asked about, and one the user answered in their own words, the planner
+    settles (`_entity_dcid_unoffered` checks the node was offered). An entity
+    the previous plan states alike for the requirement carries its settled
+    choice forward. A pick names its requirement (`entity_pick`), so a pick
+    made under an earlier referral about the same requirement still binds its
+    reading when this one offers it again, and the planner cannot drop a
+    picked node and state another once Search refers the entity anew. Only
+    asks raised since this referral hold a reading unanswered.
+    """
+    if referral is None or referral.kind is not ReferralKind.ENTITY_NAME_AMBIGUOUS:
+        return None
+    readings = {
+        candidate.pick: (reading.entity, candidate)
+        for reading in referral.ambiguous_entities
+        for candidate in reading.candidates
+    }
+    answers = view.answers_since_referral()
+    chosen = {
+        readings[pick][0]: readings[pick][1] for pick in answers.picked_ever if pick in readings
+    }
+    held = {readings[pick][0] for pick in answers.unanswered if pick in readings} - chosen.keys()
+    for requirement in plan.evidence_requirements:
+        if (
+            not isinstance(requirement, DatasetRequirement)
+            or requirement.id != referral.requirement_id
+        ):
+            continue
+        kept = _kept_entities(previous, requirement.id)
+        for entity in requirement.entities:
+            if (entity.name, entity.role, entity.dcid) in kept:
+                continue
+            if entity.dcid is not None:
+                keys = [EntityKey(name=entity.name, role=entity.role)]
+            elif not (keys := _restated(entity, referral.ambiguous_entities)):
+                continue
+            stated = (entity.dcid, None if entity.dcid is not None else entity.name)
+            if any(
+                key not in held and (key not in chosen or _stated_as(chosen[key]) == stated)
+                for key in keys
+            ):
+                continue
+            key = keys[0]
+            if key in chosen:
+                return _invalid_plan(
+                    f"The user picked {chosen[key].label!r} for the entity {key.name!r} "
+                    f"(role {key.role!r}). State it with {_statement(chosen[key])}."
+                )
+            return _invalid_plan(
+                f"The user was asked which node the entity {key.name!r} "
+                f"(role {key.role!r}) names and has not picked one. Leave its dcid "
+                "unset or ask again; do not choose it for them."
+            )
+    return None
+
+
+def _restated(entity: Entity, readings: Sequence[AmbiguousEntityReading]) -> list[EntityKey]:
+    """The readings whose candidate `entity` restates by a group's name, empty for any other entity.
+
+    Such an entity states no `dcid`, sets `members` and carries as its name
+    a candidate's `restate_as` for a reading of the same role. The name
+    replaces the reading's own, so the entity is keyed by the candidate it
+    restates: by the `(name, role)` of each reading offering that candidate.
+    """
+    if entity.dcid is not None or not entity.members:
+        return []
+    return [
+        reading.entity
+        for reading in readings
+        if reading.entity.role == entity.role
+        and any(candidate.restate_as == entity.name for candidate in reading.candidates)
+    ]
+
+
+def _stated_as(candidate: EntityCandidate) -> tuple[str | None, str | None]:
+    """The `(dcid, name)` an entity stating `candidate` carries; the name only for a restated group."""
+    if candidate.restate_as is None:
+        return candidate.ref, None
+    return None, candidate.restate_as
+
+
+def _statement(candidate: EntityCandidate) -> str:
+    """How an entity states `candidate`, as `ENTITY_CHOICE_REPAIR` tells the planner."""
+    if candidate.restate_as is None:
+        return f"{candidate.ref!r} as its dcid"
+    return f"the name {candidate.restate_as!r}, members true and no dcid"
 
 
 def _unrecordable(
@@ -1989,7 +2124,8 @@ def _unrecordable(
     earned is refused for the decline (`_decline_unearned`). A patch carries forward what it
     does not name, so the amended plan is checked whole for a source
     reference the user did not pick (`_source_ref_unpicked`), an entity
-    node no referral offered (`_entity_dcid_unoffered`) and a pin a
+    node no referral offered (`_entity_dcid_unoffered`) or other than the one
+    the user picked for it (`_entity_dcid_unpicked`), and a pin a
     pending source choice did not offer (`_choice_not_offered`), each
     against `stated`, the plan before its split and `_window_pins`, with
     `referral`, the pending referral naming the requirements the model wrote
@@ -2020,6 +2156,7 @@ def _unrecordable(
     return (
         _source_ref_unpicked(stated, referral, view, previous)
         or _entity_dcid_unoffered(stated, referral, previous)
+        or _entity_dcid_unpicked(stated, referral, view, previous)
         or _choice_not_offered(stated, referral, view)
         or _combination_unasked(stated, view, previous=previous)
         or _decline_unearned(plan, previous, view)
