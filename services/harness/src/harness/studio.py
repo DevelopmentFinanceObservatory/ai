@@ -98,7 +98,6 @@ from harness.studio_translate import (
     _Translator,
     failure_detail,
     held_labels,
-    plan_approved,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
@@ -121,6 +120,7 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanProposed,
     PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
@@ -727,23 +727,6 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
 
 
-async def _approved_first(
-    pending: _PendingInterrupt, conversation: ConversationState, frames: AsyncGenerator[Any]
-) -> AsyncGenerator[Any]:
-    """`frames` led by the `plan.approved` frame for the card `pending` holds,
-    the one the user approved, so the client has the approved plan before
-    the resumed run's first frame."""
-    assert pending.card is not None
-    yield plan_approved(
-        pending.card,
-        seq=conversation.next_seq(),
-        baseline=conversation.turn_choice_baseline,
-    )
-    async with aclosing(frames) as source:
-        async for frame in source:
-            yield frame
-
-
 async def _unwind(pending: asyncio.Future[Any]) -> None:
     """Cancel `pending` once and WAIT for it: a bare `.cancel()` leaves the
     generator mid-frame and `aclosing` then raises "asynchronous generator
@@ -899,8 +882,13 @@ class StudioRunner:
         principal: str,
         conversation: ConversationState,
         message: types.Content,
+        approving: PlanProposed | None = None,
     ) -> AsyncGenerator[Any]:
         """Run one segment (fresh turn or resume) and yield wire frames.
+
+        `approving` is the plan card a first answer to its interrupt approves,
+        which `plan.approved` states once the graph takes the approval
+        (`_Translator`).
 
         Failures are serialised into the stream as a stream-fatal `error`
         frame. SSE headers are already on the wire, so an exception can't
@@ -911,6 +899,7 @@ class StudioRunner:
             conversation=conversation,
             recorder=self.recorder,
             surface_recorder=self.surface_recorder,
+            approving=approving,
         )
         try:
             async with aclosing(
@@ -1734,9 +1723,19 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
-            frames = studio._frames(principal=principal, conversation=conversation, message=message)
-            if body.decision is InterruptDecision.APPROVE and pending.card is not None:
-                frames = _approved_first(pending, conversation, frames)
+            # The approved plan goes out once per interrupt: a retry resuming
+            # the same answer follows an attempt that may already have sent it.
+            approving = (
+                pending.card
+                if body.decision is InterruptDecision.APPROVE and not resuming
+                else None
+            )
+            frames = studio._frames(
+                principal=principal,
+                conversation=conversation,
+                message=message,
+                approving=approving,
+            )
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(

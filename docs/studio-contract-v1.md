@@ -155,7 +155,7 @@ pause; `plan.proposed` has a second showing a failed switch).
 | `message.complete`    | final text for the turn's message                                                                                                           |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
-| `plan.approved`       | the plan the user approved; sent once, before the resumed run's first frame (delta 22)                                                      |
+| `plan.approved`       | the plan the user approved; sent once per interrupt, once the run has accepted the approval, and not on a retried resume (delta 22)         |
 | `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
@@ -647,7 +647,7 @@ Fixture values that are samples:
    question id.
 1. `PlanStep` gains `gives_answer`; `plan.proposed` gains `summary` and
    `switch_failed`; a new `plan.approved` frame carries the approved plan
-   on the approve answer. All optional.
+   on the approve answer, once the run has accepted it. All optional.
 1. `choice_id` is `"<requirement id>:<axis>"`, stable across switches;
    `switch_failed` gains `retryable`; a `/cancel` during a switch
    re-offers the unchanged plan on a live pause under `switch_cancelled`,

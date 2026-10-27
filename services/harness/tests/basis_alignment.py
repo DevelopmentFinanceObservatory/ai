@@ -259,17 +259,15 @@ def us_2023_block(name: str) -> dict[str, Any]:
 
 
 def dac1_with_contributions() -> dict[str, Any]:
-    """`US_2023`'s DAC1 total counted gross with the provider choice the dfo-apis
-    provider change gives a DAC1 total (`search.scope.provider._contributions_table`
-    there): core contributions to multilaterals as its one available option, the
-    bilateral and inclusive scopes unavailable with `counts_core_contributions`."""
+    """`US_2023`'s DAC1 total counted gross with the provider choice dfo-apis gives a
+    DAC1 total (`search.scope.provider._published_table` there): core contributions
+    to multilaterals held, under the rule `contribution_total`; bilateral flows
+    available as DAC1 bilateral ODA, an option binding the `dac1AidType` slot to aid
+    type 1015 in place of a provider scope; and the inclusive scope unavailable with
+    `contributions_counted`."""
     block = json.loads(json.dumps(us_2023_block("dac1_total_gross")))
     scope = block["resolved"]["scope_choices"]
-    published = {
-        "status": "unavailable",
-        "code": "counts_core_contributions",
-        "detail": {"dataset": "provenance/OECDDAC1"},
-    }
+    available = {"status": "available", "detail": {}}
     scope["choices"].append(
         {
             "id": f"{scope['id']}:provider",
@@ -279,23 +277,52 @@ def dac1_with_contributions() -> dict[str, Any]:
             "active": "provider:contributions",
             "options": [
                 {
-                    "option_id": f"provider:{value}",
-                    "label": label,
-                    "binding": {"kind": "provider", "scope": value},
-                    "availability": availability,
-                }
-                for value, label, availability in (
-                    ("bilateral", "bilateral flows only", published),
-                    ("inclusive", "bilateral plus imputed multilateral", published),
-                    (
-                        "contributions",
-                        "bilateral plus core contributions to multilaterals",
-                        {"status": "available", "detail": {}},
-                    ),
-                )
+                    "option_id": "provider:bilateral",
+                    "label": "bilateral flows only",
+                    "binding": {
+                        "kind": "slot",
+                        "slot": "dac1AidType",
+                        "state": "value",
+                        "refs": ["DAC1AidType1015"],
+                    },
+                    "availability": available,
+                },
+                {
+                    "option_id": "provider:inclusive",
+                    "label": "bilateral plus imputed multilateral",
+                    "binding": {"kind": "provider", "scope": "inclusive"},
+                    "availability": {
+                        "status": "unavailable",
+                        "code": "contributions_counted",
+                        "detail": {"dataset": "provenance/OECDDAC1"},
+                    },
+                },
+                {
+                    "option_id": "provider:contributions",
+                    "label": "bilateral plus core contributions to multilaterals",
+                    "binding": {"kind": "provider", "scope": "contributions"},
+                    "availability": available,
+                },
             ],
         }
     )
+    return block
+
+
+def total_without_bilateral() -> dict[str, Any]:
+    """`dac1_with_contributions` with its bilateral option unavailable
+    (`provider_not_offered`): a published total counting core contributions to
+    multilaterals that serves no other provider scope, so no input can be moved to
+    it on bilateral flows."""
+    block = dac1_with_contributions()
+    choice = block["resolved"]["scope_choices"]["choices"][-1]
+    bilateral = choice["options"][0]
+    bilateral["binding"] = {"kind": "provider", "scope": "bilateral"}
+    bilateral["availability"] = {
+        "status": "unavailable",
+        "code": "provider_not_offered",
+        "detail": {"why": "dataset"},
+    }
     return block
 
 

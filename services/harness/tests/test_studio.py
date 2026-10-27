@@ -31,6 +31,7 @@ from typing import Any
 
 import anyio
 import harness.graph.execute as execute_module
+import harness.graph.planning as planning_module
 import harness.graph.switch as switch_module
 import harness.studio as studio_module
 import harness.studio_state as studio_state_module
@@ -1474,6 +1475,27 @@ async def test_a_segment_lost_closes_the_activity_lines_its_stream_left_running(
     assert conversation.turn_recorded is False  # the turn stays open for the takeover to finish
 
 
+async def test_an_approval_the_approve_node_refuses_sends_no_approved_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approve node takes no approval whose time it cannot read, and routes the
+    answer to the planner as an amendment: the stream offers the plan again and
+    names no approved plan."""
+    monkeypatch.setattr(planning_module, "_answered_at", lambda answer: None)
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+
+        second = await _stream(
+            client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    events = _events(second)
+    assert "plan.approved" not in events
+    assert events[-1] == "plan.proposed"
+
+
 async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
     executor = ScriptedExecutor()
     app = _app(
@@ -2460,6 +2482,8 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
 
     assert _events(resumed)[-1] == "done"
     assert resumed[0]["seq"] >= saved_seq + 1000
+    # A's dead attempt sent the approved plan once the approve node took it.
+    assert "plan.approved" not in _events(resumed)
 
     reloaded = await StudioStore(session_service, app_name=AGENT_NAME).load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None

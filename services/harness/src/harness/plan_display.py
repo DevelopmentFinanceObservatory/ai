@@ -50,7 +50,7 @@ from __future__ import annotations
 import json
 import re
 import typing
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 
 from compiler.evidence import open_axes_for, resolve_group, resolve_name
 from compiler.shapes import breakdown_level
@@ -114,7 +114,7 @@ from planner.records import (
     ValueThreshold,
 )
 from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
-from planner.workflow import ReadingSetBy, SelectedSource, Workflow
+from planner.workflow import ReadingSetBy, SelectedSource, Workflow, WorkflowStep
 
 from harness.sentences import DECLINE_REASONS, PlanWords
 
@@ -248,27 +248,16 @@ def step_rows(plan: Plan) -> list[dict[str, object]]:
     """
     assert plan.translation is not None, "step_rows needs a plan carrying a translation"
     assert plan.workflow is not None, "step_rows needs a plan carrying a workflow"
-    scopes = answer_scopes(plan)
     shown = shown_plan(plan)
-    assert shown.translation is not None
-    assert shown.workflow is not None
-    operations_by_id = {operation.id: operation for operation in shown.translation.operations}
-    rows: list[dict[str, object]] = []
-    for step in shown.workflow.steps:
-        operation = operations_by_id[step.operation_id]
-        requirement = shown.requirement(operation.requirement_id)
-        description = _sentence(requirement, shown)
-        if requirement.id in scopes:
-            description = f"{description} Result: {scopes[requirement.id]}."
-        rows.append(
-            {
-                "id": step.id,
-                "label": _label(requirement, shown),
-                "description": description,
-                "args": dict(step.args),
-            }
-        )
-    return rows
+    return [
+        {
+            "id": step.id,
+            "label": _label(requirement, shown),
+            "description": _with_result(_sentence(requirement, shown), result),
+            "args": dict(step.args),
+        }
+        for step, requirement, result in _stepped(plan, shown)
+    ]
 
 
 def card_rows(plan: Plan) -> list[dict[str, object]]:
@@ -297,34 +286,48 @@ def card_rows(plan: Plan) -> list[dict[str, object]]:
     """
     assert plan.translation is not None, "card_rows needs a plan carrying a translation"
     assert plan.workflow is not None, "card_rows needs a plan carrying a workflow"
-    scopes = answer_scopes(plan)
     shapes = frame_shapes(plan)
     shown = shown_plan(plan)
-    assert shown.translation is not None
-    assert shown.workflow is not None
     concepts = _concepts(shown)
-    answer = answer_step(plan)
-    operations_by_id = {operation.id: operation for operation in shown.translation.operations}
+    answer = _answer_step(plan, shown)
     rows: list[dict[str, object]] = []
-    for step in shown.workflow.steps:
-        requirement = shown.requirement(operations_by_id[step.operation_id].requirement_id)
+    for step, requirement, result in _stepped(plan, shown):
         source = _selected_source(requirement.id, shown)
         if isinstance(requirement, DatasetRequirement) and source is not None:
             description = _full_stop(source.sentence)
         else:
             description = _sentence(requirement, shown)
-        if requirement.id in scopes:
-            description = f"{description} Result: {scopes[requirement.id]}."
         rows.append(
             {
                 "id": step.id,
                 "label": _card_label(requirement, shown, concepts=concepts, shapes=shapes),
-                "description": description,
+                "description": _with_result(description, result),
                 "args": dict(step.args),
                 "gives_answer": step.id == answer,
             }
         )
     return rows
+
+
+def _stepped(
+    plan: Plan, shown: Plan
+) -> Iterator[tuple[WorkflowStep, EvidenceRequirement, str | None]]:
+    """Each workflow step of `shown`, `plan` folded (`shown_plan`), in the order the
+    workflow runs them, with the requirement its operation carries out and the
+    scope its result gives where that result answers (`answer_scopes`), else `None`.
+    The row core `step_rows` and `card_rows` share; requires a compiled plan."""
+    assert shown.translation is not None
+    assert shown.workflow is not None
+    scopes = answer_scopes(plan)
+    operations_by_id = {operation.id: operation for operation in shown.translation.operations}
+    for step in shown.workflow.steps:
+        requirement = shown.requirement(operations_by_id[step.operation_id].requirement_id)
+        yield step, requirement, scopes.get(requirement.id)
+
+
+def _with_result(description: str, result: str | None) -> str:
+    """`description` ending with the scope `result` an answering step's result gives."""
+    return description if result is None else f"{description} Result: {result}."
 
 
 def plan_words(plan: Plan, *, names: Mapping[str, str] | None = None) -> PlanWords:
@@ -397,7 +400,12 @@ def answer_step(plan: Plan) -> str | None:
     the totals it divides). A plan answering no ask by name takes the last
     step whose result answers it (`planner.plan.answering_results`).
     """
-    requirement_id = _answer_requirement(plan)
+    return _answer_step(plan, shown_plan(plan))
+
+
+def _answer_step(plan: Plan, shown: Plan) -> str | None:
+    """`answer_step` of `plan`, folded as `shown` (`shown_plan`)."""
+    requirement_id = _answer_requirement(plan, shown)
     if requirement_id is None or plan.translation is None:
         return None
     return next(
@@ -406,12 +414,13 @@ def answer_step(plan: Plan) -> str | None:
     )
 
 
-def _answer_requirement(plan: Plan) -> str | None:
-    """The requirement `answer_step` carries out, in `_card_order`; `None` before compile."""
+def _answer_requirement(plan: Plan, shown: Plan) -> str | None:
+    """The requirement `answer_step` carries out, in `_card_order` of `shown`, `plan`
+    folded (`shown_plan`); `None` before compile."""
     if plan.translation is None or plan.workflow is None:
         return None
     answering = answering_results(plan)
-    order = [requirement.id for requirement in _card_order(shown_plan(plan))]
+    order = [requirement.id for requirement in _card_order(shown)]
     asked = [rid for rid in order if answering.get(rid) is not None]
     candidates = asked or [rid for rid in order if rid in answering]
     return candidates[-1] if candidates else None
@@ -421,7 +430,7 @@ def card_title(plan: Plan) -> str:
     """The plan card's title: the ask the answering step answers (`answer_step`), in the
     user's words with its first letter raised; the first ask when that step answers
     none by name; "Research plan" for a plan given no asks."""
-    requirement_id = _answer_requirement(plan)
+    requirement_id = _answer_requirement(plan, shown_plan(plan))
     number = answering_results(plan).get(requirement_id) if requirement_id else None
     if number is None and plan.asks:
         number = 0
@@ -436,17 +445,19 @@ def card_summary(plan: Plan) -> str | None:
 
     Read off the retrievals the answering requirement reads (`datasets_of`),
     each as `_Counted` states it. A share names its numerator's retrievals,
-    then "as a share of" its denominator's; a quotient "divided by". A fact
+    then "as a share of" its denominator's; a quotient "divided by". So does
+    a step reading one input over a share or quotient, such as a rank of
+    shares or a total of quotients (`_ratio_beneath`). A fact
     every retrieval shares, the basis, the years or the source, is stated
     once at the head; a retrieval then reads by its sector and its parties,
     or "the total" for its parties when it names no sector. `None` before
     compile.
     """
-    requirement_id = _answer_requirement(plan)
+    shown = shown_plan(plan)
+    requirement_id = _answer_requirement(plan, shown)
     if requirement_id is None:
         return None
-    shown = shown_plan(plan)
-    requirement = shown.requirement(requirement_id)
+    requirement = _ratio_beneath(shown.requirement(requirement_id), shown)
     if isinstance(requirement, ShareOfRequirement | QuotientRequirement):
         joiner = (
             ", as a share of " if isinstance(requirement, ShareOfRequirement) else ", divided by "
@@ -495,6 +506,18 @@ def card_summary(plan: Plan) -> str | None:
     )
     lead = ", ".join(filter(None, head))
     return _sentence_case(f"{lead}: {body}" if lead else body)
+
+
+def _ratio_beneath(requirement: EvidenceRequirement, plan: Plan) -> EvidenceRequirement:
+    """The share or quotient `requirement` reads through steps reading one input each
+    (an aggregate, growth, rank or filter), else `requirement` itself."""
+    current = requirement
+    while not isinstance(current, ShareOfRequirement | QuotientRequirement):
+        inputs = inputs_of(current)
+        if len(inputs) != 1:
+            return requirement
+        current = plan.requirement(inputs[0])
+    return current
 
 
 class _Counted(typing.NamedTuple):

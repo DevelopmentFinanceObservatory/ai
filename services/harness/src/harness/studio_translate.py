@@ -1113,15 +1113,19 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
 
 
 def held_labels(card: PlanProposed) -> dict[str, str]:
-    """The label of the option each scope choice of `card` holds, by choice id."""
+    """The label of the option each scope choice of `card` holds, by choice id; the
+    option's id where the choice lists no option by that id."""
     return {
         decision.choice_id: next(
-            option.label
-            for option in decision.options
-            if option.option_id == decision.active_option_id
+            (
+                option.label
+                for option in decision.options or ()
+                if option.option_id == decision.active_option_id
+            ),
+            decision.active_option_id or "",
         )
         for decision in card.decisions or ()
-        if decision.choice_id is not None and decision.options is not None
+        if decision.choice_id is not None
     }
 
 
@@ -1310,10 +1314,15 @@ class _Translator:
         conversation: ConversationState,
         recorder: _RecordingExecutor,
         surface_recorder: _RecordingSurface | None = None,
+        approving: PlanProposed | None = None,
     ) -> None:
         self._conversation = conversation
         self._recorder = recorder
         self._surface_recorder = surface_recorder
+        # The plan card the user approved on this segment's first answer to
+        # its interrupt; `plan.approved` states it once the `approve` node
+        # takes the approval, and only then.
+        self._approving = approving
         # The wire `step_id` each step (`_ExecutorRecord.step_id`) was given
         # at its first frame, so its later frames update the same line.
         self._wire_step_ids: dict[str, str] = {}
@@ -1395,6 +1404,15 @@ class _Translator:
         if output is None:
             return frames
         if node == "approve" and event.actions.route == "approved":
+            if self._approving is not None:
+                frames.append(
+                    plan_approved(
+                        self._approving,
+                        seq=self._conversation.next_seq(),
+                        baseline=self._conversation.turn_choice_baseline,
+                    )
+                )
+                self._approving = None
             frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
             frames.extend(self._open_status(_STARTING_PLAN))
         if node == "planner":

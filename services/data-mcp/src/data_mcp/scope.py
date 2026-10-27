@@ -41,7 +41,6 @@ ScopeReasonCode = Literal[
     "carried_choice_not_applied",
     "stated_choice_not_applied",
     "option_not_covered",
-    "counts_core_contributions",
     "contributions_counted",
 ]
 
@@ -103,10 +102,6 @@ REASON_COPY: dict[str, str] = {
     "carried_choice_not_applied": "an earlier choice did not apply here",
     "stated_choice_not_applied": "the option you asked for is not available here",
     "option_not_covered": "the data holds no series for this option",
-    "counts_core_contributions": (
-        "this total counts core contributions to multilaterals as the donor's aid, so it "
-        "cannot be limited to bilateral flows"
-    ),
     "contributions_counted": (
         "this total already counts core contributions to multilaterals as the donor's aid, "
         "in place of an imputed share of their spending"

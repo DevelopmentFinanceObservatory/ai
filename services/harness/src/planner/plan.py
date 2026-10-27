@@ -3966,9 +3966,12 @@ class Plan(StrictModel):
             "without the field."
         ),
     )
+    # Past `MAX_PLAN_DECISIONS`, a plan carries the decisions qualifying its answer
+    # (`Decision.caveat`), at most one per requirement the model writes
+    # (`_decisions_fit_the_cap`).
     decisions: tuple[Decision, ...] = Field(
         default=(),
-        max_length=MAX_PLAN_DECISIONS,
+        max_length=MAX_PLAN_DECISIONS + MAX_PLAN_REQUIREMENTS,
         description=(
             f"The methodological choices this plan makes, at most "
             f"{MAX_PLAN_DECISIONS}; a plan names its parts by `slot`, so no two decisions "
@@ -4067,6 +4070,19 @@ class Plan(StrictModel):
         return question
 
     @model_validator(mode="after")
+    def _decisions_fit_the_cap(self) -> Plan:
+        """Reject a plan stating more than `MAX_PLAN_DECISIONS` decisions that qualify
+        nothing. A decision qualifying the answer (`Decision.caveat`) is not counted:
+        `propose_plan` writes it for the plan whatever else it states."""
+        counted = sum(decision.caveat is None for decision in self.decisions)
+        if counted > MAX_PLAN_DECISIONS:
+            raise ValueError(
+                f"the plan states {counted} decisions, over the {MAX_PLAN_DECISIONS} a plan "
+                "may take"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _record_fits_the_size_limit(self) -> Plan:
         """Reject a plan whose model-authored part states more than `MAX_PLAN_REQUIREMENTS` requirements or serialises past `MAX_PLAN_RECORD_CHARS`.
 
@@ -4076,8 +4092,10 @@ class Plan(StrictModel):
         parts that take the most of it, so the model can shorten those. Both
         limits measure the plan the model wrote (`authored`), without the
         copies `whole_history_split` adds. The size leaves out the scope
-        decisions `propose_plan` writes (`is_scope_choice`): the model cannot
-        shorten them, and `MAX_PLAN_DECISIONS` bounds how many a plan holds.
+        decisions and the decisions qualifying the answer that `propose_plan`
+        writes (`is_scope_choice`, `Decision.caveat`): the model cannot shorten
+        them, and `MAX_PLAN_DECISIONS` and the requirements bound how many a
+        plan holds.
         """
         written = authored(self)
         if len(written.evidence_requirements) > MAX_PLAN_REQUIREMENTS:
@@ -4089,7 +4107,7 @@ class Plan(StrictModel):
         record["decisions"] = [
             dumped
             for dumped, decision in zip(record["decisions"], written.decisions, strict=True)
-            if not is_scope_choice(decision)
+            if not is_scope_choice(decision) and decision.caveat is None
         ]
         size = _serialised_chars(record)
         if size <= MAX_PLAN_RECORD_CHARS:

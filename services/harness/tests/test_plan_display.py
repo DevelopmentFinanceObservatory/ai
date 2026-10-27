@@ -3310,6 +3310,46 @@ def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_di
     assert words.inputs["both"] == ("left", "right")
 
 
+@pytest.mark.parametrize(
+    "over",
+    [
+        AggregateRequirement(
+            id="over_share", input_id="health_share", reduction=Reduction.MEAN, group_by=[]
+        ),
+        GrowthRequirement(
+            id="over_share", input_id="health_share", window_start=2016, window_end=2020
+        ),
+        RankRequirement(
+            id="over_share",
+            input_id="health_share",
+            direction=RankDirection.HIGHEST_FIRST,
+            among=RankAmong.POPULATION,
+            reduction=Reduction.MEAN,
+        ),
+        FilterRequirement(
+            id="over_share", input_id="health_share", predicates=(ValueThreshold(op="gt", value=0),)
+        ),
+    ],
+    ids=["aggregate", "growth", "rank", "filter"],
+)
+def test_a_step_over_a_share_keeps_the_shares_summary(over: EvidenceRequirement) -> None:
+    """The answer is a total, growth, rank or filter over the recorded share: the
+    summary still says what the share divides, "as a share of" its denominator and
+    from which source."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                *plan.evidence_requirements,
+                over.model_copy(update={"decision_ids": ("measure",)}),
+            ],
+            "answered": [plan.answered[0].model_copy(update={"outputs": ("over_share",)})],
+        }
+    )
+
+    assert card_summary(plan) == card_summary(_recorded_plan("long"))
+
+
 def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> None:
     """Both sides of the share total the same retrieval: the summary keeps
     each side, joined by "as a share of", and does not read as one figure."""

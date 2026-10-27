@@ -60,7 +60,7 @@ from harness.scope_choices import (
     EntitiesBinding,
     Option,
     PartScope,
-    ProviderBinding,
+    ProviderScope,
     ScopeChoice,
     ServedScope,
     ShapeBinding,
@@ -1478,13 +1478,15 @@ def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool
     An entities option holds when the residual buckets served on its role
     are the ones it adds, and cannot be told on a role the fetch narrowed;
     a measure option when the served measure and
-    netting are its own. A provider option binds whose spending is counted:
+    netting are its own. A provider option counts whose spending is counted,
+    by its scope binding or, binding a published total's slot, by its id
+    (`Option.provider_scope`):
     an inclusive one holds exactly when imputed multilateral aid is a served
     component, and a bilateral or a contributions one (a published total
     counting core contributions to multilaterals) only when it is not. The
     record does not tell those two apart, so with no imputed component
     either holds only when `choice` offers no option of the other. The
-    record holds no what/how slot, so a slot option cannot be told.
+    record holds no what/how slot, so any other slot option cannot be told.
     """
     binding = option.binding
     if isinstance(binding, EntitiesBinding):
@@ -1498,23 +1500,20 @@ def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool
             served.measured_property,
             served.netting_basis,
         )
-    if isinstance(binding, ProviderBinding):
-        return _serves_provider(binding, served, choice=choice)
+    if (scope := option.provider_scope) is not None:
+        return _serves_provider(scope, served, choice=choice)
     return None
 
 
 def _serves_provider(
-    binding: ProviderBinding, served: ServedScope, *, choice: ScopeChoice
+    scope: ProviderScope, served: ServedScope, *, choice: ScopeChoice
 ) -> bool | None:
-    """`_serves` for a provider option of `choice`."""
+    """`_serves` for a provider option of `choice` counting `scope`
+    (`Option.provider_scope`), whether it binds the scope or a slot."""
     imputed = any(component.role == "imputed" for component in served.components)
-    if binding.scope == "inclusive" or imputed:
-        return (binding.scope == "inclusive") == imputed
-    offered = {
-        option.binding.scope
-        for option in choice.options
-        if isinstance(option.binding, ProviderBinding)
-    }
+    if scope == "inclusive" or imputed:
+        return (scope == "inclusive") == imputed
+    offered = {option.provider_scope for option in choice.options}
     return None if {"bilateral", "contributions"} <= offered else True
 
 

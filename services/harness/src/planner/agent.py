@@ -1514,15 +1514,16 @@ async def compile_whole(
     its choice on that axis binds (`submission.service.axis_slot`) set
     unbound, under the spec_id that identity hashes to, the part's entity
     groups, and one explicit entry from each of its other choices holding
-    its active option, with the concept of the part's entry on that axis.
-    Search then keeps the part's measure basis, provider scope and region,
-    which an option the whole cannot serve would otherwise leave to
-    Search's default. No model call is made. The answer is shown to the
+    its active option, with the concept of the part's entry on that axis,
+    or the option of `realignment.option_ids` on that choice's axis, one
+    the user switched on the whole's own row. Search then keeps the part's
+    measure basis, provider scope and region, which an option the whole
+    cannot serve would otherwise leave to Search's default. No model call is made. The answer is shown to the
     planner as a source of its own, its block marking every posted axis as
     the planner's (`harness.scope_choices.mark_planner_axes`) so a later
     search carries none of them, and held as a
-    `submission.service.AlignedPin` from the part on that axis, which every
-    whole declaring the part and the axis pins.
+    `submission.service.AlignedPin` from the part on that axis and those
+    options, which every whole declaring the part and the axis on them pins.
 
     Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
     did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` when the part
@@ -1551,10 +1552,11 @@ async def compile_whole(
         if held.get("property") == slot:
             held["binding"] = {"state": "unbound"}
     concepts = {entry.axis: entry.concept for entry in scope.entries}
+    switched = {option_axis(option_id): option_id for option_id in realignment.option_ids}
     entries = [
         ScopeEntry(
             axis=choice.axis,
-            option_id=choice.active,
+            option_id=switched.get(choice.axis, choice.active),
             provenance="explicit",
             concept=concepts.get(choice.axis),
             origin=ChoiceOrigin(choice_id=choice.id),
@@ -1589,7 +1591,13 @@ async def compile_whole(
     save_pin_sources(state, {**sources, spec_id: whole_source})
     save_aligned_pin(
         state,
-        AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),
+        AlignedPin(
+            origin=part_pin,
+            option_ids=realignment.option_ids,
+            spec_id=spec_id,
+            digest=digest,
+            whole_axis=axis,
+        ),
     )
     return None
 

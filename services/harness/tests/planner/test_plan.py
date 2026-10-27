@@ -4982,6 +4982,25 @@ def test_a_plan_at_the_size_limit_validates_and_one_character_over_is_refused() 
     assert f"the plan is {MAX_PLAN_RECORD_CHARS + 1:,} characters" in str(refused.value)
 
 
+@pytest.mark.parametrize(("caveat", "valid"), [("providers_differ", True), (None, False)])
+def test_the_decision_cap_leaves_out_the_decisions_qualifying_the_answer(
+    caveat: str | None, valid: bool
+) -> None:
+    """A plan at `MAX_PLAN_DECISIONS` with one decision more, cited by a requirement:
+    one qualifying the answer (`Decision.caveat`) is carried past the cap, any other
+    is refused."""
+    record = plan_record()
+    extra = {**record["decisions"][0], "slot": "extra", "caveat": caveat}
+    record["decisions"].append(extra)
+    record["evidence_requirements"][0]["decision_ids"].append("extra")
+
+    if valid:
+        assert len(Plan.model_validate(record).decisions) == MAX_PLAN_DECISIONS + 1
+        return
+    with pytest.raises(ValidationError, match=f"over the {MAX_PLAN_DECISIONS} a plan may take"):
+        Plan.model_validate(record)
+
+
 def test_the_size_limit_leaves_out_the_scope_decisions_code_writes() -> None:
     """A plan at the size limit whose first decision becomes a scope
     decision serialises past the limit and is recorded; the same decision

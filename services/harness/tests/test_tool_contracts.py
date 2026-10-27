@@ -120,30 +120,54 @@ def test_a_field_search_adds_to_scope_choices_is_ignored_and_never_stored() -> N
         PartScope.model_validate(added)
 
 
+def _provider_choice(scope_id: str, *, active: str) -> dict[str, Any]:
+    """A provider choice holding a bilateral option and one of a provider scope this
+    release does not read, "pooled" (`provider:pooled`, bound either way a later
+    dfo-apis release could write it), `active` the one it holds."""
+    available = {"status": "available", "detail": {}}
+    return {
+        "id": f"{scope_id}:provider",
+        "axis": "provider",
+        "rule": "test_provider",
+        "provenance": "default",
+        "active": active,
+        "options": [
+            {
+                "option_id": "provider:bilateral",
+                "label": "bilateral flows only",
+                "binding": {"kind": "provider", "scope": "bilateral"},
+                "availability": available,
+            },
+            {
+                "option_id": "provider:pooled",
+                "label": "pooled funds",
+                "binding": {"kind": "provider", "scope": "pooled"},
+                "availability": available,
+            },
+            {
+                "option_id": "provider:pooled_total",
+                "label": "pooled funds total",
+                "binding": {
+                    "kind": "slot",
+                    "slot": "dac1AidType",
+                    "state": "value",
+                    "refs": ["DAC1AidType/9999"],
+                },
+                "availability": available,
+            },
+        ],
+    }
+
+
 def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it() -> None:
     """A later dfo-apis release adds an axis, a provider scope, a reason code, a
     component role and a dropped entry's code. The record stays readable: the choice
-    and entry on the unknown axis and the choice holding the unknown provider scope
-    are left out, the unknown reason code reads as none, the role is kept as written,
-    and the dropped entry's code follows its provenance."""
+    and entry on the unknown axis and the option of the unknown provider scope are
+    left out, the provider choice keeping its other options, the unknown reason code
+    reads as none, the role is kept as written, and the dropped entry's code follows
+    its provenance."""
     added = _scope_choices()
-    added["choices"].append(
-        {
-            "id": f"{added['id']}:provider",
-            "axis": "provider",
-            "rule": "test_provider",
-            "provenance": "default",
-            "active": "provider:pooled",
-            "options": [
-                {
-                    "option_id": "provider:pooled",
-                    "label": "pooled funds",
-                    "binding": {"kind": "provider", "scope": "pooled"},
-                    "availability": {"status": "available", "detail": {}},
-                }
-            ],
-        }
-    )
+    added["choices"].append(_provider_choice(added["id"], active="provider:bilateral"))
     unknown_option = {
         "option_id": "channel:ngo",
         "label": "through NGOs",
@@ -180,7 +204,13 @@ def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it()
 
     assert stored is not None
     scope = PartScope.model_validate(stored)
-    assert [choice.axis for choice in scope.choices] == ["sector", "region", "measure_basis"]
+    assert [choice.axis for choice in scope.choices] == [
+        "sector",
+        "region",
+        "measure_basis",
+        "provider",
+    ]
+    assert [option.option_id for option in scope.choices[3].options] == ["provider:bilateral"]
     assert [entry.axis for entry in scope.entries] == ["sector", "region"]
     assert scope.choices[2].options[1].availability.code is None
     assert [component.role for component in scope.compiled.components] == ["pooled"]
@@ -191,9 +221,12 @@ def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it()
 
 def test_a_dac1_total_reads_with_its_contributions_provider_scope() -> None:
     """The US DAC1 total with the provider choice dfo-apis gives a DAC1 total: the
-    contributions option is read as the one active, beside the basis choice, and the
-    bilateral and inclusive options are unavailable for the reason worded for them."""
-    scope = PartScope.from_search(dac1_with_contributions()["resolved"]["scope_choices"])
+    contributions option is read as the one active, beside the basis choice. Its
+    bilateral option binds DAC1 bilateral ODA's aid-type code in place of a provider
+    scope and still counts bilateral flows; the inclusive option is unavailable for
+    the reason worded for it. The stored reading keeps every option."""
+    raw = dac1_with_contributions()["resolved"]["scope_choices"]
+    scope = PartScope.from_search(raw)
 
     assert [(c.axis, c.active) for c in scope.choices] == [
         ("measure_basis", "measure_basis:gross"),
@@ -201,13 +234,40 @@ def test_a_dac1_total_reads_with_its_contributions_provider_scope() -> None:
     ]
     provider = scope.choices[1]
     assert [
-        (o.option_id, o.availability.status, o.availability.code) for o in provider.options
+        (
+            o.option_id,
+            o.binding.kind,
+            o.provider_scope,
+            o.availability.status,
+            o.availability.code,
+        )
+        for o in provider.options
     ] == [
-        ("provider:bilateral", "unavailable", "counts_core_contributions"),
-        ("provider:inclusive", "unavailable", "counts_core_contributions"),
-        ("provider:contributions", "available", None),
+        ("provider:bilateral", "slot", "bilateral", "available", None),
+        ("provider:inclusive", "provider", "inclusive", "unavailable", "contributions_counted"),
+        ("provider:contributions", "provider", "contributions", "available", None),
     ]
-    assert "counts_core_contributions" in REASON_COPY
+    assert "contributions_counted" in REASON_COPY
+    assert PartScope.model_validate(scope.model_dump(mode="json")) == scope
+
+
+@pytest.mark.parametrize("active", ["provider:pooled", "provider:pooled_total"])
+def test_a_provider_choice_holding_an_unknown_scope_is_refused_as_a_contract_error(
+    active: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A provider choice whose active option counts a provider scope this release
+    does not read: leaving the option out would leave the choice holding nothing, and
+    leaving the choice out would turn provider alignment off for the part. The record
+    is refused and the refusal logged."""
+    added = _scope_choices()
+    added["choices"].append(_provider_choice(added["id"], active=active))
+    part = _definite("spec_1")
+    part["spec"]["resolved"]["scope_choices"] = added
+
+    with pytest.raises(ValidationError, match=active):
+        PartScope.from_search(added)
+    assert reading_facts(part["spec"])["scope"] is None
+    assert any("spec_1" in record.getMessage() for record in caplog.records)
 
 
 def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(

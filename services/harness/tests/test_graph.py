@@ -118,6 +118,7 @@ from planner.plan import (
     PinSource,
     PlanStatus,
     ResolvedBy,
+    SessionState,
     WindowedPin,
     authored,
     open_window,
@@ -137,7 +138,12 @@ from planner.records import (
 )
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import ValidationError
-from submission.service import scope_choice_decisions
+from submission.service import (
+    AlignedPin,
+    aligned_pins,
+    save_aligned_pin,
+    scope_choice_decisions,
+)
 from translator.discovery import PartFault, PartNotResolvedError
 
 from .data_mcp_definitions import DataMcpDefinitions, SearchStub
@@ -3267,13 +3273,15 @@ async def _switch_runner(
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
+    whole_of: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`) beside its block naming `entity_groups` when given, then
-    answered with a switch to `option_id`, by default its sector to CRS 120
-    and 130, through `search`. Returns the runner, the seam, the plan, the
-    scope and the resumed turn's events."""
+    `aligned`) beside its block naming `entity_groups` when given, held as the
+    whole `whole_of` compiled from its part when given, then answered with a
+    switch to `option_id`, by default its sector to CRS 120 and 130, through
+    `search`. Returns the runner, the seam, the plan, the scope and the
+    resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _scoped_plan(pin, scope, schemas=real_schemas)
@@ -3298,6 +3306,10 @@ async def _switch_runner(
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    if whole_of is not None:
+        save_aligned_pin(
+            cast(SessionState, _session_state(runner)), whole_of.model_copy(update={"spec_id": pin})
+        )
     if entity_groups is not None:
         _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {
             pin: {
@@ -3386,6 +3398,45 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
             "to_label": "grant equivalents",
             "reason": "It conflicts with another choice.",
         }
+    ]
+
+
+async def test_a_switch_on_a_declared_wholes_row_holds_the_answer_as_its_whole(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The switched source is a whole compiled from its part with its region
+    left open and its measure basis switched before: Search's answer is held as
+    the whole compiled from that part on the earlier option and the switched
+    one, so the plan's next proposal keeps it as the whole."""
+    scope = _hashed_scope()
+    new_pin, envelope = _switched_answer(scope)
+    revised = _scoped_plan(
+        new_pin,
+        envelope["parts"][0]["spec"]["resolved"]["scope_choices"],
+        schemas=real_schemas,
+        version=2,
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
+    part = "spec_" + "4" * 32
+    whole = AlignedPin(
+        origin=part,
+        option_ids=("measure_basis:net",),
+        spec_id="",
+        digest={},
+        whole_axis="region",
+    )
+
+    runner, *_ = await _switch_runner(
+        real_schemas,
+        search,
+        {"plan": revised.model_dump(mode="json"), "summary": {}},
+        whole_of=whole,
+    )
+
+    held = aligned_pins(cast(SessionState, _session_state(runner)))
+    assert [(pin.key, pin.spec_id) for pin in held] == [
+        ((part, ("measure_basis:net",), "region"), scope["compiled"]["spec_id"]),
+        ((part, ("measure_basis:net", "sector:120+130"), "region"), new_pin),
     ]
 
 

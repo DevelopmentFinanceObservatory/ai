@@ -169,6 +169,7 @@ from submission import service as submission_service
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    AlignedPin,
     _choice_not_offered,
     _combination_unasked,
     _entity_dcid_unoffered,
@@ -176,8 +177,10 @@ from submission.service import (
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
+    aligned_pins,
     first_year_reads,
     identity_on_record,
+    save_aligned_pin,
     scope_choice_decisions,
     searched_pins,
 )
@@ -213,6 +216,7 @@ from ..basis_alignment import (
     basis_block,
     dac1_with_contributions,
     provider_block,
+    total_without_bilateral,
     us_2023_block,
 )
 from ..context_probe import plan_record
@@ -5030,8 +5034,11 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
 # --- a calculation's inputs on one provider scope ---
 
 
-def _sum_of_health(propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision) -> Any:
-    """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`."""
+def _sum_of_health(
+    propose: Callable[..., Any], ctx: _FakeToolContext, decision: Decision, *, accept: bool = False
+) -> Any:
+    """Propose US health aid plus the US total, pinning `HEALTH` and `TOTAL`; with
+    `accept`, the sum accepts a provider difference."""
 
     def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
         return DatasetRequirement(
@@ -5055,6 +5062,7 @@ def _sum_of_health(propose: Callable[..., Any], ctx: _FakeToolContext, decision:
                 decision_ids=["measure"],
                 left=RequirementSide(input_id="health"),
                 right=RequirementSide(input_id="total"),
+                accept_provider_difference=accept,
             ),
         ],
         tool_context=ctx,
@@ -5139,6 +5147,41 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
             "step_id": "sum",
         }
         assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("donors", "code"),
+    [
+        pytest.param(
+            (["country/USA"], ["country/USA"]),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="one-donor",
+        ),
+        pytest.param((["country/FRA"], ["country/DEU"]), Outcome.OK.value, id="disjoint-donors"),
+    ],
+)
+def test_a_sum_accepting_a_provider_difference_is_still_refused_where_it_counts_flows_twice(
+    decision: DecisionFactory, donors: tuple[list[str], list[str]], code: str
+) -> None:
+    """US bilateral health aid plus the US total with imputed multilateral flows, the
+    sum accepting a provider difference. The flag lets each input keep its own scope,
+    so the inputs are not realigned, and the sum still refuses where one donor's
+    bilateral flows would be counted twice. Over disjoint donors it is served."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        _from_donors(provider_block(HEALTH, narrow=True, active="provider:bilateral"), donors[0]),
+        _from_donors(provider_block(TOTAL, narrow=False, active="provider:inclusive"), donors[1]),
+    )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=True)
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == ProblemCode.OPERATION_UNSUPPORTED.value:
+        assert result["detail"]["basis"]["step_id"] == "sum"
+        assert load_plan(ctx.state) is None
+    else:
+        assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
 
 
 def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
@@ -5825,10 +5868,14 @@ _PART, _WHOLE, _SHARE, _COMPARE, _TOTAL, _SUM = (
 
 def _us_block(name: str) -> dict[str, Any]:
     """`US_2023`'s block `name`, or, as "dac1_contributions", the DAC1 total with the
-    provider choice dfo-apis gives it (`dac1_with_contributions`), or, as "malaria",
-    the health part narrowed to CRS 12262, malaria control (`_malaria_block`)."""
+    provider choice dfo-apis gives it (`dac1_with_contributions`), as
+    "no_bilateral", that total with no bilateral option served
+    (`total_without_bilateral`), or, as "malaria", the health part narrowed to CRS
+    12262, malaria control (`_malaria_block`)."""
     if name == "dac1_contributions":
         return dac1_with_contributions()
+    if name == "no_bilateral":
+        return total_without_bilateral()
     if name == "malaria":
         return _malaria_block()
     return us_2023_block(name)
@@ -5875,6 +5922,7 @@ def _us_2023(
     accept: bool = False,
     denominator: Decision | None = None,
     extra: Sequence[EvidenceRequirement] = (),
+    own: Sequence[Decision] = (),
 ) -> Any:
     """Propose the US 2023 part `part` as a share of `whole`, or compared with it,
     each pinned to its block (`_us_block`), the whole to none when `None`; with
@@ -5883,7 +5931,7 @@ def _us_2023(
     is divided by the whole as a `quotient_of`, as the planner wrote the share in a
     recorded Studio run; with `accept`, the share accepts a provider difference;
     with `denominator`, a decision of the planner's the whole alone cites; `extra`
-    is proposed after the rest."""
+    is proposed after the rest; `own` are further decisions the part cites."""
 
     def dataset(
         requirement_id: str,
@@ -5939,9 +5987,9 @@ def _us_2023(
     return propose(
         question="What share of US aid went to health in 2023?",
         answer_mode=AnswerMode.COMPUTED,
-        decisions=drafts([decision, *([denominator] if denominator else [])]),
+        decisions=drafts([decision, *([denominator] if denominator else []), *own]),
         evidence_requirements=[
-            dataset(_PART, "US aid to health", part),
+            dataset(_PART, "US aid to health", part, cited=tuple(d.slot for d in own)),
             dataset(
                 _WHOLE,
                 "US total ODA",
@@ -6042,6 +6090,76 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     whole_requirement = plan.requirement(_WHOLE)
     assert isinstance(whole_requirement, DatasetRequirement)
     assert stated.slot in whole_requirement.decision_ids
+
+
+async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid beside a declared whole, the part over every sector, which the
+    user then switched to bilateral plus imputed multilateral on the whole's own row:
+    the switch holds Search's answer as the whole compiled from the part with that
+    option, and the plan re-pinned to it keeps it with no compile. When the part
+    moves to malaria aid, the whole is compiled again from the new part, with the
+    whole's own option held."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), _malaria_block())
+    propose = _tools_reading(surface)["propose_plan"].func
+    first = await _us_2023(
+        propose, ctx, decision(), part="health", whole=None, declared=True, share=False
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    switched = us_2023_block("whole_inclusive")
+    save_pin_sources(
+        ctx.state,
+        {**pin_sources(ctx.state), switched["spec_id"]: PinSource(block=switched, settled=True)},
+    )
+    save_aligned_pin(
+        ctx.state,
+        AlignedPin(
+            origin=us_2023_block("health")["spec_id"],
+            option_ids=("provider:inclusive",),
+            spec_id=switched["spec_id"],
+            digest={},
+            whole_axis="sector",
+        ),
+    )
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    whole = plan.requirement(_WHOLE)
+
+    kept = await propose(
+        evidence_requirements=[whole.model_copy(update={"source_spec_id": switched["spec_id"]})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert kept["outcome"] == Outcome.OK.value, kept
+    assert len(surface.calls) == 1
+    assert _pins(ctx) == [
+        (_PART, us_2023_block("health")["spec_id"]),
+        (_WHOLE, switched["spec_id"]),
+    ]
+
+    part = load_plan(ctx.state).requirement(_PART)  # type: ignore[union-attr]
+    moved = await propose(
+        evidence_requirements=[
+            part.model_copy(update={"source_spec_id": _malaria_block()["spec_id"]})
+        ],
+        amends_version=kept["version"],
+        tool_context=ctx,
+    )
+
+    assert moved["outcome"] == Outcome.OK.value, moved
+    recompiled = surface.calls[-1]
+    assert [e["option_id"] for e in recompiled["scope_entries"] if e["axis"] == "provider"] == [
+        "provider:inclusive"
+    ]
+    assert aligned_pins(ctx.state)[-1].key == (
+        _malaria_block()["spec_id"],
+        ("provider:inclusive",),
+        "sector",
+    )
 
 
 async def test_a_quotient_over_a_declared_whole_divides_by_the_parts_own_total(
@@ -6234,8 +6352,9 @@ async def test_a_share_declaring_no_whole_is_never_rewritten(
 async def test_a_share_over_a_total_counting_other_providers_is_served_only_when_the_user_asks(
     decision: DecisionFactory, accept: bool, quotient: bool
 ) -> None:
-    """CRS bilateral health aid over the DAC1 total, which Search records as counting
-    core contributions to multilaterals too, with no whole declared. Undeclared, the
+    """CRS bilateral health aid over a published total Search records as counting core
+    contributions to multilaterals, serving no bilateral option, with no whole
+    declared. Undeclared, the
     share is refused for repair, naming the input and the bilateral scope it is not
     served on, and never rewritten. Where the user asked for that total ("use the
     DAC1 total") and the share accepts the provider difference, it divides by DAC1
@@ -6243,14 +6362,14 @@ async def test_a_share_over_a_total_counting_other_providers_is_served_only_when
     words what each side counts."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
-    _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
+    _show_blocks(ctx, us_2023_block("health"), total_without_bilateral())
 
     result = await _us_2023(
         _tools_reading(surface)["propose_plan"].func,
         ctx,
         decision(),
         part="health",
-        whole="dac1_contributions",
+        whole="no_bilateral",
         accept=accept,
         quotient=quotient,
     )
@@ -6279,6 +6398,106 @@ async def test_a_share_over_a_total_counting_other_providers_is_served_only_when
     assert "bilateral plus core contributions to multilaterals from OECD DAC1" in stated.rationale
     reader_text = " ".join((stated.rationale, *stated.options))
     assert not [rid for rid in (_PART, _WHOLE, _SHARE) if rid in reader_text]
+
+
+@pytest.mark.parametrize(
+    ("whole", "declared", "caveat"),
+    [
+        pytest.param("dac1_total_gross", True, "derived_whole", id="derived-whole"),
+        pytest.param("dac1_contributions", False, "providers_differ", id="providers-differ"),
+    ],
+)
+async def test_a_plan_at_the_decision_cap_still_carries_its_caveats(
+    decision: DecisionFactory, whole: str, declared: bool, caveat: str
+) -> None:
+    """A share whose plan already states `MAX_PLAN_DECISIONS` decisions of the
+    planner's: the decision saying the total is compiled from the part, or that the
+    inputs count different providers, qualifies the answer, so it is written and
+    cited past the cap."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
+    own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 1)]
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=whole,
+        declared=declared,
+        accept=not declared,
+        own=own,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (noted,) = [d for d in plan.decisions if d.caveat == caveat]
+    assert len([d for d in plan.decisions if d.caveat is None]) == MAX_PLAN_DECISIONS
+    assert any(noted.slot in r.decision_ids for r in plan.evidence_requirements)
+
+
+@pytest.mark.parametrize(
+    ("whole", "differ"),
+    [
+        pytest.param("whole", False, id="one-scope"),
+        pytest.param("dac1_total_gross", False, id="no-provider-record"),
+        pytest.param("dac1_contributions", True, id="contributions-total"),
+    ],
+)
+async def test_a_share_accepting_a_provider_difference_states_one_only_where_its_inputs_differ(
+    decision: DecisionFactory, whole: str, differ: bool
+) -> None:
+    """CRS bilateral health aid over a total the user asked for as it stands. The
+    share states a provider difference only when its inputs' scope records hold
+    different provider scopes: over the DAC1 total counting core contributions, and
+    not over the CRS bilateral total, or a DAC1 total Search states no provider scope
+    for. The stated difference names what each input counts."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
+
+    result = await _us_2023(
+        _tools_reading(WholeCompiles())["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=whole,
+        accept=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    stated = [d for d in plan.decisions if d.caveat == "providers_differ"]
+    assert len(stated) == differ
+    for noted in stated:
+        assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in (noted.rationale)
+        assert "bilateral plus core contributions to multilaterals from OECD DAC1" in (
+            noted.rationale
+        )
+
+
+def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: DecisionFactory) -> None:
+    """CRS bilateral health aid over the DAC1 total, which counts core contributions to
+    multilaterals and offers bilateral flows as DAC1 bilateral ODA, an option binding
+    its aid-type slot in place of a provider scope. That option counts bilateral
+    flows, so the share puts the total on it: the total is named for compiling on
+    `provider:bilateral`."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
+
+    refused = _us_2023(
+        _tools_by_name()["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_contributions",
+    )
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert [
+        (r["spec_id"], r["option_ids"], r["requirement_id"]) for r in refused["detail"]["realign"]
+    ] == [(us_2023_block("dac1_total_gross")["spec_id"], ["provider:bilateral"], _WHOLE)]
 
 
 @pytest.mark.parametrize("whole", ["dac1_total_gross", "whole_inclusive"])
@@ -6315,11 +6534,12 @@ async def test_a_comparison_keeps_each_sides_own_dataset_and_provider_scope(
 async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_calculation_aligned(
     decision: DecisionFactory, flagged_share: bool
 ) -> None:
-    """CRS bilateral health aid plus the DAC1 total in a sum mixes providers, so the
-    sum is refused, whether or not a share reading the same DAC1 total accepts the
+    """CRS bilateral health aid plus a total counting core contributions to
+    multilaterals, serving no bilateral option, in a sum mixes providers, so the sum
+    is refused, whether or not a share reading the same total accepts the
     provider difference: the user's request exempts that one share."""
     ctx = _FakeToolContext()
-    _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
+    _show_blocks(ctx, us_2023_block("health"), total_without_bilateral())
     summed = SumOfRequirement(
         id=_SUM,
         decision_ids=["measure"],
@@ -6332,7 +6552,7 @@ async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_ca
         ctx,
         decision(),
         part="health",
-        whole="dac1_contributions",
+        whole="no_bilateral",
         share=flagged_share,
         accept=flagged_share,
         extra=[summed],

@@ -15,6 +15,10 @@ and the plan compiles again. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
 with what else moved (`harness.scope_choices.moved_choices`).
 
+A switch of a declared whole's own row holds Search's answer as the whole
+compiled from its part on the switched option (`_hold_switched_wholes`), so
+the revision keeps it (`submission.service._declared_wholes`).
+
 Each requirement the switch re-pins drops the source it stated
 (`source`, `source_ref`, `source_exclude`, and `source_code` unless the new
 dataset is exactly that series): the user chose the dataset, so its pin is
@@ -74,6 +78,7 @@ from planner.plan import (
 from planner.plan import Plan as PlannerPlan
 from planner.tool_results import ProblemCode
 from pydantic import ValidationError
+from submission.service import AlignedPin, aligned_pins, save_aligned_pin
 from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
 from harness.graph.seams import PlannerModel
@@ -91,6 +96,7 @@ from harness.scope_choices import (
     ScopeChoice,
     mark_planner_axes,
     moved_choices,
+    option_axis,
     switch_entries,
 )
 from harness.sentences import SeamCode
@@ -189,6 +195,9 @@ def switch_node(
         plan = readable_plan(ctx, ctx.state.get("plan"))
         assert plan is not None, "approve routes a switch only for a plan it read"
         choice_id, option_id = str(pick.get("choice_id")), str(pick.get("option_id"))
+        # The drafting state as it stood, which a switch that fails or is
+        # stopped leaves as it found.
+        drafting = _drafting_state(ctx)
         try:
             output = await _unless_stopped(
                 ctx,
@@ -204,6 +213,7 @@ def switch_node(
                 option_id=option_id,
             )
         except SwitchFailedError as exc:
+            _restore(ctx, drafting)
             logger.info(
                 "plan switch not applied: choice_id=%s option_id=%s code=%s",
                 choice_id,
@@ -232,15 +242,14 @@ async def _unless_stopped(
 ) -> dict[str, Any]:
     """`revision`'s payload, unless the user stops the switch first (`SWITCH_STOP`).
 
-    A stopped revision is cancelled and the planner's drafting state put
-    back as it was before it ran, so the plan stands unchanged.
+    A stopped revision is cancelled; the `switch` node puts the drafting
+    state back, so the plan stands unchanged.
 
     Raises:
         SwitchFailedError: Under `SWITCH_CANCELLED` when the user stopped
             the switch, else as `revision` raises it.
     """
     stop = SWITCH_STOP.get()
-    drafting = _drafting_state(ctx)
     running = asyncio.ensure_future(revision)
     stopped = asyncio.ensure_future(stop.wait()) if stop is not None else None
     try:
@@ -256,7 +265,6 @@ async def _unless_stopped(
                     await waiting
     if not running.cancelled():
         return running.result()
-    _restore(ctx, drafting)
     logger.info("plan switch stopped: choice_id=%s option_id=%s", choice_id, option_id)
     raise SwitchFailedError(
         "You stopped this change, so the plan is as it was.",
@@ -330,9 +338,9 @@ async def _switched_plan(
             for pin, reading, scope, choice in targets
         )
     )
-    drafting = _drafting_state(ctx)
     moved_to = {item.pin: item.spec_id for item in switched}
     digests = [_reading_digest(item, axis=axis) for item in switched]
+    _hold_switched_wholes(state, switched, digests, option_id=option_id)
     save_pin_sources(
         state,
         {
@@ -360,7 +368,6 @@ async def _switched_plan(
         inherits={new: old for old, new in moved_to.items()},
     )
     if "plan" not in revised:
-        _restore(ctx, drafting)
         refused = revised.get("refused") or {}
         logger.warning("plan switch not revised: %s", refused)
         code = str(refused.get("code") or SCOPE_CHOICE_NOT_APPLIED)
@@ -398,6 +405,37 @@ async def _switched_plan(
         "revision": plan_revision(revised_plan),
         "moved": list(moved.values()),
     }
+
+
+def _hold_switched_wholes(
+    state: SessionState,
+    switched: Sequence[_Switched],
+    digests: Sequence[dict[str, Any]],
+    *,
+    option_id: str,
+) -> None:
+    """Hold each switched pin that is a declared whole compiled from its part
+    (`submission.service.AlignedPin.whole_axis`) as the whole compiled on its
+    options with `option_id` in place of its option on that axis, so
+    `submission.service._declared_wholes` keeps the answer and compiles a
+    whole of a later part on the same options."""
+    wholes = {pin.spec_id: pin for pin in aligned_pins(state) if pin.whole_axis is not None}
+    axis = option_axis(option_id)
+    for item, digest in zip(switched, digests, strict=True):
+        whole = wholes.get(item.pin)
+        if whole is None:
+            continue
+        options = {option_axis(held): held for held in whole.option_ids} | {axis: option_id}
+        save_aligned_pin(
+            state,
+            AlignedPin(
+                origin=whole.origin,
+                option_ids=tuple(sorted(options.values())),
+                spec_id=item.spec_id,
+                digest=digest,
+                whole_axis=whole.whole_axis,
+            ),
+        )
 
 
 def _moved_row(plan: PlannerPlan, item: _Switched, moved: str) -> str:
