@@ -38,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple, cast
 
+from common.composite import ManifestComponent, manifest_components, year_spans, years_of
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import WHOLE_SIDE_POPULATIONS
@@ -49,11 +50,9 @@ from data_mcp.manifest import (
     CoverageModel,
     DefinitionModel,
     Manifest,
-    ManifestComponent,
     PartyTotalsLeftOut,
     SeriesStatisticsModel,
     WarningModel,
-    manifest_components,
     party_totals_left_out,
 )
 from data_mcp.series_statistics import continued_series, continuing_method
@@ -556,7 +555,7 @@ def _components_lines(components: Sequence[ManifestComponent]) -> list[str]:
         (component for component in components if component.periods),
         key=lambda component: component.periods[0][0],
     )
-    years = [_years_of(component.periods) for component in served]
+    years = [years_of(component.periods) for component in served]
     spliced = len(served) > 1 and sum(len(held) for held in years) == len(set().union(*years))
     if spliced:
         breaks = [
@@ -585,7 +584,7 @@ def _component_piece(component: ManifestComponent) -> str:
         dropped = sorted(set(component.dropped_years))
         year_word = "year" if len(dropped) == 1 else "years"
         piece += (
-            f", {len(dropped)} {year_word} left out ({_spans_text(_spans(dropped))}) as "
+            f", {len(dropped)} {year_word} left out ({_spans_text(year_spans(dropped))}) as "
             "outside the years every component covers"
         )
     return piece
@@ -593,21 +592,6 @@ def _component_piece(component: ManifestComponent) -> str:
 
 def _component_noun(component: ManifestComponent) -> str:
     return _COMPONENT_NOUNS.get(component.role, component.role)
-
-
-def _years_of(periods: Sequence[tuple[int, int]]) -> set[int]:
-    return {year for first, last in periods for year in range(first, last + 1)}
-
-
-def _spans(years: Sequence[int]) -> list[tuple[int, int]]:
-    """Sorted, distinct `years` as closed runs of consecutive years."""
-    spans: list[tuple[int, int]] = []
-    for year in years:
-        if spans and year == spans[-1][1] + 1:
-            spans[-1] = (spans[-1][0], year)
-        else:
-            spans.append((year, year))
-    return spans
 
 
 def _spans_text(spans: Sequence[tuple[int, int]]) -> str:

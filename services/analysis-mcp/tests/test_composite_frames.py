@@ -42,11 +42,15 @@ async def store():
     set_store(None)
 
 
-async def _held(store: InMemoryMaterialisationStore, *, composite: bool) -> dict[str, str]:
-    """The fixture's frame, held with its components on its trace or with none."""
-    frame = Frame.build(
-        role_keys=["financingProvider", "financingRecipient"], rows=_FIXTURE["rows"]
-    )
+async def _held(
+    store: InMemoryMaterialisationStore, *, composite: bool, renamed: bool = False
+) -> dict[str, str]:
+    """The fixture's frame, held with its components on its trace or with none, its
+    StatVars each renamed to one no component lists when `renamed`."""
+    rows = _FIXTURE["rows"]
+    if renamed:
+        rows = [{**row, "stat_var": f"{row['stat_var']}_Plain"} for row in rows]
+    frame = Frame.build(role_keys=["financingProvider", "financingRecipient"], rows=rows)
     digest = secrets.token_hex(16)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     trace = MaterialisationTrace(
@@ -91,3 +95,26 @@ async def test_a_verb_refusing_a_composite_s_statvars_says_to_read_its_component
     assert refused["fix"]["get_data"] == {"stat_vars": "sum"}
     assert (plain.structured_content or {})["code"] == "stat_var_unresolved"
     assert "components" not in (plain.structured_content or {})["fix"]
+
+
+async def test_a_refusal_of_the_plain_side_beside_a_composite_names_no_components(
+    store: InMemoryMaterialisationStore,
+) -> None:
+    """A quotient of a plain family over a composite frame refuses the plain side's
+    StatVars, which no component of the composite holds, so the refusal is the plain
+    one."""
+    plain = await _held(store, composite=False, renamed=True)
+    composite = await _held(store, composite=True)
+
+    refused = (
+        await quotient_of(
+            frame_ref=plain,
+            denominator_frame_ref=composite,
+            numerator_entity=_RECIPIENT,
+            denominator_entity=_RECIPIENT,
+        )
+    ).structured_content or {}
+
+    assert refused["code"] == "stat_var_unresolved"
+    assert all(sv.endswith("_Plain") for sv in refused["fix"]["distinct_stat_vars"]), refused
+    assert "components" not in refused["fix"]

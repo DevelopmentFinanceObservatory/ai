@@ -73,7 +73,7 @@ from harness.scope_choices import (
     switch_entries,
 )
 from harness.tool_contracts import resolver_digest
-from harness.turn_records import SearchReading, stored_choice
+from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +325,10 @@ async def _resubmit(
     The same resubmit a compile on another basis posts
     (`planner.agent.compile_on_basis`), through
     `translator.discovery.resolve_definition`: the part's entity groups
-    beside it, when its block holds any, as every resubmit posts them
-    (`compiler.sources.wire_groups`), so Search names them again.
+    beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
+    so Search names them again. They are the groups `reading` was resolved
+    with (`SearchReading.entity_groups`), or `block`'s for a reading stored
+    without them.
 
     Raises:
         SwitchFailedError: If the call does not complete, Search refuses it,
@@ -337,7 +339,7 @@ async def _resubmit(
             surface,
             spec_id=scope.base.spec_id,
             identity=scope.base.identity,
-            groups=block_groups(block) if block is not None else (),
+            groups=reading.entity_groups or (block_groups(block) if block is not None else ()),
             scope_entries=entries,
         )
     except DefinitionNotResolvedError as exc:
@@ -427,13 +429,15 @@ async def apply_stored_choice(
     *,
     choice_id: str,
     option_id: str,
+    spec_id: str,
     surface: ToolSurface,
     fetch: Callable[..., Awaitable[dict[str, Any]]],
     record_step: Callable[..., None] | None,
 ) -> dict[str, str]:
     """Apply a chip: move choice `choice_id` of the conversation's newest
-    reading holding it to `option_id`, fetch what Search compiles, and return
-    the hand-back the agent answers from.
+    reading holding it, the reading `spec_id` the chip was offered on, to
+    `option_id`, fetch what Search compiles, and return the hand-back the
+    agent answers from.
 
     The reading's base identity is posted with its entries and the switch
     (`switch_entries`) through `surface` (`_resubmit`), the reading Search
@@ -446,9 +450,10 @@ async def apply_stored_choice(
     recorded under `ORCHESTRATOR_APPLIED_KEY`, with the option it moved from
     and the spec_id Search compiled.
 
-    A chip that cannot be applied, because no reading holds the choice, the
-    option is not one Search can serve, or Search refuses or fails the
-    resubmit, fetches nothing: the hand-back carries the note a plan-card
+    A chip that cannot be applied, because no reading holds the choice or
+    the newest one is not `spec_id` (`CHIP_STALE_NOTE`, as the studio refuses
+    it), the option is not one Search can serve, or Search refuses or fails
+    the resubmit, fetches nothing: the hand-back carries the note a plan-card
     switch shows, and the `APPLY_CHOICE_STEP_TOOL` step fails with it under
     `SCOPE_CHOICE_NOT_APPLIED`.
 
@@ -462,6 +467,8 @@ async def apply_stored_choice(
     try:
         if reading is None or choice is None:
             raise SwitchFailedError("That choice is no longer on this answer, so nothing changed.")
+        if reading.spec_id != spec_id:
+            raise SwitchFailedError(CHIP_STALE_NOTE)
         if (
             option is None
             or option_id == choice.active

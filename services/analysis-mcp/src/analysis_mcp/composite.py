@@ -13,50 +13,40 @@ where dfo-apis adds every member of every component into one series per party an
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
+
+from common.composite import manifest_components
 
 from analysis_mcp.tool_errors import ToolErrorCode, ToolRefusal
 
 if TYPE_CHECKING:
     from common.materialisation import StoredFrameTrace
 
-# The upstream trace member dfo-apis lists a composite frame's components under.
-_COMPONENTS_KEY = "components"
-
-
-def frame_components(trace: StoredFrameTrace) -> list[dict[str, object]]:
-    """The components `trace`'s frame was composed from, each as its role and how many
-    member StatVars it holds, in dfo-apis' order, and empty for a frame of one table."""
-    listed = trace.upstream_trace.get(_COMPONENTS_KEY)
-    if not isinstance(listed, Sequence):
-        return []
-    components: list[dict[str, object]] = []
-    for component in listed:
-        if not isinstance(component, Mapping):
-            continue
-        stat_vars = component.get("stat_vars")
-        components.append(
-            {
-                "role": component.get("role"),
-                "stat_vars": len(stat_vars) if isinstance(stat_vars, Sequence) else 0,
-            }
-        )
-    return components
-
 
 def composite_refusal(refusal: ToolRefusal, traces: Iterable[StoredFrameTrace]) -> ToolRefusal:
-    """`refusal`, or, when it refuses an input frame's several StatVars and one of
-    `traces` is a composite frame's, the refusal naming that frame's components and the
-    `get_data` read that sums them."""
+    """`refusal`, or, when it refuses an input frame's several StatVars and those are
+    members of one of `traces`' composite components, the refusal naming that frame's
+    components and the `get_data` read that sums them.
+
+    A verb reading two frames refuses one side's StatVars, so the composite whose
+    components hold them is the side refused; a refusal of a plain frame beside a
+    composite stays the plain one.
+    """
     if refusal.code is not ToolErrorCode.STAT_VAR_UNRESOLVED:
         return refusal
     distinct = refusal.fix.get("distinct_stat_vars") or []
     if len(distinct) < 2:
         return refusal
     for trace in traces:
-        if components := frame_components(trace):
+        components = manifest_components(trace.upstream_trace)
+        members = {stat_var for component in components for stat_var in component.stat_vars}
+        if members.intersection(distinct):
             return ToolRefusal.composite_stat_vars_unsummed(
-                distinct_stat_vars=list(distinct), components=components
+                distinct_stat_vars=list(distinct),
+                components=[
+                    {"role": component.role, "stat_vars": len(component.stat_vars)}
+                    for component in components
+                ],
             )
     return refusal

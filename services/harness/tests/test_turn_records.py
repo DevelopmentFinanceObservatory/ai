@@ -966,9 +966,20 @@ def test_a_fetch_that_named_its_places_offers_no_region_chip(
     assert "sector:120+130" in options
 
 
+def _education_part() -> dict[str, Any]:
+    """`_scoped_part` asked for as education aid, under its own spec_id and base, so its
+    choices are its own."""
+    part = {**_scoped_part(), "variable": "education aid", "spec_id": "spec_edu"}
+    scope = part["scope"]
+    scope["id"] = scope["base"]["spec_id"] = "spec_edu_base"
+    for choice in scope["choices"]:
+        choice["id"] = f"spec_edu_base:{choice['axis']}"
+    return part
+
+
 def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_four() -> None:
     health = _fetched(_scoped_part())
-    education = _fetched({**_scoped_part(), "variable": "education aid", "spec_id": "spec_edu"})
+    education = _fetched(_education_part())
 
     chips = scope_chips([health, education], specs={})
 
@@ -978,6 +989,36 @@ def test_chips_run_by_axis_name_their_part_when_several_offer_them_and_stop_at_f
         ('"health aid"', "region:members_and_residuals", health["spec_id"]),
         ('"education aid"', "region:members_and_residuals", "spec_edu"),
     ]
+
+
+def test_a_choice_offers_chips_only_on_its_newest_reading() -> None:
+    """A switch compiled a newer reading of the same choices, and both were
+    fetched. A chip on the older reading would be refused as stale
+    (`stored_choice`), so only the newer reading offers chips, each named as
+    the only part offering them."""
+    older = _fetched(_scoped_part())
+    newer = _fetched({**_scoped_part(), "spec_id": "spec_switched"})
+
+    assert scope_chips([older, newer], specs={}) == scope_chips([newer], specs={})
+
+
+def test_chips_name_their_part_only_when_the_chips_offered_span_several_parts() -> None:
+    """Health offers four chips before education's measure-basis chip, which
+    the cut to four leaves out, so the chips offered name no part."""
+    health = _scoped_part()
+    sector = next(c for c in health["scope"]["choices"] if c["axis"] == "sector")
+    sector["options"].append(
+        {**sector["options"][0], "option_id": "sector:121", "label": "CRS 121"}
+    )
+    education = _education_part()
+    education["scope"]["choices"] = [
+        c for c in education["scope"]["choices"] if c["axis"] == "measure_basis"
+    ]
+
+    chips = scope_chips([_fetched(health), _fetched(education)], specs={})
+
+    assert {chip.spec_id for chip in chips} == {health["spec_id"]}
+    assert [chip.label for chip in chips][1] == "CRS 121"
 
 
 @pytest.mark.parametrize(
@@ -1130,6 +1171,14 @@ _INCLUSIVE = {
             "Counted as: health (CRS 120) and population and reproductive health (CRS 130) · "
             "Africa incl. regional buckets · net to 2017, grant equivalents from 2018.",
             id="headline",
+        ),
+        pytest.param(
+            [],
+            _composite_manifest(
+                _served_identity(), bilateral=[[2011, 2024]], regional_share=[[2011, 2024]]
+            ),
+            _EXAMPLE_LINE,
+            id="a-role-this-release-does-not-read",
         ),
     ],
 )

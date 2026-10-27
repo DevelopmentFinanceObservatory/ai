@@ -33,6 +33,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping
 from typing import Annotated, Any, Literal, get_args
 
+from common.composite import manifest_components, year_spans, years_of
 from data_mcp.scope import (
     REASON_COPY,
     ChoiceOrigin,
@@ -473,12 +474,7 @@ class ServedScope(StrictModel):
         "net to 2017, grant equivalents from 2018", by the last year served net and the
         first served in grant equivalents, on the measure-basis axis.
         """
-        years = {
-            served.role: {
-                year for first, last in served.periods or () for year in range(first, last + 1)
-            }
-            for served in self.components
-        }
+        years = {served.role: years_of(served.periods or ()) for served in self.components}
         if years.keys() == {"bilateral", "imputed"}:
             held = sorted(years["bilateral"] | years["imputed"])
             served_years = f", {_years_text(held)}" if held else ""
@@ -505,13 +501,9 @@ class ServedScope(StrictModel):
 
 def _years_text(years: list[int]) -> str:
     """Sorted, distinct `years` as runs: "2011 to 2024", or "2005, 2011 to 2024"."""
-    runs: list[list[int]] = []
-    for year in years:
-        if runs and year == runs[-1][1] + 1:
-            runs[-1][1] = year
-        else:
-            runs.append([year, year])
-    return ", ".join(str(first) if first == last else f"{first} to {last}" for first, last in runs)
+    return ", ".join(
+        str(first) if first == last else f"{first} to {last}" for first, last in year_spans(years)
+    )
 
 
 _NETTING_SLOT = "nettingBasis"
@@ -523,11 +515,10 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
     Read from the minted definition's identity (`definition.identity`): the
     refs bound on each entity role, the shape's measured property and the
     `nettingBasis` slot's bound value. A composite frame's components are its
-    trace's (`trace.components`), each role with the years it serves; any other
-    frame is one `whole` component over the manifest's covered window
-    (`coverage.window`). JSON only, so a
-    `get_data` result can carry it. `None` for a manifest naming no
-    definition.
+    trace's (`common.composite.manifest_components`), each role with the
+    years it serves; any other frame is one `whole` component over the
+    manifest's covered window (`coverage.window`). JSON only, so a `get_data`
+    result can carry it. `None` for a manifest naming no definition.
     """
     definition = manifest.get("definition") or {}
     spec_id = definition.get("spec_id")
@@ -548,13 +539,13 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
     start, end = window.get("start_year"), window.get("end_year")
     periods = [[start, end]] if isinstance(start, int) and isinstance(end, int) else None
     measured = shape.get("measured_property")
-    listed = (manifest.get("trace") or {}).get("components")
+    listed = manifest_components(manifest.get("trace") or {})
     components = (
         [
-            {"role": component.get("role"), "periods": component.get("periods") or None}
+            {"role": component.role, "periods": [list(span) for span in component.periods] or None}
             for component in listed
         ]
-        if isinstance(listed, list) and listed
+        if listed
         else [{"role": "whole", "periods": periods}]
     )
     return {

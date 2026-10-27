@@ -99,7 +99,7 @@ from harness.studio_translate import (
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
-from harness.turn_records import stored_choice
+from harness.turn_records import CHIP_STALE_NOTE, stored_choice
 from harness.wire import (
     MAX_TURN_REQUEST_BYTES,
     ActivityStep,
@@ -321,10 +321,7 @@ def _chip_label(conversation: ConversationState, pick: ApplyChoice) -> str | JSO
         or reading.spec_id != pick.spec_id
         or (option is not None and pick.option_id == choice.active)
     ):
-        constraint, detail = (
-            "scope_choice_stale",
-            "This answer has changed since that suggestion was offered, so nothing changed.",
-        )
+        constraint, detail = "scope_choice_stale", CHIP_STALE_NOTE
     elif option is None:
         constraint, detail = "switch_option_unavailable", "That option is not offered here."
     elif option.availability.status == "unavailable":
@@ -1185,7 +1182,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 chip_label = label
             conversation.begin_turn()
             conversation.auto_add = body.auto_add
-            if pick is None or chip_label is None:
+            if pick is None:
                 conversation.turn_user_message = body.message
                 conversation.turn_user_words = body.message
             else:

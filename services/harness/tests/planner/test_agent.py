@@ -5116,6 +5116,71 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
         assert load_plan(ctx.state) is None
 
 
+def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
+    """`block` with its part's base identity bound to `donors` as its origin, all
+    providers when empty."""
+    identity = block["resolved"]["scope_choices"]["base"]["identity"]
+    identity["entities"] = {"origin": donors} if donors else {}
+    return block
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "code"),
+    [
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/DEU"], "explicit"),
+            Outcome.OK.value,
+            id="disjoint-donors",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/DEU"], "carried"),
+            Outcome.OK.value,
+            id="disjoint-donors-one-carried",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            (["country/FRA", "country/DEU"], "explicit"),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="a-shared-donor",
+        ),
+        pytest.param(
+            (["country/FRA"], "explicit"),
+            ([], "carried"),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="all-providers-carried",
+        ),
+    ],
+)
+def test_a_sum_over_different_stated_provider_scopes_is_refused_only_where_donors_overlap(
+    decision: DecisionFactory,
+    left: tuple[list[str], str],
+    right: tuple[list[str], str],
+    code: str,
+) -> None:
+    """France's bilateral aid plus Germany's with imputed multilateral flows counts no
+    flow twice, so the sum is served on the scopes as stated. A donor in both, or an
+    all-providers total beside a named donor, would count the bilateral flows twice. A
+    scope the user chose in an earlier turn counts as stated."""
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        _from_donors(
+            provider_block(HEALTH, narrow=False, active="provider:bilateral", provenance=left[1]),
+            left[0],
+        ),
+        _from_donors(
+            provider_block(TOTAL, narrow=False, active="provider:inclusive", provenance=right[1]),
+            right[0],
+        ),
+    )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+
+
 async def test_an_input_moving_on_basis_and_provider_scope_is_compiled_once_on_both(
     decision: DecisionFactory,
 ) -> None:

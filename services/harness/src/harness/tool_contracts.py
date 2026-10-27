@@ -551,7 +551,10 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     (`range`, `all`, `latest`); `entity_roles` and `open_entity_axes` as
     `_wide_facts` reads them; `scope` is `resolved.scope_choices` as
     `_scope` reads it, and `planner_axes` the axes the planner's own words
-    settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). These are keys
+    settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
+    are the named sets the part's places were asked for as
+    (`compiler.sources.block_groups`), which a later resubmit of the reading,
+    such as a chip's, posts again. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
     per-year counts (`resolved.headline.recent_years`) are left out, since a
@@ -569,6 +572,7 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
         "planner_axes": sorted(planner_axes(spec)),
+        "entity_groups": [group.model_dump(mode="json") for group in block_groups(spec)],
     }
 
 

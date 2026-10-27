@@ -678,8 +678,11 @@ class SearchReading(StrictModel):
     their options and the entries that settled them; `None` when the part's
     block carries none. `planner_axes` are the scope axes the planner's own
     words settled on the part (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`,
-    copied from its block): their entries are the planner's. `observed_at`
-    is stored and not rendered.
+    copied from its block): their entries are the planner's.
+    `entity_groups` are the named sets the part's places were asked for as
+    (`resolved.entity_groups`), which a resubmit of the reading posts again
+    (`harness.graph.switch`); stored and not rendered. `observed_at` is
+    stored and not rendered.
     """
 
     text: str | None
@@ -721,6 +724,9 @@ class SearchReading(StrictModel):
     sibling_of: SiblingReading | None = Field(default=None, exclude_if=lambda link: link is None)
     scope: PartScope | None = Field(default=None, exclude_if=lambda scope: scope is None)
     planner_axes: tuple[ScopeAxis, ...] = Field(default=(), exclude_if=lambda axes: not axes)
+    entity_groups: tuple[ResolvedGroup, ...] = Field(
+        default=(), exclude_if=lambda groups: not groups
+    )
     origin: Origin = "search"
     observed_at: datetime | None = None
 
@@ -761,7 +767,7 @@ class SearchReading(StrictModel):
         Besides the keys `_part_summary` writes, reads the keys
         `harness.tool_contracts.reading_facts` writes and `asked_roles` and
         `open_roles` (`harness.orchestrator_tools`) when present, `scope`
-        among them, `planner_axes` too. A `no_data` part's `reason` is the
+        among them, `planner_axes` and `entity_groups` too. A `no_data` part's `reason` is the
         reading's `refusal_code`, and `counted_as`, `alternatives` and
         `other_prices` are `harness.tool_contracts.measure_choice`'s.
         """
@@ -828,6 +834,7 @@ class SearchReading(StrictModel):
             other_prices=_offers(part.get("other_prices")),
             scope=part.get("scope"),
             planner_axes=tuple(part.get("planner_axes") or ()),
+            entity_groups=tuple(part.get("entity_groups") or ()),
             origin=origin,
             observed_at=observed_at,
         )
@@ -1210,10 +1217,12 @@ def scope_chips(
 
     A part is used when a `fetch` of its spec_id returned data; its newest
     reading speaks for it. A plan step's retrieval is no fetch, and the plan card
-    switches those. Each choice offers every option other than its active
-    one that Search can serve (`available` or `partial`), labelled with the
-    option's label, after the part's name (`_part_name`) when several parts offer
-    chips. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
+    switches those. A choice offers chips only on the newest of `readings`
+    holding it (`stored_choice`), the one a chip applies to, so a reading a
+    switch compiled again offers none on the choices it shares. Each choice
+    offers every option other than its active one that Search can serve
+    (`available` or `partial`), labelled with the option's label, after the
+    part's name (`_part_name`) when the chips offered span several parts. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
     fetch named its own places (`entities` in the scope of any of
     `FetchReading.args`). The chip refetches with those places, which replace
@@ -1243,6 +1252,9 @@ def scope_chips(
         for choice in reading.scope.choices:
             if placed and any(isinstance(o.binding, EntitiesBinding) for o in choice.options):
                 continue
+            newest = stored_choice(readings, choice.id)
+            if newest is None or newest[0].spec_id != reading.spec_id:
+                continue
             rank = _CHIP_AXES.index(choice.axis) if choice.axis in _CHIP_AXES else len(_CHIP_AXES)
             offered.extend(
                 (rank, reading, choice, option)
@@ -1250,6 +1262,7 @@ def scope_chips(
                 if option.option_id != choice.active and option.availability.status != "unavailable"
             )
     offered.sort(key=lambda item: item[0])
+    offered = offered[:MAX_SCOPE_CHIPS]
     several = len({id(reading) for _, reading, _, _ in offered}) > 1
     return [
         ScopeChip(
@@ -1262,8 +1275,13 @@ def scope_chips(
             option_id=option.option_id,
             spec_id=cast(str, reading.spec_id),  # `used` holds readings with a spec_id
         )
-        for _, reading, choice, option in offered[:MAX_SCOPE_CHIPS]
+        for _, reading, choice, option in offered
     ]
+
+
+# What a chip that no longer applies to its answer says: the studio's refusal of
+# it (`harness.studio`) and the turn that finds it stale (`harness.graph.switch`).
+CHIP_STALE_NOTE = "This answer has changed since that suggestion was offered, so nothing changed."
 
 
 def stored_choice(

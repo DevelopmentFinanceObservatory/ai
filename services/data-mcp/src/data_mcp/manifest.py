@@ -310,49 +310,6 @@ def party_totals_left_out(trace: Mapping[str, object]) -> list[PartyTotalsLeftOu
     return _PARTY_TOTALS_LEFT_OUT.validate_python(trace.get(PARTY_TOTALS_LEFT_OUT_KEY) or [])
 
 
-class ManifestComponent(BaseModel):
-    """One component of a composite frame: one entry of the manifest's `trace.components`
-    (apis' `materialise.composite.ComponentSummary`).
-
-    A composite definition binds a declared composite provenance, which no graph node
-    holds, and apis mints it from the tables its components name: stacked components
-    (bilateral plus imputed multilateral aid) share years and each row is one
-    component's, and spliced ones (net flows to 2017, grant equivalents from 2018) serve
-    disjoint years. `role` names what the component holds, `provenance` the table it was
-    read from, `periods` the years it serves as closed spans, `dropped_years` the years
-    left out of it, outside the years the composite serves, `stat_vars` its members,
-    `rows` its rows in the frame and `zero_rows` how many of them are zeros written where
-    a table that reads absence as zero holds nothing.
-    """
-
-    model_config = _UNSEEN_FIELDS_ARE_DROPPED
-    role: str
-    provenance: str | None = None
-    content_version: str | None = None
-    periods: list[tuple[int, int]] = Field(default_factory=list)
-    dropped_years: list[int] = Field(default_factory=list)
-    stat_vars: list[str] = Field(default_factory=list)
-    rows: int = 0
-    zero_rows: int = 0
-    warnings: list[str] = Field(default_factory=list)
-
-
-# The trace member apis lists a composite frame's components under, absent on a frame of
-# one table.
-COMPONENTS_KEY = "components"
-_COMPONENTS = TypeAdapter(list[ManifestComponent])
-
-
-def manifest_components(trace: Mapping[str, object]) -> list[ManifestComponent]:
-    """The components a manifest's `trace` says its composite frame was minted from, in
-    apis' order, and none for a frame of one table.
-
-    Raises:
-        pydantic.ValidationError: When the trace lists them in another shape.
-    """
-    return _COMPONENTS.validate_python(trace.get(COMPONENTS_KEY) or [])
-
-
 class Manifest(BaseModel):
     """The mint route's manifest, re-validated with every artifact URL gone.
 

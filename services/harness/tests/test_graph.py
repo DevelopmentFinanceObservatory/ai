@@ -99,7 +99,8 @@ from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
 from harness.studio_translate import _node_name
-from harness.turn_records import SearchReading, basis_line
+from harness.tool_contracts import HarnessCode, reading_facts
+from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
@@ -3487,22 +3488,39 @@ class _RecordingExecutor(scripted.ScriptedExecutor):
         self.steps.append(step)
 
 
+class _BrokenFetchExecutor(_RecordingExecutor):
+    """`_RecordingExecutor` whose `get_data` raises, as a fault inside DFO would."""
+
+    async def __call__(
+        self, *, tool: str, args: dict[str, Any], on_progress: ProgressCallback | None = None
+    ) -> dict[str, Any]:
+        if tool == "get_data":
+            raise RuntimeError("get_data broke")
+        return await super().__call__(tool=tool, args=args, on_progress=on_progress)
+
+
 async def _chip_turn(
-    search: SearchStub, *, option_id: str = "sector:120+130"
+    search: SearchStub,
+    *,
+    option_id: str = "sector:120+130",
+    executor: _RecordingExecutor | None = None,
+    spec_id: str | None = None,
+    entity_groups: dict[str, Any] | None = None,
 ) -> tuple[Runner, ScriptLlm, _RecordingExecutor, dict[str, Any]]:
     """A turn applying a chip that moves the US health aid answer's
-    `option_id` axis to `option_id`, its reading stored by an earlier turn,
-    resubmitted through `search`. Its model tries to search, then answers."""
+    `option_id` axis to `option_id`, offered on the reading `spec_id`, by
+    default the answer's own, its reading stored by an earlier turn from a
+    block naming `entity_groups` when given, resubmitted through `search`.
+    Its model tries to search, then answers."""
     scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    block = {"spec_id": pin, "resolved": {"scope_choices": scope}}
+    if entity_groups is not None:
+        block["resolved"]["entity_groups"] = entity_groups
     reading = SearchReading.from_part(
-        {
-            "variable": "health aid",
-            "status": "definite",
-            "spec_id": scope["compiled"]["spec_id"],
-            "scope": scope,
-        }
+        {"variable": "health aid", "status": "definite", "spec_id": pin, **reading_facts(block)}
     ).model_dump(mode="json")
-    executor = _RecordingExecutor()
+    executor = executor or _RecordingExecutor()
     runner, model = orchestrator_runner(
         call("search", query="health aid", parts=[{"variable": "health aid"}]),
         executor=executor,
@@ -3511,7 +3529,13 @@ async def _chip_turn(
     axis = option_id.split(":", maxsplit=1)[0]
     await open_session(
         runner,
-        apply_choice=json.dumps({"choice_id": f"{scope['id']}:{axis}", "option_id": option_id}),
+        apply_choice=json.dumps(
+            {
+                "choice_id": f"{scope['id']}:{axis}",
+                "option_id": option_id,
+                "spec_id": spec_id or pin,
+            }
+        ),
         **{ORCHESTRATOR_PRIOR_LEDGER_KEY: {"readings": [reading], "warnings": {}, "spec_ids": []}},
     )
     await run_turn(runner, types.UserContent("Count health and population."))
@@ -3549,6 +3573,54 @@ async def test_a_chip_compiles_through_search_fetches_what_it_compiled_and_never
     searched = model.requests[1].contents[-1].parts[0].function_response.response
     assert searched["code"] == "tool_budget_spent"
     assert [step["result"]["outcome"] for step in executor.steps] == ["ok"]
+
+
+async def test_a_chip_posts_the_groups_its_reading_was_resolved_with() -> None:
+    """The answer's reading came from a search whose block named Africa as the
+    set its recipients were asked for, and no plan kept that block. The chip's
+    resubmit posts the set as every resubmit does (`compiler.sources.wire_groups`)."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
+
+    await _chip_turn(search, entity_groups=groups)
+
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
+    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
+
+
+async def test_a_chip_offered_on_another_reading_is_refused_stale_and_compiles_nothing() -> None:
+    """The chip names a reading other than the newest one holding its choice, as
+    after a later switch of that choice: it is refused as the studio refuses a
+    stale chip, and nothing is posted or fetched."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    runner, model, executor, _ = await _chip_turn(search, spec_id=f"spec_{'9' * 32}")
+
+    assert search.posted == []
+    assert CHIP_STALE_NOTE in request_text(model.requests[0])
+    (step,) = executor.steps
+    assert step["result"]["refusal"]["code"] == SCOPE_CHOICE_NOT_APPLIED
+    assert not any(c["tool"] == "get_data" for c in executor.calls)
+    assert ORCHESTRATOR_APPLIED_KEY not in _session_state(runner)
+
+
+async def test_a_chip_whose_fetch_raises_answers_as_the_agents_own_fetch_would() -> None:
+    """The chip's fetch raises inside DFO: the agent is handed the failure the
+    orchestrator's own tool calls answer with, and the turn goes on."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+
+    _, model, _, _ = await _chip_turn(search, executor=_BrokenFetchExecutor())
+
+    first = request_text(model.requests[0])
+    assert "fetch failed inside DFO (RuntimeError)" in first
+    assert HarnessCode.RAISED.value in first
 
 
 async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_nothing() -> None:

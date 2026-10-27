@@ -3477,6 +3477,8 @@ class _InputBasis:
     choice, or a carried one, the user's choice earlier in the conversation,
     and the origin's block does not mark the axis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
+    `providers` are the donors the origin's part binds on its `origin` role,
+    empty for a part counting every provider.
     """
 
     requirement_id: str
@@ -3485,6 +3487,12 @@ class _InputBasis:
     choice: ScopeChoice
     stated: bool
     rank: int
+    providers: frozenset[str]
+
+    def shares_providers(self, other: _InputBasis) -> bool:
+        """Whether this input and `other` can count one provider's flows: a donor both
+        bind, or a part counting every provider beside any other."""
+        return not self.providers or not other.providers or bool(self.providers & other.providers)
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
@@ -3541,6 +3549,7 @@ def _input_bases(
             choice=choice,
             stated=choice.provenance != "default" and axis not in planner_axes(block),
             rank=_part_rank(scope.base.identity),
+            providers=frozenset((scope.base.identity.get("entities") or {}).get("origin") or ()),
         )
     return bases
 
@@ -3583,8 +3592,11 @@ def _aligned_bases(
     input in plan order on a tie. A group whose inputs the user stated on
     different options has no one option, and each of its calculations takes
     its own. A sum whose inputs the user stated on different provider
-    scopes is refused, since an inclusive figure already holds the
-    bilateral one and the sum would count it twice.
+    scopes is refused where two of them can count one donor's flows (a
+    donor both bind, or a part counting every provider beside any other),
+    since an inclusive figure already holds the bilateral one and the sum
+    would count it twice. A sum over disjoint donors, such as France's
+    bilateral aid plus Germany's inclusive aid, is served as stated.
 
     An input already on its options keeps its origin pin. Another is pinned
     to the pin compiled from its origin on the options it moves to, one per
@@ -3706,8 +3718,12 @@ def _alignment_targets(
             own = _shared_basis(inputs)
             if own is not None:
                 aligning.append((step, inputs, own))
-            elif axis == _PROVIDER_AXIS and isinstance(step, SumOfRequirement):
-                first, other = _first_differing(inputs)
+            elif (
+                axis == _PROVIDER_AXIS
+                and isinstance(step, SumOfRequirement)
+                and (pair := _double_counted(inputs)) is not None
+            ):
+                first, other = pair
                 raise _Unservable(
                     _basis_unservable(
                         view,
@@ -3810,11 +3826,19 @@ class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bas
         self.problem = problem
 
 
-def _first_differing(inputs: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBasis]:
-    """The first input of `inputs` the user stated an option on, and the first stated on another."""
+def _double_counted(inputs: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBasis] | None:
+    """The first two inputs of `inputs` the user stated on different options that can
+    count one provider's flows (`_InputBasis.shares_providers`); `None` when none can."""
     stated = [basis for basis in inputs if basis.stated]
-    first = stated[0]
-    return first, next(basis for basis in stated if basis.choice.active != first.choice.active)
+    return next(
+        (
+            (first, other)
+            for index, first in enumerate(stated)
+            for other in stated[index + 1 :]
+            if first.choice.active != other.choice.active and first.shares_providers(other)
+        ),
+        None,
+    )
 
 
 def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:

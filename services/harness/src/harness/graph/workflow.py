@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -71,16 +72,39 @@ def planner_entry(planner: PlannerModel) -> PlannerEntry:
 
 
 def _fetch_tool(orchestrator: LlmAgent) -> Callable[..., Awaitable[dict[str, Any]]] | None:
-    """The function of the `fetch` tool among `orchestrator`'s tools
-    (`harness.orchestrator_tools`); `None` without one."""
-    return next(
+    """The `fetch` tool among `orchestrator`'s tools (`harness.orchestrator_tools`),
+    called as the agent calls it; `None` without one.
+
+    An exception the tool raises is answered by the agent's own
+    `on_tool_error_callback`s (`orchestrator.tool_failures.answering_tool_failures`),
+    so a fetch that breaks inside DFO reads as the agent's own fetch would, and
+    one no callback answers is raised.
+    """
+    tool = next(
         (
-            cast(Callable[..., Awaitable[dict[str, Any]]], tool.func)
+            tool
             for tool in orchestrator.tools
             if isinstance(tool, FunctionTool) and tool.name == "fetch"
         ),
         None,
     )
+    if tool is None:
+        return None
+    func = cast(Callable[..., Awaitable[dict[str, Any]]], tool.func)
+
+    async def fetch(*, tool_context: Any, **args: Any) -> dict[str, Any]:
+        try:
+            return await func(tool_context=tool_context, **args)
+        except Exception as error:
+            for callback in orchestrator.canonical_on_tool_error_callbacks:
+                answered = callback(tool, args, tool_context, error)
+                if inspect.isawaitable(answered):
+                    answered = await answered
+                if isinstance(answered, dict):
+                    return cast(dict[str, Any], answered)
+            raise
+
+    return fetch
 
 
 def create_root_workflow(

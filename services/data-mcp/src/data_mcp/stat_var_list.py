@@ -12,7 +12,7 @@ apis' snapshot of the same `{spec_id, content_version}` pair. No model
 ever reads the list.
 
 A composite frame's `trace.components` lists each component's members too
-(`data_mcp.manifest.ManifestComponent.stat_vars`), so the same bound applies to
+(`common.composite.ManifestComponent.stat_vars`), so the same bound applies to
 the members of every component together: past it, each component's list is
 emptied, their count goes under `COMPONENT_STAT_VARS_OMITTED_KEY`, and
 `with_stat_var_list` reads them back with the rest.
@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from common.composite import COMPONENTS_KEY
 from fastmcp.exceptions import ResourceError
 
 from data_mcp.client_holder import get_client
@@ -59,14 +60,17 @@ def without_long_stat_var_list(result: Mapping[str, Any]) -> dict[str, Any]:
     components = _components(trace)
     members = sum(len(component.get("stat_vars") or ()) for component in components)
     if members > MAX_LISTED_STAT_VARS:
-        kept["components"] = [{**component, "stat_vars": []} for component in components]
+        kept[COMPONENTS_KEY] = [{**component, "stat_vars": []} for component in components]
         bounded[COMPONENT_STAT_VARS_OMITTED_KEY] = members
     bounded["trace"] = kept
     return bounded
 
 
 def _components(trace: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    listed = trace.get("components")
+    """`trace`'s components as apis wrote them, every field kept, since the bound
+    rewrites them and hands the trace on whole; `common.composite.manifest_components`
+    would drop the fields it does not read."""
+    listed = trace.get(COMPONENTS_KEY)
     if not isinstance(listed, list):
         return []
     return [component for component in listed if isinstance(component, Mapping)]
@@ -121,7 +125,7 @@ async def with_stat_var_list(result: Mapping[str, Any]) -> dict[str, Any]:
                 f"the snapshot of {spec_id}/{content_version} does not list the "
                 f"{members_omitted} component StatVars its get_data result left out"
             )
-        trace["components"] = [
+        trace[COMPONENTS_KEY] = [
             {**component, "stat_vars": list(whole.get("stat_vars") or ())}
             for component, whole in zip(_components(trace), components, strict=True)
         ]

@@ -443,7 +443,7 @@ class ToolRefusal:
     ) -> Self:
         """`stat_var_unresolved` for a composite frame read with one series per StatVar:
         `components` names each component's role and member count
-        (`analysis_mcp.composite.frame_components`), and `get_data` the read that adds
+        (`analysis_mcp.composite.composite_refusal`), and `get_data` the read that adds
         them into one series per party and year."""
         parts = " and ".join(
             f"{component['role']} ({component['stat_vars']} StatVars)" for component in components

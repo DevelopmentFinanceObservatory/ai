@@ -119,6 +119,7 @@ def seed_node(
                 ctx,
                 choice_id=str(pick["choice_id"]),
                 option_id=str(pick["option_id"]),
+                spec_id=str(pick["spec_id"]),
                 surface=definition_surface,
                 fetch=fetch,
                 record_step=getattr(executor, "record_step", None),
