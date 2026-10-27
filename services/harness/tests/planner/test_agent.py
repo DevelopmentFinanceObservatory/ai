@@ -126,6 +126,7 @@ from planner.plan import (
     save_plan,
     save_plan_rounds,
     search_pin_slot,
+    split_of,
     stored_plan,
     windowed_pins,
 )
@@ -186,7 +187,7 @@ from translator.referral import (
     load_referral,
     save_referral,
 )
-from translator.tool import Translate, build_translate
+from translator.tool import Translate, authored_answer, build_translate
 
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
@@ -9286,6 +9287,105 @@ def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
     )
 
     refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None)
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def _congo_split_draft(decision):
+    draft = split_draft(decision)
+    entities = (Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient"))
+    return Plan.model_validate(
+        draft.model_dump()
+        | {
+            "evidence_requirements": [
+                requirement.model_copy(update={"entities": entities})
+                if isinstance(requirement, DatasetRequirement)
+                else requirement
+                for requirement in draft.evidence_requirements
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])
+async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
+    decision, offered_for, refused
+):
+    ctx: Any = _FakeToolContext()
+    save_plan(ctx.state, _congo_split_draft(decision))
+    save_referral(ctx.state, _congo_both_ends("debt_history"))
+    reading = _congo_both_ends(offered_for).ambiguous_entities[0]
+
+    result = await _tools_by_name()["adk_request_input"].run_async(
+        args={
+            "message": "Which Congo gave the aid?",
+            "candidates": [{"spec_id": c.pick, "label": c.label} for c in reading.candidates],
+        },
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "stated", "referred_again", "valid"),
+    [
+        ("COD", "COD", False, True),
+        ("COD", "COG", False, False),
+        (None, "COD", False, False),
+        ("skip", "COD", False, False),
+        ("COD", "COG", True, False),
+    ],
+    ids=["as-picked", "other-node", "pending", "skipped", "referred-to-origin"],
+)
+def test_an_entity_answer_on_a_history_copy_binds_its_origin(
+    decision, answer, stated, referred_again, valid
+):
+    draft = _congo_split_draft(decision)
+    ctx: Any = _FakeToolContext()
+    save_plan(ctx.state, draft)
+    referral = _congo_both_ends("debt_history")
+    save_referral(ctx.state, referral)
+    shown = authored_answer(referral.model_dump(mode="json"), split_of(draft))
+    readings = cast("list[dict[str, Any]]", shown["ambiguous_entities"])
+    candidates = [
+        {"spec_id": candidate["pick"], "label": candidate["label"]}
+        for candidate in readings[0]["candidates"]
+    ]
+    ctx.session.events.extend(
+        [_referred_event(referral.kind, str(shown["requirement_id"])), _ask_event(candidates)]
+    )
+    if answer == "skip":
+        ctx.session.events.append(_ask_response("call-1", {"result": {"skip": True}}))
+    elif answer is not None:
+        ctx.session.events.append(_answer_event(candidates[0]["spec_id"]))
+    if referred_again:
+        save_referral(ctx.state, _congo_both_ends("debt"))
+        ctx.session.events.append(_referred_event(referral.kind, "debt"))
+    entities = (
+        Entity(name="Congo", role="donor", dcid=f"country/{stated}"),
+        Entity(name="Congo", role="recipient"),
+    )
+    plan = draft.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                requirement.model_copy(update={"entities": entities})
+                if isinstance(requirement, DatasetRequirement)
+                else requirement
+                for requirement in draft.evidence_requirements
+            )
+        }
+    )
+    view = ToolContextSession(ctx)
+
+    refusal = _entity_dcid_unpicked(
+        plan, submission_service._authored_referral(view, draft), view, draft
+    )
 
     assert (refusal is None) == valid
     if refusal is not None:

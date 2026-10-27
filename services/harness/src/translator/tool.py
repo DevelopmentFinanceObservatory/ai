@@ -85,7 +85,7 @@ from planner.plan import (
     save_plan,
     split_of,
 )
-from planner.records import EvidenceIssueCode, RollingPlanError
+from planner.records import AmbiguousEntityReading, EvidenceIssueCode, RollingPlanError
 from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
 from planner.workflow import SelectedSource, Workflow
@@ -1222,7 +1222,7 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     in session state name a copy by its own id, which the model did not write
     and cannot patch or pin, so the answer it reads names the copy's origin
     (`planner.plan.origin_of`) in `requirement_id`, each stale pin's and each
-    named group's, and in the
+    named group's, each entity candidate's `pick`, and in the
     prose of `reason` and each `repair`. Discovery and the compiler build
     that prose with ids interpolated at dozens of sites, so it is rewritten
     here (`planner.plan.authored_text`).
@@ -1276,7 +1276,15 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
 
     mapped = prose(answer)
     if isinstance(requirement_id := answer.get("requirement_id"), str):
-        mapped["requirement_id"] = origin_of(split, requirement_id)
+        authored_id = origin_of(split, requirement_id)
+        mapped["requirement_id"] = authored_id
+        if "ambiguous_entities" in answer:
+            mapped["ambiguous_entities"] = [
+                AmbiguousEntityReading.model_validate(reading)
+                .picked_under(authored_id)
+                .model_dump(mode="json")
+                for reading in cast("list[dict[str, object]]", answer["ambiguous_entities"])
+            ]
     if "stale_pins" in answer:
         by_origin: dict[str, list[tuple[str, dict[str, object]]]] = {}
         for pin in cast("list[dict[str, object]]", answer["stale_pins"]):

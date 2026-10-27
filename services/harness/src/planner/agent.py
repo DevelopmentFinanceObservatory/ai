@@ -1388,7 +1388,13 @@ class _AskTool(LongRunningFunctionTool):
 
     @override
     async def run_async(self, *, args: dict[str, Any], tool_context: ToolContext) -> Any:
-        refusal = _entity_ask_unbound(load_referral(tool_context.state), args.get("candidates"))
+        referral = load_referral(tool_context.state)
+        plan = load_plan(tool_context.state)
+        if referral is not None and plan is not None and plan.rolling_copies:
+            referral = Referral.model_validate(
+                authored_answer(referral.model_dump(mode="json"), split_of(plan))
+            )
+        refusal = _entity_ask_unbound(referral, args.get("candidates"))
         if refusal is not None:
             return refusal
         return await super().run_async(args=args, tool_context=tool_context)

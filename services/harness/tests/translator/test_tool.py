@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import translator.tool
@@ -101,6 +101,7 @@ from translator.tool import (
     IssueResolution,
     _compile_failure_action,
     _referral_payload,
+    authored_answer,
     build_translate,
     build_translator_core,
     issue_resolution,
@@ -1534,6 +1535,38 @@ async def test_a_referral_on_a_copy_names_its_origin_to_the_model(
     stored = load_referral(context.state)
     assert stored is not None
     assert stored.requirement_id == "debt_history"
+
+
+@pytest.mark.parametrize("requirement_id", ["debt", "debt_history"])
+def test_an_entity_referral_offers_its_authored_requirement_picks(decision, requirement_id):
+    reading = AmbiguousEntityReading(
+        text="Central Africa",
+        entity=EntityKey(name="Central Africa", role="recipient"),
+        candidates=(
+            EntityCandidate(
+                ref="region/UN_CentralAfrica", label="UN", restate_as="Central Africa (UN)"
+            ),
+            EntityCandidate(ref="region/AU_CentralAfrica", label="AU"),
+        ),
+    )
+    referral = Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id=requirement_id,
+        ambiguous_entities=(reading,),
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+    payload = _referral_payload(referral)
+
+    answer = authored_answer(payload, split_of(split_draft(decision)))
+    readings = cast("list[dict[str, Any]]", answer["ambiguous_entities"])
+
+    assert answer["requirement_id"] == "debt"
+    assert [candidate["pick"] for candidate in readings[0]["candidates"]] == [
+        "debt|recipient|Central Africa|Central Africa (UN)",
+        "debt|recipient|Central Africa|region/AU_CentralAfrica",
+    ]
+    assert payload == _referral_payload(referral)
 
 
 def _offer(spec_id: str) -> dict[str, object]:
