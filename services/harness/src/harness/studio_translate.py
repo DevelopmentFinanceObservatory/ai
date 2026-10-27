@@ -40,7 +40,7 @@ import functools
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -72,6 +72,7 @@ from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
+from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -125,6 +126,9 @@ from harness.wire import (
     MessageComplete,
     MessageDelta,
     PlanAction,
+    PlanApproved,
+    PlanApprovedChoice,
+    PlanApprovedStep,
     PlanAsk,
     PlanDecision,
     PlanDecisionOption,
@@ -133,6 +137,7 @@ from harness.wire import (
     PlanProposed,
     PlanRequirement,
     PlanStep,
+    PlanSwitchFailed,
     PlanVersioned,
     RetryMode,
     StepProduced,
@@ -1055,6 +1060,22 @@ def _scope_members(decision: Decision | None) -> dict[str, Any]:
     }
 
 
+def _decision_question(
+    decision: Mapping[str, Any],
+    scoped: Mapping[str, Decision],
+    named: Callable[[str], str],
+) -> str:
+    """What a plan card decision asks: a scope choice's short name
+    (`plan_display.CHOICE_NAMES`), else the planner's question as the card
+    shows it (`plan_display.card_decision_text`)."""
+    scope = scoped.get(decision.get("slot", ""))
+    if scope is not None and scope.scope is not None:
+        name = plan_display.CHOICE_NAMES.get(scope.scope.axis)
+        if name is not None:
+            return name
+    return named(decision.get("description", ""))
+
+
 def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     """The scope choices of the card's `decisions` a switch may name, by choice id.
 
@@ -1082,6 +1103,57 @@ def _switchable(decisions: Sequence[PlanDecision]) -> dict[str, _PendingChoice]:
     return choices
 
 
+def plan_approved(card: PlanProposed, *, seq: int) -> PlanApproved:
+    """The `plan.approved` frame for the plan card the user approved.
+
+    Built from the card alone, so it states what the user saw: its title,
+    summary and step labels, and for each scope choice the short name
+    (`PlanDecision.question`) and the label of the option it held. A choice
+    a switch moved besides the one the user switched carries the label it
+    held before (`PlanMoved.from_label`) as `changed_from`.
+    """
+    moved_from = {moved.choice_id: moved.from_label for moved in card.moved or ()}
+    choices = []
+    for decision in card.decisions or ():
+        if decision.choice_id is None or decision.options is None:
+            continue
+        chosen = next(
+            option.label
+            for option in decision.options
+            if option.option_id == decision.active_option_id
+        )
+        choices.append(
+            PlanApprovedChoice(
+                question=decision.question,
+                chosen=chosen,
+                changed_from=moved_from.get(decision.choice_id),
+            )
+        )
+    return PlanApproved(
+        event="plan.approved",
+        seq=seq,
+        plan_version_id=card.plan_version_id,
+        version=card.version,
+        revision=card.revision,
+        title=card.title,
+        summary=card.summary,
+        steps=[
+            PlanApprovedStep(label=step.label, gives_answer=step.gives_answer)
+            for step in card.steps
+        ],
+        choices=choices,
+    )
+
+
+def _switch_failed(payload: Mapping[str, Any]) -> PlanSwitchFailed | None:
+    """The switch that did not apply, on a plan the `switch` node offers
+    again unchanged (`harness.graph.switch`): the choice and option the user
+    picked, the refusal's code and the note saying why and what still holds.
+    `None` on any other plan."""
+    failed = payload.get("switch_failed")
+    return PlanSwitchFailed.model_validate(failed) if failed else None
+
+
 def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     """The planner node's payload as a `planner.plan.Plan`. The planner
     node itself validates a model-drafted plan (`harness.graph.planning`'s `planner` node
@@ -1096,12 +1168,14 @@ def _plan_from_payload(payload: dict[str, Any]) -> PlannerPlan:
     marks an `"ok"` draft made over a plan the node could not read, whose version
     counts from 1 again; `_interrupt_frames` reads it to start a new line of
     plan version ids. `moved` rides on a plan the `switch` node offers
-    (`harness.graph.switch`): the other scope choices the switch moved.
+    (`harness.graph.switch`): the other scope choices the switch moved;
+    `switch_failed` on one it offers again after a switch that did not
+    apply (`_switch_failed`).
     """
     fields = {
         key: value
         for key, value in payload.items()
-        if key not in ("summary", "revision", "refusal_note", "restarted", "moved")
+        if key not in ("summary", "revision", "refusal_note", "restarted", "moved", "switch_failed")
     }
     return PlannerPlan.model_validate(fields)
 
@@ -1653,7 +1727,7 @@ class _Translator:
             plan = _plan_from_payload(payload)
             shown_slots = {decision.slot for decision in plan_display.shown_decisions(plan)}
             scoped = {decision.slot: decision for decision in plan.decisions if decision.scope}
-            named = functools.partial(plan_display.with_source_names, plan=plan)
+            named = functools.partial(plan_display.card_decision_text, plan=plan)
             revision = payload.get("revision")
             steps = [
                 PlanStep(
@@ -1661,12 +1735,13 @@ class _Translator:
                     label=str(row["label"]),
                     description=str(row["description"]),
                     args=cast("dict[str, Any] | None", row["args"]),
+                    gives_answer=bool(row["gives_answer"]),
                 )
-                for row in plan_display.step_rows(plan)
+                for row in plan_display.card_rows(plan)
             ]
             # `plan.workflow.steps`' own ids are what `executor.run.
             # current_step_id` sets and `_ExecutorRecord.step_id` carries
-            # (`plan_display.step_rows` reads the same ids off the same
+            # (`plan_display.card_rows` reads the same ids off the same
             # steps to build `steps` above); the fallback covers a plan
             # whose workflow this payload's `_plan_from_payload` parse
             # somehow left unset. Recorded on the pending interrupt below so
@@ -1704,14 +1779,17 @@ class _Translator:
             decisions = [
                 PlanDecision(
                     id=decision.get("slot", f"d{index + 1}"),
-                    question=named(decision.get("description", "")),
+                    question=_decision_question(decision, scoped, named),
                     chosen=named(decision.get("chosen", "")),
                     alternatives=(
                         [named(option) for option in decision["options"]]
                         if decision.get("options") is not None
                         else None
                     ),
-                    reason=named(decision.get("rationale", "")),
+                    # A reason saying only that Search's default holds says nothing.
+                    reason=""
+                    if decision.get("rationale") == SEARCH_DEFAULT_RATIONALE
+                    else named(decision.get("rationale", "")),
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
                     ),
@@ -1727,7 +1805,8 @@ class _Translator:
                 interrupt_id=wire_id,
                 plan_version_id=plan_version_id,
                 version=version,
-                title="Research plan",
+                title=plan_display.card_title(plan),
+                summary=plan_display.card_summary(plan),
                 steps=steps,
                 decisions=decisions,
                 actions=[
@@ -1743,6 +1822,7 @@ class _Translator:
                 moved=[PlanMoved.model_validate(moved) for moved in payload["moved"]]
                 if payload.get("moved")
                 else None,
+                switch_failed=_switch_failed(payload),
             )
             frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(

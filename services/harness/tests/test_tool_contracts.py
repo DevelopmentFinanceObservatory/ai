@@ -15,6 +15,8 @@ from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReaso
 from harness.tool_contracts import graph_envelope, reading_facts
 from pydantic import ValidationError
 
+from .basis_alignment import dac1_with_contributions
+
 _DATA_MCP_FIXTURES = Path(__file__).parents[2] / "data-mcp" / "tests" / "fixtures"
 
 
@@ -119,11 +121,29 @@ def test_a_field_search_adds_to_scope_choices_is_ignored_and_never_stored() -> N
 
 
 def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it() -> None:
-    """A later dfo-apis release adds an axis, a reason code, a component role and
-    a dropped entry's code. The record stays readable: the choice and entry on the
-    unknown axis are left out, the unknown reason code reads as none, the role is
-    kept as written, and the dropped entry's code follows its provenance."""
+    """A later dfo-apis release adds an axis, a provider scope, a reason code, a
+    component role and a dropped entry's code. The record stays readable: the choice
+    and entry on the unknown axis and the choice holding the unknown provider scope
+    are left out, the unknown reason code reads as none, the role is kept as written,
+    and the dropped entry's code follows its provenance."""
     added = _scope_choices()
+    added["choices"].append(
+        {
+            "id": f"{added['id']}:provider",
+            "axis": "provider",
+            "rule": "test_provider",
+            "provenance": "default",
+            "active": "provider:pooled",
+            "options": [
+                {
+                    "option_id": "provider:pooled",
+                    "label": "pooled funds",
+                    "binding": {"kind": "provider", "scope": "pooled"},
+                    "availability": {"status": "available", "detail": {}},
+                }
+            ],
+        }
+    )
     unknown_option = {
         "option_id": "channel:ngo",
         "label": "through NGOs",
@@ -167,6 +187,27 @@ def test_a_value_search_adds_to_an_open_vocabulary_degrades_only_what_holds_it()
     assert [(d.entry.axis, d.code) for d in scope.dropped_entries] == [
         ("sector", "stated_choice_not_applied")
     ]
+
+
+def test_a_dac1_total_reads_with_its_contributions_provider_scope() -> None:
+    """The US DAC1 total with the provider choice dfo-apis gives a DAC1 total: the
+    contributions option is read as the one active, beside the basis choice, and the
+    bilateral and inclusive options are unavailable for the reason worded for them."""
+    scope = PartScope.from_search(dac1_with_contributions()["resolved"]["scope_choices"])
+
+    assert [(c.axis, c.active) for c in scope.choices] == [
+        ("measure_basis", "measure_basis:gross"),
+        ("provider", "provider:contributions"),
+    ]
+    provider = scope.choices[1]
+    assert [
+        (o.option_id, o.availability.status, o.availability.code) for o in provider.options
+    ] == [
+        ("provider:bilateral", "unavailable", "counts_core_contributions"),
+        ("provider:inclusive", "unavailable", "counts_core_contributions"),
+        ("provider:contributions", "available", None),
+    ]
+    assert "counts_core_contributions" in REASON_COPY
 
 
 def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(

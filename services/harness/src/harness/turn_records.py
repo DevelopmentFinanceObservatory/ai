@@ -1158,7 +1158,7 @@ def basis_line(
     scope choice of a used part gives one clause (`_choice_clause`), and
     each entry search left out of the part another. Parts whose
     clauses are the same share them; otherwise each part's clauses follow
-    its name (`_part_name`):
+    its name (`part_name`):
 
         Counted as: health incl. population and reproductive health
         (CRS 120 + 130) · Africa incl. regional buckets · gross disbursements.
@@ -1178,7 +1178,7 @@ def basis_line(
         clauses = _scope_clauses(reading)
         if clauses:
             parts.setdefault(clauses, []).append(
-                _part_name(reading, specs.get(reading.spec_id or ""))
+                part_name(reading, specs.get(reading.spec_id or ""))
             )
     if not parts:
         return None
@@ -1222,7 +1222,7 @@ def scope_chips(
     switch compiled again offers none on the choices it shares. Each choice
     offers every option other than its active one that Search can serve
     (`available` or `partial`), labelled with the option's label, after the
-    part's name (`_part_name`) when the chips offered span several parts. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
+    part's name (`part_name`) when the chips offered span several parts. Chips run by axis (`_CHIP_AXES`), then part, then option. A choice
     whose options bind entities (a region's members) offers none when the
     fetch named its own places (`entities` in the scope of any of
     `FetchReading.args`). The chip refetches with those places, which replace
@@ -1231,7 +1231,7 @@ def scope_chips(
     Args:
         readings: The turn's search readings, as `SearchReading` JSON.
         specs: The spec blocks the turn's searches returned, by spec_id,
-            which name a part `_part_name` does not name by its words.
+            which name a part `part_name` does not name by its words.
     """
     used = newest_per_spec_id(
         [
@@ -1267,7 +1267,7 @@ def scope_chips(
     return [
         ScopeChip(
             label=(
-                f"{_part_name(reading, specs.get(reading.spec_id or ''))}: {option.label}"
+                f"{part_name(reading, specs.get(reading.spec_id or ''))}: {option.label}"
                 if several
                 else option.label
             ),
@@ -1325,8 +1325,9 @@ def chip_kept(applied: Mapping[str, Any], readings: Sequence[Mapping[str, Any]])
     return found is None or found[1].active != applied.get("from_option_id")
 
 
-def _part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
-    """The part's name, for a basis line naming several parts.
+def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
+    """The part's name, for a basis line naming several parts and for a
+    sentence naming a requirement that pins it (`harness.planner_seam`).
 
     The part's own words, quoted, while they describe the pin it was served
     from. They do not once the pin was compiled again from one of its scope
@@ -1355,11 +1356,22 @@ def _part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
 
 
 def _served_name(block: Mapping[str, Any] | None) -> str | None:
-    """Search's name for what `block` measures, `resolved.shape.label` as
-    written: the `measure` the search digest shows the model
-    (`data_mcp.digest`). `None` when the block states none."""
-    label = (((block or {}).get("resolved") or {}).get("shape") or {}).get("label")
-    return label if isinstance(label, str) and label else None
+    """Search's name for what `block` counts, from `resolved.shape.label`: the
+    `measure` the search digest shows the model (`data_mcp.digest`).
+
+    A label that is the block's `measure_label` followed by the concept in
+    brackets ("gross disbursements (official development assistance)") gives
+    the concept alone, since the basis line states the measure as a clause.
+    `None` when the block states no label.
+    """
+    resolved = (block or {}).get("resolved") or {}
+    label = (resolved.get("shape") or {}).get("label")
+    if not isinstance(label, str) or not label:
+        return None
+    measure = resolved.get("measure_label")
+    if isinstance(measure, str) and label.startswith(f"{measure} (") and label.endswith(")"):
+        return label[len(measure) + 2 : -1]
+    return label
 
 
 def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
@@ -1395,7 +1407,7 @@ def _scope_clauses(reading: SearchReading) -> tuple[str, ...]:
         )
         why = REASON_COPY[dropped.code]
         clauses.append(f"{why}: {label}" if label else why)
-    return tuple(clauses)
+    return tuple(dict.fromkeys(clauses))
 
 
 def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | None:

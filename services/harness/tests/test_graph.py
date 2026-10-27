@@ -66,6 +66,7 @@ from harness.chart_binding import (
     select_binding_ok,
 )
 from harness.graph import answer as answer_module
+from harness.graph import switch
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
@@ -94,10 +95,12 @@ from harness.graph.state import (
     frame_store_ref,
 )
 from harness.graph.switch import SCOPE_CHOICE_NOT_APPLIED
+from harness.planner_seam import PlannerSeam
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY
 from harness.scripted import ScriptedPlannerModel, ScriptedSurface
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.seeds import stale_reason
+from harness.settings import Settings
 from harness.studio_translate import _node_name
 from harness.tool_contracts import HarnessCode, reading_facts
 from harness.turn_records import CHIP_STALE_NOTE, SearchReading, basis_line
@@ -3429,8 +3432,10 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     real_schemas: list[ToolSchema], refused_by: str
 ) -> None:
     """Search refusing the switch (`requested_option_unavailable`), or the
-    revision failing, offers the same plan again with a note, leaves the
-    readings as they were and the planner's drafting state as it found it."""
+    revision failing, offers the same plan again with the failed switch, its
+    code and one sentence saying why, leaves the readings as they were and
+    the planner's drafting state as it found it. A revision's refusal gives
+    the reason its own (`harness.sentences.refusal_reason`)."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = (
@@ -3449,14 +3454,34 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
         else SearchStub(answer={scope["id"]: envelope})
     )
 
-    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search)
+    why = "Official development assistance would then count different providers' spending."
+    refused = {
+        "refused": {
+            "text": "This cannot be calculated as planned, so nothing was recorded.",
+            "reason": why,
+            "final": False,
+            "code": "operation_unsupported",
+        }
+    }
+
+    runner, seam, plan, scope, events = await _switch_runner(real_schemas, search, refused)
 
     assert len(seam.calls) == 1
     assert len(seam.revisions) == (0 if refused_by == "search" else 1)
     offered = _output_of(events, "switch")
     assert offered["revision"] == plan_revision(plan)
-    assert "nothing changed" in offered["refusal_note"]
-    assert "still there to approve" in offered["refusal_note"]
+    assert "refusal_note" not in offered
+    assert offered["switch_failed"] == {
+        "choice_id": f"{scope['id']}:sector",
+        "option_id": "sector:120+130",
+        "code": "requested_option_unavailable"
+        if refused_by == "search"
+        else "operation_unsupported",
+        "reason": "Search cannot count health (CRS 120) and population and reproductive "
+        "health (CRS 130) for this source."
+        if refused_by == "search"
+        else why,
+    }
     state = _session_state(runner)
     assert PlannerPlan.model_validate_json(state["plan"]) == plan
     assert [r["spec_id"] for r in state[ORCHESTRATOR_SEARCHES_KEY]] == [
@@ -3466,6 +3491,149 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     assert state.get("planner:rounds") is None
     assert state.get("planner:pin_sources") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+# The source the planner wrote on the deployed plan's numerator, in the
+# question's words, and the provenance Search states for the composite of
+# bilateral and imputed multilateral aid the user switched it to.
+_STATED_SOURCE = "OECD Creditor Reporting System (CRS)"
+_INCLUSIVE_PROVENANCE = {
+    "ref": "provenance/CRSAndONEImputedMultilateralSectors",
+    "label": "CRS and ONE Imputed Multilateral Sectors",
+}
+
+
+class _TranslatingSeam(_Seam):
+    """A `PlannerModel` drafting `plans` and revising through the real
+    `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
+    translation's discovery and the compile, over `schemas`, with no model."""
+
+    def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
+        super().__init__(plans)
+        self._seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=schemas))
+
+    async def revise(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._seam.revise(**kwargs)
+
+
+async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_plan_runs(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The deployed failure: the planner stated the CRS as the health
+    numerator's source, and the user switched it to bilateral plus imputed
+    multilateral, a dataset Search names otherwise. The switch drops the
+    stated source with the pin it left, so the translation takes the new pin
+    with no search, the plan compiles, and its run accepts what the new
+    dataset returns."""
+    scope = _hashed_scope()
+    pin = scope["compiled"]["spec_id"]
+    new_pin, envelope = _switched_answer(scope)
+    block = envelope["parts"][0]["spec"]
+    block["resolved"] |= {
+        "coverage": {
+            "kind": "exact",
+            "has_data": True,
+            "window": {"start_year": 2015, "end_year": 2024},
+        },
+        "facets": {"provenance": _INCLUSIVE_PROVENANCE},
+        "entities": [{"role": "country", "ref": "country/KEN", "label": "Kenya"}],
+    }
+    scoped = _scoped_plan(pin, scope, schemas=real_schemas)
+    plan = PlannerPlan.model_validate(
+        {
+            **scoped.model_dump(),
+            "asks": [_BRIEF],
+            "answered": [{"ask": 0, "outputs": ["spending"]}],
+            "translation": None,
+            "workflow": None,
+            "evidence_requirements": [
+                r.model_copy(update={"source": _STATED_SOURCE})
+                for r in scoped.evidence_requirements
+                if isinstance(r, DatasetRequirement)
+            ],
+        }
+    )
+    seam = _TranslatingSeam(
+        [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
+    )
+    search = SearchStub(answer={scope["id"]: envelope})
+    runner, _ = orchestrator_runner(
+        plan_call(_BRIEF),
+        planner=seam,
+        executor=ScriptedExecutor(),
+        definition_surface=DataMcpDefinitions(InMemoryDefinitionStore(), search=search),
+    )
+    await _start(runner)
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "definite", "spec_id": pin, "scope": scope}
+    )
+    _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+
+    events = await _resume(
+        runner,
+        APPROVE_INTERRUPT,
+        {
+            "approved": None,
+            "switch": {"choice_id": f"{scope['id']}:sector", "option_id": "sector:120+130"},
+        },
+    )
+
+    offered = _output_of(events, "switch")
+    assert "switch_failed" not in offered, offered.get("switch_failed")
+    revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])
+    (dataset,) = [r for r in revised.evidence_requirements if isinstance(r, DatasetRequirement)]
+    assert (dataset.source_spec_id, dataset.source) == (new_pin, None)
+    assert revised.workflow is not None
+    assert [step.args.get("spec_id") for step in revised.workflow.steps] == [new_pin]
+    approved = PlannerPlan.model_validate(
+        revised.model_dump()
+        | {
+            "status": "approved",
+            "approved_revision": plan_revision(revised),
+            "approved_at": datetime.now(UTC),
+        }
+    )
+    manifest = _get_data_manifest(spec_id=new_pin)
+    manifest["citation"]["sources"] = [_INCLUSIVE_PROVENANCE]
+    fetched = ToolCallResult(is_error=False, structured_content=manifest, text="fetched")
+
+    _, outcome = await execute_approved_plan(
+        approved,
+        surface=_fixture_surface(real_schemas, get_data_result=fetched),
+        fetch_series_stats=scripted_fetch_series_stats,
+    )
+
+    assert isinstance(outcome, Accepted), outcome
+
+
+@pytest.mark.parametrize(
+    ("exact_codes", "kept"), [(frozenset({"DT.ODA.ALLD.CD"}), True), (frozenset(), False)]
+)
+def test_a_repinned_requirement_keeps_its_series_code_only_where_the_new_dataset_is_it(
+    exact_codes: frozenset[str], kept: bool
+) -> None:
+    stated = DatasetRequirement(
+        id="aid",
+        decision_ids=["window"],
+        measure="aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        source="World Bank",
+        source_ref="provenance/WorldBank",
+        source_exclude=True,
+        source_code="DT.ODA.ALLD.CD",
+        source_spec_id="spec_" + "a" * 32,
+    )
+
+    repinned = switch._repinned(stated, "spec_" + "b" * 32, exact_codes)
+
+    assert (repinned.source_spec_id, repinned.source, repinned.source_ref) == (
+        "spec_" + "b" * 32,
+        None,
+        None,
+    )
+    assert repinned.source_exclude is False
+    assert repinned.source_code == ("DT.ODA.ALLD.CD" if kept else None)
 
 
 # --- a chip under an answer, applied with no search ----------------------------
@@ -3641,7 +3809,7 @@ async def test_a_chip_search_refuses_reads_as_a_plan_cards_switch_and_fetches_no
 
     note = (
         "Search cannot count health (CRS 120) and population and reproductive health "
-        "(CRS 130) for this source, so nothing changed."
+        "(CRS 130) for this source."
     )
     assert note in request_text(model.requests[0])
     (step,) = executor.steps

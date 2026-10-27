@@ -207,8 +207,11 @@ from ..basis_alignment import (
     TOTAL_GROSS_BILATERAL,
     BasisCompiles,
     ProviderCompiles,
+    WholeCompiles,
     basis_block,
+    dac1_with_contributions,
     provider_block,
+    us_2023_block,
 )
 from ..context_probe import plan_record
 from ..data_mcp_definitions import DataMcpDefinitions
@@ -5783,6 +5786,268 @@ def test_a_re_pin_to_a_source_a_referral_offered_states_how_the_flow_is_counted(
     assert (measure.chosen, measure.resolved_by) == ("gross disbursements", resolved_by)
     assert measure.slot in amended.requirement(dataset.id).decision_ids
     assert measure in shown_decisions(amended)
+
+
+# --- a share's whole counted from its part's own dataset ---
+
+
+def _us_block(name: str) -> dict[str, Any]:
+    """`US_2023`'s block `name`, or, as "dac1_contributions", the DAC1 total with the
+    provider choice dfo-apis gives it (`dac1_with_contributions`)."""
+    return dac1_with_contributions() if name == "dac1_contributions" else us_2023_block(name)
+
+
+def _us_2023(
+    propose: Callable[..., Any],
+    ctx: _FakeToolContext,
+    decision: Decision,
+    *,
+    part: str,
+    whole: str,
+    share: bool = True,
+    source: str | None = None,
+) -> Any:
+    """Propose the US 2023 part `part` as a share of `whole`, or compared with it,
+    each pinned to its block (`_us_block`), the whole's source named as `source`."""
+
+    def dataset(
+        requirement_id: str, measure: str, name: str, named: str | None = None
+    ) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            source=named,
+            source_spec_id=_us_block(name)["spec_id"],
+        )
+
+    step: EvidenceRequirement = (
+        ShareOfRequirement(
+            id="share",
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="part"),
+            denominator=RequirementSide(input_id="whole"),
+        )
+        if share
+        else ComparisonRequirement(
+            id="compare",
+            decision_ids=["measure"],
+            minuend=RequirementSide(input_id="whole"),
+            subtrahend=RequirementSide(input_id="part"),
+        )
+    )
+    return propose(
+        question="What share of US aid went to health in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision]),
+        evidence_requirements=[
+            dataset("part", "US aid to health", part),
+            dataset("whole", "US total ODA", whole, source),
+            step,
+        ],
+        tool_context=ctx,
+    )
+
+
+def _pins(ctx: _FakeToolContext) -> list[tuple[str, str | None]]:
+    """Each dataset requirement of the plan `ctx` holds, with its pin."""
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    return [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("part", "whole", "compiled"),
+    [
+        pytest.param("health", "dac1_total_gross", "whole", id="bilateral-over-dac1"),
+        pytest.param(
+            "health", "dac1_contributions", "whole", id="bilateral-over-dac1-with-provider"
+        ),
+        pytest.param(
+            "health_inclusive", "dac1_total_gross", "whole_inclusive", id="inclusive-over-dac1"
+        ),
+        pytest.param(
+            "health_inclusive", "whole", "whole_inclusive", id="inclusive-over-crs-bilateral"
+        ),
+    ],
+)
+async def test_a_share_divides_its_sector_part_by_the_total_of_the_parts_own_dataset(
+    decision: DecisionFactory, part: str, whole: str, compiled: str
+) -> None:
+    """ "What share of US aid went to health in 2023?" over a total from another
+    dataset: DAC1, which also counts core contributions to multilaterals, or the CRS
+    bilateral total under an inclusive part. The whole is compiled from the part's
+    base identity with its sector slot unbound and every other choice held as an
+    explicit entry, with no model call, and the share divides by it; its block marks
+    the held axes as the planner's, so no later search carries them."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block(part), _us_block(whole))
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), part=part, whole=whole
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    scope = us_2023_block(part)["resolved"]["scope_choices"]
+    identity = json.loads(json.dumps(scope["base"]["identity"]))
+    for slot in identity["slots"]:
+        if slot["property"] == "crsPurpose":
+            slot["binding"] = {"state": "unbound"}
+    answered = us_2023_block(compiled)["resolved"]["scope_choices"]["base"]
+    assert (call["spec_id"], call["identity"]) == (answered["spec_id"], identity)
+    assert call["scope_entries"] == [
+        {
+            "axis": choice["axis"],
+            "option_id": choice["active"],
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": choice["id"]},
+        }
+        for choice in scope["choices"]
+        if choice["axis"] != "sector"
+    ]
+    assert _pins(ctx) == [
+        ("part", us_2023_block(part)["spec_id"]),
+        ("whole", us_2023_block(compiled)["spec_id"]),
+    ]
+    held = pin_sources(ctx.state)[us_2023_block(compiled)["spec_id"]].block
+    assert held[PLANNER_AXES_BLOCK_KEY] == ["measure_basis", "provider"]
+
+
+@pytest.mark.parametrize(
+    ("whole", "counted"),
+    [
+        pytest.param("dac1_total_gross", "what OECD DAC1 reports", id="dac1"),
+        pytest.param(
+            "dac1_contributions",
+            "bilateral plus core contributions to multilaterals from OECD DAC1",
+            id="dac1-with-provider",
+        ),
+    ],
+)
+async def test_a_share_keeps_the_whole_its_question_names_and_says_whose_spending_each_counts(
+    decision: DecisionFactory, whole: str, counted: str
+) -> None:
+    """ "US health aid in 2023 as a share of total US ODA, the DAC1 headline figure":
+    the question names the whole's source, so the share divides by DAC1 as stated,
+    with or without the provider choice dfo-apis gives it, and is never compiled
+    again. A decision of the planner's says the two sides count different
+    providers' spending, cited by the whole."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=whole,
+        source="the DAC1 headline figure",
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert surface.calls == []
+    dac1 = us_2023_block("dac1_total_gross")["spec_id"]
+    assert _pins(ctx) == [("part", us_2023_block("health")["spec_id"]), ("whole", dac1)]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.slot == f"share_whole_{dac1}"]
+    assert stated.chosen == "the DAC1 headline figure, as the question names it"
+    assert stated.resolved_by is ResolvedBy.PLANNER_DEFAULT
+    assert counted in stated.rationale
+    assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in stated.rationale
+    assert stated.slot in plan.requirement("whole").decision_ids
+
+
+@pytest.mark.parametrize("whole", ["dac1_total_gross", "whole_inclusive"])
+async def test_a_comparison_keeps_each_sides_own_dataset_and_provider_scope(
+    decision: DecisionFactory, whole: str
+) -> None:
+    """The DAC1 total, or the inclusive CRS total, compared with bilateral CRS health
+    aid: a comparison sets its sides side by side, so neither is compiled again and
+    each keeps its own dataset and provider scope."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block(whole))
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=whole,
+        share=False,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert surface.calls == []
+    assert _pins(ctx) == [
+        ("part", us_2023_block("health")["spec_id"]),
+        ("whole", us_2023_block(whole)["spec_id"]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("part", "refusal", "code", "calls"),
+    [
+        pytest.param("grants", None, ProblemCode.SHARE_WHOLE_UNDERIVABLE, 0, id="no-sector-choice"),
+        pytest.param(
+            "health",
+            {"code": "requested_option_unavailable", "retry_mode": "do_not_retry"},
+            ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+            1,
+            id="option-unavailable",
+        ),
+        pytest.param(
+            "health",
+            {"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+            ProblemCode.SURFACE_UNAVAILABLE,
+            1,
+            id="search-unavailable",
+        ),
+    ],
+)
+async def test_a_share_whose_whole_cannot_be_counted_from_its_part_is_refused_for_repair(
+    decision: DecisionFactory,
+    part: str,
+    refusal: dict[str, str] | None,
+    code: ProblemCode,
+    calls: int,
+) -> None:
+    """US grants, a CRS part with no sector choice, over the DAC1 total, or a whole
+    Search will not count the way the part is counted: the share is refused with a
+    code of its own, which asks the planner to repin the whole and records no
+    decline. Search not answering stays a retry."""
+    surface = WholeCompiles(refusal=refusal)
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block(part), us_2023_block("dac1_total_gross"))
+
+    refused = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part=part,
+        whole="dac1_total_gross",
+    )
+
+    assert refused["code"] == code.value, refused
+    assert len(surface.calls) == calls
+    if code is ProblemCode.SHARE_WHOLE_UNDERIVABLE:
+        assert refused["outcome"] == Outcome.INVALID_INPUT.value
+        assert refused["detail"]["share"] == {
+            "step_id": "share",
+            "whole_id": "whole",
+            "part_spec_id": us_2023_block(part)["spec_id"],
+        }
+    assert load_plan(ctx.state) is None
 
 
 # --- a pin whose identity a search recorded, over the requirement's period ----------

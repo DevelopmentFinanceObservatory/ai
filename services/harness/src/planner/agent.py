@@ -43,6 +43,7 @@ straight off that answer, with nothing here to fetch it back a second time.
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -50,7 +51,9 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 from compiler.sources import block_groups
 from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ChoiceOrigin, ScopeEntry
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.adk.agents import LlmAgent
 from google.adk.planners import BuiltInPlanner
@@ -74,6 +77,7 @@ from pydantic import JsonValue
 from submission.service import (
     COMBINATION_OPTIONS,
     COMBINE_OPTION,
+    SECTOR_AXIS,
     Admission,
     AlignedPin,
     Combination,
@@ -88,6 +92,8 @@ from submission.service import (
     realignments_wanted,
     save_aligned_pin,
     save_searched_pin,
+    sector_slot,
+    share_whole_underivable,
     submit,
     unpinned_wanted,
 )
@@ -1404,7 +1410,11 @@ async def compile_on_basis(
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
     `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
     one dataset.
+
+    A share's whole (`Realignment.whole_of`) is compiled by `compile_whole`.
     """
+    if realignment.whole_of is not None:
+        return await compile_whole(surface, realignment, state=state)
     sources = pin_sources(state)
     source = sources.get(realignment.spec_id)
     block = source.spec_block(realignment.spec_id) if source is not None else None
@@ -1416,7 +1426,10 @@ async def compile_on_basis(
 
     def unservable(reason: str) -> dict[str, object]:
         return basis_unservable(
-            **realignment._asdict(),
+            spec_id=realignment.spec_id,
+            option_ids=realignment.option_ids,
+            requirement_id=realignment.requirement_id,
+            step_id=realignment.step_id,
             reason=reason,
             record=lambda operation: record_unsupported(state, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
@@ -1471,6 +1484,105 @@ async def compile_on_basis(
             option_ids=realignment.option_ids,
             spec_id=spec_id,
             digest=digest,
+        ),
+    )
+    return None
+
+
+async def compile_whole(
+    surface: ToolSurface,
+    realignment: Realignment,
+    *,
+    state: SessionState,
+) -> dict[str, object] | None:
+    """Compile the whole of the share `realignment` names, its part's own dataset over every sector, and hold the pin Search answers.
+
+    The part is the pin `realignment.whole_of`. Posts the part's base
+    identity with the slot its sector choice binds
+    (`submission.service.sector_slot`) set unbound, under the spec_id that
+    identity hashes to, the part's entity groups, and one explicit entry
+    from each of its other choices holding its active option, with the
+    concept of the part's entry on that axis. Search then keeps the part's
+    measure basis, provider scope and region, which an option the whole
+    cannot serve would otherwise leave to Search's default. No model call
+    is made. The answer is shown to the planner as a source of its own,
+    its block marking every posted axis as the planner's
+    (`harness.scope_choices.mark_planner_axes`) so a later search carries
+    none of them, and held as a `submission.service.AlignedPin` in place of
+    the pin `realignment.spec_id` the share divided by.
+
+    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
+    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` when the
+    part offers no sector choice, Search refuses the whole (as
+    `requested_option_unavailable` where it cannot hold an option the part
+    holds), or answers with no one dataset.
+    """
+    part_pin = cast(str, realignment.whole_of)
+    sources = pin_sources(state)
+    source = sources.get(part_pin)
+    block = source.spec_block(part_pin) if source is not None else None
+    scope = part_scope(part_pin, block)
+    slot = sector_slot(scope) if scope is not None else None
+
+    def underivable(reason: str) -> dict[str, object]:
+        return share_whole_underivable(
+            step_id=realignment.step_id,
+            whole_id=realignment.requirement_id,
+            part_spec_id=part_pin,
+            reason=reason,
+        )
+
+    if source is None or block is None or scope is None or slot is None:
+        return underivable(f"Search offers no sector choice on {part_pin} to count every sector of")
+    identity = copy.deepcopy(scope.base.identity)
+    for held in identity.get("slots") or ():
+        if held.get("property") == slot:
+            held["binding"] = {"state": "unbound"}
+    concepts = {entry.axis: entry.concept for entry in scope.entries}
+    entries = [
+        ScopeEntry(
+            axis=choice.axis,
+            option_id=choice.active,
+            provenance="explicit",
+            concept=concepts.get(choice.axis),
+            origin=ChoiceOrigin(choice_id=choice.id),
+        )
+        for choice in scope.choices
+        if choice.axis != SECTOR_AXIS
+    ]
+    try:
+        part = await resolve_definition(
+            surface,
+            spec_id=spec_id_for(canonicalize(identity)),
+            identity=identity,
+            groups=block_groups(block),
+            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
+        )
+    except DefinitionNotResolvedError as exc:
+        if exc.retryable:
+            return _basis_uncompiled(realignment, str(exc))
+        return underivable(
+            f"Search does not count {part_pin}'s dataset over every sector the way the part is "
+            f"counted ({exc.code or 'refused'}): {exc}"
+        )
+    spec = part.get("spec") if part.get("status") == "definite" else None
+    spec_id = spec.get("spec_id") if isinstance(spec, Mapping) else None
+    if not isinstance(spec, Mapping) or not isinstance(spec_id, str):
+        return underivable(f"Search holds no one dataset counting every sector of {part_pin}")
+    digest = resolver_digest({"parts": [dict(part)]})
+    mark_planner_axes(digest, (entry.axis for entry in entries))
+    whole_source = PinSource(
+        block=digest["spec_block"], settled=True, asked_roles=source.asked_roles
+    )
+    save_pin_sources(state, {**sources, spec_id: whole_source})
+    save_aligned_pin(
+        state,
+        AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=(),
+            spec_id=spec_id,
+            digest=digest,
+            whole_of=part_pin,
         ),
     )
     return None
@@ -1593,8 +1705,10 @@ async def with_source_reads(
     requirement's content is made once. A calculation whose inputs are
     counted on different measure bases or provider scopes needs each input
     it names compiled on their shared options, every option of one input in
-    one compile (`BASES_UNALIGNED`, `compile_on_basis`); a pin already
-    compiled on a set of options is asked for once, so a refusal naming one
+    one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a share whose
+    whole counts from another dataset than its part needs the part's own
+    total compiled (`compile_whole`); a pin already
+    compiled on a set of options, or a whole already compiled, is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`_alignment_key`).
     """
@@ -1621,8 +1735,10 @@ async def with_source_reads(
                     return refused
             continue
         wanted = realignments_wanted(result)
-        done = {_alignment_key(pin.origin, pin.option_ids) for pin in aligned_pins(state)}
-        keys = [_alignment_key(item.spec_id, item.option_ids) for item in wanted]
+        done = {
+            _alignment_key(pin.origin, pin.option_ids, pin.whole_of) for pin in aligned_pins(state)
+        }
+        keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_of) for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
         for item, key in zip(wanted, keys, strict=True):
@@ -1634,13 +1750,15 @@ async def with_source_reads(
             done.add(key)
 
 
-def _alignment_key(spec_id: str, option_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
-    """The compile that puts the pin `spec_id` on the options `option_ids`, as a key.
+def _alignment_key(
+    spec_id: str, option_ids: Iterable[str], whole_of: str | None
+) -> tuple[str, tuple[str, ...], str | None]:
+    """The compile that puts the pin `spec_id` on the options `option_ids`, or replaces it with the whole of the part `whole_of`, as a key.
 
     The options are sorted and deduplicated, so one compile naming the same
     options in another order is the same work.
     """
-    return spec_id, tuple(sorted(set(option_ids)))
+    return spec_id, tuple(sorted(set(option_ids))), whole_of
 
 
 def _entity_ask_unbound(referral: Referral | None, candidates: object) -> dict[str, object] | None:

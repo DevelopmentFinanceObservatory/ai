@@ -874,6 +874,16 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
 
     events = _events(second)
     assert events[-1] == "done"
+    # The approved plan leads the resumed stream, once, as the card showed it.
+    assert events[0] == "plan.approved"
+    assert events.count("plan.approved") == 1
+    approved = _frame(second, "plan.approved")
+    assert approved["plan_version_id"] == plan["plan_version_id"]
+    assert approved["version"] == plan["version"]
+    assert approved["title"] == plan["title"]
+    assert [step["label"] for step in approved["steps"]] == [
+        step["label"] for step in plan["steps"]
+    ]
     # The plan's own two steps ran through `tool_surface`, invisibly to this
     # `executor`: it saw the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
@@ -1479,6 +1489,7 @@ async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
 
         events = _events(second)
         assert events[-1] == "plan.proposed"
+        assert "plan.approved" not in events
         versioned = _frame(second, "plan.versioned")
         assert versioned["version"] == 2
         assert versioned["supersedes"] == plan_v1["plan_version_id"]
@@ -1492,6 +1503,8 @@ async def test_amend_yields_plan_versioned_then_a_fresh_proposal() -> None:
         )
 
     assert _events(third)[-1] == "done"
+    assert _events(third).count("plan.approved") == 1
+    assert _frame(third, "plan.approved")["version"] == 2
     # The plan's own steps ran through `tool_surface`; `executor` only saw
     # the hand-back describe the plan's frame, then the chart.
     assert [c["tool"] for c in executor.calls] == ["describe_frame", "write_component"]
@@ -4491,7 +4504,8 @@ async def test_a_stale_approve_gets_the_current_card_and_the_shown_revision_appr
 async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None:
     """A switch the card offers resumes the turn with no approval record;
     the graph revises the plan and offers it on a fresh card. Here the plan
-    states no scope choice, so the same plan comes back with a note."""
+    states no scope choice, so the same plan comes back saying why on the
+    card, with no chat message."""
     app = _app(*_plan())
     async with _client(app) as client:
         plan = await _plan_with_a_choice(app, client)
@@ -4499,11 +4513,12 @@ async def test_a_switch_approves_nothing_and_the_plan_is_offered_again() -> None
 
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     assert conversation.approvals == []
-    assert _events(second)[-2:] == ["message.complete", "plan.proposed"]
+    assert "message.complete" not in _events(second)
+    assert _events(second)[-1] == "plan.proposed"
     again = _frame(second, "plan.proposed")
     assert again["interrupt_id"] != plan["interrupt_id"]
     assert again["revision"] == plan["revision"]
-    assert "nothing changed" in _frame(second, "message.complete")["text"]
+    assert again["switch_failed"]["reason"] == "That choice is no longer on the plan."
     assert conversation.turn_user_message.endswith("(then: count health and population)")
 
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 import functools
 import logging
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -55,7 +56,7 @@ from compiler.sources import (
 )
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
-from harness.scope_choices import PartScope, ScopeChoice, option_axis, planner_axes
+from harness.scope_choices import PartScope, ScopeChoice, SlotBinding, option_axis, planner_axes
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -92,11 +93,13 @@ from planner.plan import (
     OneYearRead,
     PinSource,
     Plan,
+    QuotientRequirement,
     RankRequirement,
     RecordedDefinition,
     ResolvedBy,
     ScopeOptionState,
     SessionState,
+    ShareOfRequirement,
     SumOfRequirement,
     UnsupportedOperation,
     UnsupportedPlanError,
@@ -461,7 +464,13 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         settled,
         evidence_requirements,
         previous=previous,
-        scopes=scope_choice_decisions(pins),
+        scopes=_with_stated_wholes(
+            scope_choice_decisions(pins),
+            _stated_whole_decisions(
+                _requirements_after(previous, evidence_requirements, removed_evidence_requirements),
+                shown=pins,
+            ),
+        ),
         removed=removed_decisions,
     )
     requirements_after = _requirements_after(
@@ -3194,6 +3203,11 @@ _ALIGNED_REASONS: dict[str, str] = {
     "provider": "so that every input of the calculation counts the same spending",
 }
 
+# The rationale of a scope decision Search's default settled. The planner
+# reads it; the plan card shows no reason for it, since it says only that
+# nobody chose (`harness.studio_translate`).
+SEARCH_DEFAULT_RATIONALE = "Search's default for this question."
+
 # What each scope decision asks, by the axis its choice settles.
 _SCOPE_QUESTIONS: dict[str, str] = {
     "sector": "Which sector codes the figures count.",
@@ -3287,7 +3301,7 @@ def _scope_decision(
     elif choice.provenance == "carried":
         rationale = f"The user chose {active.label} earlier in the conversation."
     else:
-        rationale = "Search's default for this question."
+        rationale = SEARCH_DEFAULT_RATIONALE
     try:
         return Decision(
             slot=scope_choice_slot(pin, choice.axis),
@@ -3331,8 +3345,9 @@ def _scope_decisions(
     Runs after the model's decisions and the measure decisions
     (`_measure_decisions`), so those come first under the cap. Each dataset
     requirement of `evidence_requirements` pinning a spec_id of `scopes`
-    cites that pin's scope decisions; one citing a scope decision for a pin
-    it no longer states has that citation dropped. A decision whose slot is
+    cites that pin's scope decisions; one citing a scope decision, or a
+    stated whole's (`_stated_whole_decisions`), for a pin it no longer
+    states has that citation dropped. A decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
     states its choice. The count is every slot this call states and every
@@ -3367,7 +3382,7 @@ def _scope_decisions(
             for slot in requirement.decision_ids
             if not (
                 (decision := known.get(slot)) is not None
-                and is_scope_choice(decision)
+                and (is_scope_choice(decision) or _is_stated_whole(decision))
                 and decision.fixes is not None
                 and decision.fixes.source_spec_id != requirement.source_spec_id
             )
@@ -3454,6 +3469,15 @@ _MIXED: dict[str | None, str] = {
     None: "counted on different measure bases or provider scopes",
 }
 
+# The calculations whose inputs are counted on one provider scope: those that
+# divide or add their inputs. A comparison or join sets its inputs side by
+# side, each keeping its own provider scope (`_aligns`).
+_PROVIDER_ALIGNED = (ShareOfRequirement, QuotientRequirement, SumOfRequirement)
+
+# The axis whose choice binds the slot a share's part narrows its dataset on,
+# unbound in the whole compiled for it (`planner.agent.compile_on_basis`).
+SECTOR_AXIS = "sector"
+
 
 class AlignedPin(StrictModel):
     """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
@@ -3462,12 +3486,22 @@ class AlignedPin(StrictModel):
     scope, sorted (`Realignment.option_ids`). `digest` is Search's answer
     as a search's digest (`harness.tool_contracts.resolver_digest`), which
     the planner seam stores as a reading of the conversation.
+
+    A share's whole (`whole_of` set) is the total of the dataset of the part
+    `whole_of`, compiled in place of the pin `origin` the share divided by,
+    with no option moved (`Realignment.whole_of`).
     """
 
     origin: str
     option_ids: tuple[str, ...]
     spec_id: str
     digest: dict[str, Any]
+    whole_of: str | None = None
+
+    @property
+    def key(self) -> tuple[str, tuple[str, ...], str | None]:
+        """What this pin was compiled for: its origin, its options and the part it is the whole of."""
+        return self.origin, self.option_ids, self.whole_of
 
 
 def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
@@ -3476,12 +3510,8 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
 
 
 def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled from the same origin on the same options."""
-    kept = [
-        held
-        for held in aligned_pins(state)
-        if (held.origin, held.option_ids) != (pin.origin, pin.option_ids)
-    ]
+    """Hold `pin`, in place of any pin compiled for the same thing (`AlignedPin.key`)."""
+    kept = [held for held in aligned_pins(state) if held.key != pin.key]
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
 
 
@@ -3574,16 +3604,24 @@ class Realignment(NamedTuple):
     options to compile it on, one per axis it moves on, sorted so one set
     of options has one form. `requirement_id` is the dataset requirement
     pinning it and `step_id` the calculation that wants its first option.
+
+    With `whole_of` set, the input is the whole of the share `step_id`, and
+    `spec_id` is replaced by the total of the dataset of `whole_of`, the
+    share's part, with no option moved (`_share_wholes`).
     """
 
     spec_id: str
     option_ids: tuple[str, ...]
     requirement_id: str
     step_id: str
+    whole_of: str | None = None
 
     def detail(self) -> dict[str, object]:
-        """This realignment as a refusal's detail states it."""
-        return {**self._asdict(), "option_ids": list(self.option_ids)}
+        """This realignment as a refusal's detail states it, `whole_of` only when set."""
+        detail: dict[str, object] = {**self._asdict(), "option_ids": list(self.option_ids)}
+        if self.whole_of is None:
+            del detail["whole_of"]
+        return detail
 
 
 def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
@@ -3597,6 +3635,7 @@ def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
             option_ids=tuple(entry["option_ids"]),
             requirement_id=entry["requirement_id"],
             step_id=entry["step_id"],
+            whole_of=entry.get("whole_of"),
         )
         for entry in detail.get("realign") or ()
     ]
@@ -3714,6 +3753,15 @@ def _aligned_bases(
     `OPERATION_UNSUPPORTED`, since one basis or provider scope cannot be
     guaranteed for it.
 
+    A share whose part binds a sector and whose whole counts from another
+    dataset takes as its whole the part's own dataset over every sector
+    (`_share_wholes`), unless the question names the whole's source: that
+    whole stands, keeps its own provider scope, and a decision says the
+    two sides count different providers (`_stated_whole_decisions`). A whole not compiled yet answers `BASES_UNALIGNED`
+    naming it (`Realignment.whole_of`), and one compiled already
+    (`aligned`) pins the share's denominator. A part with no sector choice
+    to unbind answers `SHARE_WHOLE_UNDERIVABLE`.
+
     A calculation reading several inputs (a comparison, sum, share, quotient
     or join) contrasts sector and region, and keeps those as stated. On
     each axis of `_ALIGNED_AXES`, the measure basis and the provider scope
@@ -3722,7 +3770,8 @@ def _aligned_bases(
     them (explicit or carried entries naming different options, an entry
     this planner compiled excluded, as `_InputBasis.stated` reads them).
     Otherwise its dataset inputs with a choice on the axis are counted on
-    one option. Calculations sharing an input, such as a sum read by a
+    one option. Only a share, quotient or sum aligns the provider scope; a
+    comparison or join keeps each input's own (`_aligns`). Calculations sharing an input, such as a sum read by a
     share, form one group and take one option for every input any of them
     reaches (`_shared_basis`): the one the user stated on any of them, else
     the one the narrowest part is counted on (`_part_rank`), the first such
@@ -3773,17 +3822,38 @@ def _aligned_bases(
     }
     requirements = [_pinned(requirement, found) for requirement in requirements]
     evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
-    origins = {pin.spec_id: pin.origin for pin in aligned}
-    compiled = {(pin.origin, pin.option_ids): pin.spec_id for pin in aligned}
+    steps = [step for step in requirements if len(inputs_of(step)) >= 2]
+    try:
+        wholes = _share_wholes(
+            requirements,
+            shown=shown,
+            compiled={(pin.origin, pin.whole_of): pin.spec_id for pin in aligned if pin.whole_of},
+        )
+    except _Unservable as exc:
+        return exc.problem
+    requirements = [_pinned(requirement, wholes) for requirement in requirements]
+    found |= wholes
+    origins = {pin.spec_id: pin.origin for pin in aligned if pin.whole_of is None}
+    compiled = {
+        (pin.origin, pin.option_ids): pin.spec_id for pin in aligned if pin.whole_of is None
+    }
     by_axis = {
         axis: _input_bases(requirements, shown=shown, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
+    }
+    # A whole the question names keeps the providers it counts (`_share_wholes`).
+    stated = {
+        share.whole.id for share in _cross_dataset_shares(requirements, shown=shown) if share.stated
+    }
+    by_axis[_PROVIDER_AXIS] = {
+        requirement_id: basis
+        for requirement_id, basis in by_axis[_PROVIDER_AXIS].items()
+        if requirement_id not in stated
     }
     reads: dict[str, Sequence[str]] = {
         input_id: () for requirement in requirements for input_id in inputs_of(requirement)
     }
     reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
-    steps = [step for step in requirements if len(inputs_of(step)) >= 2]
     unsettled = {
         requirement.id: pin
         for requirement in requirements
@@ -3795,7 +3865,7 @@ def _aligned_bases(
     unpinned: dict[str, Unpinned] = {}
     for step in steps:
         under = reached(step.id, reads)
-        if not any(bases.keys() & under for bases in by_axis.values()):
+        if not any(bases.keys() & under for axis, bases in by_axis.items() if _aligns(step, axis)):
             continue
         for requirement_id in sorted(unsettled.keys() & under):
             return _basis_unservable(
@@ -3814,8 +3884,6 @@ def _aligned_bases(
                 unpinned[requirement_id] = _unpinned(unsearched[requirement_id], step.id)
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
-    if all(len(bases) < 2 for bases in by_axis.values()):
-        return _with_found(evidence_requirements, requirements, found)
     try:
         targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
     except _Unservable as exc:
@@ -3848,6 +3916,8 @@ def _alignment_targets(
     for axis, bases in by_axis.items():
         aligning: list[tuple[EvidenceRequirement, list[_InputBasis], str]] = []
         for step in steps:
+            if not _aligns(step, axis):
+                continue
             under = reached(step.id, reads)
             inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
             if len(inputs) < 2:
@@ -3956,7 +4026,7 @@ def _realigned_pins(
 
 
 class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bases` answers
-    """Carries the `OPERATION_UNSUPPORTED` problem out of an alignment helper."""
+    """Carries the refusal `_aligned_bases` answers out of an alignment helper."""
 
     def __init__(self, problem: dict[str, object]) -> None:
         super().__init__(problem.get("code"))
@@ -3989,6 +4059,292 @@ def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
     if len(stated) > 1:
         return None
     return next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
+
+
+def _aligns(step: EvidenceRequirement, axis: str) -> bool:
+    """Whether `step` counts its inputs on one option of `axis`: every calculation
+    on the measure basis, and only a share, quotient or sum on the provider scope
+    (`_PROVIDER_ALIGNED`)."""
+    return axis != _PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
+
+
+@dataclass(frozen=True)
+class _CrossDatasetShare:
+    """A share whose whole counts from another dataset than its part (`_cross_dataset_shares`).
+
+    `part` and `whole` are the dataset requirements its numerator and
+    denominator read, and `part_block` and `whole_block` their pins' spec
+    blocks.
+    """
+
+    step: ShareOfRequirement
+    part: DatasetRequirement
+    whole: DatasetRequirement
+    part_block: Mapping[str, Any] | None
+    whole_block: Mapping[str, Any] | None
+
+    @property
+    def stated(self) -> bool:
+        """Whether the question names the whole's source in its own words (`DatasetRequirement.source`)."""
+        return self.whole.source is not None and not self.whole.source_exclude
+
+
+def _cross_dataset_shares(
+    requirements: Sequence[EvidenceRequirement], *, shown: Mapping[str, PinSource]
+) -> list[_CrossDatasetShare]:
+    """Each share of `requirements` whose whole counts from another dataset than its part.
+
+    A share's part and whole are the dataset inputs its numerator and
+    denominator read, each through calculations of one input, and the
+    whole's inputs read by this share alone. Its whole counts from another
+    dataset when the part binds a sector or restriction (`_part_rank`), the
+    two bind the same parties, and their spec blocks name different
+    datasets (`_dataset`), as CRS bilateral health aid over a DAC1 total,
+    which also counts core contributions to multilaterals.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    readers = Counter(
+        input_id for requirement in requirements for input_id in inputs_of(requirement)
+    )
+    shares: list[_CrossDatasetShare] = []
+    for step in requirements:
+        if not isinstance(step, ShareOfRequirement) or step.pools_its_own_axis:
+            continue
+        part = _side_dataset(step.numerator.input_id, by_id)
+        whole = _side_dataset(step.denominator.input_id, by_id, readers=readers)
+        if part is None or whole is None or part.id == whole.id:
+            continue
+        if part.source_spec_id is None or whole.source_spec_id is None:
+            continue
+        part_block = _pin_block(part.source_spec_id, shown)
+        whole_block = _pin_block(whole.source_spec_id, shown)
+        if _whole_from_another_dataset(part_block, whole_block):
+            shares.append(_CrossDatasetShare(step, part, whole, part_block, whole_block))
+    return shares
+
+
+def _share_wholes(
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    shown: Mapping[str, PinSource],
+    compiled: Mapping[tuple[str, str], str],
+) -> dict[str, str]:
+    """The pin of each whole a share takes from its part's dataset, by requirement id (`_aligned_bases`).
+
+    A share whose whole counts from another dataset (`_cross_dataset_shares`)
+    divides figures two datasets count differently. Unless the question
+    names the whole's source (`_CrossDatasetShare.stated`), which stands,
+    its whole is the part's own dataset with the sector slot unbound and
+    every other choice held, so it counts the same donor, recipient, basis,
+    years and providers as the part. `compiled` holds those wholes by the
+    pin they replace and the part's pin.
+
+    Raises:
+        _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
+            yet (`Realignment.whole_of`), or `SHARE_WHOLE_UNDERIVABLE`, when
+            a part offers no sector choice (`sector_slot`) to unbind.
+    """
+    wanted: list[Realignment] = []
+    wholes: dict[str, str] = {}
+    for share in _cross_dataset_shares(requirements, shown=shown):
+        if share.stated:
+            continue
+        part, whole = share.part, share.whole
+        part_pin, whole_pin = cast(str, part.source_spec_id), cast(str, whole.source_spec_id)
+        scope = part_scope(part_pin, share.part_block)
+        if scope is None or sector_slot(scope) is None:
+            raise _Unservable(
+                share_whole_underivable(
+                    step_id=share.step.id,
+                    whole_id=whole.id,
+                    part_spec_id=part_pin,
+                    reason=f"Search offers no sector choice on {part.id!r} to count every sector of",
+                )
+            )
+        held = compiled.get((whole_pin, part_pin))
+        if held is None:
+            wanted.append(Realignment(whole_pin, (), whole.id, share.step.id, whole_of=part_pin))
+        else:
+            wholes[whole.id] = held
+    if wanted:
+        raise _Unservable(_bases_unaligned(wanted, {}))
+    return wholes
+
+
+def _stated_whole_decisions(
+    requirements: Sequence[EvidenceRequirement], *, shown: Mapping[str, PinSource]
+) -> dict[str, tuple[Decision, ...]]:
+    """The decision each share whose question names its whole's source states, by the whole's pin.
+
+    Such a share keeps the whole the question names over another dataset
+    than its part's (`_share_wholes`), so its two sides count different
+    providers' spending. The decision says so in the plan, from what each
+    side's scope records count: the active provider option's label, else
+    the dataset the block names. It is the planner's, offers the part's own
+    dataset over every sector as the other option, and is cited by the
+    whole's requirement as a scope decision is (`_scope_decisions`).
+    """
+    decisions: dict[str, tuple[Decision, ...]] = {}
+    for share in _cross_dataset_shares(requirements, shown=shown):
+        if not share.stated:
+            continue
+        whole_pin = cast(str, share.whole.source_spec_id)
+        part_dataset = _dataset_label(share.part_block)
+        named = f"{share.whole.source}, as the question names it"
+        try:
+            decision = Decision(
+                slot=_stated_whole_slot(whole_pin),
+                description="Which total the share divides by.",
+                options=(named, f"the {part_dataset} total over every sector"),
+                chosen=named,
+                resolved_by=ResolvedBy.PLANNER_DEFAULT,
+                rationale=(
+                    f"The question names {share.whole.source} as the whole. It counts "
+                    f"{_counts(share.whole_block)}, and {share.part.id!r} counts "
+                    f"{_counts(share.part_block)}, so the two sides of {share.step.id!r} count "
+                    "different providers' spending."
+                ),
+                fixes=DecisionFixes(source_spec_id=whole_pin),
+            )
+        except ValidationError as exc:
+            logger.warning("stated whole not noted: spec_id=%s: %s", whole_pin, exc)
+            continue
+        decisions[whole_pin] = (*decisions.get(whole_pin, ()), decision)
+    return decisions
+
+
+def _stated_whole_slot(spec_id: str) -> str:
+    """The `Decision.slot` of the decision a share states for the whole `spec_id` its question names."""
+    return f"share_whole_{spec_id}"
+
+
+def _is_stated_whole(decision: Decision) -> bool:
+    """Whether `decision` is one `_stated_whole_decisions` wrote."""
+    fixes = decision.fixes
+    return (
+        fixes is not None
+        and fixes.source_spec_id is not None
+        and decision.slot == _stated_whole_slot(fixes.source_spec_id)
+    )
+
+
+def _with_stated_wholes(
+    scopes: Mapping[str, tuple[Decision, ...]], stated: Mapping[str, tuple[Decision, ...]]
+) -> dict[str, tuple[Decision, ...]]:
+    """`scopes`, each pin's scope decisions, with the decisions `stated` names for it after them."""
+    return {**scopes, **{pin: (*scopes.get(pin, ()), *added) for pin, added in stated.items()}}
+
+
+def _dataset_label(block: Mapping[str, Any] | None) -> str:
+    """The reader's name of the dataset `block` counts from, its provenance label; "part's dataset" when it names none."""
+    facets = ((block or {}).get("resolved") or {}).get("facets") or {}
+    label = (facets.get("provenance") or {}).get("label")
+    return label if isinstance(label, str) and label else "part's dataset"
+
+
+def _counts(block: Mapping[str, Any] | None) -> str:
+    """What `block` counts, in its scope records' words: its active provider option's
+    label and the dataset it counts from, or the dataset alone where it states no provider."""
+    scope = part_scope(str((block or {}).get("spec_id")), block)
+    provider = (
+        next((c.active_option for c in scope.choices if c.axis == _PROVIDER_AXIS), None)
+        if scope is not None
+        else None
+    )
+    dataset = _dataset_label(block)
+    return f"{provider.label} from {dataset}" if provider is not None else f"what {dataset} reports"
+
+
+def _side_dataset(
+    input_id: str,
+    by_id: Mapping[str, EvidenceRequirement],
+    *,
+    readers: Mapping[str, int] | None = None,
+) -> DatasetRequirement | None:
+    """The dataset requirement `input_id` reads through calculations of one input, or `None`
+    when it reads several; with `readers`, also `None` when any of them is read more than once."""
+    requirement = by_id.get(input_id)
+    while requirement is not None:
+        if readers is not None and readers.get(requirement.id, 0) != 1:
+            return None
+        if isinstance(requirement, DatasetRequirement):
+            return requirement
+        inputs = inputs_of(requirement)
+        if len(inputs) != 1:
+            return None
+        requirement = by_id.get(inputs[0])
+    return None
+
+
+def _pin_block(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | None:
+    """The spec block of `pin` among the datasets the planner was shown, `None` when not shown."""
+    source = shown.get(pin)
+    return source.spec_block(pin) if source is not None else None
+
+
+def _base_identity(block: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """The identity `block` resolved before its scope compiled, else its definition's; empty when it states neither."""
+    resolved = (block or {}).get("resolved") or {}
+    base = (resolved.get("scope_choices") or {}).get("base") or {}
+    return base.get("identity") or ((block or {}).get("definition") or {}).get("identity") or {}
+
+
+def _dataset(block: Mapping[str, Any] | None) -> str | None:
+    """The dataset `block` counts from, the provenance its facets name (`provenance/OECDDAC1`); `None` when it names none."""
+    facets = ((block or {}).get("resolved") or {}).get("facets") or {}
+    ref = (facets.get("provenance") or {}).get("ref")
+    return ref if isinstance(ref, str) else None
+
+
+def _whole_from_another_dataset(
+    part: Mapping[str, Any] | None, whole: Mapping[str, Any] | None
+) -> bool:
+    """Whether a share of the part `part` in the whole `whole`, two spec blocks, takes its whole from another dataset (`_share_wholes`).
+
+    The rule compares datasets, so it holds whatever provider scope Search
+    states on either: the part binds a sector or restriction, both bind the
+    same parties, and they name different datasets.
+    """
+    part_identity, whole_identity = _base_identity(part), _base_identity(whole)
+    if _part_rank(part_identity) < 2:
+        return False
+    if (part_identity.get("entities") or {}) != (whole_identity.get("entities") or {}):
+        return False
+    part_dataset, whole_dataset = _dataset(part), _dataset(whole)
+    return part_dataset is not None and whole_dataset is not None and part_dataset != whole_dataset
+
+
+def sector_slot(scope: PartScope) -> str | None:
+    """The identity slot `scope`'s sector choice binds, `None` when it offers no sector
+    choice binding one slot of its base identity."""
+    choice = next((c for c in scope.choices if c.axis == SECTOR_AXIS), None)
+    if choice is None:
+        return None
+    slots = {o.binding.slot for o in choice.options if isinstance(o.binding, SlotBinding)}
+    held = {slot.get("property") for slot in scope.base.identity.get("slots") or ()}
+    return next(iter(slots)) if len(slots) == 1 and slots <= held else None
+
+
+def share_whole_underivable(
+    *, step_id: str, whole_id: str, part_spec_id: str, reason: str
+) -> dict[str, object]:
+    """Return the `SHARE_WHOLE_UNDERIVABLE` problem for a share whose whole cannot be counted from its part's dataset.
+
+    The planner can repair it: pin a whole from the part's dataset, or
+    divide a part Search can count every sector of. `part_spec_id` is the
+    part's pin and `reason` says why no whole was compiled, as a sentence.
+    """
+    return problem(
+        ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+        f"{step_id!r} divides its part, pinned to {part_spec_id}, by {whole_id!r}, a total "
+        "from another dataset. A share's whole is counted from its part's own dataset over "
+        "every sector, so both count the same donors, recipients, measure basis and "
+        f"providers. {reason}. Pin as {whole_id!r} a total from {part_spec_id}'s dataset, with "
+        "the same parties, years, measure basis and provider scope, or divide a part Search "
+        "offers a sector choice on.",
+        outcome=Outcome.INVALID_INPUT,
+        detail={"share": {"step_id": step_id, "whole_id": whole_id, "part_spec_id": part_spec_id}},
+    )
 
 
 def _pinned(requirement: EvidenceRequirement, pins: Mapping[str, str]) -> EvidenceRequirement:
@@ -4046,6 +4402,11 @@ def _bases_unaligned(
     """
 
     def move(item: Realignment) -> str:
+        if item.whole_of is not None:
+            return (
+                f"{item.requirement_id!r}, the whole of {item.step_id!r}, is wanted as the "
+                f"total over every sector of {item.whole_of}, its part's dataset"
+            )
         bases = [
             (by_axis[option_axis(option_id)][item.requirement_id], option_id)
             for option_id in item.option_ids

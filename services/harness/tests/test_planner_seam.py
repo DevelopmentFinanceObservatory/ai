@@ -50,7 +50,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from harness import planner_seam
+from harness import plan_display, planner_seam
 from harness.graph import switch
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -74,7 +74,13 @@ from harness.planner_seam import (
     _RunTracker,
 )
 from harness.scripted import use_compiled_proposals
-from harness.sentences import SeamCode, referral_sentence, refusal_sentence
+from harness.sentences import (
+    PlanWords,
+    SeamCode,
+    referral_reason,
+    referral_sentence,
+    refusal_sentence,
+)
 from harness.settings import Settings
 from harness.studio_state import ConversationState
 from harness.tool_contracts import reading_facts, resolver_digest
@@ -142,6 +148,7 @@ from pydantic import Field
 from submission.service import scope_choice_decisions
 from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
+from translator.referral import ReferralKind
 
 from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, TOTAL_NET, BasisCompiles, basis_block
 from .search_results import search_result_parts
@@ -2403,7 +2410,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
                 "reason": "entity_required",
                 "repeated": True,
             },
-            "'cmp'",
+            "the comparison",
         ),
         (
             {
@@ -2413,7 +2420,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
                 "reason": "used 4 discovery calls",
                 "budget_spent": True,
             },
-            "'gdp_gtm'",
+            "GDP of Guatemala",
         ),
     ],
     ids=["internal", "repeated", "budget-spent"],
@@ -2423,16 +2430,18 @@ def test_a_closing_referral_ends_the_entry_on_the_proposal_carrying_it(
 ) -> None:
     """An internal failure, a translation that failed the way it failed
     before, or a data service that timed out until the discovery budget was
-    spent ends the entry as a final refusal naming what stopped it, as soon
-    as a proposal's translation answers with it."""
+    spent ends the entry as a final refusal naming what stopped it, a
+    requirement by its reader's name, as soon as a proposal's translation
+    answers with it."""
     tracker = _RunTracker()
     _track_proposal(tracker, referral)
 
     assert tracker.ready_to_break
     assert tracker.submitted is None
     assert tracker.refused is not None
-    assert named in refusal_sentence(tracker.refused)
-    assert PlannerSeam._refused(tracker.refused)["refused"]["final"] is True
+    names = {"cmp": "the comparison", "gdp_gtm": "GDP of Guatemala"}
+    assert named in refusal_sentence(tracker.refused, words=PlanWords(names=names))
+    assert PlannerSeam._refused(tracker.refused, words=PlanWords())["refused"]["final"] is True
 
 
 _NOT_CALLED = "'search' was not called: the planner entry has no time left for it"
@@ -3134,7 +3143,10 @@ async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_refer
 
     referred = {"kind": "no_data", "requirement_id": "gdp_gtm"}
     assert result["refused"] == {
-        "text": refusal_sentence({"code": SeamCode.PLAN_NOT_READY, "detail": referred}),
+        "text": refusal_sentence(
+            {"code": SeamCode.PLAN_NOT_READY, "detail": referred},
+            words=plan_display.plan_words(draft),
+        ),
         "final": False,
         "code": SeamCode.PLAN_NOT_READY,
     }
@@ -4545,6 +4557,92 @@ async def test_a_revision_repins_the_plan_and_its_scope_decisions_follow_with_no
     assert result["summary"]["revision"] == plan_revision(revised)
 
 
+async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_reason(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A translation that refers the revised plan back (here, the pin it
+    moved to was not found again) ends the revision as a planner entry ending
+    on that referral would, with `plan_not_ready` and the referral's reason,
+    since no model is there to settle it."""
+    old, new = "spec_" + "c" * 32, "spec_" + "d" * 32
+    scope = _switchable_scope()
+    shown = {
+        spec_id: PinSource(
+            block={"spec_id": spec_id, "resolved": {"scope_choices": s}}, settled=True
+        )
+        for spec_id, s in ((old, scope), (new, _sector_switched(scope)))
+    }
+    translated = _translated_plan(decision, requirement, derived_requirement)
+    dataset = next(r for r in translated.evidence_requirements if isinstance(r, DatasetRequirement))
+    plan = Plan.model_validate(
+        {
+            **translated.model_dump(),
+            "evidence_requirements": [
+                dataset.model_copy(update={"source_spec_id": old}) if r.id == dataset.id else r
+                for r in translated.evidence_requirements
+            ],
+        }
+    )
+    kind = ReferralKind.PINNED_SOURCE_NOT_FOUND
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {
+            "kind": kind.value,
+            "outcome": "choice_required",
+            "requirement_id": dataset.id,
+            "reason": f"{dataset.id!r} pins {new!r}, which discovery did not find.",
+        }
+
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=FixtureSurface(schemas=[]),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+
+    reading = SearchReading.from_part(
+        {"variable": "health aid", "status": "definite", "spec_id": new, "scope": scope}
+    )
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        save_pin_sources(cast(SessionState, ctx.state), shown)
+        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+        return await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[
+                dataset.model_copy(update={"source_spec_id": new}).model_dump(mode="json")
+            ],
+            inherits={new: old},
+        )
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="referred_wf", edges=[(START, node(_node, name="revise"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    refused = result["refused"]
+    assert (refused["code"], refused["final"]) == (SeamCode.PLAN_NOT_READY, False)
+    assert refused["text"].startswith('No plan was made for "health aid": ')
+    assert refused["reason"] == f'For "health aid", {referral_reason(kind)}.'
+    assert referral_reason(kind) in refused["text"]
+    assert dataset.id not in refused["text"]
+
+
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(
     decision: Any,
 ) -> None:
@@ -4623,7 +4721,9 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
             and d.fixes.source_spec_id == TOTAL_GROSS
         ]
         readings = switch._readings(ctx)
-        pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
+        pin, reading, scope, choice = switch._target(
+            row, to_origin={}, readings=readings, choice_id="unused", option_id="unused"
+        )
         return {
             "stored": [(r.spec_id, r.planner_axes) for r in readings],
             "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],

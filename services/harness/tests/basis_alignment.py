@@ -242,3 +242,87 @@ class ProviderCompiles:
                 choice["provenance"] = "explicit"
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+# Search's answers for the United States in 2023 as dev Search gave them: the CRS
+# bilateral health part, its inclusive form, the DAC1 total counted gross, the two
+# parts' wholes and a grants part with no sector choice, each a one-part
+# envelope's part, by name.
+US_2023: dict[str, dict[str, Any]] = json.loads(
+    (Path(__file__).parent / "fixtures" / "share_whole_us_2023.json").read_text()
+)
+
+
+def us_2023_block(name: str) -> dict[str, Any]:
+    """The spec block of `US_2023`'s part `name`."""
+    return US_2023[name]["spec"]
+
+
+def dac1_with_contributions() -> dict[str, Any]:
+    """`US_2023`'s DAC1 total counted gross with the provider choice the dfo-apis
+    provider change gives a DAC1 total (`search.scope.provider._contributions_table`
+    there): core contributions to multilaterals as its one available option, the
+    bilateral and inclusive scopes unavailable with `counts_core_contributions`."""
+    block = json.loads(json.dumps(us_2023_block("dac1_total_gross")))
+    scope = block["resolved"]["scope_choices"]
+    published = {
+        "status": "unavailable",
+        "code": "counts_core_contributions",
+        "detail": {"dataset": "provenance/OECDDAC1"},
+    }
+    scope["choices"].append(
+        {
+            "id": f"{scope['id']}:provider",
+            "axis": "provider",
+            "rule": "contribution_total",
+            "provenance": "default",
+            "active": "provider:contributions",
+            "options": [
+                {
+                    "option_id": f"provider:{value}",
+                    "label": label,
+                    "binding": {"kind": "provider", "scope": value},
+                    "availability": availability,
+                }
+                for value, label, availability in (
+                    ("bilateral", "bilateral flows only", published),
+                    ("inclusive", "bilateral plus imputed multilateral", published),
+                    (
+                        "contributions",
+                        "bilateral plus core contributions to multilaterals",
+                        {"status": "available", "detail": {}},
+                    ),
+                )
+            ],
+        }
+    )
+    return block
+
+
+class WholeCompiles:
+    """A tool surface whose `resolve_definition` answers the whole of the US health
+    part as Search recorded it, `whole` for a bilateral provider entry and
+    `whole_inclusive` for an inclusive one, or refuses with `refusal` when given,
+    recording each call's arguments in `calls`."""
+
+    def __init__(self, *, refusal: Mapping[str, Any] | None = None) -> None:
+        self.calls: list[Mapping[str, Any]] = []
+        self.refusal = refusal
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        del on_progress
+        assert tool.name == "resolve_definition", tool
+        self.calls.append(arguments)
+        if self.refusal is not None:
+            return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
+        (provider,) = [
+            e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
+        ]
+        name = {"provider:bilateral": "whole", "provider:inclusive": "whole_inclusive"}[provider]
+        part = US_2023[name]
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})

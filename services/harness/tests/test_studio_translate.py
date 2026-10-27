@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -49,14 +50,20 @@ from harness.studio_translate import (
     _stream_fatal,
     _timeout_refusal,
     _Translator,
+    plan_approved,
 )
 from harness.tool_contracts import HarnessCode, ResolverError
 from harness.wire import (
     CompositionActor,
     MessageComplete,
     MessageDelta,
+    PlanAction,
     PlanAsk,
+    PlanDecision,
     PlanDecisionOption,
+    PlanMoved,
+    PlanProposed,
+    PlanStep,
     StepStatus,
 )
 from planner.agent import COMBINATION_OPTIONS
@@ -351,7 +358,8 @@ def test_a_scope_decision_on_the_card_carries_its_choice_and_every_option() -> N
             years=[(2011, 2024)],
         ),
     ]
-    assert (basis.reason, basis.resolved_by) == ("Search's default for this question.", "default")
+    # A reason saying only that Search's default holds is left off the card.
+    assert (basis.reason, basis.resolved_by) == ("", "default")
     assert frame.actions == ["approve", "amend", "reject", "switch"]
     assert frame.moved is None
     # What a switch on this card may name: every shown choice, with its
@@ -383,6 +391,107 @@ def test_a_plan_a_switch_offers_says_what_else_moved_and_a_plain_plan_offers_no_
     assert [entry.model_dump() for entry in frame.moved] == [moved]
     assert frame.actions == ["approve", "amend", "reject"]
     assert translator._conversation.pending[frame.interrupt_id].choices == {}
+
+
+def test_a_plan_offered_again_after_a_failed_switch_names_the_option_and_why() -> None:
+    """The `switch` node's payload for a switch that did not apply: the card
+    carries `switch_failed` so the site shows the note on the row the user
+    switched, and no chat message repeats it."""
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+    note = (
+        "Official development assistance would then count different providers' spending "
+        "from health aid."
+    )
+    failed = {
+        "choice_id": "spec_" + "e" * 32 + ":provider",
+        "option_id": "provider:inclusive",
+        "code": "operation_unsupported",
+        "reason": note,
+    }
+    payload = {
+        **plan.model_dump(mode="json"),
+        "revision": plan_revision(plan),
+        "switch_failed": failed,
+    }
+
+    (frame,) = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
+
+    assert frame.switch_failed is not None
+    assert frame.switch_failed.model_dump() == failed
+    assert frame.version == plan.version
+
+
+def test_an_approved_plan_states_the_card_the_user_saw() -> None:
+    """Title, summary, step labels and, for each scope choice, its short name
+    and the option it holds; a choice the switch moved says what it held
+    before, a planner decision is no choice."""
+
+    def scope(choice_id: str, question: str, held: str) -> PlanDecision:
+        return PlanDecision(
+            id=f"d_{question}",
+            question=question,
+            chosen=held,
+            reason="because",
+            resolved_by="user",
+            choice_id=choice_id,
+            active_option_id=f"{choice_id}:held",
+            options=[
+                PlanDecisionOption(option_id=f"{choice_id}:held", label=held, status="available"),
+                PlanDecisionOption(option_id=f"{choice_id}:other", label="x", status="available"),
+            ],
+        )
+
+    card = PlanProposed(
+        event="plan.proposed",
+        seq=3,
+        interrupt_id="int_1",
+        plan_version_id="plan_1",
+        version=2,
+        title="Research plan",
+        summary="Gross aid to Kenya, 2020 to 2024.",
+        steps=[
+            PlanStep(id="s1", label="Fetch aid", description="detail"),
+            PlanStep(id="s2", label="Sum it", gives_answer=True),
+        ],
+        actions=[PlanAction.APPROVE],
+        decisions=[
+            scope("c_basis", "Basis", "gross disbursements"),
+            scope("c_region", "Region", "Africa's countries only"),
+            PlanDecision(
+                id="d_plan", question="Chart", chosen="line", reason="r", resolved_by="default"
+            ),
+        ],
+        revision="rev_1",
+        moved=[
+            PlanMoved(
+                choice_id="c_region",
+                from_label="Africa incl. regional buckets",
+                to_label="Africa's countries only",
+                reason="r",
+            )
+        ],
+    )
+
+    frame = plan_approved(card, seq=9)
+
+    assert frame.model_dump(mode="json", exclude_none=True) == {
+        "event": "plan.approved",
+        "seq": 9,
+        "plan_version_id": "plan_1",
+        "version": 2,
+        "revision": "rev_1",
+        "title": "Research plan",
+        "summary": "Gross aid to Kenya, 2020 to 2024.",
+        "steps": [{"label": "Fetch aid"}, {"label": "Sum it", "gives_answer": True}],
+        "choices": [
+            {"question": "Basis", "chosen": "gross disbursements"},
+            {
+                "question": "Region",
+                "chosen": "Africa's countries only",
+                "changed_from": "Africa incl. regional buckets",
+            },
+        ],
+    }
 
 
 def test_a_plan_proposed_card_shows_each_ask_with_its_steps_or_why_it_is_declined() -> None:
@@ -1704,3 +1813,45 @@ def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line(
         == [entry.model_dump(mode="json", exclude_none=True) for entry in carried_entries([scope])]
     )
     assert [entry["option_id"] for entry in with_line] == ["sector:120"]
+
+
+def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() -> None:
+    """A health share of US aid, switched to net: the card is titled by the
+    ask and summed up in one sentence, its step labels name no basis, one
+    step gives the answer, each scope choice goes by its short name, a
+    default gives no reason, and the planner's slug reads as words."""
+    recorded = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
+    payload = json.loads(recorded.read_text())["long_switched_to_net"]
+
+    frame = _translator()._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})[-1]
+
+    assert isinstance(frame, PlanProposed)
+    assert frame.title == "Health share of US ODA in 2023"
+    assert frame.summary is not None
+    assert frame.summary.startswith("Net disbursements, current USD, in 2023")
+    health = "health incl. population and reproductive health"
+    assert [(step.label, step.gives_answer) for step in frame.steps] == [
+        (f"Fetch {health} for United States", False),
+        (f"Total {health}", False),
+        ("Fetch official development assistance for United States", False),
+        ("Total official development assistance", False),
+        (
+            "Health incl. population and reproductive health as a share of official development assistance",
+            True,
+        ),
+    ]
+    assert [(row.question, row.chosen, row.reason) for row in frame.decisions or ()] == [
+        (
+            "Denominator source for US total ODA to compute the sector share",
+            "crs total",
+            "Using the CRS total ensures consistent cash-flow accounting between numerator "
+            "and denominator, avoiding grant-equivalent vs cash disbursement mismatches and "
+            "CRS reporting gaps against DAC1.",
+        ),
+        ("Sector", "health incl. population and reproductive health (CRS 120 + 130)", ""),
+        (
+            "Basis",
+            "net disbursements, current USD",
+            "The user chose net disbursements, current USD on the plan.",
+        ),
+    ]

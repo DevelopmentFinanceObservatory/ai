@@ -94,6 +94,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -121,6 +122,7 @@ from planner.plan import (
     TERMINAL_DECLINES_STATE_KEY,
     UNSUPPORTED_STATE_KEY,
     AskBreakdown,
+    DatasetRequirement,
     PinSource,
     Plan,
     PlanStatus,
@@ -142,10 +144,12 @@ from planner.plan import (
     save_pin_sources,
     save_plan,
     save_plan_rounds,
+    windowed_pins,
 )
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
+from pydantic import ValidationError
 from submission.service import (
     ALIGNED_PINS_STATE_KEY,
     SEARCHED_PINS_STATE_KEY,
@@ -167,13 +171,16 @@ from harness.graph.state import (
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPEC_WARNINGS_KEY,
     ORCHESTRATOR_SPECS_KEY,
+    conversation_readings,
     store_search,
 )
 from harness.prefix_cache import PrefixCache
 from harness.sentences import (
     TERMINAL_PROPOSE_CODES,
+    PlanWords,
     SeamCode,
     referral_sentence,
+    refusal_reason,
     refusal_sentence,
 )
 from harness.settings import Settings
@@ -186,6 +193,7 @@ from harness.turn_records import (
     measure_choice_text,
     named_spec_ids,
     newest_per_spec_id,
+    part_name,
     render_readings,
 )
 from harness.usage import log_usage
@@ -674,7 +682,8 @@ class PlannerSeam:
                 ctx=ctx, message=message, on_progress=on_progress
             )
             if refused is not None:
-                return self._refused(refused)
+                state = cast(SessionState, ctx.state)
+                return self._refused(refused, words=_plan_words(state, load_plan(state)))
             assert submitted is not None and plan is not None, (
                 "_propose answers a refusal unless a proposal declared the plan on record "
                 "ready (see planner.agent.declare_ready)"
@@ -803,8 +812,13 @@ class PlannerSeam:
         replaces (`_RevisionSession`).
 
         Returns `{"plan", "summary"}` once the revised plan awaits approval,
-        or `{"refused": ...}` as `__call__` refuses, the revision recording
-        a version or not; the caller restores what it keeps.
+        or `{"refused": ...}` as `__call__` refuses, with `reason` beside
+        (`_revision_refused`), the revision recording
+        a version or not; the caller restores what it keeps. A translation
+        that refers the plan back refuses as an entry ending on that
+        referral does: on its closing refusal (`_closing_refusal`), or as
+        `SeamCode.PLAN_NOT_READY` with the referral's reason (`_not_ready`),
+        since no model is there to settle it.
         """
         state = cast(SessionState, ctx.state)
         prior = Plan.model_validate(prior_plan)
@@ -827,13 +841,21 @@ class PlannerSeam:
         )
         store_aligned_readings(ctx, state)
         if recorded.get("outcome") != Outcome.OK.value:
-            return self._refused(recorded)
-        answer = declare_ready({**recorded, "translation": await self._translate(ctx)}, ctx)
+            return self._revision_refused(recorded, words=_plan_words(state, prior))
+        translation = await self._translate(ctx)
+        referral = PlannerSeam._referral_dict(translation)
+        if referral is not None:
+            return self._revision_refused(
+                PlannerSeam._closing_refusal(referral) or _not_ready(referral),
+                words=_plan_words(state, load_plan(state)),
+            )
+        answer = declare_ready({**recorded, "translation": translation}, ctx)
         plan = load_plan(state)
         if "summary" not in answer or plan is None:
             blocked = answer.get("submission") or answer.get("translation")
-            return self._refused(
-                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer)
+            return self._revision_refused(
+                cast(dict[str, Any], blocked if isinstance(blocked, dict) else answer),
+                words=_plan_words(state, plan or prior),
             )
         return {"plan": plan.model_dump(mode="json"), "summary": answer["summary"]}
 
@@ -1171,17 +1193,27 @@ class PlannerSeam:
     )
 
     @staticmethod
-    def _refused(refused: dict[str, Any]) -> dict[str, Any]:
+    def _refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
         """What `__call__` answers for a refusal that ends the entry: its plain
-        sentence (`harness.sentences.refusal_sentence`), whether another plan
-        for the same ask could succeed, and its code."""
+        sentence (`harness.sentences.refusal_sentence`), naming a requirement
+        by `words` (`_plan_words`), whether another plan for the same ask
+        could succeed, and its code."""
         return {
             "refused": {
-                "text": refusal_sentence(refused),
+                "text": refusal_sentence(refused, words=words),
                 "final": refused.get("code") in PlannerSeam._FINAL_CODES,
                 "code": refused.get("code"),
             }
         }
+
+    @staticmethod
+    def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
+        """What `revise` answers for a refusal: `_refused`'s, with why alone
+        as one sentence (`harness.sentences.refusal_reason`) under `reason`,
+        which a switch that did not apply shows under its choice."""
+        answer = PlannerSeam._refused(refused, words=words)
+        answer["refused"]["reason"] = refusal_reason(refused, words=words)
+        return answer
 
     @staticmethod
     def _is_terminal_refusal(tool_response: dict[str, Any] | None) -> bool:
@@ -1375,6 +1407,37 @@ class PlannerSeam:
                 ask,
             ]
         )
+
+
+def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
+    """How a sentence about `plan` names its requirements
+    (`harness.plan_display.plan_words`): a retrieval by the name the "Counted
+    as" line gives the newest reading of its pin (`harness.turn_records.
+    part_name`), a pin copied over its first years by its origin's."""
+    if plan is None:
+        return PlanWords()
+    to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
+    readings: dict[str, SearchReading] = {}
+    for raw in conversation_readings(state):
+        with suppress(ValidationError):
+            reading = SearchReading.model_validate(raw)
+            if reading.spec_id is not None and reading.scope is not None:
+                readings[reading.spec_id] = reading
+    blocks = {
+        **{spec_id: source.block for spec_id, source in pin_sources(state).items()},
+        **(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
+    }
+    names: dict[str, str] = {}
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.source_spec_id is None:
+            continue
+        pin = to_origin.get(requirement.source_spec_id, requirement.source_spec_id)
+        reading = readings.get(pin)
+        name = part_name(reading, blocks.get(pin)) if reading is not None else None
+        # `part_name` falls back to the spec_id, which no reader reads.
+        if name is not None and name != pin:
+            names[requirement.id] = name
+    return plan_display.plan_words(plan, names=names)
 
 
 def _referral_detail(referral: Mapping[str, Any]) -> dict[str, Any]:

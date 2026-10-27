@@ -46,6 +46,10 @@ from planner.records import OptionStatus, StrictModel
 from pydantic import Field, ValidationInfo, field_validator
 
 ChoiceProvenance = Literal["explicit", "carried", "default"]
+# Whose spending a provider option counts: bilateral flows alone, with imputed
+# shares of multilateral spending, or with core contributions to multilaterals
+# as a published donor total such as DAC1's counts them.
+ProviderScope = Literal["bilateral", "inclusive", "contributions"]
 DroppedCode = Literal["carried_choice_not_applied", "stated_choice_not_applied"]
 
 YearSpan = tuple[int, int]
@@ -56,11 +60,12 @@ def option_axis(option_id: str) -> str:
     return option_id.split(":", 1)[0]
 
 
-# The axes and reason codes this release reads. Search's vocabularies are
-# open: a later release can add to either, and a record holding a value
-# outside them stays readable (`_on_known_axes`, `OptionAvailability.code`,
-# `DroppedEntry.code`).
+# The axes, provider scopes and reason codes this release reads. Search's
+# vocabularies are open: a later release can add to any, and a record holding
+# a value outside them stays readable (`_on_known_axes`, `_readable_choices`,
+# `OptionAvailability.code`, `DroppedEntry.code`).
 _KNOWN_AXES = frozenset(get_args(ScopeAxis))
+_KNOWN_PROVIDER_SCOPES = frozenset(get_args(ProviderScope))
 _KNOWN_REASONS = frozenset(get_args(ScopeReasonCode))
 
 
@@ -76,6 +81,29 @@ def _on_known_axes(items: Any, *path: str) -> Any:
         return not isinstance(item, str) or item in _KNOWN_AXES
 
     return [item for item in items if known(item)] if isinstance(items, list | tuple) else items
+
+
+def _readable_choices(items: Any) -> Any:
+    """`items`, a scope's raw choices from Search, less each on an axis this release does
+    not read (`_on_known_axes`) or holding an option whose provider scope it does not
+    read, as a choice on an unknown axis is left out.
+
+    An option holding no scope string is kept, so validation refuses it.
+    """
+
+    def readable(choice: Any) -> bool:
+        options = choice.get("options") if isinstance(choice, Mapping) else None
+        return not any(
+            isinstance(binding := (option or {}).get("binding"), Mapping)
+            and binding.get("kind") == "provider"
+            and isinstance(scope := binding.get("scope"), str)
+            and scope not in _KNOWN_PROVIDER_SCOPES
+            for option in options or ()
+            if isinstance(option, Mapping)
+        )
+
+    kept = _on_known_axes(items, "axis")
+    return [choice for choice in kept if readable(choice)] if isinstance(kept, list) else kept
 
 
 class SlotBinding(StrictModel):
@@ -107,7 +135,7 @@ class ProviderBinding(StrictModel):
     """An option that sets whose spending the answer counts."""
 
     kind: Literal["provider"] = "provider"
-    scope: Literal["bilateral", "inclusive"]
+    scope: ProviderScope
 
 
 class OptionAvailability(StrictModel):
@@ -225,11 +253,17 @@ class PartScope(StrictModel):
     compiled: CompiledScope
     ledger: tuple[LedgerStep, ...] = ()
 
-    @field_validator("entries", "choices", "ledger", mode="before")
+    @field_validator("entries", "ledger", mode="before")
     @classmethod
     def _known_axes(cls, items: object) -> object:
-        """Each choice, entry and switch on an axis this release reads; the others are left out."""
+        """Each entry and switch on an axis this release reads; the others are left out."""
         return _on_known_axes(items, "axis")
+
+    @field_validator("choices", mode="before")
+    @classmethod
+    def _known_choices(cls, items: object) -> object:
+        """Each choice this release reads (`_readable_choices`); the others are left out."""
+        return _readable_choices(items)
 
     @field_validator("dropped_entries", mode="before")
     @classmethod
@@ -246,7 +280,8 @@ class PartScope(StrictModel):
         part's scope choices readable. The record keeps the declared fields
         alone, and a stored one is read back with no field ignored. A value
         Search added to an open vocabulary degrades only what holds it: a
-        choice or entry on an unknown axis is left out, an unknown reason
+        choice or entry on an unknown axis is left out, as is a choice
+        holding an option of an unknown provider scope, an unknown reason
         code reads as none, a dropped entry's unknown code as the one its
         provenance gives, and a component keeps whatever role it names.
 

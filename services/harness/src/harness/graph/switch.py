@@ -15,10 +15,19 @@ and the plan compiles again. The node stores each new reading, so later
 searches carry the switch, and offers the revised plan back to `approve`
 with what else moved (`harness.scope_choices.moved_choices`).
 
+Each requirement the switch re-pins drops the source it stated
+(`source`, `source_ref`, `source_exclude`, and `source_code` unless the new
+dataset is exactly that series): the user chose the dataset, so its pin is
+the requirement's identity, and text left behind would have discovery,
+compile and the run's evidence check judge the new dataset against the old
+one's name.
+
 A switch Search refuses (`requested_option_unavailable`,
 `conflicting_requested_options`), or one that fails anywhere else, offers
-the unchanged plan again with a note saying so, and leaves the planner's
-drafting state as it was.
+the unchanged plan again with `switch_failed` naming the option, the
+refusal's code and one sentence saying why (`harness.sentences.
+refusal_reason` for a refused revision), and leaves the planner's drafting
+state as it was.
 
 A chip under an answer applies one option the same way, with no plan
 (`apply_stored_choice`): the `seed` node posts the stored reading's base
@@ -36,7 +45,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from typing import Any, cast
 
-from compiler.sources import block_groups
+from compiler.sources import block_groups, source_from_spec_block
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -78,7 +87,8 @@ from harness.turn_records import CHIP_STALE_NOTE, SearchReading, stored_choice
 logger = logging.getLogger(__name__)
 
 # The codes Search refuses a switch it cannot apply with (422).
-_SCOPE_REFUSALS = frozenset({"requested_option_unavailable", "conflicting_requested_options"})
+_OPTION_UNAVAILABLE = "requested_option_unavailable"
+_SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options"})
 
 # The state the planner seam and the translator keep while drafting, which a
 # revision that fails leaves as it found.
@@ -93,7 +103,16 @@ SCOPE_CHOICE_NOT_APPLIED = "scope_choice_not_applied"
 
 
 class SwitchFailedError(Exception):
-    """A switch that cannot be applied; the message is the note the card shows."""
+    """A switch of choice `choice_id` to option `option_id` that cannot be
+    applied: `code` is the refusal's code and `reason`, the message, the one
+    sentence saying why that the card shows under the choice."""
+
+    def __init__(self, reason: str, *, choice_id: str, option_id: str, code: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.choice_id = choice_id
+        self.option_id = option_id
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -119,7 +138,8 @@ def switch_node(
 
         One route out, `"offer"`, to the `approve` node: the revised plan
         with a new revision and `moved`, or the unchanged plan with a
-        `refusal_note`.
+        `switch_failed`, which the plan card shows on the row the user
+        switched (`harness.studio_translate`), so no chat message repeats it.
         """
         pick = node_input.get("switch") if isinstance(node_input, dict) else None
         pick = pick if isinstance(pick, dict) else {}
@@ -136,13 +156,22 @@ def switch_node(
                 surface=definition_surface,
             )
         except SwitchFailedError as exc:
-            note = f"{exc} Version {plan.version} is still there to approve."
-            logger.info("plan switch not applied: choice_id=%s option_id=%s", choice_id, option_id)
+            logger.info(
+                "plan switch not applied: choice_id=%s option_id=%s code=%s",
+                choice_id,
+                option_id,
+                exc.code,
+            )
             output = {
                 **plan.model_dump(mode="json"),
-                "summary": note,
+                "summary": exc.reason,
                 "revision": plan_revision(plan),
-                "refusal_note": note,
+                "switch_failed": {
+                    "choice_id": exc.choice_id,
+                    "option_id": exc.option_id,
+                    "code": exc.code,
+                    "reason": exc.reason,
+                },
             }
         yield Event(output=output, route="offer")
 
@@ -163,12 +192,17 @@ async def _switched_plan(
     Raises:
         SwitchFailedError: If the switch cannot be applied, with the note to show.
     """
+    pick = {"choice_id": choice_id, "option_id": option_id}
     clicked = next(
         (d for d in plan.decisions if d.scope is not None and d.scope.choice_id == choice_id),
         None,
     )
     if clicked is None or clicked.scope is None:
-        raise SwitchFailedError("That choice is no longer on the plan, so nothing changed.")
+        raise SwitchFailedError(
+            "That choice is no longer on the plan.",
+            **pick,
+            code=SCOPE_CHOICE_NOT_APPLIED,
+        )
     axis = clicked.scope.axis
     state = cast(SessionState, ctx.state)
     to_origin = {copy.spec_id: copy.windowed_from for copy in windowed_pins(state).values()}
@@ -177,7 +211,7 @@ async def _switched_plan(
         (pin, reading, scope, choice)
         for decision in listed_together(plan, clicked.slot)
         for pin, reading, scope, choice in [
-            _target(decision, to_origin=to_origin, readings=readings)
+            _target(decision, to_origin=to_origin, readings=readings, **pick)
         ]
     ]
     label = next(
@@ -186,7 +220,9 @@ async def _switched_plan(
     )
     if any(not any(o.option_id == option_id for o in choice.options) for *_, choice in targets):
         raise SwitchFailedError(
-            f"Search does not offer {label} for this source, so nothing changed."
+            f"Search does not offer {label} for this source.",
+            **pick,
+            code=_OPTION_UNAVAILABLE,
         )
     specs = ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}
     sources = pin_sources(state)
@@ -203,6 +239,7 @@ async def _switched_plan(
                 ],
                 block=specs.get(pin) or _source_block(sources.get(pin), pin),
                 label=label,
+                **pick,
             )
             for pin, reading, scope, choice in targets
         )
@@ -220,8 +257,13 @@ async def _switched_plan(
             },
         },
     )
+    exact_codes = {
+        item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
+    }
     requirements = [
-        requirement.model_copy(update={"source_spec_id": moved_to[origin]}).model_dump(mode="json")
+        _repinned(requirement, moved_to[origin], exact_codes[moved_to[origin]]).model_dump(
+            mode="json"
+        )
         for requirement in authored(plan).evidence_requirements
         if isinstance(requirement, DatasetRequirement)
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
@@ -235,9 +277,12 @@ async def _switched_plan(
     )
     if "plan" not in revised:
         _restore(ctx, drafting)
-        logger.warning("plan switch not revised: %s", revised.get("refused"))
+        refused = revised.get("refused") or {}
+        logger.warning("plan switch not revised: %s", refused)
         raise SwitchFailedError(
-            f"The plan could not be revised to count {label}, so nothing changed."
+            str(refused.get("reason") or f"The plan could not be revised to count {label}."),
+            **pick,
+            code=str(refused.get("code") or SCOPE_CHOICE_NOT_APPLIED),
         )
     revised_plan = PlannerPlan.model_validate(revised["plan"])
     ctx.state["plan"] = revised_plan.model_dump_json()
@@ -272,6 +317,35 @@ async def _switched_plan(
     }
 
 
+def _repinned(
+    requirement: DatasetRequirement, spec_id: str, exact_codes: frozenset[str]
+) -> DatasetRequirement:
+    """`requirement` pinned to `spec_id`, the dataset the user switched to.
+
+    The source it stated goes with the pin it left: `source`, `source_ref`
+    and `source_exclude`, and `source_code` unless `exact_codes`, the codes
+    `spec_id` is exactly, hold it.
+    """
+    update: dict[str, Any] = {
+        "source_spec_id": spec_id,
+        "source": None,
+        "source_ref": None,
+        "source_exclude": False,
+    }
+    if requirement.source_code not in exact_codes:
+        update["source_code"] = None
+    return requirement.model_copy(update=update)
+
+
+def _exact_codes(digest: Mapping[str, Any]) -> frozenset[str]:
+    """The publisher codes the dataset of `digest`'s one part is exactly, none when its block cannot be read."""
+    (part,) = digest["part_digests"]
+    try:
+        return frozenset(source_from_spec_block(part["spec_block"]).exact_codes)
+    except ValueError:
+        return frozenset()
+
+
 def _readings(ctx: Context) -> list[SearchReading]:
     """The conversation's stored readings, newest first: this turn's, then earlier turns'."""
     readings: list[SearchReading] = []
@@ -284,16 +358,27 @@ def _readings(ctx: Context) -> list[SearchReading]:
 
 
 def _target(
-    decision: Decision, *, to_origin: Mapping[str, str], readings: Sequence[SearchReading]
+    decision: Decision,
+    *,
+    to_origin: Mapping[str, str],
+    readings: Sequence[SearchReading],
+    choice_id: str,
+    option_id: str,
 ) -> tuple[str, SearchReading, PartScope, ScopeChoice]:
     """The pin `decision` states, the newest reading of it with a scope, that scope and the choice on the decision's axis.
 
     Raises:
         SwitchFailedError: If `decision` is no scope decision, or no stored
-            reading of its pin holds the choice.
+            reading of its pin holds the choice, for the switch of
+            `choice_id` to `option_id`.
     """
+    pick = {"choice_id": choice_id, "option_id": option_id}
     if not is_scope_choice(decision) or decision.fixes is None or decision.scope is None:
-        raise SwitchFailedError("That choice is no longer on the plan, so nothing changed.")
+        raise SwitchFailedError(
+            "That choice is no longer on the plan.",
+            **pick,
+            code=SCOPE_CHOICE_NOT_APPLIED,
+        )
     pinned = decision.fixes.source_spec_id or ""
     pin = to_origin.get(pinned, pinned)
     for reading in readings:
@@ -302,7 +387,11 @@ def _target(
         choice = next((c for c in reading.scope.choices if c.axis == decision.scope.axis), None)
         if choice is not None:
             return pin, reading, reading.scope, choice
-    raise SwitchFailedError("Search's record of this source is gone, so nothing changed.")
+    raise SwitchFailedError(
+        "Search's record of this source is gone.",
+        **pick,
+        code=SCOPE_CHOICE_NOT_APPLIED,
+    )
 
 
 def _source_block(source: PinSource | None, pin: str) -> Mapping[str, Any] | None:
@@ -319,6 +408,8 @@ async def _resubmit(
     entries: list[dict[str, Any]],
     block: Mapping[str, Any] | None,
     label: str,
+    choice_id: str,
+    option_id: str,
 ) -> _Switched:
     """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
 
@@ -332,8 +423,10 @@ async def _resubmit(
 
     Raises:
         SwitchFailedError: If the call does not complete, Search refuses it,
-            or its answer is not one definite part with a scope.
+            or its answer is not one definite part with a scope, for the
+            switch of `choice_id` to `option_id`.
     """
+    pick = {"choice_id": choice_id, "option_id": option_id}
     try:
         part = await resolve_definition(
             surface,
@@ -344,21 +437,30 @@ async def _resubmit(
         )
     except DefinitionNotResolvedError as exc:
         logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
+        code = exc.code or SCOPE_CHOICE_NOT_APPLIED
         if exc.code in _SCOPE_REFUSALS:
             raise SwitchFailedError(
-                f"Search cannot count {label} for this source, so nothing changed."
+                f"Search cannot count {label} for this source.",
+                **pick,
+                code=code,
             ) from exc
         if exc.retryable or exc.refused:
             raise SwitchFailedError(
-                f"Search could not count {label} just now, so nothing changed."
+                f"Search could not count {label} just now.",
+                **pick,
+                code=code,
             ) from exc
         raise SwitchFailedError(
-            f"Search holds no data counted as {label} here, so nothing changed."
+            f"Search holds no data counted as {label} here.",
+            **pick,
+            code=code,
         ) from exc
     spec = part.get("spec") if part.get("status") == "definite" else None
     if not isinstance(spec, dict) or not spec.get("spec_id"):
         raise SwitchFailedError(
-            f"Search holds no data counted as {label} here, so nothing changed."
+            f"Search holds no data counted as {label} here.",
+            **pick,
+            code=SCOPE_CHOICE_NOT_APPLIED,
         )
     resolved = spec.get("resolved")
     try:
@@ -367,7 +469,9 @@ async def _resubmit(
         )
     except ValidationError as exc:
         raise SwitchFailedError(
-            f"Search's answer for {label} could not be read, so nothing changed."
+            f"Search's answer for {label} could not be read.",
+            **pick,
+            code=SCOPE_CHOICE_NOT_APPLIED,
         ) from exc
     return _Switched(
         pin=pin,
@@ -466,16 +570,22 @@ async def apply_stored_choice(
     label = option.label if option is not None else option_id
     try:
         if reading is None or choice is None:
-            raise SwitchFailedError("That choice is no longer on this answer, so nothing changed.")
+            raise SwitchFailedError(
+                "That choice is no longer on this answer.",
+                **args,
+                code=SCOPE_CHOICE_NOT_APPLIED,
+            )
         if reading.spec_id != spec_id:
-            raise SwitchFailedError(CHIP_STALE_NOTE)
+            raise SwitchFailedError(CHIP_STALE_NOTE, **args, code=SCOPE_CHOICE_NOT_APPLIED)
         if (
             option is None
             or option_id == choice.active
             or option.availability.status == "unavailable"
         ):
             raise SwitchFailedError(
-                f"Search does not offer {label} for this source, so nothing changed."
+                f"Search does not offer {label} for this source.",
+                **args,
+                code=_OPTION_UNAVAILABLE,
             )
         assert reading.scope is not None and reading.spec_id is not None
         pin = reading.spec_id
@@ -490,6 +600,7 @@ async def apply_stored_choice(
             ],
             block=(ctx.state.get(ORCHESTRATOR_SPECS_KEY) or {}).get(pin) or earlier_block(pin),
             label=label,
+            **args,
         )
     except SwitchFailedError as exc:
         note = str(exc)

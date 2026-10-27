@@ -1198,15 +1198,19 @@ def _total_block(spec_id: str, netting: str) -> dict[str, Any]:
     """The spec block Search returns for US ODA counted on `netting`, with
     the label it names the measure by, as dfo-apis writes it."""
     label = f"{netting.lower()} disbursements (official development assistance)"
-    return {"spec_id": spec_id, "resolved": {"shape": {"label": label}}}
+    return {
+        "spec_id": spec_id,
+        "resolved": {
+            "measure_label": f"{netting.lower()} disbursements",
+            "shape": {"label": label},
+        },
+    }
 
 
 @pytest.mark.parametrize(
     ("switched", "total_name"),
     [
-        pytest.param(
-            True, "net disbursements (official development assistance)", id="switched-to-net"
-        ),
+        pytest.param(True, "official development assistance", id="switched-to-net"),
         pytest.param(False, '"ODA gross disbursements"', id="unswitched"),
     ],
 )
@@ -1238,6 +1242,53 @@ def test_a_part_compiled_from_its_choice_is_named_by_searchs_label_for_what_it_s
         f"gross disbursements, current USD; {total_name}: health (CRS 120) and population "
         "and reproductive health (CRS 130) · Africa incl. regional buckets · "
         + ("net disbursements." if switched else "gross disbursements, current USD.")
+    )
+
+
+def test_the_basis_line_reads_each_clause_once_and_names_a_total_by_its_concept() -> None:
+    """A share of health aid in all official development assistance. The total
+    was compiled again from its basis choice, so Search's label for its block
+    names it, "gross disbursements (official development assistance)": the
+    concept alone, since its measure is one of its clauses."""
+    health = _example_part(sector="sector:120+130")
+    scope = health["scope"]
+    scope["choices"] = [c for c in scope["choices"] if c["axis"] != "region"]
+    sector = next(c for c in scope["choices"] if c["axis"] == "sector")
+    next(o for o in sector["options"] if o["option_id"] == "sector:120+130")["label"] = (
+        "health incl. population and reproductive health (CRS 120 + 130)"
+    )
+    bilateral = copy.deepcopy(_INCLUSIVE)
+    bilateral["active"] = "provider:bilateral"
+    bilateral["options"][0]["label"] = "bilateral flows only"
+    scope["choices"].append(bilateral)
+
+    total = _example_part("ODA gross disbursements")
+    total["spec_id"] = "spec_total"
+    total_scope = total["scope"]
+    total_scope["choices"] = [c for c in total_scope["choices"] if c["axis"] == "measure_basis"]
+    (basis,) = total_scope["choices"]
+    total_scope["entries"] = [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": basis["id"]},
+        }
+    ]
+    specs = {
+        "spec_total": {
+            "spec_id": "spec_total",
+            "resolved": {
+                "measure_label": "gross disbursements",
+                "shape": {"label": "gross disbursements (official development assistance)"},
+            },
+        }
+    }
+
+    assert basis_line([_fetched(health), _fetched(total)], specs=specs, plans=[]) == (
+        'Counted as: "health aid": health incl. population and reproductive health '
+        "(CRS 120 + 130) \u00b7 gross disbursements, current USD \u00b7 bilateral flows only; "
+        "official development assistance: gross disbursements, current USD."
     )
 
 
@@ -1294,6 +1345,7 @@ _CONTRACT_REASON_CODES = {
     "carried_choice_not_applied",
     "stated_choice_not_applied",
     "option_not_covered",
+    "counts_core_contributions",
 }
 
 

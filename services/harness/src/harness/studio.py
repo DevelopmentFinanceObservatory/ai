@@ -96,6 +96,7 @@ from harness.studio_translate import (
     _stream_fatal,
     _Translator,
     failure_detail,
+    plan_approved,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn_budget import start_turn_budget
@@ -118,6 +119,7 @@ from harness.wire import (
     InterruptResponse,
     MessageComplete,
     OptionAnswer,
+    PlanProposed,
     PlanRevisionStaleError,
     RetryMode,
     SkippedAnswer,
@@ -678,6 +680,17 @@ def _keep_turn_records(conversation: ConversationState, event: Event) -> None:
         conversation.turn_specs = dict(delta[ORCHESTRATOR_SPECS_KEY])
     if ORCHESTRATOR_APPLIED_KEY in delta:
         conversation.turn_applied_choice = dict(delta[ORCHESTRATOR_APPLIED_KEY])
+
+
+async def _approved_first(
+    card: PlanProposed, conversation: ConversationState, frames: AsyncGenerator[Any]
+) -> AsyncGenerator[Any]:
+    """`frames` led by the `plan.approved` frame for the card the user approved,
+    so the client has the approved plan before the resumed run's first frame."""
+    yield plan_approved(card, seq=conversation.next_seq())
+    async with aclosing(frames) as source:
+        async for frame in source:
+            yield frame
 
 
 async def _unwind(pending: asyncio.Future[Any]) -> None:
@@ -1645,6 +1658,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
+            frames = studio._frames(principal=principal, conversation=conversation, message=message)
+            if body.decision is InterruptDecision.APPROVE and pending.card is not None:
+                frames = _approved_first(pending.card, conversation, frames)
             return StreamingResponse(
                 _sse_stream(
                     studio._locked(
@@ -1652,9 +1668,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         body.conversation_id,
                         conversation,
                         segment_id,
-                        studio._frames(
-                            principal=principal, conversation=conversation, message=message
-                        ),
+                        frames,
                     ),
                     conversation=conversation,
                 ),

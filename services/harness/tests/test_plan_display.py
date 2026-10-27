@@ -7,14 +7,21 @@ dependency on either, and neither do these tests.
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 from harness.plan_display import (
     _label,
+    card_decision_text,
+    card_rows,
+    card_summary,
+    card_title,
     operation_rows,
+    plan_words,
     requirement_rows,
     share_wholes,
     shown_decisions,
@@ -3052,3 +3059,172 @@ def test_a_numerator_population_is_the_denominators_by_its_identity_not_its_word
     wholes = share_wholes(plan)
 
     assert wholes == ({} if whole_words is None else {"share": whole_words})
+
+
+# Three plans a live harness proposed for US health aid, as the planner node's
+# payloads carried them: one retrieval and its total; a health share of all
+# US aid; and that share after the user switched its basis to net.
+_RECORDED_PLANS = Path(__file__).parent / "fixtures" / "plan_card_recorded.json"
+
+
+def _recorded_plan(name: str) -> Plan:
+    payload = json.loads(_RECORDED_PLANS.read_text())[name]
+    return Plan.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in ("summary", "revision", "moved")
+        }
+    )
+
+
+_HEALTH = "health incl. population and reproductive health"
+_LONG_LABELS = [
+    f"Fetch {_HEALTH} for United States",
+    f"Total {_HEALTH}",
+    "Fetch official development assistance for United States",
+    "Total official development assistance",
+    "Health incl. population and reproductive health as a share of official development assistance",
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "title", "summary", "labels"),
+    [
+        (
+            "short",
+            "Total health aid from the United States to Africa in 2024",
+            f"Gross disbursements, current USD, for {_HEALTH}, from United States to Africa "
+            "incl. regional and unspecified amounts, in 2024, from the OECD Creditor Reporting "
+            "System (CRS).",
+            [f"Fetch {_HEALTH} for United States and each member of Africa", f"Total {_HEALTH}"],
+        ),
+        (
+            "long",
+            "Health share of US ODA in 2023",
+            f"Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+        (
+            "long_switched_to_net",
+            "Health share of US ODA in 2023",
+            f"Net disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+            f"System (CRS): {_HEALTH} from United States to 129 recipients, as a share of the "
+            "total from United States to 152 recipients.",
+            _LONG_LABELS,
+        ),
+    ],
+)
+def test_the_card_states_a_recorded_plan_once_in_short_labels(
+    name: str, title: str, summary: str, labels: list[str]
+) -> None:
+    """The card is titled by the ask and sums the plan up in one sentence;
+    each step label names what it fetches or computes in the reader's words,
+    leaving the basis and the sector codes to the summary and the choices,
+    so a one-year total says no "by year" and a switch to net leaves every
+    label as it was."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    assert card_title(plan) == title
+    assert card_summary(plan) == summary
+    assert [row["label"] for row in rows] == labels
+
+
+@pytest.mark.parametrize("name", ["short", "long", "long_switched_to_net"])
+def test_the_one_step_answering_the_ask_gives_the_answer(name: str) -> None:
+    """Exactly one step gives the answer: the last step the ask's answer
+    names, whose description ends with the result's scope."""
+    plan = _recorded_plan(name)
+
+    rows = card_rows(plan)
+
+    answering = [row for row in rows if row["gives_answer"]]
+    assert [row["id"] for row in answering] == [plan.answered[-1].outputs[-1]]
+    assert str(answering[0]["description"]).endswith(
+        "Result: one figure, 2024." if name == "short" else "Result: one figure, 2023."
+    )
+
+
+def test_a_retrievals_description_is_searchs_account_of_its_source() -> None:
+    plan = _recorded_plan("long_switched_to_net")
+
+    fetch = card_rows(plan)[2]
+
+    assert fetch["description"] == (
+        "United States of America's net ODA disbursements to 152 recipients in 2023. "
+        "Current US dollars · OECD Creditor Reporting System (CRS)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("crs_total", "crs total"),
+        ("sector:120+130 health incl. population", "health incl. population"),
+        ("CRS total aid", "CRS total aid"),
+        ("gross disbursements, current USD", "gross disbursements, current USD"),
+    ],
+)
+def test_a_decision_shows_no_planner_slug_or_option_id(text: str, shown: str) -> None:
+    assert card_decision_text(text, _recorded_plan("long")) == shown
+
+
+@pytest.mark.parametrize(
+    ("ghana", "kenya", "names"),
+    [
+        (
+            ("Ghana", 2023, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid to Ghana", "health aid to Kenya"),
+        ),
+        (
+            ("Kenya", 2015, 2023),
+            ("Kenya", 2023, 2023),
+            ("health aid in 2015-2023", "health aid in 2023"),
+        ),
+        (("Kenya", 2023, 2023), ("Kenya", 2023, 2023), ("health aid", "health aid")),
+    ],
+    ids=["entity", "period", "alike"],
+)
+def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_differs(
+    decision: Callable[..., Decision],
+    ghana: tuple[str, int, int],
+    kenya: tuple[str, int, int],
+    names: tuple[str, str],
+) -> None:
+    """Two retrievals named alike read with the one facet that sets each
+    apart, never a number; a calculation reads by the names it reads."""
+
+    def dataset(requirement_id: str, place: str, start: int, end: int) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure="health aid",
+            entities=[Entity(name=place, role="recipient")],
+            period=Period(start=start, end=end),
+        )
+
+    plan = Plan(
+        question="Health aid to Ghana against Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            dataset("left", *ghana),
+            dataset("right", *kenya),
+            ComparisonRequirement(
+                id="both",
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="left"),
+                subtrahend=RequirementSide(input_id="right"),
+            ),
+        ],
+    )
+
+    words = plan_words(plan, names={"left": "health aid", "right": "health aid"})
+
+    assert (words.names["left"], words.names["right"]) == names
+    assert words.names["both"] == f"{names[0]} against {names[1]}"
+    assert words.inputs["both"] == ("left", "right")
