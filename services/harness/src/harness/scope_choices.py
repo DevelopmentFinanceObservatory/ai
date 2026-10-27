@@ -37,6 +37,7 @@ from common.composite import manifest_components, year_spans, years_of
 from data_mcp.scope import (
     REASON_COPY,
     ChoiceOrigin,
+    ChoiceProvenance,
     OptionId,
     ScopeAxis,
     ScopeEntry,
@@ -45,7 +46,6 @@ from data_mcp.scope import (
 from planner.records import OptionStatus, StrictModel
 from pydantic import Field, ValidationInfo, field_validator
 
-ChoiceProvenance = Literal["explicit", "carried", "default"]
 # Whose spending a provider option counts: bilateral flows alone, with imputed
 # shares of multilateral spending, or with core contributions to multilaterals
 # as a published donor total such as DAC1's counts them.

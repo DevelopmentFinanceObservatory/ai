@@ -328,6 +328,10 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
         "A share{at} could not be divided by a total from the same dataset as its part, so "
         "nothing was recorded."
     ),
+    ProblemCode.PROVIDERS_UNALIGNED: (
+        "The figures the plan combines{at} count different providers' spending, so nothing "
+        "was recorded."
+    ),
     ProblemCode.ASK_NOT_UNDERSTOOD: (
         "Part of the request could not be matched to data{at}, so nothing was recorded."
     ),
@@ -373,6 +377,9 @@ SEAM_REASONS: Mapping[SeamCode | ProblemCode, str] = {
     ),
     ProblemCode.SHARE_WHOLE_UNDERIVABLE: (
         "{lead}a share could not be divided by a total from the same dataset as its part"
+    ),
+    ProblemCode.PROVIDERS_UNALIGNED: (
+        "{lead}the figures the plan combines count different providers' spending"
     ),
     ProblemCode.ASK_NOT_UNDERSTOOD: "{lead}part of the request could not be matched to data",
     ProblemCode.SEARCH_REFUSED: "Search refused to look up the data{at}",
@@ -776,6 +783,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             ProblemCode.BASES_UNALIGNED,
             ProblemCode.WHOLE_IS_ITS_MEMBER,
             ProblemCode.SHARE_WHOLE_UNDERIVABLE,
+            ProblemCode.PROVIDERS_UNALIGNED,
         }
     ),
     FailureClass.SOURCE_GONE: frozenset(

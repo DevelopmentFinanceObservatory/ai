@@ -82,7 +82,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_sector_spec_61d37f5bd032b8bba3d077187e627ded"
       },
@@ -146,7 +147,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_measure_basis_spec_61d37f5bd032b8bba3d077187e627ded"
       },
@@ -955,7 +957,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_sector_spec_b80254f94a38b60a951a128c2baf60d0"
       },
@@ -1019,7 +1022,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "explicit"
         },
         "slot": "scope_measure_basis_spec_b80254f94a38b60a951a128c2baf60d0"
       },
@@ -1083,7 +1087,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "explicit"
         },
         "slot": "scope_measure_basis_spec_03889dfe8b27c84b8b34bbe3866cbbc0"
       }
@@ -1825,7 +1830,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_sector_spec_7c3066e68a49cef8c9033ba06c99789e"
       },
@@ -1875,7 +1881,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_region_spec_7c3066e68a49cef8c9033ba06c99789e"
       },
@@ -1939,7 +1946,8 @@
               "status": "available",
               "years": null
             }
-          ]
+          ],
+          "provenance": "default"
         },
         "slot": "scope_measure_basis_spec_7c3066e68a49cef8c9033ba06c99789e"
       }

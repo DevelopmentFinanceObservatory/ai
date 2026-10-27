@@ -27,6 +27,11 @@ MAX_ENTRY_ID_CHARS = 200
 
 ScopeAxis = Literal["sector", "region", "measure_basis", "provider"]
 
+# How a part's scope choice came to hold its active option: the user's
+# words, a choice carried from earlier in the conversation, or Search's
+# default.
+ChoiceProvenance = Literal["explicit", "carried", "default"]
+
 ScopeReasonCode = Literal[
     "provider_not_offered",
     "imputed_coverage",

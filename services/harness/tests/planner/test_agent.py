@@ -6236,11 +6236,11 @@ async def test_a_share_over_a_total_counting_other_providers_is_served_only_when
 ) -> None:
     """CRS bilateral health aid over the DAC1 total, which Search records as counting
     core contributions to multilaterals too, with no whole declared. Undeclared, the
-    share is refused for repair, never rewritten: the DAC1 total cannot be counted
-    bilaterally. Where the user asked for that total ("use the DAC1 total") and the
-    share accepts the provider difference, it divides by DAC1 as pinned, and a
-    decision of the planner's, cited by the share, says in reader words what each
-    side counts."""
+    share is refused for repair, naming the input and the bilateral scope it is not
+    served on, and never rewritten. Where the user asked for that total ("use the
+    DAC1 total") and the share accepts the provider difference, it divides by DAC1
+    as pinned, and a decision of the planner's, cited by the share, says in reader
+    words what each side counts."""
     surface = WholeCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), dac1_with_contributions())
@@ -6257,8 +6257,14 @@ async def test_a_share_over_a_total_counting_other_providers_is_served_only_when
 
     assert surface.calls == []
     if not accept:
-        assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
-        assert result["detail"]["basis"]["requirement_id"] == _WHOLE
+        assert result["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, result
+        assert result["outcome"] == Outcome.INVALID_INPUT.value
+        assert result["detail"]["provider"] == {
+            "step_id": _SHARE,
+            "requirement_id": _WHOLE,
+            "spec_id": us_2023_block("dac1_total_gross")["spec_id"],
+            "option_id": "provider:bilateral",
+        }
         assert load_plan(ctx.state) is None
         return
     assert result["outcome"] == Outcome.OK.value, result
@@ -6332,8 +6338,8 @@ async def test_a_provider_difference_accepted_on_one_share_leaves_every_other_ca
         extra=[summed],
     )
 
-    assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
-    assert result["detail"]["basis"]["step_id"] == _SUM
+    assert result["code"] == ProblemCode.PROVIDERS_UNALIGNED.value, result
+    assert result["detail"]["provider"]["step_id"] == _SUM
     assert load_plan(ctx.state) is None
 
 

@@ -1274,6 +1274,9 @@ class PlanProposed(_WireModel):
     # re-offered after a switch that did not apply.
     summary: str | None = None
     switch_failed: PlanSwitchFailed | None = None
+    # Delta 23 (v1.8): the plan's decisions that qualify the answer, one
+    # reader sentence each, which `plan.approved` carries once it is approved.
+    caveats: list[str] = []
 
 
 class PlanRevisionStaleError(ToolError):
@@ -1328,7 +1331,7 @@ class PlanApproved(_WireModel):
     (delta 22). The client attaches it to the message that stream
     produces. `caveats` are the plan's decisions that qualify the answer,
     such as a share whose two sides count different providers, each one
-    sentence for a reader (delta 23)."""
+    sentence for a reader, as the approved card stated them (delta 23)."""
 
     event: Literal["plan.approved"]
     seq: int = Field(ge=0)

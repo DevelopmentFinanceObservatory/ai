@@ -3473,8 +3473,9 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
         ("search", "transient_unavailable", True),
         ("revision", "operation_unsupported", False),
         ("revision", "discovery_unavailable", True),
+        ("revision", "surface_unavailable", True),
     ],
-    ids=["search", "search-transient", "revision", "revision-transient"],
+    ids=["search", "search-transient", "revision", "revision-transient", "revision-surface"],
 )
 async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     real_schemas: list[ToolSchema], refused_by: str, code: str, retryable: bool

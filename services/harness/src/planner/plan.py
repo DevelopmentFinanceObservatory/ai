@@ -56,7 +56,7 @@ from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
-from data_mcp.scope import ScopeAxis
+from data_mcp.scope import ChoiceProvenance, ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -645,11 +645,15 @@ class DecisionScope(StrictModel):
 
     `choice_id` names the choice and `axis` the axis it settles. `options`
     holds one state per `Decision.options` label, in the same order.
+    `provenance` is how the choice came to hold its option, `"default"` when
+    Search's default settled it; `None` on a decision recorded before it was
+    kept.
     """
 
     choice_id: str = Field(max_length=MAX_SCOPE_ID_CHARS)
     axis: ScopeAxis
     options: tuple[ScopeOptionState, ...] = Field(max_length=MAX_DECISION_OPTIONS)
+    provenance: Annotated[ChoiceProvenance | None, HASHED_WHEN_SET] = None
 
 
 # How a decision `propose_plan` writes qualifies the answer (`Decision.caveat`).

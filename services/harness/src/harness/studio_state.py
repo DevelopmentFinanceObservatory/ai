@@ -391,10 +391,6 @@ class _PendingInterrupt:
     # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
-    # The plan's caveats, one reader sentence each, which `plan.approved`
-    # carries when the card is approved. Empty for an elicitation and a plan
-    # stating none.
-    caveats: tuple[str, ...] = ()
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -1271,7 +1267,6 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 for choice_id, choice in p.choices.items()
             },
             "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
-            "caveats": list(p.caveats),
         }
         for interrupt_id, p in pending.items()
     }
@@ -1298,7 +1293,6 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
         card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
-        caveats=tuple(entry.get("caveats") or ()),
     )
     if "questions" in entry:
         pending.questions = tuple(
@@ -1772,7 +1766,13 @@ class StudioStore:
         raise last_error
 
     async def renew(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float = 5.0
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        timeout: float = 5.0,
+        consume_cancel: bool = False,
     ) -> Literal["ok", "cancelled", "lost"]:
         """Push `segment_id`'s TTL forward by `SEGMENT_TTL_S`, writing only
         the `studio:segment` key under compare-and-swap. Fetches the
@@ -1785,8 +1785,10 @@ class StudioStore:
         (another instance took over after this one's TTL lapsed); the
         caller ends the stream fatally. `"cancelled"` when it is still
         `segment_id` but its `cancel` flag is set, still renewed, so the
-        flag keeps being observed until the caller reacts to it. `"ok"`
-        otherwise. A `StaleSessionError` still standing after
+        flag keeps being observed until the caller reacts to it. With
+        `consume_cancel` the same write clears the flag, so a later
+        `request_cancel` sets it again and the next renewal reports that
+        Stop on its own. `"ok"` otherwise. A `StaleSessionError` still standing after
         `_SEGMENT_WRITE_RETRY_ATTEMPTS` attempts, or any other exception
         the session service raises, propagates, as does a `TimeoutError`
         when the renewal takes longer than `timeout`. The caller's own
@@ -1798,11 +1800,23 @@ class StudioStore:
         cancelled whenever its stream ends.
         """
         return await _run_to_completion(
-            self._renew(principal, conversation_id, segment_id, timeout=timeout)
+            self._renew(
+                principal,
+                conversation_id,
+                segment_id,
+                timeout=timeout,
+                consume_cancel=consume_cancel,
+            )
         )
 
     async def _renew(
-        self, principal: str, conversation_id: str, segment_id: str, *, timeout: float
+        self,
+        principal: str,
+        conversation_id: str,
+        segment_id: str,
+        *,
+        timeout: float,
+        consume_cancel: bool,
     ) -> Literal["ok", "cancelled", "lost"]:
         """`renew`'s write, run as its own task."""
         async with asyncio.timeout(timeout):
@@ -1816,7 +1830,11 @@ class StudioStore:
                     )
                     if session is None or segment is None or segment.id != segment_id:
                         return "lost"
-                    renewed = dataclasses.replace(segment, expires_at=self._clock() + SEGMENT_TTL_S)
+                    renewed = dataclasses.replace(
+                        segment,
+                        expires_at=self._clock() + SEGMENT_TTL_S,
+                        cancel=segment.cancel and not consume_cancel,
+                    )
                     event = Event(
                         author="studio",
                         actions=EventActions(
@@ -1837,7 +1855,7 @@ class StudioStore:
                         and live_state.segment.id == renewed.id
                     ):
                         live_state.segment = renewed
-                    return "cancelled" if renewed.cancel else "ok"
+                    return "cancelled" if segment.cancel else "ok"
             assert last_error is not None
             raise last_error
 

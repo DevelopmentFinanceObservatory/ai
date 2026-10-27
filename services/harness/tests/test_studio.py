@@ -3158,6 +3158,28 @@ async def test_closing_the_sse_stream_unwinds_the_segment_generator() -> None:
     assert conversation.cancel_event is None  # disarmed on unwind
 
 
+async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> None:
+    """A stream running a switch arms `switch_stop` and the `SWITCH_STOP` its
+    frames read. Ending, it leaves alone a stop a later switch stream armed
+    meanwhile, so an earlier stream's unwind cannot disarm the next switch."""
+    seen: list[asyncio.Event | None] = []
+
+    async def segment():
+        seen.append(switch_module.SWITCH_STOP.get())
+        yield MessageDelta(event="message.delta", seq=0, text="one")
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    stream = _sse_stream(segment(), conversation=conversation, switch=True)
+    await anext(stream)
+    armed = conversation.switch_stop
+    later = conversation.switch_stop = asyncio.Event()
+    await stream.aclose()
+
+    assert armed is not None
+    assert seen == [armed]
+    assert conversation.switch_stop is later
+
+
 async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:
     """What a client disconnect becomes inside the process: uvicorn cancels
     the response task. The stream must close the segment generator, record
@@ -4594,6 +4616,59 @@ async def test_a_stop_while_a_switch_runs_offers_the_plan_unchanged_on_a_live_pa
     assert conversation.switch_stop is None
 
 
+@pytest.mark.parametrize("stops", [1, 2], ids=["one-stop", "a-second-stop"])
+async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stops: int
+) -> None:
+    """B POSTs `/cancel` while A's switch runs and the switch does not hear it:
+    A's heartbeat reads B's durable flag as the Stop of the switch and keeps
+    watching, so a second Stop from B ends A's stream with `cancelled` well
+    before `SWITCH_REOFFER_SECONDS`. One Stop alone lets the stream read on."""
+    monkeypatch.setattr(studio_module, "HEARTBEAT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 30.0)
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        entered.set()
+        await finish.wait()
+        raise switch_module.SwitchFailedError(
+            "r", choice_id=_CHOICE_ID, option_id="sector:120+130", code="c"
+        )
+
+    async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
+        return await revision
+
+    monkeypatch.setattr(switch_module, "_switched_plan", _revising)
+    monkeypatch.setattr(switch_module, "_unless_stopped", _deaf)
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    app_a = _app(*_plan(), session_service=session_service)
+    app_b = _app(session_service=session_service)
+    stop = {"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION}
+    async with _client(app_a) as client_a, _client(app_b) as client_b:
+        plan = await _plan_with_a_choice(app_a, client_a)
+        conversation = app_a.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        resumed = asyncio.ensure_future(
+            _stream(client_a, "/api/studio/interrupt", _switch_body(plan))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        switch_stop = conversation.switch_stop
+        assert switch_stop is not None
+        for _ in range(stops):
+            cancelled = await client_b.post("/api/studio/cancel", json=stop, headers=AUTH)
+            assert cancelled.status_code == 204
+            await asyncio.wait_for(switch_stop.wait(), timeout=5)
+        if stops == 1:
+            finish.set()
+        frames = await asyncio.wait_for(resumed, timeout=5)
+
+    if stops == 1:
+        assert _events(frames)[-1] == "plan.proposed"
+        return
+    assert _events(frames)[-1] == "error"
+    assert _frame(frames, "error")["error"]["error"] == "cancelled"
+
+
 async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_switch() -> None:
     """Health counted as CRS 120, switched to CRS 120 and 130, then to CRS
     130, then approved: `plan.approved` names CRS 120, the label on the card
@@ -4657,6 +4732,25 @@ async def test_an_approved_plan_names_what_a_choice_held_before_the_turns_first_
     assert _frame(approved, "plan.approved")["choices"] == [
         {"question": "Sector", "chosen": "population (CRS 130)", "changed_from": "health (CRS 120)"}
     ]
+
+
+async def test_an_amendment_drops_the_labels_the_turns_switches_kept() -> None:
+    """An amendment drafts the plan again, possibly under the same
+    requirement ids, so the next `plan.approved` names no `changed_from`
+    the turn's switches kept before it."""
+    app = _app(*_plan(), tool_surface=ScriptedSurface())
+    async with _client(app) as client:
+        plan = await _plan_with_a_choice(app, client)
+        conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+        conversation.turn_choice_baseline = {_CHOICE_ID: "health (CRS 120)"}
+        await app.state.studio.store.save(PRINCIPAL, CONVERSATION)
+        await _stream(
+            client,
+            "/api/studio/interrupt",
+            _interrupt_body(plan["interrupt_id"], "amend", "use commitments"),
+        )
+
+    assert conversation.turn_choice_baseline == {}
 
 
 async def test_a_switch_leaves_its_label_out_of_the_words_later_searches_send() -> None:
@@ -5969,9 +6063,9 @@ async def test_a_stalled_segments_expiry_lets_another_instance_take_over(
     stalled = asyncio.Event()
     renew_a = store_a.renew
 
-    async def stalled_renew(*args: Any) -> Any:
+    async def stalled_renew(*args: Any, **kwargs: Any) -> Any:
         await stalled.wait()
-        return await renew_a(*args)
+        return await renew_a(*args, **kwargs)
 
     monkeypatch.setattr(store_a, "renew", stalled_renew)
     store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])

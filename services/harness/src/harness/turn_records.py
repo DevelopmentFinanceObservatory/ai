@@ -1452,12 +1452,12 @@ def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | Non
         and served.narrowed(binding.role)
     ):
         return None
-    if served is not None and _serves(active, served) is False:
+    if served is not None and _serves(active, served, choice=choice) is False:
         other = next(
             (
                 option
                 for option in choice.options
-                if option.option_id != choice.active and _serves(option, served)
+                if option.option_id != choice.active and _serves(option, served, choice=choice)
             ),
             None,
         )
@@ -1472,15 +1472,19 @@ def _choice_clause(choice: ScopeChoice, served: ServedScope | None) -> str | Non
     return f"{active.label} ({why}: {years})" if years else f"{active.label} ({why})"
 
 
-def _serves(option: Option, served: ServedScope) -> bool | None:
-    """Whether the served figures hold `option`; `None` when the record cannot tell.
+def _serves(option: Option, served: ServedScope, *, choice: ScopeChoice) -> bool | None:
+    """Whether the served figures hold `option`, one of `choice`'s; `None` when the record cannot tell.
 
     An entities option holds when the residual buckets served on its role
     are the ones it adds, and cannot be told on a role the fetch narrowed;
     a measure option when the served measure and
-    netting are its own; a provider option when imputed multilateral aid is
-    a served component exactly when it is inclusive. The record holds no
-    what/how slot, so a slot option cannot be told.
+    netting are its own. A provider option binds whose spending is counted:
+    an inclusive one holds exactly when imputed multilateral aid is a served
+    component, and a bilateral or a contributions one (a published total
+    counting core contributions to multilaterals) only when it is not. The
+    record does not tell those two apart, so with no imputed component
+    either holds only when `choice` offers no option of the other. The
+    record holds no what/how slot, so a slot option cannot be told.
     """
     binding = option.binding
     if isinstance(binding, EntitiesBinding):
@@ -1495,9 +1499,23 @@ def _serves(option: Option, served: ServedScope) -> bool | None:
             served.netting_basis,
         )
     if isinstance(binding, ProviderBinding):
-        imputed = any(component.role == "imputed" for component in served.components)
-        return (binding.scope == "inclusive") == imputed
+        return _serves_provider(binding, served, choice=choice)
     return None
+
+
+def _serves_provider(
+    binding: ProviderBinding, served: ServedScope, *, choice: ScopeChoice
+) -> bool | None:
+    """`_serves` for a provider option of `choice`."""
+    imputed = any(component.role == "imputed" for component in served.components)
+    if binding.scope == "inclusive" or imputed:
+        return (binding.scope == "inclusive") == imputed
+    offered = {
+        option.binding.scope
+        for option in choice.options
+        if isinstance(option.binding, ProviderBinding)
+    }
+    return None if {"bilateral", "contributions"} <= offered else True
 
 
 def named_spec_ids(reading: SearchReading) -> list[str]:

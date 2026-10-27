@@ -19,6 +19,7 @@ import pytest
 from harness.plan_display import requirement_rows
 from harness.scope_choices import (
     REASON_COPY,
+    SERVED_OTHERWISE,
     ScopeReasonCode,
     ServedComponent,
     ServedRole,
@@ -1227,6 +1228,43 @@ def test_the_basis_line_states_a_composite_frame_from_its_served_components(
     )
 
     assert basis_line([reading.model_dump(mode="json")], specs={}, plans=[]) == line
+
+
+@pytest.mark.parametrize(
+    ("contributions", "clause"),
+    [
+        (False, "bilateral aid only"),
+        (True, f"including imputed multilateral aid ({SERVED_OTHERWISE})"),
+    ],
+    ids=["bilateral-the-only-other", "a-contributions-total-offered-too"],
+)
+def test_figures_with_no_imputed_component_name_bilateral_only_when_nothing_else_fits(
+    contributions: bool, clause: str
+) -> None:
+    """An inclusive choice served with no imputed component: the figures are
+    bilateral flows alone or a published total counting core contributions to
+    multilaterals, which the record does not tell apart. With only a
+    bilateral option besides, they read as it; with a contributions option
+    offered too, the choice says the figures differ from it."""
+    choice = copy.deepcopy(_INCLUSIVE)
+    if contributions:
+        choice["options"].append(
+            {
+                "option_id": "provider:contributions",
+                "label": "with core contributions to multilaterals",
+                "binding": {"kind": "provider", "scope": "contributions"},
+                "availability": {"status": "available"},
+            }
+        )
+    part = _example_part()
+    part["scope"]["choices"].append(choice)
+    reading = SearchReading.from_part(part).with_fetch(
+        {"summary": "30 observations"}, served=served_facts(_manifest(_served_identity()))
+    )
+
+    line = basis_line([reading.model_dump(mode="json")], specs={}, plans=[])
+
+    assert line == _EXAMPLE_LINE.removesuffix(".") + f" \u00b7 {clause}."
 
 
 def _total_block(spec_id: str, netting: str) -> dict[str, Any]:

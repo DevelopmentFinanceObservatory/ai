@@ -528,20 +528,25 @@ ignores it and an older harness omits it.
   requirement pins keeps Search's own id.
 - `PlanSwitchFailed.retryable`: whether the same switch can succeed if
   asked again. The harness sets it from the failure: false when it will
-  repeat, such as an option Search cannot serve; true when Search could
-  not answer in time, and for a stopped switch.
+  repeat, such as an option Search cannot serve; true when Search or the
+  calculation service could not answer in time, and for a stopped switch.
 - A `/cancel` while a switch runs stops the switch, not the stream. The
   stream ends on `plan.proposed` re-offering the unchanged plan under a
-  fresh `interrupt_id`, with `switch_failed.code` `switch_cancelled` and
-  `retryable` true, and the turn stays paused on it. A second `/cancel`
+  fresh `interrupt_id`, with `switch_failed.code` `switch_cancelled`,
+  `retryable` true and the `reason` "You stopped this change, so the plan
+  is as it was.", and the turn stays paused on it. The user asked for
+  this outcome, so the client shows that reason as a quiet note on the
+  row, with no failure lead and no error styling. A second `/cancel`
   before then, or 10 seconds with no re-offer, ends the stream with the
   `cancelled` error frame. A switch
   that fails before it can re-offer the plan ends the turn as any failed
   stream does.
-- `plan.approved.caveats`: the plan's decisions that qualify the answer,
-  such as a share whose two sides count different providers or a total
-  derived from its part's dataset, each one reader sentence; empty when
-  there are none.
+- `plan.proposed.caveats` and `plan.approved.caveats`: the plan's
+  decisions that qualify the answer, such as a share whose two sides count
+  different providers or a total derived from its part's dataset, each one
+  reader sentence; empty when there are none. The card carries them, so
+  the user reads them before Approve, and `plan.approved` repeats the
+  approved card's sentences.
 - `plan.approved.choices[].changed_from` is the label the choice held on
   the card the turn's first switch of it was made from, set when the
   choice now holds another label, whether the user switched it or a
@@ -645,6 +650,7 @@ Fixture values that are samples:
    on the approve answer. All optional.
 1. `choice_id` is `"<requirement id>:<axis>"`, stable across switches;
    `switch_failed` gains `retryable`; a `/cancel` during a switch
-   re-offers the unchanged plan on a live pause under `switch_cancelled`;
-   `plan.approved` gains `caveats`, and `changed_from` names the label
-   before the turn's first switch.
+   re-offers the unchanged plan on a live pause under `switch_cancelled`,
+   with a reason the client shows as a note, not an error;
+   `plan.proposed` and `plan.approved` gain `caveats`, and `changed_from`
+   names the label before the turn's first switch.

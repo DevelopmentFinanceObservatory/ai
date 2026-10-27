@@ -72,7 +72,6 @@ from planner.plan import Plan as PlannerPlan
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ToolId
 from pydantic import ValidationError
-from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -1061,6 +1060,15 @@ def _scope_members(decision: Decision | None, plan: PlannerPlan) -> dict[str, An
     }
 
 
+def _search_default(decision: Decision | None) -> bool:
+    """Whether `decision` states a scope choice Search's default settled."""
+    return (
+        decision is not None
+        and decision.scope is not None
+        and decision.scope.provenance == "default"
+    )
+
+
 def _decision_question(
     decision: Mapping[str, Any],
     scoped: Mapping[str, Decision],
@@ -1122,18 +1130,16 @@ def plan_approved(
     *,
     seq: int,
     baseline: Mapping[str, str],
-    caveats: Sequence[str] = (),
 ) -> PlanApproved:
     """The `plan.approved` frame for the plan card the user approved.
 
-    Built from the card, so it states what the user saw: its title, summary
-    and step labels, and for each scope choice the short name
+    Built from the card, so it states what the user saw: its title, summary,
+    step labels and caveats, and for each scope choice the short name
     (`PlanDecision.question`) and the label of the option it held. A choice
     holding another label than the one `baseline` keeps for its choice id,
     the label on the card the turn's first switch of it was made from
     (`ConversationState.turn_choice_baseline`), carries that label as
     `changed_from`, whether the user switched it or a switch moved it.
-    `caveats` are the plan's own (`_PendingInterrupt.caveats`).
     """
     labels = held_labels(card)
     choices = [
@@ -1160,16 +1166,16 @@ def plan_approved(
             for step in card.steps
         ],
         choices=choices,
-        caveats=list(caveats),
+        caveats=card.caveats,
     )
 
 
-def _caveats(plan: PlannerPlan) -> tuple[str, ...]:
+def _caveats(plan: PlannerPlan) -> list[str]:
     """The reason of each decision of `plan` that qualifies the answer
     (`Decision.caveat`), such as a share whose sides count different
     providers, in plan order and as the card words it
     (`plan_display.card_decision_text`), each sentence once."""
-    return tuple(
+    return list(
         dict.fromkeys(
             plan_display.card_decision_text(decision.rationale, plan)
             for decision in plan.decisions
@@ -1822,7 +1828,7 @@ class _Translator:
                     ),
                     # A reason saying only that Search's default holds says nothing.
                     reason=""
-                    if decision.get("rationale") == SEARCH_DEFAULT_RATIONALE
+                    if _search_default(scoped.get(decision.get("slot", "")))
                     else named(decision.get("rationale", "")),
                     resolved_by=_RESOLVED_BY_TO_WIRE.get(
                         decision.get("resolved_by", ""), "default"
@@ -1857,6 +1863,7 @@ class _Translator:
                 if payload.get("moved")
                 else None,
                 switch_failed=_switch_failed(payload),
+                caveats=_caveats(plan),
             )
             frames.append(card)
             conversation.pending[wire_id] = _PendingInterrupt(
@@ -1868,7 +1875,6 @@ class _Translator:
                 step_labels=step_labels,
                 choices=choices,
                 card=card,
-                caveats=_caveats(plan),
             )
             return frames
         # The workflow's own `ask` node raises a `RequestInput` whose `payload`

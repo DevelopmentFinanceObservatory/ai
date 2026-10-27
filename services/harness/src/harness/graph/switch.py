@@ -72,6 +72,7 @@ from planner.plan import (
     windowed_pins,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.tool_results import ProblemCode
 from pydantic import ValidationError
 from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
@@ -103,10 +104,15 @@ _OPTION_UNAVAILABLE = "requested_option_unavailable"
 _SCOPE_REFUSALS = frozenset({_OPTION_UNAVAILABLE, "conflicting_requested_options"})
 
 # The revision refusals a later switch to the same option can escape: the
-# request ran out of wall-clock time, or a search could not reach Search.
-# Every other refusal of a revision, which calls no model, repeats.
+# request ran out of wall-clock time, a search could not reach Search, or a
+# compile could not reach the calculation service. Every other refusal of a
+# revision, which calls no model, repeats.
 _RETRYABLE_REVISION_CODES = frozenset(
-    {SeamCode.TURN_WALL_TIME_SPENT.value, SeamCode.DISCOVERY_UNAVAILABLE.value}
+    {
+        SeamCode.TURN_WALL_TIME_SPENT.value,
+        SeamCode.DISCOVERY_UNAVAILABLE.value,
+        ProblemCode.SURFACE_UNAVAILABLE.value,
+    }
 )
 
 # The state the planner seam and the translator keep while drafting, which a

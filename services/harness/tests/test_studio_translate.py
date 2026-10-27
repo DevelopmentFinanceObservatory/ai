@@ -426,10 +426,10 @@ def test_a_plan_offered_again_after_a_failed_switch_names_the_option_and_why() -
     assert frame.version == plan.version
 
 
-def test_a_plans_pause_keeps_the_decisions_that_qualify_its_answer_as_caveats() -> None:
+def test_a_plan_card_states_the_decisions_that_qualify_its_answer_as_caveats() -> None:
     """Each decision the plan marks as a caveat (`Decision.caveat`) gives its
-    reason for `plan.approved`, in plan order and once each; any other
-    decision gives none."""
+    reason on the card, before Approve, in plan order and once each; any
+    other decision gives none."""
     plan = scripted_plan("kenya life expectancy", spec_id=None)
     differ = "The question asks for the inputs as their datasets count them."
     whole = "Denominator: the total over every sector from the CRS, the same dataset."
@@ -472,7 +472,7 @@ def test_a_plans_pause_keeps_the_decisions_that_qualify_its_answer_as_caveats() 
 
     (frame,) = translator._interrupt_frames(APPROVE_INTERRUPT, {"payload": payload})
 
-    assert translator._conversation.pending[frame.interrupt_id].caveats == (differ, whole)
+    assert frame.caveats == [differ, whole]
 
 
 def test_an_approved_plan_states_the_card_the_user_saw() -> None:
@@ -496,6 +496,7 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
             ],
         )
 
+    caveat = "The share's two sides count different providers' spending, as asked."
     card = PlanProposed(
         event="plan.proposed",
         seq=3,
@@ -517,14 +518,13 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
             ),
         ],
         revision="rev_1",
+        caveats=[caveat],
     )
-    caveat = "The share's two sides count different providers' spending, as asked."
 
     frame = plan_approved(
         card,
         seq=9,
         baseline={"c_basis": "gross disbursements", "c_region": "Africa incl. regional buckets"},
-        caveats=[caveat],
     )
 
     assert frame.model_dump(mode="json", exclude_none=True) == {

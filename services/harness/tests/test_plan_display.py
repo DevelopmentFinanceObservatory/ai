@@ -543,8 +543,9 @@ def test_sources_counted_alike_share_one_scope_row_and_others_keep_their_own(
         "aid_b:measure_basis",
     ]
     assert chosen_scope_decision(plan, "aid_a:sector") == sector_b
-    # Search's own id for the choice names no row.
-    assert chosen_scope_decision(plan, f"{_SPEC_B}:sector") is None
+    # A card sent before these ids names the listed row by Search's own id.
+    assert chosen_scope_decision(plan, f"{_SPEC_B}:sector") == sector_b
+    assert chosen_scope_decision(plan, f"{_SPEC_A}:sector") is None
 
 
 @pytest.mark.parametrize("merged", [False, True], ids=["apart", "merged"])
@@ -3307,3 +3308,25 @@ def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_di
     assert (words.names["left"], words.names["right"]) == names
     assert words.names["both"] == f"{names[0]} against {names[1]}"
     assert words.inputs["both"] == ("left", "right")
+
+
+def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> None:
+    """Both sides of the share total the same retrieval: the summary keeps
+    each side, joined by "as a share of", and does not read as one figure."""
+    plan = _recorded_plan("long")
+    plan = plan.model_copy(
+        update={
+            "evidence_requirements": [
+                requirement.model_copy(update={"input_id": "us_health_aid_raw"})
+                if requirement.id == "us_total_aid_sum"
+                else requirement
+                for requirement in plan.evidence_requirements
+            ]
+        }
+    )
+
+    side = f"{_HEALTH} from United States to 129 recipients"
+    assert card_summary(plan) == (
+        "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
+        f"System (CRS): {side}, as a share of {side}."
+    )

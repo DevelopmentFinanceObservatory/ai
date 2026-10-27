@@ -458,8 +458,9 @@ def card_summary(plan: Plan) -> str | None:
     else:
         joiner = ""
         sides = [datasets_of(requirement, shown)]
-    counted = {dataset.id: _counted(dataset, shown) for side in sides for dataset in side}
-    facts = list(counted.values())
+    # Keyed by side, so a share whose two sides read one retrieval keeps both.
+    counted = [[_counted(dataset, shown) for dataset in side] for side in sides]
+    facts = [fact for side in counted for fact in side]
     if len(facts) == 1:
         (only,) = facts
         # A basis whose label holds a comma ("gross disbursements, current USD")
@@ -490,8 +491,7 @@ def card_summary(plan: Plan) -> str | None:
         )
 
     body = joiner.join(
-        " and ".join(dict.fromkeys(clause(counted[dataset.id]) for dataset in side))
-        for side in sides
+        " and ".join(dict.fromkeys(clause(fact) for fact in side)) for side in counted
     )
     lead = ", ".join(filter(None, head))
     return _sentence_case(f"{lead}: {body}" if lead else body)
@@ -557,11 +557,10 @@ def _who(requirement: DatasetRequirement, plan: Plan) -> str:
         side = flow_side(entity.role) if entity.role else None
         name = region.chosen if entity.members and region is not None else entities_phrase([entity])
         sides[side].append(name)
+    for side, label in _side_groups(requirement, plan):
+        if not sides[side]:
+            sides[side].append(label)
     if source is not None:
-        for group in source.groups:
-            side = flow_side(group.role)
-            if side is not None and not sides[side]:
-                sides[side].append(group.label)
         for axis in source.open_entity_axes or ():
             side = flow_side(axis.column)
             if side is None or sides[side] or axis.member_count is None or axis.member_count < 2:
@@ -738,15 +737,6 @@ def _concept_of(requirement: EvidenceRequirement, plan: Plan, concepts: Mapping[
     return _concept_of(plan.requirement(input_id), plan, concepts)
 
 
-# What a reduction does, as the word opening a card label.
-_REDUCTION_LABELS: dict[Reduction, str] = {
-    Reduction.SUM: "Total",
-    Reduction.MEAN: "Average",
-    Reduction.MAX: "Highest",
-    Reduction.MIN: "Lowest",
-}
-
-
 def _card_label(
     requirement: EvidenceRequirement,
     plan: Plan,
@@ -766,7 +756,7 @@ def _card_label(
         case DatasetRequirement():
             label = f"Fetch {concepts[requirement.id]} for {_parties(requirement, plan)}"
         case AggregateRequirement():
-            label = f"{_REDUCTION_LABELS[requirement.reduction]} {of(requirement.input_id)}{by}"
+            label = f"{_REDUCTION_WORDS[requirement.reduction]} {of(requirement.input_id)}{by}"
         case GrowthRequirement():
             label = (
                 f"Growth in {of(requirement.input_id)}, {requirement.window_start}-"
@@ -880,14 +870,24 @@ def pinned_choice_id(plan: Plan, pinned: Collection[str], axis: str) -> str | No
 
 
 def chosen_scope_decision(plan: Plan, choice: str) -> Decision | None:
-    """The listed scope decision of `plan` whose row has id `choice` (`choice_id`), if any."""
+    """The listed scope decision of `plan` whose row has id `choice` (`choice_id`), if any.
+
+    A card sent before rows took `"<requirement id>:<axis>"` ids names a row
+    by Search's own id for the choice (`ScopeDecision.choice_id`), so a
+    switch from a plan paused then finds its row by that id when no row has
+    `choice` as its own.
+    """
+    scoped = [decision for decision in shown_decisions(plan) if decision.scope is not None]
     return next(
-        (
-            decision
-            for decision in shown_decisions(plan)
-            if decision.scope is not None and choice_id(plan, decision) == choice
+        (decision for decision in scoped if choice_id(plan, decision) == choice),
+        next(
+            (
+                decision
+                for decision in scoped
+                if decision.scope is not None and decision.scope.choice_id == choice
+            ),
+            None,
         ),
-        None,
     )
 
 
@@ -1593,6 +1593,19 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     return f"Fetch {measure} for {_parties(requirement, plan)}"
 
 
+def _side_groups(requirement: DatasetRequirement, plan: Plan) -> list[tuple[str, str]]:
+    """Each named set `requirement`'s selected source binds on a side of the
+    flow (`SelectedSource.groups`), as that side and the set's label, in the
+    source's order; empty before compile. `_parties` and `_who` name a side
+    by it."""
+    source = _selected_source(requirement.id, plan)
+    return [
+        (side, group.label)
+        for group in (source.groups if source is not None else ())
+        if (side := flow_side(group.role)) is not None
+    ]
+
+
 def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | None = None) -> str:
     """Who `requirement` retrieves, in words, as its selected source holds them.
 
@@ -1605,15 +1618,10 @@ def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | 
     keeps. A set on a side no `across` word covers is left unsaid, as the
     requirement leaves it. Before compile the requirement's own words.
     """
-    source = _selected_source(requirement.id, plan)
     sides = {across_party(word) for word in requirement.across}
-    groups = [
-        group
-        for group in (source.groups if source is not None else ())
-        if (side := flow_side(group.role)) is not None and side in sides
-    ]
-    entities = [*requirement.entities, *(Entity(name=group.label) for group in groups)]
-    grouped = {flow_side(group.role) for group in groups}
+    groups = [(side, label) for side, label in _side_groups(requirement, plan) if side in sides]
+    entities = [*requirement.entities, *(Entity(name=label) for _, label in groups)]
+    grouped = {side for side, _ in groups}
     across = tuple(word for word in requirement.across if across_party(word) not in grouped)
     counts = {
         word: count

@@ -3217,8 +3217,9 @@ _ALIGNED_REASONS: dict[str, str] = {
 }
 
 # The rationale of a scope decision Search's default settled. The planner
-# reads it; the plan card shows no reason for it, since it says only that
-# nobody chose (`harness.studio_translate`).
+# reads it; the plan card shows no reason for a decision whose choice
+# Search's default settled (`DecisionScope.provenance`), since it says only
+# that nobody chose (`harness.studio_translate`).
 SEARCH_DEFAULT_RATIONALE = "Search's default for this question."
 
 # What each scope decision asks, by the axis its choice settles.
@@ -3332,6 +3333,7 @@ def _scope_decision(
             scope=DecisionScope(
                 choice_id=choice.id,
                 axis=choice.axis,
+                provenance=choice.provenance,
                 options=tuple(
                     ScopeOptionState(
                         option_id=option.option_id,
@@ -3826,8 +3828,10 @@ def _aligned_bases(
     pin yet answers `BASES_UNALIGNED`, naming each to compile with every
     option it moves to (`Realignment`). `planner.agent.with_source_reads`
     compiles them and proposes again. An input whose choice does not offer
-    the option, or offers it unavailable, and an input two calculations
-    want on different options of one axis answer `OPERATION_UNSUPPORTED`.
+    the provider scope its calculation counts, or offers it unavailable,
+    answers `PROVIDERS_UNALIGNED` (`_providers_unaligned`); the same on the
+    measure basis, and an input two calculations want on different options
+    of one axis, answer `OPERATION_UNSUPPORTED`.
     Every requirement pinned to a compiled whole or a realigned pin drops
     the source it stated (`planner.plan.repinned`), which discovery would
     otherwise search back to the dataset it replaced.
@@ -4006,13 +4010,16 @@ def _alignment_targets(
                     (basis.requirement_id, axis), (target, step.id)
                 )
                 option = next((o for o in basis.choice.options if o.option_id == target), None)
+                unserved = option is None or option.availability.status == "unavailable"
+                if held_target == target and unserved and axis == _PROVIDER_AXIS:
+                    raise _Unservable(_providers_unaligned(step, basis, target))
                 if held_target != target:
                     reason = (
                         f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
                         f"counts it as {basis.label(held_target)}, and one dataset "
                         "requirement is counted one way"
                     )
-                elif option is None or option.availability.status == "unavailable":
+                elif unserved:
                     reason = (
                         f"{step.id!r} counts its inputs as {basis.label(target)}, and "
                         f"{basis.requirement_id!r}'s dataset, counted as "
@@ -4062,6 +4069,40 @@ def _realigned_pins(
         elif pin != basis.pin:
             repinned[requirement_id] = pin
     return wanted, repinned
+
+
+def _providers_unaligned(
+    step: EvidenceRequirement, basis: _InputBasis, target: str
+) -> dict[str, object]:
+    """Return the `PROVIDERS_UNALIGNED` problem for an input of `step` its dataset does
+    not serve on `target`, the provider scope `step`'s other inputs are counted on.
+
+    The planner can repair it: declare a share's total the part over every
+    sector (`DatasetRequirement.whole_of`), or pin an input counted on that
+    scope. `accept_provider_difference` is named only for a user who asked for
+    that input's source, so the planner does not take it as a way past the
+    refusal.
+    """
+    return problem(
+        ProblemCode.PROVIDERS_UNALIGNED,
+        f"{step.id!r} divides or adds its inputs, so they count one provider scope, "
+        f"{basis.label(target)}, and {basis.requirement_id!r}'s dataset counts "
+        f"{basis.label(basis.choice.active)} and is not served that way. Align them: when "
+        f"{step.id!r} is a share of a sector's figure in the same party's total across every "
+        "sector, state that total with `whole_of` naming its part; otherwise pin for "
+        f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Set "
+        f"`accept_provider_difference` on {step.id!r} only when the user asked for "
+        f"{basis.requirement_id!r}'s source as it stands.",
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "provider": {
+                "step_id": step.id,
+                "requirement_id": basis.requirement_id,
+                "spec_id": basis.origin,
+                "option_id": target,
+            }
+        },
+    )
 
 
 class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bases` answers
