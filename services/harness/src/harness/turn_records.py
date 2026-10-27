@@ -30,6 +30,7 @@ from typing import Any, Literal, NamedTuple, cast
 from common.place_type import FLOW_ROLE_COLUMNS
 from compiler.evidence import read_unit_currency, read_unit_dcid
 from compiler.sources import PROVIDER_ACCOUNT, stat_var_count
+from data_mcp.scope import ScopeAxis
 from executor.ledger import RunStatus
 from planner.parties import PARTY_ROLES, column_party_roles
 from planner.plan import (
@@ -45,7 +46,6 @@ from planner.plan import (
 from planner.records import (
     AmbiguousSourceReading,
     ResolvedSourceMention,
-    ScopeAxis,
     StatVarReading,
     StrictModel,
 )

@@ -3198,9 +3198,14 @@ def _scope_decisions(
     it no longer states has that citation dropped. A decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
-    states its choice. The count is every slot of `previous` this call does
-    not remove and every slot it states, so it never falls short of the
-    plan's own and the cap never refuses. One `previous` records as Search's
+    states its choice. The count is every slot this call states and every
+    slot of `previous` it does not remove that stays: one a requirement
+    still cites once this call's citations are patched, the scope decisions
+    of this call's pins among them, or a user's, which
+    `_uncited_carried_decisions` may keep. A planner's decision no
+    requirement cites any more, such as a re-pinned dataset's scope
+    decision, is swept and not counted. The count never falls short of the
+    plan's own, so the cap never refuses. One `previous` records as Search's
     default is restated when Search now says otherwise, unless this call
     states its slot; a user's stands.
 
@@ -3218,26 +3223,51 @@ def _scope_decisions(
     """
     carried = previous.decisions if previous is not None else ()
     known = {decision.slot: decision for decision in (*carried, *decisions)}
-    held = {decision.slot for decision in carried} - set(removed)
     stated = {decision.slot for decision in decisions}
-    held |= stated
-    written: list[Decision] = []
-    patched: list[EvidenceRequirement] = []
-    for requirement in evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement):
-            patched.append(requirement)
-            continue
-        pin = requirement.source_spec_id
-        cited = [
+    citations = [
+        [
             slot
             for slot in requirement.decision_ids
             if not (
                 (decision := known.get(slot)) is not None
                 and is_scope_choice(decision)
                 and decision.fixes is not None
-                and decision.fixes.source_spec_id != pin
+                and decision.fixes.source_spec_id != requirement.source_spec_id
             )
         ]
+        if isinstance(requirement, DatasetRequirement)
+        else list(requirement.decision_ids)
+        for requirement in evidence_requirements
+    ]
+    restated = {requirement.id for requirement in evidence_requirements}
+    cited_after = {
+        *(slot for cited in citations for slot in cited),
+        *(
+            slot
+            for requirement in (previous.evidence_requirements if previous is not None else ())
+            if requirement.id not in restated
+            for slot in requirement.decision_ids
+        ),
+        *(
+            derived.slot
+            for requirement in evidence_requirements
+            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+            for derived in scopes.get(requirement.source_spec_id, ())
+        ),
+    }
+    held = stated | {
+        decision.slot
+        for decision in carried
+        if decision.slot not in removed
+        and (decision.slot in cited_after or decision.resolved_by is not ResolvedBy.PLANNER_DEFAULT)
+    }
+    written: list[Decision] = []
+    patched: list[EvidenceRequirement] = []
+    for requirement, cited in zip(evidence_requirements, citations, strict=True):
+        if not isinstance(requirement, DatasetRequirement):
+            patched.append(requirement)
+            continue
+        pin = requirement.source_spec_id
         for derived in scopes.get(pin, ()) if pin is not None else ():
             standing = known.get(derived.slot)
             if standing is None:
@@ -3335,8 +3365,8 @@ class SearchedPin(StrictModel):
     as a reading of the conversation; both are `None` when Search settled on
     no one dataset, and `_aligned_bases` then refuses the plan. `status` is
     the status Search answered the part with (`definite`, `ambiguous`,
-    `candidates`, `no_data`), or `unreadable` for an answer holding no one
-    part. `asked_roles` and `open_roles` are the parties the search named
+    `candidates`, `no_data`), `refused` for a refusal that cannot succeed
+    later, or `unreadable` for an answer holding no one part. `asked_roles` and `open_roles` are the parties the search named
     and held open.
     """
 
@@ -3444,7 +3474,8 @@ class _InputBasis:
     option). `choice` is the origin's choice on the axis (`_ALIGNED_AXES`), so
     an option the user stated reads as theirs whatever the pin was aligned
     to. `stated` says the user stated it: an explicit entry settled the
-    choice, and the origin's block does not mark the axis as the planner's
+    choice, or a carried one, the user's choice earlier in the conversation,
+    and the origin's block does not mark the axis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
     """
 
@@ -3508,7 +3539,7 @@ def _input_bases(
             pin=pin,
             origin=origin,
             choice=choice,
-            stated=choice.provenance == "explicit" and axis not in planner_axes(block),
+            stated=choice.provenance != "default" and axis not in planner_axes(block),
             rank=_part_rank(scope.base.identity),
         )
     return bases
@@ -3542,14 +3573,18 @@ def _aligned_bases(
     each axis of `_ALIGNED_AXES`, the measure basis and the provider scope
     (bilateral flows alone, or with imputed multilateral flows), it
     contrasts its inputs only when the user stated different options on
-    them (explicit entries naming different options, an entry this planner
-    compiled excluded, as `_InputBasis.stated` reads them). Otherwise its dataset inputs
-    with a choice on the axis are counted on one option: the one the user
-    stated on any of them, else the one the narrowest part is counted on
-    (`_part_rank`), the first such input in plan order on a tie. A sum whose
-    inputs the user stated on different provider scopes is refused, since
-    an inclusive figure already holds the bilateral one and the sum would
-    count it twice.
+    them (explicit or carried entries naming different options, an entry
+    this planner compiled excluded, as `_InputBasis.stated` reads them).
+    Otherwise its dataset inputs with a choice on the axis are counted on
+    one option. Calculations sharing an input, such as a sum read by a
+    share, form one group and take one option for every input any of them
+    reaches (`_shared_basis`): the one the user stated on any of them, else
+    the one the narrowest part is counted on (`_part_rank`), the first such
+    input in plan order on a tie. A group whose inputs the user stated on
+    different options has no one option, and each of its calculations takes
+    its own. A sum whose inputs the user stated on different provider
+    scopes is refused, since an inclusive figure already holds the
+    bilateral one and the sum would count it twice.
 
     An input already on its options keeps its origin pin. Another is pinned
     to the pin compiled from its origin on the options it moves to, one per
@@ -3652,78 +3687,88 @@ def _alignment_targets(
 ) -> dict[tuple[str, str], tuple[str, str]]:
     """The option each input of `steps` is counted on, by its requirement id and axis, with the calculation that wants it (`_aligned_bases`).
 
+    On each axis, the calculations whose inputs share one option
+    (`_shared_basis`) are joined into connected groups by the inputs they
+    share, and each takes its group's option, or its own when the group's
+    inputs were stated on different options.
+
     Raises:
         _Unservable: When the inputs of one calculation cannot be counted on one option.
     """
     targets: dict[tuple[str, str], tuple[str, str]] = {}
     for axis, bases in by_axis.items():
+        aligning: list[tuple[EvidenceRequirement, list[_InputBasis], str]] = []
         for step in steps:
             under = reached(step.id, reads)
             inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
-            stated = {basis.choice.active for basis in inputs if basis.stated}
             if len(inputs) < 2:
                 continue
-            if len(stated) > 1:
-                if axis == _PROVIDER_AXIS and isinstance(step, SumOfRequirement):
-                    first, other = _first_differing(inputs)
-                    raise _Unservable(
-                        _basis_unservable(
-                            view,
-                            proposer,
-                            step_id=step.id,
-                            requirement_id=other.requirement_id,
-                            spec_id=other.origin,
-                            option_id=first.choice.active,
-                            reason=(
-                                f"{step.id!r} adds {first.requirement_id!r}, counted as "
-                                f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
-                                f"counted as {other.label(other.choice.active)}, and a figure "
-                                "including imputed multilateral flows already holds the bilateral "
-                                "ones and the sum counts them twice"
-                            ),
-                        )
+            own = _shared_basis(inputs)
+            if own is not None:
+                aligning.append((step, inputs, own))
+            elif axis == _PROVIDER_AXIS and isinstance(step, SumOfRequirement):
+                first, other = _first_differing(inputs)
+                raise _Unservable(
+                    _basis_unservable(
+                        view,
+                        proposer,
+                        step_id=step.id,
+                        requirement_id=other.requirement_id,
+                        spec_id=other.origin,
+                        option_id=first.choice.active,
+                        reason=(
+                            f"{step.id!r} adds {first.requirement_id!r}, counted as "
+                            f"{first.label(first.choice.active)}, to {other.requirement_id!r}, "
+                            f"counted as {other.label(other.choice.active)}, and a figure "
+                            "including imputed multilateral flows already holds the bilateral "
+                            "ones and the sum counts them twice"
+                        ),
                     )
-                continue
-            target = (
-                next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
-            )
+                )
+        groups: list[set[str]] = []
+        for _, inputs, _ in aligning:
+            joined = {basis.requirement_id for basis in inputs}
+            for group in [group for group in groups if group & joined]:
+                joined |= group
+                groups.remove(group)
+            groups.append(joined)
+        group_target = {
+            requirement_id: _shared_basis([b for r, b in bases.items() if r in group])
+            for group in groups
+            for requirement_id in group
+        }
+        for step, inputs, own in aligning:
+            target = group_target[inputs[0].requirement_id] or own
             for basis in inputs:
                 held_target, held_by = targets.setdefault(
                     (basis.requirement_id, axis), (target, step.id)
                 )
-                if held_target != target:
-                    raise _Unservable(
-                        _basis_unservable(
-                            view,
-                            proposer,
-                            step_id=step.id,
-                            requirement_id=basis.requirement_id,
-                            spec_id=basis.origin,
-                            option_id=target,
-                            reason=(
-                                f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
-                                f"counts it as {basis.label(held_target)}, and one dataset "
-                                "requirement is counted one way"
-                            ),
-                        )
-                    )
                 option = next((o for o in basis.choice.options if o.option_id == target), None)
-                if option is None or option.availability.status == "unavailable":
-                    raise _Unservable(
-                        _basis_unservable(
-                            view,
-                            proposer,
-                            step_id=step.id,
-                            requirement_id=basis.requirement_id,
-                            spec_id=basis.origin,
-                            option_id=target,
-                            reason=(
-                                f"{step.id!r} counts its inputs as {basis.label(target)}, and "
-                                f"{basis.requirement_id!r}'s dataset, counted as "
-                                f"{basis.label(basis.choice.active)}, is not served that way"
-                            ),
-                        )
+                if held_target != target:
+                    reason = (
+                        f"{basis.requirement_id!r} is also an input of {held_by!r}, which "
+                        f"counts it as {basis.label(held_target)}, and one dataset "
+                        "requirement is counted one way"
                     )
+                elif option is None or option.availability.status == "unavailable":
+                    reason = (
+                        f"{step.id!r} counts its inputs as {basis.label(target)}, and "
+                        f"{basis.requirement_id!r}'s dataset, counted as "
+                        f"{basis.label(basis.choice.active)}, is not served that way"
+                    )
+                else:
+                    continue
+                raise _Unservable(
+                    _basis_unservable(
+                        view,
+                        proposer,
+                        step_id=step.id,
+                        requirement_id=basis.requirement_id,
+                        spec_id=basis.origin,
+                        option_id=target,
+                        reason=reason,
+                    )
+                )
     return targets
 
 
@@ -3770,6 +3815,19 @@ def _first_differing(inputs: Sequence[_InputBasis]) -> tuple[_InputBasis, _Input
     stated = [basis for basis in inputs if basis.stated]
     first = stated[0]
     return first, next(basis for basis in stated if basis.choice.active != first.choice.active)
+
+
+def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
+    """The option `inputs` are counted on together on their axis, or `None` when the user stated different ones.
+
+    The one option the user stated on any of them (`_InputBasis.stated`),
+    else the one the narrowest part is counted on (`_part_rank`), the first
+    such input on a tie.
+    """
+    stated = {basis.choice.active for basis in inputs if basis.stated}
+    if len(stated) > 1:
+        return None
+    return next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
 
 
 def _pinned(requirement: EvidenceRequirement, pins: Mapping[str, str]) -> EvidenceRequirement:

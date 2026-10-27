@@ -79,10 +79,10 @@ RankLimit = Annotated[int, Field(ge=1, le=MAX_RANK_LIMIT)]
 # approve.
 SpecId = Annotated[str, Field(pattern=r"^spec_[0-9a-f]{32}$")]
 
-# The axes a Search part's scope choices settle, and whether one of a choice's
-# options can be served (`harness.scope_choices`). A plan's scope decision
-# states them too (`planner.plan.DecisionScope`).
-ScopeAxis = Literal["sector", "region", "measure_basis", "provider"]
+# Whether one of a Search part's scope choice options can be served
+# (`harness.scope_choices`). A plan's scope decision states it too
+# (`planner.plan.DecisionScope`), beside the choice's axis
+# (`data_mcp.scope.ScopeAxis`).
 OptionStatus = Literal["available", "partial", "unavailable"]
 
 
