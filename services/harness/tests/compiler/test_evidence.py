@@ -20,6 +20,7 @@ from compiler.evidence import (
     evidence_from_manifest,
     evidence_from_source,
     left_out_entities,
+    named_members,
     open_axes_for,
     opens_place_axis,
     resolve_entity,
@@ -3463,6 +3464,51 @@ def test_each_entity_left_out_is_the_one_pinned_to_the_node_the_retrieval_lacks(
     found = left_out_entities(asked, _g7_retrieval(*held), approved)
     assert [entity.ref for entity in found] == list(left_out)
     assert list(found.values()) == gaps
+
+
+# "Aid to Central African countries" with the UN's group picked: the planner
+# restates the group by its registered name with `members`, Search restates the
+# row as posted and binds the group's node followed by its members (C141a), and
+# labels the set by the group's own name.
+_UN_MIDDLE_AFRICA = (
+    ResolvedEntity(role="destination", ref="country/CMR", label="Cameroon"),
+    ResolvedEntity(role="destination", ref="country/TCD", label="Chad"),
+)
+
+
+@pytest.mark.parametrize(("bound", "named"), [(True, _UN_MIDDLE_AFRICA), (False, ())])
+def test_a_group_restated_by_its_registered_name_names_the_members_search_bound_for_it(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    bound: bool,
+    named: tuple[ResolvedEntity, ...],
+) -> None:
+    part = {
+        "restatement": {
+            "entities": [{"text": "Central Africa (UN)", "role_text": "to", "members": True}]
+        },
+        "entity_refs": [
+            {
+                "text": "Central Africa (UN)",
+                "refs": ["region/UN_CentralAfrica", "country/CMR", "country/TCD"],
+            }
+        ],
+    }
+    found = source(
+        entities=_UN_MIDDLE_AFRICA,
+        groups=(
+            ResolvedGroup(role="destination", label="Middle Africa", ref="region/UN_CentralAfrica"),
+        ),
+        bound_refs=bound_refs(part) if bound else (),
+        identity=None,
+    )
+    restated = Entity(name="Central Africa (UN)", role="recipient", members=True)
+
+    issues = check_evidence(requirement(entities=[restated]), evidence_from_source(found))
+
+    # Without the bound row the name meets no label, which shows the row binds it.
+    assert named_members(restated, found) == named
+    assert _entity_codes(issues) == ([] if bound else ["entity_missing"])
 
 
 @pytest.mark.parametrize("exclude", [False, True])

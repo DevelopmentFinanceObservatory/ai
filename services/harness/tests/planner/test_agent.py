@@ -134,6 +134,7 @@ from planner.plan import (
     save_plan_rounds,
     scope_choice_slot,
     search_pin_slot,
+    split_of,
     stored_plan,
     windowed_pins,
 )
@@ -158,7 +159,7 @@ from planner.records import (
     SourceNameCandidate,
     StatVarReading,
 )
-from planner.tool_results import Outcome, ProblemCode
+from planner.tool_results import Outcome, ProblemCode, problem
 from planner.workflow import EvidenceBinding, SelectedSource, ToolId, Workflow, WorkflowStep
 from pydantic import TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
@@ -169,6 +170,7 @@ from submission.service import (
     _choice_not_offered,
     _combination_unasked,
     _entity_dcid_unoffered,
+    _entity_dcid_unpicked,
     _repinned,
     _resolve_intent,
     _source_ref_unpicked,
@@ -195,7 +197,7 @@ from translator.referral import (
     load_referral,
     save_referral,
 )
-from translator.tool import Translate, build_translate
+from translator.tool import Translate, authored_answer, build_translate
 
 from ..basis_alignment import (
     HEALTH,
@@ -2901,9 +2903,7 @@ def test_an_answer_after_a_referral_counts() -> None:
     ctx.session.events.append(_referred_event(ReferralKind.UNSUPPORTED_ASK, "gdp"))
     ctx.session.events.extend(_ask_answered_events())
 
-    answered, _picked = ToolContextSession(ctx).answers_since_referral()
-
-    assert answered
+    assert ToolContextSession(ctx).answers_since_referral().answered
 
 
 def test_a_refused_proposal_after_the_answer_does_not_take_the_answer_back(
@@ -10576,6 +10576,475 @@ def test_an_entity_node_must_be_one_a_referral_offered_for_it(
     assert (refusal is None) == valid
     if refusal is not None:
         assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def _congo_both_ends(requirement_id: str) -> Referral:
+    """An `entity_name_ambiguous` referral reading "aid from Congo to Congo": one
+    reading per end, each offering both Congos."""
+    return Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id=requirement_id,
+        ambiguous_entities=tuple(
+            AmbiguousEntityReading(
+                text="Congo",
+                candidates=tuple(
+                    EntityCandidate(ref=f"country/{code}", label=code) for code in ("COD", "COG")
+                ),
+                entity=EntityKey(name="Congo", role=role),
+            )
+            for role in ("donor", "recipient")
+        ),
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+
+
+# The `requirements` fixture's dataset requirement, which `_congo_both_ends` is about.
+_CONGO_REQUIREMENT = "annual_debt_service"
+
+
+def _congo_pick(role: str, code: str) -> str:
+    """The pick of `code` for `role`'s Congo in `_CONGO_REQUIREMENT` (`entity_pick`)."""
+    return f"{_CONGO_REQUIREMENT}|{role}|Congo|country/{code}"
+
+
+def _congo_ask(role: str, *, call_id: str) -> Any:
+    """An ask offering one end's Congos under their picks."""
+    return _ask_event(
+        [{"spec_id": _congo_pick(role, code), "label": code} for code in ("COD", "COG")],
+        call_id=call_id,
+    )
+
+
+def _congo_answer(role: str, code: str, *, call_id: str) -> Any:
+    """The user's pick of `code` answering the ask about `role`'s Congo."""
+    return _answer_event(_congo_pick(role, code), call_id=call_id)
+
+
+@pytest.mark.parametrize(
+    ("events", "stated", "valid"),
+    [
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _congo_ask("recipient", call_id="a2"),
+                _congo_answer("recipient", "COG", call_id="a2"),
+            ],
+            {"donor": "COD", "recipient": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _congo_ask("recipient", call_id="a2"),
+                _congo_answer("recipient", "COG", call_id="a2"),
+            ],
+            {"donor": "COG", "recipient": "COD"},
+            False,
+        ),
+        (
+            [_congo_ask("donor", call_id="a1"), _congo_answer("donor", "COD", call_id="a1")],
+            {"donor": "COD", "recipient": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _congo_ask("donor", call_id="a2"),
+                _congo_answer("donor", "COG", call_id="a2"),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+        (
+            [_congo_ask("donor", call_id="a1"), _ask_response("a1", {"result": {"skip": True}})],
+            {"donor": "COD"},
+            False,
+        ),
+        (
+            [_congo_ask("donor", call_id="a1")],
+            {"donor": "COD"},
+            False,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _ask_response("a1", {"result": {"text": "the Republic"}}),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, _CONGO_REQUIREMENT),
+            ],
+            {"donor": "COG"},
+            False,
+        ),
+        (
+            [
+                _ask_event(
+                    [
+                        {"spec_id": _congo_pick("donor", "COD"), "label": "COD"},
+                        {"spec_id": _congo_pick("recipient", "COG"), "label": "COG"},
+                    ],
+                    call_id="a1",
+                ),
+                _ask_response(
+                    "a1",
+                    problem(ProblemCode.INVALID_ARGUMENTS, "mixed", outcome=Outcome.INVALID_INPUT),
+                ),
+            ],
+            {"recipient": "COG"},
+            True,
+        ),
+        (
+            [
+                _ask_event(
+                    [
+                        {"spec_id": _congo_pick("donor", "COD"), "label": "COD"},
+                        {"spec_id": _congo_pick("recipient", "COG"), "label": "COG"},
+                    ],
+                    call_id="a1",
+                ),
+                _ask_response("a1", {"error": "missing message"}),
+            ],
+            {"recipient": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _congo_ask("donor", call_id="a2"),
+                _ask_response("a2", {"result": {"text": "the Republic"}}),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, _CONGO_REQUIREMENT),
+                _congo_ask("donor", call_id="a2"),
+                _ask_response("a2", {"result": {"text": "the Republic"}}),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, _CONGO_REQUIREMENT),
+                _congo_ask("donor", call_id="a2"),
+                _congo_answer("donor", "COG", call_id="a2"),
+            ],
+            {"donor": "COD"},
+            False,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                _typed("I meant the Republic"),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+        (
+            [
+                _congo_ask("donor", call_id="a1"),
+                _congo_answer("donor", "COD", call_id="a1"),
+                *_amendment_events("the Republic, as donor"),
+            ],
+            {"donor": "COG"},
+            True,
+        ),
+    ],
+    ids=[
+        "each_end_answered",
+        "ends_swapped",
+        "unasked_end_settled_by_the_planner",
+        "latest_answer_wins",
+        "asked_and_skipped",
+        "asked_and_pending",
+        "answered_in_own_words",
+        "pick_binds_after_a_re_referral",
+        "refused_ask_holds_nothing",
+        "ask_adk_rejected_holds_nothing",
+        "free_text_after_a_pick",
+        "free_text_after_a_re_referral",
+        "re_picked_after_a_re_referral",
+        "user_message_releases_a_pick",
+        "amendment_releases_a_pick",
+    ],
+)
+def test_an_entity_node_must_be_the_one_the_user_picked_for_it(
+    decision, requirements, events, stated, valid
+):
+    dataset, derived = requirements
+    ctx = _FakeToolContext()
+    save_referral(ctx.state, _congo_both_ends(dataset.id))
+    ctx.session.events.extend(
+        [_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id), *events]
+    )
+    entities = tuple(
+        Entity(name="Congo", role=role, dcid=f"country/{code}") for role, code in stated.items()
+    )
+    plan = Plan(
+        question="question",
+        decisions=[decision()],
+        evidence_requirements=[dataset.model_copy(update={"entities": entities}), derived],
+    )
+
+    refusal = _entity_dcid_unpicked(plan, load_referral(ctx.state), ToolContextSession(ctx), None)
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def _congo_split_draft(decision):
+    draft = split_draft(decision)
+    entities = (Entity(name="Congo", role="donor"), Entity(name="Congo", role="recipient"))
+    return Plan.model_validate(
+        draft.model_dump()
+        | {
+            "evidence_requirements": [
+                requirement.model_copy(update={"entities": entities})
+                if isinstance(requirement, DatasetRequirement)
+                else requirement
+                for requirement in draft.evidence_requirements
+            ]
+        }
+    )
+
+
+@pytest.mark.parametrize(("offered_for", "refused"), [("debt", False), ("debt_history", True)])
+async def test_an_entity_ask_on_a_history_copy_offers_the_origin_picks(
+    decision, offered_for, refused
+):
+    ctx: Any = _FakeToolContext()
+    save_plan(ctx.state, _congo_split_draft(decision))
+    save_referral(ctx.state, _congo_both_ends("debt_history"))
+    reading = _congo_both_ends(offered_for).ambiguous_entities[0]
+
+    result = await _tools_by_name()["adk_request_input"].run_async(
+        args={
+            "message": "Which Congo gave the aid?",
+            "candidates": [{"spec_id": c.pick, "label": c.label} for c in reading.candidates],
+        },
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+    else:
+        assert result is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "stated", "referred_again", "valid"),
+    [
+        ("COD", "COD", False, True),
+        ("COD", "COG", False, False),
+        (None, "COD", False, False),
+        ("skip", "COD", False, False),
+        ("COD", "COG", True, False),
+    ],
+    ids=["as-picked", "other-node", "pending", "skipped", "referred-to-origin"],
+)
+def test_an_entity_answer_on_a_history_copy_binds_its_origin(
+    decision, answer, stated, referred_again, valid
+):
+    draft = _congo_split_draft(decision)
+    ctx: Any = _FakeToolContext()
+    save_plan(ctx.state, draft)
+    referral = _congo_both_ends("debt_history")
+    save_referral(ctx.state, referral)
+    shown = authored_answer(referral.model_dump(mode="json"), split_of(draft))
+    readings = cast("list[dict[str, Any]]", shown["ambiguous_entities"])
+    candidates = [
+        {"spec_id": candidate["pick"], "label": candidate["label"]}
+        for candidate in readings[0]["candidates"]
+    ]
+    ctx.session.events.extend(
+        [_referred_event(referral.kind, str(shown["requirement_id"])), _ask_event(candidates)]
+    )
+    if answer == "skip":
+        ctx.session.events.append(_ask_response("call-1", {"result": {"skip": True}}))
+    elif answer is not None:
+        ctx.session.events.append(_answer_event(candidates[0]["spec_id"]))
+    if referred_again:
+        save_referral(ctx.state, _congo_both_ends("debt"))
+        ctx.session.events.append(_referred_event(referral.kind, "debt"))
+    entities = (
+        Entity(name="Congo", role="donor", dcid=f"country/{stated}"),
+        Entity(name="Congo", role="recipient"),
+    )
+    plan = draft.model_copy(
+        update={
+            "evidence_requirements": tuple(
+                requirement.model_copy(update={"entities": entities})
+                if isinstance(requirement, DatasetRequirement)
+                else requirement
+                for requirement in draft.evidence_requirements
+            )
+        }
+    )
+    view = ToolContextSession(ctx)
+
+    refusal = _entity_dcid_unpicked(
+        plan, submission_service._authored_referral(view, draft), view, draft
+    )
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+def _central_africa(requirement_id: str) -> Referral:
+    """An `entity_name_ambiguous` referral reading "aid to Central African countries":
+    the UN's group node, restated by its registered name since the row asks for its
+    members, beside the African Union's and the World Bank's regions."""
+    return Referral(
+        kind=ReferralKind.ENTITY_NAME_AMBIGUOUS,
+        reason="r",
+        requirement_id=requirement_id,
+        ambiguous_entities=(
+            AmbiguousEntityReading(
+                text="Central Africa",
+                candidates=(
+                    EntityCandidate(
+                        ref="region/UN_CentralAfrica",
+                        label="UN",
+                        restate_as="Central Africa (UN)",
+                    ),
+                    EntityCandidate(ref="region/AU_CentralAfrica", label="AU"),
+                    EntityCandidate(ref="region/WB_CentralAfrica", label="WB"),
+                ),
+                entity=EntityKey(name="Central Africa", role="recipient"),
+            ),
+        ),
+        repair=ENTITY_CHOICE_REPAIR,
+    )
+
+
+_PICK_UN = f"{_CONGO_REQUIREMENT}|recipient|Central Africa|Central Africa (UN)"
+_PICK_AU = f"{_CONGO_REQUIREMENT}|recipient|Central Africa|region/AU_CentralAfrica"
+_RESTATED_UN = Entity(name="Central Africa (UN)", role="recipient", members=True)
+_PINNED_UN = Entity(
+    name="Central Africa", role="recipient", members=True, dcid="region/UN_CentralAfrica"
+)
+_PINNED_AU = Entity(
+    name="Central Africa", role="recipient", members=True, dcid="region/AU_CentralAfrica"
+)
+
+
+@pytest.mark.parametrize(
+    ("answer", "entity", "valid"),
+    [
+        (_PICK_UN, _RESTATED_UN, True),
+        (_PICK_UN, _PINNED_AU, False),
+        (_PICK_UN, _PINNED_UN, False),
+        (_PICK_AU, _RESTATED_UN, False),
+        (_PICK_AU, _PINNED_AU, True),
+        (None, _RESTATED_UN, True),
+        (None, _PINNED_UN, False),
+        ("", _RESTATED_UN, False),
+    ],
+    ids=[
+        "group_picked_and_restated",
+        "group_picked_node_stated",
+        "group_picked_and_pinned",
+        "node_picked_group_restated",
+        "node_picked_and_stated",
+        "unasked_group_restated",
+        "unasked_group_pinned",
+        "asked_and_pending",
+    ],
+)
+def test_a_group_restated_by_its_name_counts_as_its_candidate(
+    decision, requirements, answer, entity, valid
+):
+    # The restated entity no longer carries the reading's name, so it is the
+    # reading of the candidate whose `restate_as` it names.
+    dataset, derived = requirements
+    ctx = _FakeToolContext()
+    save_referral(ctx.state, _central_africa(dataset.id))
+    ctx.session.events.append(_referred_event(ReferralKind.ENTITY_NAME_AMBIGUOUS, dataset.id))
+    if answer is not None:
+        ctx.session.events.append(
+            _ask_event(
+                [{"spec_id": pick, "label": pick} for pick in (_PICK_UN, _PICK_AU)],
+                call_id="a1",
+            )
+        )
+    if answer:
+        ctx.session.events.append(_answer_event(answer, call_id="a1"))
+    plan = Plan(
+        question="question",
+        decisions=[decision()],
+        evidence_requirements=[dataset.model_copy(update={"entities": (entity,)}), derived],
+    )
+    referral = load_referral(ctx.state)
+
+    refusal = _entity_dcid_unoffered(plan, referral, None) or _entity_dcid_unpicked(
+        plan, referral, ToolContextSession(ctx), None
+    )
+
+    assert (refusal is None) == valid
+    if refusal is not None:
+        assert refusal["code"] == ProblemCode.INVALID_PLAN.value
+
+
+@pytest.mark.parametrize(
+    ("referred", "spec_ids", "refused"),
+    [
+        (True, [_congo_pick("donor", "COD"), _congo_pick("donor", "COG")], False),
+        (True, [_congo_pick("donor", "COD"), _congo_pick("recipient", "COG")], True),
+        (True, [_congo_pick("donor", "COD"), _congo_pick("donor", "CGO")], True),
+        (True, [_congo_pick("donor", "COD")], True),
+        (True, ["country/COD", "country/COG"], True),
+        (True, [], False),
+        (False, ["country/COD", "country/COG"], False),
+    ],
+    ids=[
+        "one_reading",
+        "readings_mixed",
+        "pick_mistyped",
+        "one_pick_only",
+        "bare_ref",
+        "no_candidates",
+        "no_referral",
+    ],
+)
+async def test_an_ask_under_an_entity_referral_offers_one_reading_by_its_picks(
+    referred, spec_ids, refused
+):
+    ctx = _FakeToolContext()
+    if referred:
+        save_referral(ctx.state, _congo_both_ends(_CONGO_REQUIREMENT))
+
+    result = await _tools_by_name()["adk_request_input"].run_async(
+        args={
+            "message": "Which Congo gave the aid?",
+            "candidates": [{"spec_id": spec_id, "label": spec_id} for spec_id in spec_ids],
+        },
+        tool_context=ctx,
+    )
+
+    if refused:
+        assert result["code"] == ProblemCode.INVALID_ARGUMENTS.value
+    else:
+        assert result is None
 
 
 def test_an_entity_referral_leaves_a_kept_pin_as_it_is(

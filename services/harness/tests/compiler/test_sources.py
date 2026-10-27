@@ -450,28 +450,64 @@ def _members_ambiguous(*options: dict[str, Any]) -> dict[str, Any]:
 _BY_GROUP_NAME = ("Central Africa (UN)", {"text": "Central Africa (UN)"})
 _AU = ("Central Africa (AU)", {"text": "Central Africa", "dcid": "region/AU_CentralAfrica"})
 _WB = ("Central Africa (WB)", {"text": "Central Africa", "dcid": "region/WB_CentralAfrica"})
+_UN_KEPT = ("region/UN_CentralAfrica", "Central Africa (UN)")
+_AU_KEPT = ("region/AU_CentralAfrica", None)
+_WB_KEPT = ("region/WB_CentralAfrica", None)
 
 
-def test_a_members_row_offers_only_the_candidates_its_options_pin_by_dcid() -> None:
+@pytest.mark.parametrize(
+    ("options", "kept"),
+    [
+        ((_BY_GROUP_NAME, _AU, _WB), [_UN_KEPT, _AU_KEPT, _WB_KEPT]),
+        ((_BY_GROUP_NAME, _AU), [_UN_KEPT, _AU_KEPT]),
+        # A group node with no registered name has no option, so it is no candidate.
+        ((_AU, _WB), [_AU_KEPT, _WB_KEPT]),
+    ],
+    ids=["un-au-wb", "un-au", "no-group-name"],
+)
+def test_a_members_row_keeps_a_group_node_by_the_name_its_option_posts(
+    options: tuple[tuple[str, dict[str, Any]], ...], kept: list[tuple[str, str | None]]
+) -> None:
     entities = [EntityKey(name="Central Africa", role="recipient")]
 
     outcome = outcome_from_envelope(
-        _envelope("no_data", no_data=_members_ambiguous(_BY_GROUP_NAME, _AU, _WB)),
-        entities=entities,
+        _envelope("no_data", no_data=_members_ambiguous(*options)), entities=entities
     )
 
     (reading,) = outcome.ambiguous_entities
-    assert [candidate.ref for candidate in reading.candidates] == [
-        "region/AU_CentralAfrica",
-        "region/WB_CentralAfrica",
-    ]
     assert reading.entity == entities[0]
+    assert [(c.ref, c.restate_as) for c in reading.candidates] == kept
 
 
-def test_a_members_row_left_one_candidate_a_dcid_can_state_is_refused() -> None:
-    with pytest.raises(ValueError, match="ambiguous entity group 0 offers 1 candidate"):
+def _shared_label(no_data: dict[str, Any]) -> None:
+    no_data["ambiguous_entities"][0]["candidates"][1]["label"] = "Central Africa (UN)"
+
+
+def _not_members(no_data: dict[str, Any]) -> None:
+    del no_data["options"][0]["data_query"]["parts"][0]["entities"][0]["members"]
+
+
+def _no_text(no_data: dict[str, Any]) -> None:
+    no_data["options"][0]["data_query"]["parts"][0]["entities"][0]["text"] = ""
+
+
+@pytest.mark.parametrize("others", [(_AU,), (_AU, _WB)], ids=["au", "au-wb"])
+@pytest.mark.parametrize(
+    "malform",
+    [_shared_label, _not_members, _no_text],
+    ids=["shared-label", "not-members", "no-text"],
+)
+def test_a_members_option_no_one_candidate_can_be_stated_by_is_refused(
+    malform: Callable[[dict[str, Any]], None], others: tuple[tuple[str, dict[str, Any]], ...]
+) -> None:
+    # The UN option cannot be replayed as one candidate's, so the group is
+    # refused whatever choice the others would leave.
+    no_data = _members_ambiguous(_BY_GROUP_NAME, *others)
+    malform(no_data)
+
+    with pytest.raises(ValueError, match="ambiguous entity group 0 has an option"):
         outcome_from_envelope(
-            _envelope("no_data", no_data=_members_ambiguous(_BY_GROUP_NAME, _AU)),
+            _envelope("no_data", no_data=no_data),
             entities=[EntityKey(name="Central Africa", role="recipient")],
         )
 

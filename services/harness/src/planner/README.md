@@ -180,17 +180,41 @@ An entity's words can name more than one graph node, as "Congo" names both
 the Republic of the Congo and the Democratic Republic of the Congo. Search
 then answers an `entity_name_ambiguous` referral. Each reading in its
 `ambiguous_entities` holds one entity's `(name, role)` and the candidate nodes,
-each a `ref` and its graph `label`, so "aid from Congo to Congo" gives two
-readings, one per role. The planner settles a reading itself when the question
-or brief decides it and asks the user otherwise, one ask per reading, and
-states the node in the entity's `dcid`, keeping its name and role. The referral's
+each a `ref`, its graph `label` and a `pick`, so "aid from Congo to Congo" gives
+two readings, one per role. A `pick` names the requirement and the reading as
+well as the node (`planner.records.entity_pick`), as
+`flows|donor|Congo|country/COD`. The planner
+settles a reading itself when the question or brief decides it and asks the
+user otherwise, one ask per reading offering its candidates by `pick`, and
+states the node in the entity's `dcid`, keeping its name and role. While the
+referral is pending, `adk_request_input` refuses an ask whose candidates are
+not all the picks of one reading. The referral's
 `repair` carries that instruction (`translator.referral.REPAIR_OF`), so the
 planner reads it only when such a referral is pending, and the planner's
 instruction does not name the kind. Two entities of one requirement never state
 the same `dcid`. `propose_plan` refuses as
 `invalid_plan` a `dcid` that is neither among the candidates a pending
 `entity_name_ambiguous` referral offers for that entity nor unchanged from the
-plan being amended (`submission.service._entity_dcid_unoffered`).
+plan being amended (`submission.service._entity_dcid_unoffered`). It refuses
+too a `dcid` other than the node the user last picked for that entity, and one
+stated for an entity an ask offered that the user has not answered
+(`submission.service._entity_dcid_unpicked`). A pick keeps binding when Search
+refers the same requirement again, since the new referral offers the same pick.
+The latest answer about a reading stands, so an answer in the user's own words
+releases an earlier pick, and a message the user types or an amendment of the
+approval card releases every pick. An ask the tool or ADK refused offered
+nothing. An entity nobody asked about, or one
+the user answered in their own words, the planner settles.
+
+A row asked for its members cannot pin a group's own node, so Search offers
+such a candidate, the UN's "Central Africa" beside the African Union's, by the
+group's registered name. The candidate carries that name as `restate_as` and
+its `pick` ends with it in place of the node. The planner states it by setting
+the entity's `name` to `restate_as`, `members` true and no `dcid`, and both
+checks count such an entity as that candidate's, keyed by the reading whose
+candidate it restates. Two readings of one role that offer the same group
+restate it alike, so an entity restating it passes when either reading admits
+that group, even if the user picked another candidate for the other.
 
 A pin's identity carries the years of the search that found it.
 `propose_plan` moves each pin whose identity is on record to that identity

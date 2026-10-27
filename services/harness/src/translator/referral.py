@@ -99,7 +99,7 @@ from planner.records import (
 )
 from planner.tool_results import Outcome
 from planner.workflow import SelectedSource
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +145,11 @@ ENTITY_CHOICE_REPAIR = (
     "`ambiguous_entities` names one `entity` and the `candidates` its words could mean. "
     "Restate each entity whose node the question or the brief settles with the "
     "candidate's `ref` as its `dcid`, keeping its name and role. Ask the user about each "
-    "other reading through `adk_request_input`, with only its candidates as options, "
-    "each as `spec_id` (the `ref`) and `label`, and state the picked `ref` as its "
-    "entity's `dcid`."
+    "other reading in an `adk_request_input` call of its own, one reading per call, with "
+    "exactly that reading's candidates as options, each as `spec_id` (the candidate's "
+    "`pick`) and `label`. State the `ref` of the candidate the user picked as that "
+    "entity's `dcid`. A candidate with `restate_as` is stated instead by setting the "
+    "entity's `name` to its `restate_as`, `members` true and no `dcid`, keeping its role."
 )
 
 # The kinds whose every referral carries how to settle it as its `repair`, the
@@ -379,6 +381,22 @@ class Referral(StrictModel):
         if self.requirement_id is not None:
             offers = {self.requirement_id: self.candidates, **offers}
         return offers
+
+    @field_validator("ambiguous_entities")
+    @classmethod
+    def _picks_name_the_requirement(
+        cls, readings: tuple[AmbiguousEntityReading, ...], info: ValidationInfo
+    ) -> tuple[AmbiguousEntityReading, ...]:
+        """Each reading's candidates with their `pick` naming the referral's requirement.
+
+        A pick stays the same id across referrals about one requirement, so an
+        answer the user gave under an earlier one still names its reading, and
+        no answer about another requirement can.
+        """
+        requirement_id = info.data.get("requirement_id")
+        if requirement_id is None:
+            return readings
+        return tuple(reading.picked_under(requirement_id) for reading in readings)
 
     @model_validator(mode="after")
     def _names_what_it_is_about(self) -> Referral:
