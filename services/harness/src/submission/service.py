@@ -3275,7 +3275,9 @@ def _scope_decision(
     """The decision a pin of `pin` states for `choice`, or `None` when it states none.
 
     It states one when another option than the active one can be served,
-    whole or for some years (`available` or `partial`). Its options are the
+    whole or for some years (`available` or `partial`), or is blocked only
+    by another choice (`conflicts_with`), which the user can reach by
+    changing that choice. Its options are the
     choice's labels, unavailable ones included, so the card can say why
     each is out of reach. A choice a `Decision` cannot state, its labels
     repeated or past a limit of the plan's, states none. The user settled it
@@ -3297,6 +3299,7 @@ def _scope_decision(
         aligned
         or any(
             option.availability.status != "unavailable"
+            or option.availability.code == "conflicts_with"
             for option in choice.options
             if option.option_id != choice.active
         )
@@ -4096,7 +4099,7 @@ class _CrossDatasetShare:
     calculation the share reads it through.
     """
 
-    step: ShareOfRequirement
+    step: ShareOfRequirement | QuotientRequirement
     part: DatasetRequirement
     whole: DatasetRequirement
     part_block: Mapping[str, Any] | None
@@ -4139,11 +4142,13 @@ def _cross_dataset_shares(
 ) -> list[_CrossDatasetShare]:
     """Each share of `requirements` whose whole counts from another dataset than its part.
 
-    A share's part and whole are the dataset inputs its numerator and
-    denominator read, each through calculations of one input. Its whole
-    counts from another dataset when the part binds a sector or restriction
-    (`_part_rank`), the two bind the same parties, and their spec blocks
-    name different datasets (`harness.scope_choices.block_dataset`), as CRS
+    A share is a `share_of`, or a `quotient_of` dividing a sector part by a
+    total of the same parties, which the planner also writes for "what share
+    of US aid went to health". Its part and whole are the dataset inputs its
+    numerator and denominator read, each through calculations of one input.
+    Its whole counts from another dataset when the part binds a sector or
+    restriction (`_part_rank`), the two bind the same parties, and their
+    spec blocks name different datasets (`harness.scope_choices.block_dataset`), as CRS
     bilateral health aid over a DAC1 total, which also counts core
     contributions to multilaterals.
     """
@@ -4153,7 +4158,9 @@ def _cross_dataset_shares(
     )
     shares: list[_CrossDatasetShare] = []
     for step in requirements:
-        if not isinstance(step, ShareOfRequirement) or step.pools_its_own_axis:
+        if not isinstance(step, ShareOfRequirement | QuotientRequirement) or (
+            isinstance(step, ShareOfRequirement) and step.pools_its_own_axis
+        ):
             continue
         part_path = _side_path(step.numerator.input_id, by_id)
         whole_path = _side_path(step.denominator.input_id, by_id)

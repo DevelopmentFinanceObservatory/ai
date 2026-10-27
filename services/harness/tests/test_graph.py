@@ -3383,8 +3383,8 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
     """A reading the planner compiled to align a basis keeps that mark, on the
     new reading, its stored block and its pin's block, through a switch of its
     sector, since its basis entry is still the planner's, and the revised card
-    states that basis as the planner's; a switch of the basis is the user's and
-    drops it."""
+    states that basis as the planner's; a switch of the basis is the user's,
+    drops the mark, and the card states that basis as the user's."""
     scope = _hashed_scope()
     new_pin, envelope = _switched_answer(scope)
     answered = envelope["parts"][0]["spec"]["resolved"]["scope_choices"]
@@ -3424,7 +3424,7 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
     card = scope_choice_decisions({new_pin: PinSource(block=pinned, settled=True)}).get(new_pin, ())
     assert [
         d.resolved_by for d in card if d.scope is not None and d.scope.axis == "measure_basis"
-    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [])
+    ] == ([ResolvedBy.PLANNER_DEFAULT] if kept else [ResolvedBy.USER])
 
 
 @pytest.mark.parametrize("refused_by", ["search", "revision"])

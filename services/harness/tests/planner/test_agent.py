@@ -106,6 +106,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RankRequirement,
     RequirementSide,
     ResolvedBy,
@@ -4477,13 +4478,20 @@ def test_propose_plan_patches_the_citation_on_a_round_that_already_knows_the_mea
 
 def _scoped_gross(*, basis_alternative: str = "available") -> dict[str, Any]:
     """`_FRANCE_KENYA` carrying the US health to Africa scope choices
-    (`_switchable_scope`), its grant-equivalent basis `basis_alternative`."""
+    (`_switchable_scope`), its grant-equivalent basis `basis_alternative`; as
+    "unpublished", that basis and net, otherwise blocked by the sector, are both
+    unpublished for the part."""
     scope = _switchable_scope()
     basis = next(choice for choice in scope["choices"] if choice["axis"] == "measure_basis")
     grant = next(o for o in basis["options"] if o["option_id"] == "measure_basis:grant_equivalent")
+    unpublished = {"status": "unavailable", "code": "basis_not_published", "detail": {}}
     grant["availability"] = {"status": basis_alternative, "detail": {}}
     if basis_alternative == "unavailable":
-        grant["availability"] |= {"code": "basis_not_published"}
+        grant["availability"] = unpublished
+    if basis_alternative == "unpublished":
+        for option in basis["options"]:
+            if option["option_id"] != basis["active"]:
+                option["availability"] = unpublished
     return {**_FRANCE_KENYA, "resolved": {**_FRANCE_KENYA["resolved"], "scope_choices": scope}}
 
 
@@ -4492,7 +4500,8 @@ def _scoped_gross(*, basis_alternative: str = "available") -> dict[str, Any]:
     [
         ("available", ["sector", "region", "measure_basis"]),
         ("partial", ["sector", "region", "measure_basis"]),
-        ("unavailable", ["sector", "region"]),
+        ("unavailable", ["sector", "region", "measure_basis"]),
+        ("unpublished", ["sector", "region"]),
     ],
 )
 def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
@@ -4505,8 +4514,10 @@ def test_a_pin_states_each_scope_choice_with_another_option_to_switch_to(
     per choice with another option that can be served, after the measure
     decision and cited by the requirement pinning it: the user's where their
     words or an earlier choice settled it, the planner's where Search's
-    default did. A basis choice whose only other options are out of reach
-    states none."""
+    default did. A basis choice whose other options are blocked only by
+    another choice, as net beside CRS 120 alone, still states one: the user
+    reaches them by changing that choice. One whose other options are out of
+    reach for their own reasons states none."""
     tools = _tools_by_name()
     ctx = _FakeToolContext()
     _show_block(ctx, _scoped_gross(basis_alternative=basis_alternative))
@@ -5817,10 +5828,13 @@ def _us_2023(
     share: bool = True,
     source: str | None = None,
     whole_also_reported: bool = False,
+    quotient: bool = False,
 ) -> Any:
     """Propose the US 2023 part `part` as a share of `whole`, or compared with it,
     each pinned to its block (`_us_block`), the whole's source written as `source`;
-    with `whole_also_reported`, the whole is also reported as a total of its own."""
+    with `whole_also_reported`, the whole is also reported as a total of its own;
+    with `quotient`, the part summed by year is divided by the whole as a
+    `quotient_of`, as the planner wrote the share in a recorded Studio run."""
 
     def dataset(
         requirement_id: str, measure: str, name: str, named: str | None = None
@@ -5835,6 +5849,21 @@ def _us_2023(
             source_spec_id=_us_block(name)["spec_id"],
         )
 
+    summed: list[EvidenceRequirement] = []
+    if quotient:
+        summed = [
+            AggregateRequirement(
+                id="health_by_year",
+                input_id=_PART,
+                reduction=Reduction.SUM,
+                group_by=(GroupBy.PERIOD,),
+            ),
+            QuotientRequirement(
+                id=_SHARE,
+                numerator=RequirementSide(input_id="health_by_year"),
+                denominator=RequirementSide(input_id=_WHOLE),
+            ),
+        ]
     step: EvidenceRequirement = (
         ShareOfRequirement(
             id=_SHARE,
@@ -5870,7 +5899,7 @@ def _us_2023(
         evidence_requirements=[
             dataset(_PART, "US aid to health", part),
             dataset(_WHOLE, "US total ODA", whole, source),
-            step,
+            *(summed or [step]),
             *reported,
         ],
         tool_context=ctx,
@@ -6012,6 +6041,36 @@ async def test_a_share_divides_its_sector_part_by_the_total_of_the_parts_own_dat
     plan = load_plan(ctx.state)
     assert plan is not None
     assert not [d for d in plan.decisions if d.slot.startswith("share_whole_")]
+
+
+async def test_a_quotient_of_a_summed_sector_part_over_a_total_divides_by_the_parts_own_total(
+    decision: DecisionFactory,
+) -> None:
+    """The plan a recorded Studio run wrote for "What share of US aid went to health
+    in 2023?": CRS health aid summed by year, divided by the DAC1 total as a
+    `quotient_of`. A quotient of a sector part over a total of the same parties is
+    a share, so its whole is compiled from the part's own dataset and the quotient
+    divides by it."""
+    current_user_message.set(_ASKED)
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"), us_2023_block("dac1_total_gross"))
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_total_gross",
+        quotient=True,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert len(surface.calls) == 1
+    assert _pins(ctx) == [
+        (_PART, us_2023_block("health")["spec_id"]),
+        (_WHOLE, us_2023_block("whole")["spec_id"]),
+    ]
 
 
 @pytest.mark.parametrize(
