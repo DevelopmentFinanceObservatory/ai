@@ -63,6 +63,7 @@ from planner.agent import (
     declare_ready,
     planner_instruction,
     read_full_history,
+    with_source_reads,
 )
 from planner.declaration import FIELD_DESCRIBED_ENUMS, SHARED_FIELDS, PlanTool, compact_schema
 from planner.operations import (
@@ -4888,6 +4889,34 @@ def test_a_share_whose_inputs_the_user_stated_on_different_bases_keeps_both(
         plan.requirement("health").source_spec_id,  # type: ignore[union-attr]
         plan.requirement("total").source_spec_id,  # type: ignore[union-attr]
     ) == (HEALTH, TOTAL)
+
+
+async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
+    """A refusal asking two requirements pinning the US total to be counted gross
+    compiles the total on gross once, and the next proposal is answered."""
+    surface = BasisCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
+    refusal = {
+        "code": ProblemCode.BASES_UNALIGNED.value,
+        "detail": {
+            "realign": [
+                {
+                    "spec_id": TOTAL,
+                    "option_id": "measure_basis:gross",
+                    "requirement_id": requirement_id,
+                    "step_id": "share",
+                }
+                for requirement_id in ("total", "total_again")
+            ]
+        },
+    }
+    answers = iter([refusal, {"outcome": Outcome.OK.value}])
+
+    result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
+
+    assert result == {"outcome": Outcome.OK.value}
+    assert surface.tools == ["resolve_definition"]
 
 
 async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refused(

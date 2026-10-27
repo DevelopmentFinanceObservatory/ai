@@ -1509,8 +1509,8 @@ async def with_source_reads(
     counted on different measure bases or provider scopes needs each input
     it names compiled on their shared option (`BASES_UNALIGNED`,
     `compile_on_basis`); a pin already compiled is asked for once, so a
-    refusal naming one is answered
-    as it stands.
+    refusal naming one is answered as it stands, and inputs sharing a pin
+    and an option compile it once (`_alignment_key`).
     """
     while True:
         result = propose()
@@ -1535,13 +1535,26 @@ async def with_source_reads(
                     return refused
             continue
         wanted = realignments_wanted(result)
-        held = {(pin.origin, pin.option_id) for pin in aligned_pins(state)}
-        if not wanted or any((item.spec_id, item.option_id) in held for item in wanted):
+        done = {_alignment_key(pin.origin, (pin.option_id,)) for pin in aligned_pins(state)}
+        keys = [_alignment_key(item.spec_id, (item.option_id,)) for item in wanted]
+        if not wanted or any(key in done for key in keys):
             return result
-        for item in wanted:
+        for item, key in zip(wanted, keys, strict=True):
+            if key in done:
+                continue
             refused = await compile_on_basis(surface, item, state=state)
             if refused is not None:
                 return refused
+            done.add(key)
+
+
+def _alignment_key(spec_id: str, option_ids: Iterable[str]) -> tuple[str, tuple[str, ...]]:
+    """The compile that puts the pin `spec_id` on the options `option_ids`, as a key.
+
+    The options are sorted and deduplicated, so one compile naming the same
+    options in another order is the same work.
+    """
+    return spec_id, tuple(sorted(set(option_ids)))
 
 
 def build_planner_tools(

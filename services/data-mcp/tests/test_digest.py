@@ -590,6 +590,120 @@ def test_the_structured_answer_carries_the_scope_choices_of_a_definite_spec() ->
     }
 
 
+def _inclusive_request_served_bilateral() -> dict[str, Any]:
+    """The scope spec with a provider choice served bilateral, where the user's words asked
+    for bilateral plus imputed multilateral and the imputed table covers only 2011 to 2024."""
+    spec = _scope_spec()
+    scope = spec["resolved"]["scope_choices"]
+    scope["choices"].append(
+        {
+            "id": f"{scope['id']}:provider",
+            "axis": "provider",
+            "rule": "test_provider_convention",
+            "provenance": "default",
+            "active": "provider:bilateral",
+            "options": [
+                {
+                    "option_id": "provider:bilateral",
+                    "label": "bilateral",
+                    "binding": {"kind": "provider", "scope": "bilateral"},
+                    "availability": {"status": "available", "detail": {}},
+                },
+                {
+                    "option_id": "provider:inclusive",
+                    "label": "bilateral plus imputed multilateral",
+                    "binding": {"kind": "provider", "scope": "inclusive"},
+                    "availability": {
+                        "status": "partial",
+                        "years": [[2011, 2024]],
+                        "code": "imputed_coverage",
+                        "detail": {},
+                    },
+                },
+            ],
+        }
+    )
+    scope["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "provider",
+                "option_id": "provider:inclusive",
+                "provenance": "explicit",
+                "origin": {
+                    "kind": "text",
+                    "text": "bilateral plus imputed multilateral",
+                    "start": 0,
+                    "end": 35,
+                },
+            },
+            "code": "stated_choice_not_applied",
+            "cause": "imputed_coverage",
+        }
+    ]
+    return spec
+
+
+def test_a_dropped_entry_states_the_option_asked_for_and_why_in_text_and_structured_content() -> (
+    None
+):
+    envelope = _envelope("definite", spec=_inclusive_request_served_bilateral())
+
+    lines = render_digest(envelope).splitlines()
+    answer = render_answer(envelope)["parts"][0]["specs"][0]
+
+    assert (
+        "Scope choice provider not applied: asked for bilateral plus imputed multilateral "
+        "(explicit); served bilateral, because imputed multilateral aid covers only some "
+        "years (2011 to 2024)."
+    ) in lines
+    assert answer["dropped_scope_entries"] == [
+        {
+            "axis": "provider",
+            "requested": {
+                "option_id": "provider:inclusive",
+                "label": "bilateral plus imputed multilateral",
+            },
+            "provenance": "explicit",
+            "served": {"option_id": "provider:bilateral", "label": "bilateral"},
+            "cause": "imputed_coverage",
+            "reason": "imputed multilateral aid covers only some years (2011 to 2024)",
+        }
+    ]
+
+
+def test_a_dropped_entry_on_an_axis_the_part_lacks_names_its_option_id_and_no_served_option() -> (
+    None
+):
+    spec = _scope_spec()
+    spec["resolved"]["scope_choices"]["dropped_entries"] = [
+        {
+            "entry": {
+                "axis": "provider",
+                "option_id": "provider:inclusive",
+                "provenance": "carried",
+                "origin": {"kind": "choice", "choice_id": "earlier:provider"},
+            },
+            "cause": "axis_absent",
+        }
+    ]
+
+    envelope = _envelope("definite", spec=spec)
+
+    assert (
+        "Scope choice provider not applied: asked for provider:inclusive (carried), "
+        "because this answer has no provider choice."
+    ) in render_digest(envelope).splitlines()
+    dropped = render_answer(envelope)["parts"][0]["specs"][0]["dropped_scope_entries"]
+    assert dropped[0]["served"] is None
+
+
+def test_no_dropped_entry_adds_no_line_and_no_answer_field() -> None:
+    envelope = _envelope("definite", spec=_scope_spec())
+
+    assert "not applied" not in render_digest(envelope)
+    assert "dropped_scope_entries" not in render_answer(envelope)["parts"][0]["specs"][0]
+
+
 def test_a_spec_without_scope_choices_renders_no_scope_line_and_no_answer_field() -> None:
     envelope = _envelope("definite", spec=_spec())
 
