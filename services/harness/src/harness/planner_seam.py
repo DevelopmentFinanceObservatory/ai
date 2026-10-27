@@ -1424,7 +1424,7 @@ def _plan_words(state: SessionState, plan: Plan | None) -> PlanWords:
             if reading.spec_id is not None and reading.scope is not None:
                 readings[reading.spec_id] = reading
     blocks = {
-        **{spec_id: source.block for spec_id, source in pin_sources(state).items()},
+        **{spec_id: source.spec_block(spec_id) for spec_id, source in pin_sources(state).items()},
         **(state.get(ORCHESTRATOR_SPECS_KEY) or {}),
     }
     names: dict[str, str] = {}

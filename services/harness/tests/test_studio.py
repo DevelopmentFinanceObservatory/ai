@@ -2491,6 +2491,56 @@ async def test_a_crash_between_interrupts_save_and_the_resume_leaves_a_retryable
     assert plan["interrupt_id"] not in reloaded.pending
 
 
+async def test_a_retry_after_an_attempt_that_died_before_the_approval_sends_it(
+    tmp_path: Path,
+) -> None:
+    """A's resume of a plan approval dies after `/interrupt`'s own save but before
+    the graph takes the approval, so it never sent `plan.approved`. B's retry of the
+    same answer, once A's segment expires, sends the approved plan once."""
+    clock = [1_000.0]
+    session_service = sqlite_session_service(tmp_path / "shared.db")
+    store_a = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    store_b = StudioStore(session_service, app_name=AGENT_NAME, clock=lambda: clock[0])
+    app_a = _app(*_plan(), session_service=session_service, store=store_a)
+    entered = asyncio.Event()
+
+    async def _dead(**_kwargs: Any) -> AsyncGenerator[Any]:
+        entered.set()
+        await asyncio.Event().wait()
+        yield  # an async generator that never yields a frame
+
+    async with _client(app_a) as client_a:
+        first = await _stream(client_a, "/api/studio/turn", _turn_body("q with forks"))
+        plan = _frame(first, "plan.proposed")
+        app_a.state.studio._frames = _dead
+        attempt = asyncio.ensure_future(
+            _stream(
+                client_a, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        app_a.state.studio.store.release = _noop_release  # type: ignore[method-assign]
+        cancel = await client_a.post(
+            "/api/studio/cancel",
+            json={"kind": "turn.cancel", "schema_version": 1, "conversation_id": CONVERSATION},
+            headers=AUTH,
+        )
+        assert cancel.status_code == 204
+        dead = await asyncio.wait_for(attempt, timeout=5)
+        assert "plan.approved" not in _events(dead)
+
+    clock[0] += studio_state_module.SEGMENT_TTL_S + 1  # A's segment has expired
+    app_b = _app(tool_surface=ScriptedSurface(), session_service=session_service, store=store_b)
+    async with _client(app_b) as client_b:
+        resumed = await _stream(
+            client_b, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
+        )
+
+    assert _events(resumed)[-1] == "done"
+    assert _events(resumed).count("plan.approved") == 1
+    assert _frame(resumed, "plan.approved")["revision"] == plan["revision"]
+
+
 class _CallingSurface(ScriptedSurface):
     """`ScriptedSurface`, recording the name of every tool it is called with."""
 
@@ -3202,6 +3252,38 @@ async def test_a_switch_stream_arms_its_own_stop_and_clears_only_that_one() -> N
     assert armed is not None
     assert seen == [armed]
     assert conversation.switch_stop is later
+
+
+async def test_a_stopped_switch_still_sending_frames_ends_at_the_reoffer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch that goes on sending frames after the first Stop, faster than any
+    heartbeat wait: the stream still ends with `cancelled` once
+    `SWITCH_REOFFER_SECONDS` pass, so a Stop never leaves a stream open."""
+    monkeypatch.setattr(studio_module, "SWITCH_REOFFER_SECONDS", 0.1)
+
+    async def segment():
+        yield _running_line(0)
+        await asyncio.sleep(0.05)  # idle while the Stop is read
+        seq = 1
+        while True:  # then each frame ready at once, so no wait times out
+            yield _running_line(seq)
+            seq += 1
+
+    conversation = ConversationState(conversation_id=CONVERSATION)
+    conversation.begin_turn()
+    stream = _sse_stream(segment(), conversation=conversation, switch=True, heartbeat_seconds=1)
+    sent = [await anext(stream)]
+    _end_stream(conversation, "cancelled")
+
+    async def rest() -> list[str]:
+        return [chunk async for chunk in stream]
+
+    sent += await asyncio.wait_for(rest(), timeout=5)
+
+    frames = _data_frames(sent)
+    assert frames[-1]["event"] == "error"
+    assert frames[-1]["error"]["error"] == "cancelled"
 
 
 async def test_a_cancelled_response_task_records_the_turn_and_unwinds_the_segment() -> None:
@@ -4656,9 +4738,7 @@ async def test_a_stop_from_another_instance_stops_a_switch_and_a_second_ends_its
     async def _revising(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         entered.set()
         await finish.wait()
-        raise switch_module.SwitchFailedError(
-            "r", choice_id=_CHOICE_ID, option_id="sector:120+130", code="c"
-        )
+        raise switch_module.SwitchFailedError("r", code="c")
 
     async def _deaf(_ctx: Any, revision: Any, **_kwargs: Any) -> dict[str, Any]:
         return await revision

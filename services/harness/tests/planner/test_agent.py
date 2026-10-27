@@ -6092,6 +6092,71 @@ async def test_a_declared_whole_is_counted_from_its_parts_own_dataset(
     assert stated.slot in whole_requirement.decision_ids
 
 
+async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid and US aid to CRS 120 alone, each a share of a declared whole over
+    every sector. Both wholes compile to the one CRS total, yet each whole states its
+    own decision, cited by it alone, naming the part it was declared over."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    narrow = _malaria_block()
+    sector = narrow["resolved"]["scope_choices"]["choices"][0]
+    sector["active"] = "sector:120"
+    _show_blocks(ctx, us_2023_block("health"), narrow)
+    united_states = Entity(name="United States", role="donor")
+
+    result = await _us_2023(
+        _tools_reading(surface)["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole=None,
+        declared=True,
+        extra=[
+            DatasetRequirement(
+                id="narrow_part",
+                decision_ids=["measure"],
+                measure="US aid to health, CRS 120",
+                entities=[united_states],
+                period=Period(start=2023, end=2023),
+                source_spec_id=narrow["spec_id"],
+            ),
+            DatasetRequirement(
+                id="narrow_whole",
+                decision_ids=["measure"],
+                measure="US total ODA",
+                entities=[united_states],
+                period=Period(start=2023, end=2023),
+                whole_of=WholeOf(part="narrow_part", axis="sector"),
+            ),
+            ShareOfRequirement(
+                id="narrow_share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="narrow_part"),
+                denominator=RequirementSide(input_id="narrow_whole"),
+            ),
+        ],
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    compiled = us_2023_block("whole")["spec_id"]
+    assert [pin for rid, pin in _pins(ctx) if rid in (_WHOLE, "narrow_whole")] == [
+        compiled,
+        compiled,
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    stated = {d.slot: d for d in plan.decisions if d.caveat == "derived_whole"}
+    named = {}
+    for whole_id in (_WHOLE, "narrow_whole"):
+        (slot,) = [s for s in plan.requirement(whole_id).decision_ids if s in stated]
+        named[whole_id] = stated[slot].rationale
+    assert len(stated) == 2
+    assert "health incl. population and reproductive health" in named[_WHOLE]
+    assert "health, CRS 120 alone" in named["narrow_whole"]
+
+
 async def test_a_declared_whole_keeps_the_choice_switched_on_its_own_row(
     decision: DecisionFactory,
 ) -> None:
@@ -6438,21 +6503,30 @@ async def test_a_plan_at_the_decision_cap_still_carries_its_caveats(
 
 
 @pytest.mark.parametrize(
-    ("whole", "differ"),
+    ("whole", "whole_counts"),
     [
-        pytest.param("whole", False, id="one-scope"),
-        pytest.param("dac1_total_gross", False, id="no-provider-record"),
-        pytest.param("dac1_contributions", True, id="contributions-total"),
+        pytest.param("whole", None, id="one-scope"),
+        pytest.param(
+            "dac1_total_gross",
+            "OECD DAC1 does not say which providers its figures count",
+            id="no-provider-record",
+        ),
+        pytest.param(
+            "dac1_contributions",
+            "bilateral plus core contributions to multilaterals from OECD DAC1",
+            id="contributions-total",
+        ),
     ],
 )
-async def test_a_share_accepting_a_provider_difference_states_one_only_where_its_inputs_differ(
-    decision: DecisionFactory, whole: str, differ: bool
+async def test_a_share_accepting_a_provider_difference_states_one_unless_its_inputs_match(
+    decision: DecisionFactory, whole: str, whole_counts: str | None
 ) -> None:
     """CRS bilateral health aid over a total the user asked for as it stands. The
-    share states a provider difference only when its inputs' scope records hold
-    different provider scopes: over the DAC1 total counting core contributions, and
-    not over the CRS bilateral total, or a DAC1 total Search states no provider scope
-    for. The stated difference names what each input counts."""
+    share states a provider difference unless every input's scope record holds one
+    provider scope and they match: over the DAC1 total counting core contributions,
+    and over a DAC1 total Search states no provider scope for, since nothing says it
+    counts the same providers, but not over the CRS bilateral total. The stated
+    difference names what each input counts, or that its dataset does not say."""
     ctx = _FakeToolContext()
     _show_blocks(ctx, us_2023_block("health"), _us_block(whole))
 
@@ -6469,12 +6543,53 @@ async def test_a_share_accepting_a_provider_difference_states_one_only_where_its
     plan = load_plan(ctx.state)
     assert plan is not None
     stated = [d for d in plan.decisions if d.caveat == "providers_differ"]
-    assert len(stated) == differ
+    assert len(stated) == (whole_counts is not None)
     for noted in stated:
-        assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in (noted.rationale)
-        assert "bilateral plus core contributions to multilaterals from OECD DAC1" in (
-            noted.rationale
-        )
+        assert "bilateral flows only from OECD Creditor Reporting System (CRS)" in noted.rationale
+        assert whole_counts is not None and whole_counts in noted.rationale
+
+
+async def test_a_carried_share_restates_its_provider_difference_when_an_input_is_repinned(
+    decision: DecisionFactory,
+) -> None:
+    """CRS bilateral health aid over the DAC1 total counting core contributions, the
+    share accepting the difference. A revision re-pins the part alone to the
+    inclusive CRS form, as a plan-card switch does, and carries the share: the
+    share's stated difference now names what the re-pinned part counts."""
+    tools = _tools_reading(WholeCompiles())
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx, us_2023_block("health"), us_2023_block("health_inclusive"), dac1_with_contributions()
+    )
+    first = await _us_2023(
+        tools["propose_plan"].func,
+        ctx,
+        decision(),
+        part="health",
+        whole="dac1_contributions",
+        accept=True,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    part = plan.requirement(_PART)
+    assert isinstance(part, DatasetRequirement)
+
+    second = await tools["propose_plan"].func(
+        evidence_requirements=[
+            part.model_copy(update={"source_spec_id": us_2023_block("health_inclusive")["spec_id"]})
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
+    assert stated.slot in plan.requirement(_SHARE).decision_ids
+    assert "bilateral plus imputed multilateral from" in stated.rationale
+    assert "bilateral flows only" not in stated.rationale
 
 
 def test_a_share_over_the_dac1_total_moves_it_to_bilateral_oda(decision: DecisionFactory) -> None:

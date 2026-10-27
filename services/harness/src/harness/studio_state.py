@@ -391,6 +391,10 @@ class _PendingInterrupt:
     # refused stale answer gets back (`PlanRevisionStaleError.current_plan`).
     # None for an elicitation and a plan paused before cards were kept.
     card: PlanProposed | None = None
+    # Whether a stream resuming this plan interrupt with an approval sent its
+    # `plan.approved` frame (`StudioRunner._checkpointed`), so a retry resuming
+    # the same answer sends it only when the dead attempt did not.
+    approved_sent: bool = False
 
 
 # A conversation's active stream may run on any instance; this is the
@@ -1029,6 +1033,13 @@ class ConversationState:
         looking paused for `/interrupt` to answer again."""
         return any(p.resuming_segment is None for p in self.pending.values())
 
+    def mark_approved_sent(self, segment_id: str) -> None:
+        """Record that the stream of `segment_id` sent `plan.approved` for the
+        interrupt it resumes (`_PendingInterrupt.approved_sent`)."""
+        for p in self.pending.values():
+            if p.resuming_segment == segment_id:
+                p.approved_sent = True
+
     def drop_resuming(self, segment_id: str) -> None:
         """Remove every pending entry marked as resuming under
         `segment_id`. Called at that segment's end, win or lose (done,
@@ -1267,6 +1278,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 for choice_id, choice in p.choices.items()
             },
             "card": p.card.model_dump(mode="json", exclude_none=True) if p.card else None,
+            "approved_sent": p.approved_sent,
         }
         for interrupt_id, p in pending.items()
     }
@@ -1293,6 +1305,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
         card=PlanProposed.model_validate(entry["card"]) if entry.get("card") else None,
+        approved_sent=bool(entry.get("approved_sent")),
     )
     if "questions" in entry:
         pending.questions = tuple(

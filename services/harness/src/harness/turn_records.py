@@ -1362,16 +1362,14 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
 
 
 def _unworded_name(block: Mapping[str, Any] | None) -> str:
-    """A part's name with none of its own words: what `block` measures, else the title of
-    the dataset it counts from, else "these figures"."""
+    """A part's name with none of its own words: what `block` measures, else the name of
+    the dataset it counts from (`BlockDataset.name`), else "these figures"."""
     resolved = (block or {}).get("resolved") or {}
     measure = resolved.get("measure_label")
-    ref, title = block_dataset(block)
     return (
         _served_name(block)
         or (measure if isinstance(measure, str) and measure else None)
-        or title
-        or (ref.rsplit("/", 1)[-1] if ref else None)
+        or block_dataset(block).name
         or "these figures"
     )
 

@@ -66,6 +66,7 @@ from harness.chart_binding import (
     select_binding_ok,
 )
 from harness.graph import answer as answer_module
+from harness.graph import switch as switch_module
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
@@ -3628,6 +3629,36 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     assert PlannerPlan.model_validate_json(state["plan"]) == plan
     assert state.get("planner:rounds") is None
     assert _pending_interrupt(events) == APPROVE_INTERRUPT
+
+
+async def test_a_switch_cancelled_while_its_stopped_revision_unwinds_stays_cancelled() -> None:
+    """A Stop cancels the revision, and the switch itself is cancelled while the
+    revision's own cleanup still runs: the switch ends cancelled, and offers no
+    plan as if only the Stop had ended it."""
+    stop = asyncio.Event()
+    unwinding = asyncio.Event()
+
+    async def revision() -> dict[str, Any]:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await asyncio.sleep(5)
+            raise
+        raise AssertionError("unreachable")
+
+    token = SWITCH_STOP.set(stop)
+    try:
+        switch = asyncio.ensure_future(switch_module._unless_stopped(cast(Any, None), revision()))
+    finally:
+        SWITCH_STOP.reset(token)
+    await asyncio.sleep(0)
+    stop.set()
+    await asyncio.wait_for(unwinding.wait(), timeout=5)
+    switch.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(switch, timeout=5)
 
 
 # The source the planner wrote on the deployed plan's numerator, in the

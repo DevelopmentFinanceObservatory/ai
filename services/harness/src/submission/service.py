@@ -481,9 +481,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         settled,
         evidence_requirements,
         previous=previous,
-        scopes=_with_whole_decisions(
-            scope_choice_decisions(pins), _whole_decisions(wholes.values(), shown=pins)
-        ),
+        scopes=scope_choice_decisions(pins),
+        wholes=_whole_decisions(wholes, aligned_after, shown=pins),
         calculations=_provider_difference_decisions(aligned_after, shown=pins),
         removed=removed_decisions,
     )
@@ -3357,6 +3356,7 @@ def _scope_decisions(
     *,
     previous: Plan | None,
     scopes: Mapping[str, Sequence[Decision]],
+    wholes: Mapping[str, Sequence[Decision]],
     calculations: Mapping[str, Sequence[Decision]],
     removed: Collection[str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
@@ -3367,9 +3367,11 @@ def _scope_decisions(
     requirement of `evidence_requirements` pinning a spec_id of `scopes`
     cites that pin's scope decisions; one citing a scope decision, or a
     whole's (`_whole_decisions`), for a pin it does not state has that
-    citation dropped. Each calculation of `calculations` cites the
-    decisions it states (`_provider_difference_decisions`), and one citing
-    such a decision it no longer states has that citation dropped. A
+    citation dropped. Each calculation of `calculations`, this call's or
+    one `previous` carries, cites the decisions it states
+    (`_provider_difference_decisions`), restated where their words changed,
+    and one citing such a decision it no longer states has that citation
+    dropped; a carried calculation whose citations change is patched. A
     decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
@@ -3392,16 +3394,32 @@ def _scope_decisions(
         previous: The plan this call amends, or `None`.
         scopes: The scope decisions a pin of each spec_id states
             (`scope_choice_decisions`).
-        calculations: The decisions each calculation states, by requirement id.
+        wholes: The decision each whole compiled from its part states, by
+            requirement id (`_whole_decisions`).
+        calculations: The decisions each calculation accepting a provider
+            difference states, by requirement id, empty for one stating none.
         removed: The slots this call removes.
 
     Returns:
         `decisions` with each new or restated scope decision appended, and
-        `evidence_requirements` citing them.
+        `evidence_requirements` citing them, with each carried calculation
+        whose citations changed.
     """
     carried = previous.decisions if previous is not None else ()
     known = {decision.slot: decision for decision in (*carried, *decisions)}
     stated = {decision.slot for decision in decisions}
+    restated = {requirement.id for requirement in evidence_requirements}
+    # A calculation the plan carries states its decisions again too: an input
+    # re-pinned under it can change what they say.
+    own = len(evidence_requirements)
+    evidence_requirements = [
+        *evidence_requirements,
+        *(
+            requirement
+            for requirement in (previous.evidence_requirements if previous is not None else ())
+            if requirement.id in calculations and requirement.id not in restated
+        ),
+    ]
     citations = [
         [
             slot
@@ -3428,9 +3446,9 @@ def _scope_decisions(
         if not isinstance(requirement, DatasetRequirement):
             return calculations.get(requirement.id, ())
         pin = requirement.source_spec_id
-        return scopes.get(pin, ()) if pin is not None else ()
+        own = scopes.get(pin, ()) if pin is not None else ()
+        return (*own, *wholes.get(requirement.id, ()))
 
-    restated = {requirement.id for requirement in evidence_requirements}
     cited_after = {
         *(slot for cited in citations for slot in cited),
         *(
@@ -3454,7 +3472,9 @@ def _scope_decisions(
     }
     written: list[Decision] = []
     patched: list[EvidenceRequirement] = []
-    for requirement, cited in zip(evidence_requirements, citations, strict=True):
+    for index, (requirement, cited) in enumerate(
+        zip(evidence_requirements, citations, strict=True)
+    ):
         for derived in derived_for(requirement):
             standing = known.get(derived.slot)
             if standing is None:
@@ -3473,11 +3493,10 @@ def _scope_decisions(
                 written.append(derived)
             if derived.slot not in cited:
                 cited.append(derived.slot)
-        patched.append(
-            requirement
-            if tuple(cited) == requirement.decision_ids
-            else requirement.model_copy(update={"decision_ids": tuple(cited)})
-        )
+        if tuple(cited) != requirement.decision_ids:
+            patched.append(requirement.model_copy(update={"decision_ids": tuple(cited)}))
+        elif index < own:
+            patched.append(requirement)
     return [*decisions, *written], patched
 
 
@@ -4253,21 +4272,11 @@ def _declared_wholes(
     return wholes
 
 
-def _whole_slot(spec_id: str) -> str:
-    """The `Decision.slot` of the decision a whole compiled from its part states for
-    its pin `spec_id` (`_whole_decisions`). Nothing reads it back: such a decision is
+def _whole_slot(requirement_id: str) -> str:
+    """The `Decision.slot` of the decision the whole `requirement_id`, compiled from
+    its part, states (`_whole_decisions`). Nothing reads it back: such a decision is
     known by its `caveat`."""
-    return f"share_whole_{spec_id}"
-
-
-def _with_whole_decisions(
-    scopes: Mapping[str, tuple[Decision, ...]], wholes: Mapping[str, tuple[Decision, ...]]
-) -> dict[str, tuple[Decision, ...]]:
-    """`scopes`, each pin's scope decisions, with the decisions `wholes` names for it after them."""
-    merged = dict(scopes)
-    for pin, decisions in wholes.items():
-        merged[pin] = (*merged.get(pin, ()), *decisions)
-    return merged
+    return _derived_slot("share_whole_", requirement_id)
 
 
 def _compiled_wholes(
@@ -4327,24 +4336,42 @@ def _without_replaced_whole_decisions(
 
 
 def _whole_decisions(
-    wholes: Iterable[AlignedPin], *, shown: Mapping[str, PinSource]
+    wholes: Mapping[str, AlignedPin],
+    requirements: Sequence[EvidenceRequirement],
+    *,
+    shown: Mapping[str, PinSource],
 ) -> dict[str, tuple[Decision, ...]]:
-    """The decision each whole compiled from its part (`AlignedPin.whole_axis`) states, by the whole's pin.
+    """The decision each whole compiled from its part (`AlignedPin.whole_axis`) states,
+    by the whole's requirement id, `wholes` holding each one's pin.
 
     It says, in reader words, that the share divides by the total of its
-    part's own dataset, `AlignedPin.origin`, over every member of the axis
-    left open. It is the planner's, qualifies the answer (`Decision.caveat`
-    `derived_whole`), and is cited by the whole's requirement as a scope
-    decision is (`_scope_decisions`).
+    part's own dataset over every member of the axis left open. The part is
+    the one the whole declares (`DatasetRequirement.whole_of`), else the pin
+    it was compiled from (`AlignedPin.origin`), so two wholes compiled to one
+    pin each name their own. It is the planner's, qualifies the answer
+    (`Decision.caveat` `derived_whole`), and is cited by the whole's
+    requirement as a scope decision is (`_scope_decisions`).
     """
+    by_id = {requirement.id: requirement for requirement in requirements}
     decisions: dict[str, tuple[Decision, ...]] = {}
-    for whole in wholes:
-        part_block = _pin_block(whole.origin, shown)
+    for requirement_id, whole in wholes.items():
+        declared = by_id.get(requirement_id)
+        part = (
+            by_id.get(declared.whole_of.part)
+            if isinstance(declared, DatasetRequirement) and declared.whole_of is not None
+            else None
+        )
+        origin = (
+            part.source_spec_id
+            if isinstance(part, DatasetRequirement) and part.source_spec_id is not None
+            else whole.origin
+        )
+        part_block = _pin_block(origin, shown)
         dataset = _dataset_title(part_block)
         chosen = f"the {dataset} total over every {whole.whole_axis}"
         try:
             decision = Decision(
-                slot=_whole_slot(whole.spec_id),
+                slot=_whole_slot(requirement_id),
                 description="Which total the share divides by.",
                 options=(chosen, "a total from another dataset"),
                 chosen=chosen,
@@ -4358,9 +4385,9 @@ def _whole_decisions(
                 caveat="derived_whole",
             )
         except ValidationError as exc:
-            logger.warning("whole not noted: spec_id=%s: %s", whole.spec_id, exc)
+            logger.warning("whole not noted: requirement=%s: %s", requirement_id, exc)
             continue
-        decisions[whole.spec_id] = (decision,)
+        decisions[requirement_id] = (decision,)
     return decisions
 
 
@@ -4371,29 +4398,38 @@ _PROVIDER_DIFFERENCE_PREFIX = "providers_differ_"
 
 def _provider_difference_slot(step_id: str) -> str:
     """The `Decision.slot` of the decision the calculation `step_id` states when it
-    accepts a provider difference (`_provider_difference_decisions`): the prefix and
-    the id, or the prefix and a digest of the id where both pass an identifier's
-    64 characters. Nothing reads it back: such a decision is known by its `caveat`."""
-    slot = f"{_PROVIDER_DIFFERENCE_PREFIX}{step_id}"
+    accepts a provider difference (`_provider_difference_decisions`). Nothing reads
+    it back: such a decision is known by its `caveat`."""
+    return _derived_slot(_PROVIDER_DIFFERENCE_PREFIX, step_id)
+
+
+def _derived_slot(prefix: str, requirement_id: str) -> str:
+    """The `Decision.slot` of a decision the requirement `requirement_id` states
+    (`_whole_slot`, `_provider_difference_slot`): `prefix` and the id, or `prefix`
+    and a digest of the id where both pass an identifier's 64 characters."""
+    slot = f"{prefix}{requirement_id}"
     if len(slot) <= _MAX_SLOT_CHARS:
         return slot
-    return f"{_PROVIDER_DIFFERENCE_PREFIX}{hashlib.sha256(step_id.encode()).hexdigest()[:16]}"
+    return f"{prefix}{hashlib.sha256(requirement_id.encode()).hexdigest()[:16]}"
 
 
 def _provider_difference_decisions(
     requirements: Sequence[EvidenceRequirement], *, shown: Mapping[str, PinSource]
 ) -> dict[str, tuple[Decision, ...]]:
-    """The decision each calculation accepting a provider difference states, by its requirement id.
+    """The decisions each calculation accepting a provider difference states, by its requirement id.
 
     The user asked for its inputs as each dataset counts them
-    (`accept_provider_difference`). A calculation states one only when its
-    pinned dataset inputs' scope records hold different provider scopes
-    (`Option.provider_scope` of each active option); an input whose record
-    states no provider scope is left out, since nothing says what it counts.
-    The decision says so in reader words, naming what each input with a
-    provider scope counts (`_side_name`, `_counts`). It is the planner's,
-    qualifies the answer (`Decision.caveat` `providers_differ`), and is cited
-    by the calculation (`_scope_decisions`).
+    (`accept_provider_difference`). Every such calculation has an entry, empty
+    when it states none, so a calculation the plan carries is restated as
+    one it states (`_scope_decisions`). It states one unless every pinned
+    dataset input's scope record holds a provider scope and all match
+    (`Option.provider_scope` of each active option): an input whose record
+    states none may count other providers, since nothing says what it
+    counts. The decision says so in reader words, naming what each input
+    with a provider scope counts (`_side_name`, `_counts`) and each dataset
+    stating none. It is the planner's, qualifies the answer
+    (`Decision.caveat` `providers_differ`), and is cited by the calculation
+    (`_scope_decisions`).
     """
     # An input the plan does not state reads nothing here; `Plan` refuses it.
     reads: dict[str, Sequence[str]] = {
@@ -4404,23 +4440,24 @@ def _provider_difference_decisions(
     for step in requirements:
         if not isinstance(step, _PROVIDER_ALIGNED) or not step.accept_provider_difference:
             continue
+        decisions[step.id] = ()
         under = reached(step.id, reads)
-        counted: list[tuple[Mapping[str, Any] | None, Option]] = []
-        for requirement in requirements:
-            if (
-                not isinstance(requirement, DatasetRequirement)
-                or requirement.id not in under
-                or requirement.source_spec_id is None
-            ):
-                continue
-            block = _pin_block(requirement.source_spec_id, shown)
-            if (provider := _provider_option(block)) is not None:
-                counted.append((block, provider))
-        if len({provider.provider_scope for _, provider in counted}) < 2:
+        inputs = [
+            (block, _provider_option(block))
+            for requirement in requirements
+            if isinstance(requirement, DatasetRequirement)
+            and requirement.id in under
+            and requirement.source_spec_id is not None
+            for block in [_pin_block(requirement.source_spec_id, shown)]
+        ]
+        scopes = {provider.provider_scope if provider else None for _, provider in inputs}
+        if None not in scopes and len(scopes) < 2:
             continue
         sides = " and ".join(
             f"the {_side_name(block)} figures count {provider.label} from {_dataset_title(block)}"
-            for block, provider in counted
+            if provider is not None
+            else f"{_dataset_title(block)} does not say which providers its figures count"
+            for block, provider in inputs
         )
         try:
             decision = Decision(
@@ -4446,9 +4483,8 @@ def _provider_difference_decisions(
 
 
 def _dataset_title(block: Mapping[str, Any] | None) -> str:
-    """The title of the dataset `block` counts from, else the last part of its ref."""
-    ref, title = block_dataset(block)
-    return title or (ref or "").rsplit("/", 1)[-1]
+    """The name of the dataset `block` counts from (`BlockDataset.name`), empty when unstated."""
+    return block_dataset(block).name or ""
 
 
 def _side_name(block: Mapping[str, Any] | None) -> str:

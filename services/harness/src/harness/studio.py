@@ -602,9 +602,11 @@ async def _sse_stream(
                                 else max(0.0, min(heartbeat_seconds, reoffer_by - loop.time())),
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
-                            if next_frame in done:
-                                break
+                            # Checked on every frame too: a stopped switch
+                            # still sending frames is never idle.
                             overdue = reoffer_by is not None and loop.time() >= reoffer_by
+                            if next_frame in done and not overdue:
+                                break
                             if overdue or (cancel_wait is not None and cancel_wait in done):
                                 assert conversation is not None
                                 if overdue:
@@ -1000,7 +1002,10 @@ class StudioRunner:
         on the same frame it reaches the ledger. A checkpoint that fails
         (the segment was taken over, or the write itself failed) yields a
         stream-fatal error frame instead of the pause or terminal frame it
-        would have carried, and ends the stream there. This is the one
+        would have carried, and ends the stream there. Once a `plan.approved`
+        frame is sent, the interrupt it answers records it
+        (`ConversationState.mark_approved_sent`) and is checkpointed, a failure
+        there logged alone. This is the one
         interception point for every route this runs under (`/turn`, its
         edit-card branch, and `/interrupt`)."""
         async for frame in frames:
@@ -1022,6 +1027,20 @@ class StudioRunner:
                 if event == "done":
                     outgoing = frame.model_copy(update={"composition": conversation.composition})
             yield outgoing
+            if event == "plan.approved":
+                # Saved once sent, so a retry of the same answer after this
+                # segment dies does not send it again. A crash before the
+                # save sends it twice, which beats never.
+                conversation.mark_approved_sent(segment_id)
+                try:
+                    await self.store.checkpoint(principal, conversation_id, segment_id)
+                except Exception:
+                    logger.warning(
+                        "studio checkpoint after plan.approved failed: conversation %s segment %s",
+                        conversation_id,
+                        segment_id,
+                        exc_info=True,
+                    )
 
     async def _locked(
         self,
@@ -1724,10 +1743,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             part = create_request_input_response(pending.adk_id, {"result": answer})
             message = types.Content(role="user", parts=[part])
             # The approved plan goes out once per interrupt: a retry resuming
-            # the same answer follows an attempt that may already have sent it.
+            # the same answer sends it only when the dead attempt did not.
             approving = (
                 pending.card
-                if body.decision is InterruptDecision.APPROVE and not resuming
+                if body.decision is InterruptDecision.APPROVE and not pending.approved_sent
                 else None
             )
             frames = studio._frames(

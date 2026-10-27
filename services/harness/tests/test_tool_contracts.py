@@ -252,22 +252,22 @@ def test_a_dac1_total_reads_with_its_contributions_provider_scope() -> None:
 
 
 @pytest.mark.parametrize("active", ["provider:pooled", "provider:pooled_total"])
-def test_a_provider_choice_holding_an_unknown_scope_is_refused_as_a_contract_error(
-    active: str, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_provider_choice_holding_an_unknown_scope_is_left_out_alone(active: str) -> None:
     """A provider choice whose active option counts a provider scope this release
-    does not read: leaving the option out would leave the choice holding nothing, and
-    leaving the choice out would turn provider alignment off for the part. The record
-    is refused and the refusal logged."""
+    does not read: the choice is left out, since without that option it would hold
+    nothing, and every other choice stays, so measure-basis alignment still reads
+    the part."""
     added = _scope_choices()
     added["choices"].append(_provider_choice(added["id"], active=active))
     part = _definite("spec_1")
     part["spec"]["resolved"]["scope_choices"] = added
 
-    with pytest.raises(ValidationError, match=active):
-        PartScope.from_search(added)
-    assert reading_facts(part["spec"])["scope"] is None
-    assert any("spec_1" in record.getMessage() for record in caplog.records)
+    scope = PartScope.from_search(added)
+
+    assert [choice.axis for choice in scope.choices] == ["sector", "region", "measure_basis"]
+    stored = reading_facts(part["spec"])["scope"]
+    assert stored is not None
+    assert PartScope.model_validate(stored) == scope
 
 
 def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(

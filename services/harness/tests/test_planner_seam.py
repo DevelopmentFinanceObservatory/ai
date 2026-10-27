@@ -4715,9 +4715,7 @@ async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switc
             and d.fixes.source_spec_id == TOTAL_GROSS
         ]
         readings = switch._readings(ctx)
-        pin, reading, scope, choice = switch._target(
-            row, to_origin={}, readings=readings, choice_id="unused", option_id="unused"
-        )
+        pin, reading, scope, choice = switch._target(row, to_origin={}, readings=readings)
         return {
             "stored": [(r.spec_id, r.planner_axes) for r in readings],
             "target": [pin, reading.text, list(reading.asked_roles), scope.id, choice.active],
@@ -4922,3 +4920,38 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]
+
+
+def test_a_plan_sentence_names_a_pin_an_earlier_turn_read_by_its_earlier_block(
+    decision: Any, requirement: Any, derived_requirement: Any
+) -> None:
+    """A pin an earlier turn read, whose block this turn holds through
+    `earlier_block` alone, and whose reading has no words of its own: a sentence
+    about the plan names it by what that block measures."""
+    scope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp/tests/fixtures/scope_choices_us_health_africa.json"
+        ).read_text()
+    )
+    spec_id = scope["compiled"]["spec_id"]
+    reading = SearchReading.from_part({"status": "definite", "spec_id": spec_id, "scope": scope})
+    assert (reading.text, reading.sentence) == (None, None)
+    state = cast(SessionState, {ORCHESTRATOR_SEARCHES_KEY: [reading.model_dump(mode="json")]})
+    save_pin_sources(state, {spec_id: PinSource(settled=True, earlier_turn=True)})
+    plan = Plan(
+        question="health aid",
+        decisions=[decision()],
+        evidence_requirements=[
+            requirement(id="health", source_spec_id=spec_id),
+            derived_requirement(input_id="health"),
+        ],
+    )
+    earlier = {spec_id: {"resolved": {"shape": {"label": "gross disbursements (health)"}}}}
+    token = current_earlier_block.set(earlier.get)
+    try:
+        words = planner_seam._plan_words(state, plan)
+    finally:
+        current_earlier_block.reset(token)
+
+    assert words.names["health"] == "gross disbursements (health)"

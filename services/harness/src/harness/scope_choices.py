@@ -62,6 +62,12 @@ class BlockDataset(NamedTuple):
     ref: str | None
     title: str | None
 
+    @property
+    def name(self) -> str | None:
+        """The dataset's name for a reader: its title, else the last part of its ref
+        (`OECDDAC1`), `None` when the block states neither."""
+        return self.title or (self.ref.rsplit("/", 1)[-1] if self.ref else None)
+
 
 def block_dataset(block: Mapping[str, Any] | None) -> BlockDataset:
     """The dataset `block`, a spec block, counts from (`BlockDataset`)."""
@@ -82,8 +88,7 @@ def option_axis(option_id: str) -> str:
 # The axes, provider scopes and reason codes this release reads. Search's
 # vocabularies are open: a later release can add to any, and a record holding
 # a value outside them stays readable (`_on_known_axes`, `_readable_choices`,
-# `OptionAvailability.code`, `DroppedEntry.code`), but for a choice holding an
-# unknown provider scope active, which `_readable_choices` refuses.
+# `OptionAvailability.code`, `DroppedEntry.code`).
 _KNOWN_AXES = frozenset(get_args(ScopeAxis))
 _KNOWN_PROVIDER_SCOPES = frozenset(get_args(ProviderScope))
 _KNOWN_REASONS = frozenset(get_args(ScopeReasonCode))
@@ -123,14 +128,11 @@ def _named_provider_scope(option: Any) -> object:
 def _readable_choices(items: Any) -> Any:
     """`items`, a scope's raw choices from Search, without each choice on an axis this
     release does not read (`_on_known_axes`), and each choice without its options of
-    a provider scope it does not read (`_named_provider_scope`).
+    a provider scope it does not read (`_named_provider_scope`). A choice holding
+    such an option active would hold nothing, so it is left out whole, and the
+    part's other choices stay.
 
     An option holding no scope string is kept, so validation refuses it.
-
-    Raises:
-        ValueError: When a choice's active option counts a provider scope this
-            release does not read: the choice would hold nothing, and leaving the
-            choice out would turn provider alignment off for the part.
     """
     kept = _on_known_axes(items, "axis")
     if not isinstance(kept, list):
@@ -151,10 +153,7 @@ def _readable_choices(items: Any) -> Any:
             readable.append(choice)
             continue
         if choice.get("active") in unread:
-            raise ValueError(
-                f"scope choice {choice.get('id')!r} holds {choice.get('active')!r}, a provider "
-                "scope this release does not read"
-            )
+            continue
         readable.append(
             {
                 **choice,
@@ -356,8 +355,8 @@ class PartScope(StrictModel):
         alone, and a stored one is read back with no field ignored. A value
         Search added to an open vocabulary degrades only what holds it: a
         choice or entry on an unknown axis is left out, as is an option of an
-        unknown provider scope (a choice holding one active is refused,
-        `_readable_choices`), an unknown reason
+        unknown provider scope, or the choice holding one active
+        (`_readable_choices`), an unknown reason
         code reads as none, a dropped entry's unknown code as the one its
         provenance gives, and a component keeps whatever role it names.
 
