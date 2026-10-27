@@ -144,10 +144,10 @@ Models: `TurnRequest`, `InterruptResponse`, `CompositionMutation`,
 ## The SSE stream
 
 Frames are SSE `data:` lines, one JSON object per frame, discriminated on
-`event` (`STUDIO_FRAME_ADAPTER`). Twelve frame types; at least one fixture
+`event` (`STUDIO_FRAME_ADAPTER`). Thirteen frame types; at least one fixture
 each in `wire_fixtures/studio/` (elicitation has three: the plain
 question, the skippable free-text question, and two questions in one
-pause).
+pause; `plan.proposed` has a second showing a failed switch).
 
 | `event`               | What it is                                                                                                                                  |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -155,6 +155,7 @@ pause).
 | `message.complete`    | final text for the turn's message                                                                                                           |
 | `plan.proposed`       | the plan awaiting approval; **pauses and ends the stream** (delta 1)                                                                        |
 | `plan.versioned`      | a new plan replaces the one `supersedes` names; a fresh `plan.proposed` follows. `version` can be lower than the superseded one (see below) |
+| `plan.approved`       | the plan the user approved; sent once, before the resumed run's first frame (delta 22)                                                      |
 | `activity.step`       | one execution step, the only progress channel; `step_id` is the call's position within the stream (see `docs/frontend-interface.md`)        |
 | `component.created`   | a new card: opaque `payload` + `fact_summary` + inline `provenance`                                                                         |
 | `component.revised`   | new revision under the same `component_id`                                                                                                  |
@@ -490,6 +491,34 @@ An elicitation opened before this delta and still paused takes its one
 answer as `payload` (an offered option id, or free text). Any other
 elicitation refuses `payload`. `schema_version` stays 1.
 
+## Plan summary, answer step, failed switch and approval (delta 22, v1.7)
+
+Every addition is optional, so a client built against an earlier contract
+ignores it and an older harness omits it.
+
+- `PlanStep.gives_answer`: true on the one step whose result answers the
+  user's question; at most one step of a plan carries it. `label` stays
+  the short step label and `description` the detail shown when the step is
+  opened.
+- `PlanProposed.summary`: one plain sentence saying what is counted, for
+  whom, when and from which source.
+- `PlanProposed.switch_failed`: `{choice_id, option_id, code, reason}`,
+  set on the plan re-offered after a switch that did not apply.
+  `choice_id` and `option_id` name the option the user picked, `code` is
+  the refusal's code, and `reason` says in a reader's words why it failed
+  and what still holds.
+- `plan.approved`: `{plan_version_id, version, revision?, title,
+  summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
+  each choice is `{question, chosen, changed_from?}`, where `question` is
+  the choice's short name (for example "Basis"), `chosen` the option label
+  and `changed_from` the label it held before the user switched it. The
+  harness sends it once, on the `approve` answer to
+  `/api/studio/interrupt`, before the first frame of the resumed run. The
+  client attaches it to the message that stream produces and keeps it in
+  the chat snapshot.
+
+`schema_version` stays 1.
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -581,3 +610,6 @@ Fixture values that are samples:
    own options, free-text and skip flags; the frame keeps a whole-pause
    `skippable`. `interrupt.response` answers them with `answers` keyed by
    question id.
+1. `PlanStep` gains `gives_answer`; `plan.proposed` gains `summary` and
+   `switch_failed`; a new `plan.approved` frame carries the approved plan
+   on the approve answer. All optional.
