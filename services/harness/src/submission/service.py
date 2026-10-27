@@ -56,7 +56,7 @@ from compiler.sources import (
 )
 from data_mcp.settings import Settings as DataMcpSettings
 from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTION_CALL_NAME
-from harness.plan_display import basis_free, sector_words
+from harness.plan_display import concept_name, sector_words
 from harness.scope_choices import (
     Option,
     PartScope,
@@ -88,6 +88,7 @@ from planner.plan import (
     AskAnswer,
     AskRoleDroppedError,
     AsksUnaccountedError,
+    ComparisonRequirement,
     DatasetRequirement,
     Decision,
     DecisionDraft,
@@ -469,6 +470,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     settled, evidence_requirements = _without_replaced_whole_decisions(
         settle_decisions(patch.decisions, aligned_after),
         evidence_requirements,
+        carried=previous.decisions if previous is not None else (),
         after=aligned_after,
         wholes=wholes.keys(),
     )
@@ -3527,9 +3529,14 @@ _MIXED: dict[str | None, str] = {
 }
 
 # The calculations whose inputs are counted on one provider scope: those that
-# divide or add their inputs. A comparison or join sets its inputs side by
-# side, each keeping its own provider scope (`_aligns`).
-_PROVIDER_ALIGNED = (ShareOfRequirement, QuotientRequirement, SumOfRequirement)
+# subtract, divide or add their inputs. A join sets its inputs side by side for
+# display (`_aligns`).
+_PROVIDER_ALIGNED = (
+    ComparisonRequirement,
+    ShareOfRequirement,
+    QuotientRequirement,
+    SumOfRequirement,
+)
 
 # The axis a part's sector is chosen on, which names a share's side for the
 # reader (`_side_name`).
@@ -3833,10 +3840,10 @@ def _aligned_bases(
     them (explicit or carried entries naming different options, an entry
     this planner compiled excluded, as `_InputBasis.stated` reads them).
     Otherwise its dataset inputs with a choice on the axis are counted on
-    one option. Only a share, quotient or sum aligns the provider scope,
-    and not one the user asked to keep its inputs' own
-    (`accept_provider_difference`); a comparison or join keeps each input's
-    own (`_aligns`). Calculations sharing an input, such as a sum read by a
+    one option. Only a comparison, share, quotient or sum aligns the
+    provider scope, and not one the user asked to keep its inputs' own
+    (`accept_provider_difference`); a join keeps each input's own
+    (`_aligns`). Calculations sharing an input, such as a sum read by a
     share, form one group and take one option for every input any of them
     reaches (`_shared_basis`): the one the user stated on any of them, else
     the one the narrowest part is counted on (`_part_rank`), the first such
@@ -4118,7 +4125,7 @@ def _providers_unaligned(
     """
     return problem(
         ProblemCode.PROVIDERS_UNALIGNED,
-        f"{step.id!r} divides or adds its inputs, so they count one provider scope, "
+        f"{step.id!r} subtracts, divides or adds its inputs, so they count one provider scope, "
         f"{basis.label(target)}, and {basis.requirement_id!r}'s dataset counts "
         f"{basis.label(basis.choice.active)} and is not served that way. Align them: when "
         f"{step.id!r} is a share of a sector's figure in the same party's total across every "
@@ -4179,8 +4186,8 @@ def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
 
 def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
     """Whether `step` reads its inputs' options on `axis`: every calculation on the
-    measure basis, and on the provider scope a share, quotient or sum
-    (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or accepts a
+    measure basis, and on the provider scope a comparison, share, quotient or
+    sum (`_PROVIDER_ALIGNED`), whether it aligns them (`_aligns`) or accepts a
     provider difference, where a sum still refuses counting flows twice and the
     difference is stated (`_provider_difference_decisions`)."""
     return axis != _PROVIDER_AXIS or isinstance(step, _PROVIDER_ALIGNED)
@@ -4188,8 +4195,8 @@ def _reads_on(step: EvidenceRequirement, axis: str) -> bool:
 
 def _aligns(step: EvidenceRequirement, axis: str) -> bool:
     """Whether `step` counts its inputs on one option of `axis`: every calculation
-    on the measure basis, and on the provider scope a share, quotient or sum
-    (`_PROVIDER_ALIGNED`), unless the user asked for its inputs as each dataset
+    on the measure basis, and on the provider scope a comparison, share,
+    quotient or sum (`_PROVIDER_ALIGNED`), unless the user asked for its inputs as each dataset
     counts them (`accept_provider_difference`)."""
     if axis != _PROVIDER_AXIS:
         return True
@@ -4301,6 +4308,7 @@ def _without_replaced_whole_decisions(
     decisions: Sequence[Decision],
     evidence_requirements: Sequence[EvidenceRequirement],
     *,
+    carried: Sequence[Decision],
     after: Sequence[EvidenceRequirement],
     wholes: Collection[str],
 ) -> tuple[list[Decision], list[EvidenceRequirement]]:
@@ -4314,14 +4322,23 @@ def _without_replaced_whole_decisions(
     one a requirement other than those wholes cites, stays. Citations are
     read over `after`, the plan's requirements once the patch applies, so a
     requirement the patch carries counts as well as one it states.
+
+    The candidates are this call's `decisions` and those of the plan it
+    amends (`carried`) it does not restate, so a whole restated with
+    `whole_of` drops a citation an earlier turn wrote, and
+    `_uncited_carried_decisions` then removes the decision.
     """
     citers: dict[str, set[str]] = {}
     for requirement in after:
         for slot in requirement.decision_ids:
             citers.setdefault(slot, set()).add(requirement.id)
+    restated = {decision.slot for decision in decisions}
     replaced = {
         decision.slot
-        for decision in decisions
+        for decision in [
+            *decisions,
+            *(decision for decision in carried if decision.slot not in restated),
+        ]
         if decision.resolved_by is ResolvedBy.PLANNER_DEFAULT
         and not (is_scope_choice(decision) or is_search_pin(decision))
         and decision.caveat != "derived_whole"
@@ -4377,7 +4394,12 @@ def _whole_decisions(
         )
         part_block = _pin_block(origin, shown)
         dataset = _dataset_title(part_block)
-        chosen = f"the {dataset} total over every {whole.whole_axis}"
+        side = _side_name(part_block)
+        chosen = " ".join(filter(None, ("the", dataset, f"total over every {whole.whole_axis}")))
+        source = (
+            f"the {dataset}, the same dataset as" if dataset is not None else "the same dataset as"
+        )
+        part_named = f"the {side} figures" if side is not None else "its part"
         try:
             decision = Decision(
                 slot=_whole_slot(requirement_id),
@@ -4386,9 +4408,9 @@ def _whole_decisions(
                 chosen=chosen,
                 resolved_by=ResolvedBy.PLANNER_DEFAULT,
                 rationale=(
-                    f"The share divides by the total over every {whole.whole_axis} from the "
-                    f"{dataset}, the same dataset as the {_side_name(part_block)} figures, so "
-                    "both sides count the same donors, recipients, measure basis and providers."
+                    f"The share divides by the total over every {whole.whole_axis} from "
+                    f"{source} {part_named}, so both sides count the same donors, recipients, "
+                    "measure basis and providers."
                 ),
                 fixes=DecisionFixes(source_spec_id=whole.spec_id),
                 caveat="derived_whole",
@@ -4494,7 +4516,8 @@ def _provider_sentence(
 ) -> str:
     """One sentence saying which providers' spending the input `requirement` counts:
     "<concept> counts <provider label>, from <dataset>." with the input named as
-    the plan card names it (`_input_concept`), or that its dataset does not say. A
+    the plan card names it (`_input_concept`), or that its dataset does not say.
+    The dataset is left out where Search names none (`_dataset_title`). A
     dataset title opening with the provider label, such as "bilateral plus imputed
     multilateral (OECD CRS and ONE Imputed Multilateral Sectors)", is named by the
     rest of it, so the label is said once."""
@@ -4502,7 +4525,11 @@ def _provider_sentence(
     concept = f"{concept[:1].upper()}{concept[1:]}"
     title = _dataset_title(block)
     if provider is None:
+        if title is None:
+            return f"{concept} does not say which providers it counts."
         return f"{concept}, from {title}, does not say which providers it counts."
+    if title is None:
+        return f"{concept} counts {provider.label}."
     if title.lower().startswith(provider.label.lower()):
         rest = title[len(provider.label) :].strip()
         title = rest.removeprefix("(").removesuffix(")").strip() or title
@@ -4510,34 +4537,35 @@ def _provider_sentence(
 
 
 def _input_concept(requirement: DatasetRequirement, block: Mapping[str, Any] | None) -> str:
-    """What `requirement` fetches in the reader's words, read off its pin's scope
-    record the way the plan card reads it off the scope decisions
-    (`harness.plan_display._concept`): the sector its sector choice holds without
-    its codes, else the planner's measure without the words of any basis its basis
-    choice offers, else what Search says the dataset measures, else the planner's
-    measure."""
+    """What `requirement` fetches in the reader's words, named by the plan card's
+    rule (`harness.plan_display.concept_name`) over its pin's scope record: the
+    sector its sector choice holds, the options its basis choice offers, and what
+    Search says the dataset measures (`resolved.shape.label`, the field
+    `SelectedSource.measure_label` copies)."""
     scope = part_scope(str((block or {}).get("spec_id")), block)
     choices = {choice.axis: choice for choice in scope.choices} if scope is not None else {}
     sector = choices.get(_SECTOR_AXIS)
-    if sector is not None and (held := sector.active_option) is not None:
-        return sector_words(held.label, held.option_id)
+    held = sector.active_option if sector is not None else None
     basis = choices.get(_BASIS_AXIS)
-    if basis is not None:
-        return basis_free(requirement.measure, (option.label for option in basis.options))
-    measure_label = ((block or {}).get("resolved") or {}).get("measure_label")
-    return (
-        measure_label if isinstance(measure_label, str) and measure_label else requirement.measure
+    shape = (((block or {}).get("resolved") or {}).get("shape")) or {}
+    label = shape.get("label")
+    return concept_name(
+        requirement.measure,
+        sector=sector_words(held.label, held.option_id) if held is not None else None,
+        basis_options=[option.label for option in basis.options] if basis is not None else None,
+        measure_label=label if isinstance(label, str) and label else None,
     )
 
 
-def _dataset_title(block: Mapping[str, Any] | None) -> str:
-    """The name of the dataset `block` counts from (`BlockDataset.name`), empty when unstated."""
-    return block_dataset(block).name or ""
+def _dataset_title(block: Mapping[str, Any] | None) -> str | None:
+    """The name of the dataset `block` counts from (`BlockDataset.name`), `None` when
+    Search names none or no block is held."""
+    return block_dataset(block).name
 
 
-def _side_name(block: Mapping[str, Any] | None) -> str:
+def _side_name(block: Mapping[str, Any] | None) -> str | None:
     """A share side's name for the reader: the sector its scope's sector choice holds,
-    else the dataset it counts from (`_dataset_title`)."""
+    else the dataset it counts from (`_dataset_title`), `None` when neither is stated."""
     scope = part_scope(str((block or {}).get("spec_id")), block)
     sector = (
         next((c.active_option for c in scope.choices if c.axis == _SECTOR_AXIS), None)

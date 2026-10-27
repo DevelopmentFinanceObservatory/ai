@@ -108,7 +108,7 @@ class ProblemCode(StrEnum):
     # cannot be compiled from its part's own dataset with the axis left open
     # (`submission.service.share_whole_underivable`).
     SHARE_WHOLE_UNDERIVABLE = "share_whole_underivable"
-    # A share, quotient or sum reads an input its dataset does not serve on the
+    # A comparison, share, quotient or sum reads an input its dataset does not serve on the
     # provider scope of its other inputs, which the planner repairs
     # (`submission.service._providers_unaligned`).
     PROVIDERS_UNALIGNED = "providers_unaligned"

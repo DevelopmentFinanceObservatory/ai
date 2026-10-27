@@ -18,6 +18,7 @@ from harness.plan_display import (
     _label,
     basis_free,
     card_decision_text,
+    card_questions,
     card_rows,
     card_summary,
     card_title,
@@ -116,7 +117,7 @@ from .share_plan import (
     us_share_of_kenya_oda,
     us_share_per_recipient,
 )
-from .split_plan import SPEC_DEBT, stored_split_plan
+from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 
 # The `decision` fixture, from `services/harness/tests/conftest.py`. Annotated
 # structurally rather than imported, the same discipline `tests/planner/test_plan.py`
@@ -598,10 +599,27 @@ def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
     [
         ("health gross disbursements", "health"),
         ("Gross disbursements", "Gross disbursements"),
+        (
+            "gross disbursements for official development assistance",
+            "gross disbursements for official development assistance",
+        ),
+        (
+            "gross disbursements (official development assistance)",
+            "gross disbursements (official development assistance)",
+        ),
+        ("aid to health in gross disbursements", "aid to health in gross disbursements"),
+        ("official development assistance gross disbursements", "official development assistance"),
     ],
-    ids=["basis-words-dropped", "basis-words-alone-kept"],
+    ids=[
+        "basis-words-dropped",
+        "basis-words-alone-kept",
+        "dac1-measure-kept-whole",
+        "bracketed-rest-kept-whole",
+        "trailing-connective-kept-whole",
+        "leading-concept-kept",
+    ],
 )
-def test_a_measure_reads_without_its_basis_words_unless_they_are_all_it_says(
+def test_a_measure_reads_without_its_basis_words_only_where_the_rest_names_it(
     measure: str, named: str
 ) -> None:
     basis = _scope_decision(_SPEC_A, "measure_basis").model_copy(
@@ -2572,6 +2590,54 @@ def test_a_warning_on_a_copy_stands_in_for_its_origin_s_of_that_code(
             copy_gap.replace("'debt_history'", "'debt'"),
         ),
     ]
+
+
+def test_a_choice_row_names_its_input_as_the_card_labels_name_it(
+    decision: DecisionFactory,
+) -> None:
+    """`debt` and a health aid retrieval each pin a source whose basis choice offers
+    its options differently, so the card lists a Basis row for each, naming its
+    input. `debt`'s copy for the rolling growth is no row of the card, so `debt`
+    is named as its step label names it, with no party or number added."""
+    stored = split_draft(decision)
+    spec_health = "spec_" + "c" * 32
+    debt_basis = _scope_decision(SPEC_DEBT, "measure_basis")
+    health_basis = _scope_decision(spec_health, "measure_basis", other="unavailable")
+    pins = {"debt": SPEC_DEBT, "debt_history": SPEC_DEBT_HISTORY}
+    plan = Plan.model_validate(
+        {
+            **stored.model_dump(),
+            "decisions": [*stored.decisions, debt_basis, health_basis],
+            "evidence_requirements": [
+                *(
+                    requirement.model_copy(
+                        update={
+                            "decision_ids": (*requirement.decision_ids, debt_basis.slot),
+                            "source_spec_id": pins[requirement.id],
+                        }
+                    )
+                    if requirement.id in pins
+                    else requirement
+                    for requirement in stored.evidence_requirements
+                ),
+                DatasetRequirement(
+                    id="health",
+                    decision_ids=["measure", health_basis.slot],
+                    measure="health aid",
+                    entities=[Entity(name="Kenya", role="recipient")],
+                    period=Period(start=2015, end=2024),
+                    source_spec_id=spec_health,
+                ),
+            ],
+        }
+    )
+
+    questions = card_questions(plan)
+
+    assert (questions[debt_basis.slot], questions[health_basis.slot]) == (
+        "Basis: external debt service paid",
+        "Basis: health aid",
+    )
 
 
 @pytest.mark.parametrize(

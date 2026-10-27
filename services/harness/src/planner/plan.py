@@ -1195,6 +1195,15 @@ class GrowthRequirement(TaggedModel):
         return self
 
 
+# What `accept_provider_difference` means to the planner, on each calculation
+# that subtracts, divides or adds its inputs
+# (`submission.service._PROVIDER_ALIGNED`).
+ACCEPT_PROVIDER_DIFFERENCE = (
+    "Set only when the user asks for inputs counting different providers' spending, as "
+    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
+)
+
+
 class ComparisonRequirement(TaggedModel):
     """The difference between two requirements' results, at each common period.
 
@@ -1217,6 +1226,12 @@ class ComparisonRequirement(TaggedModel):
         description="The side the difference starts from: the result is `minuend` minus `subtrahend`."
     )
     subtrahend: RequirementSide = Field(description="The side subtracted from `minuend`.")
+    # Left out of every dump while unset, as `Entity.members` is.
+    accept_provider_difference: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False,
+        exclude_if=lambda accepted: not accepted,
+        description=ACCEPT_PROVIDER_DIFFERENCE,
+    )
 
     @model_validator(mode="after")
     def _sides_differ(self) -> ComparisonRequirement:
@@ -1226,14 +1241,6 @@ class ComparisonRequirement(TaggedModel):
         ):
             raise ValueError("a comparison's minuend and subtrahend must differ")
         return self
-
-
-# What `accept_provider_difference` means to the planner, on each calculation
-# that divides or adds its inputs (`submission.service._PROVIDER_ALIGNED`).
-ACCEPT_PROVIDER_DIFFERENCE = (
-    "Set only when the user asks for inputs counting different providers' spending, as "
-    "'use the DAC1 total' does beside CRS aid: each input keeps its own provider scope."
-)
 
 
 class SumOfRequirement(TaggedModel):

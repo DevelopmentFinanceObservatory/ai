@@ -679,13 +679,25 @@ def sector_words(label: str, option_id: str) -> str:
     return re.sub(pattern, "", label)
 
 
+# A connective or bracket at either end of what `basis_free` leaves, which
+# makes it a fragment of the measure ("for official development assistance").
+_FRAGMENT_EDGE = re.compile(
+    r"^(?:(?:for|of|in|from|to|on|by|with|and|or)\b|[(\[)\],;:])"
+    r"|(?:\b(?:for|of|in|from|to|on|by|with|and|or)|[(\[)\],;:])$",
+    re.IGNORECASE,
+)
+
+
 def basis_free(measure: str, options: Iterable[str]) -> str:
     """`measure` without the words of any of the basis `options`, so a planner's
     "health gross disbursements" reads "health" whichever basis holds. An
     option's words are its label up to its first comma ("gross
     disbursements, current USD"), with and without a bracketed note
     ("grant equivalents (OECD headline)"). A measure made of basis words
-    alone ("gross disbursements") keeps them all, since nothing else names it."""
+    alone ("gross disbursements") keeps them all, since nothing else names it,
+    and so does one whose rest starts or ends with a connective or bracket
+    ("gross disbursements for official development assistance"), since the
+    rest is a fragment of it."""
     phrases: set[str] = set()
     for option in options:
         words = option.split(",")[0].strip()
@@ -693,27 +705,48 @@ def basis_free(measure: str, options: Iterable[str]) -> str:
     free = measure
     for phrase in sorted(filter(None, phrases), key=len, reverse=True):
         free = re.sub(rf"\b{re.escape(phrase)}\b", "", free, flags=re.IGNORECASE)
-    return " ".join(free.split()) or measure
+    free = " ".join(free.split())
+    if not free or _FRAGMENT_EDGE.search(free):
+        return measure
+    return free
+
+
+def concept_name(
+    measure: str,
+    *,
+    sector: str | None,
+    basis_options: Iterable[str] | None,
+    measure_label: str | None,
+) -> str:
+    """What a retrieval fetches, in the reader's words: the one naming rule the
+    plan card (`_concept`) and the caveats `propose_plan` writes
+    (`submission.service._input_concept`) share.
+
+    The `sector` its sector choice holds, without its codes, where one does.
+    Where a basis choice offers `basis_options`, the planner's `measure`
+    without their words (`basis_free`), since Search's names for the measure
+    open with the basis and would contradict another basis the user picks.
+    Otherwise Search's `measure_label`, else the planner's `measure`.
+    """
+    if sector is not None:
+        return sector
+    if basis_options is not None:
+        return basis_free(measure, basis_options)
+    return measure_label or measure
 
 
 def _concept(requirement: DatasetRequirement, plan: Plan) -> str:
-    """What `requirement` fetches, in the reader's words, as `_concepts` names it.
-
-    A retrieval no scope decision governs reads as `_label_dataset` names
-    it. One a sector decision governs reads by the sector it chose, without
-    its codes (`_without_codes`); one only a basis decision governs, by the
-    planner's measure without the basis words (`basis_free`), the words
-    the question asked in.
-    """
+    """What `requirement` fetches, in the reader's words, as `_concepts` names it
+    (`concept_name`), read off the scope decisions it cites and its source."""
     governing = _governing(requirement, plan)
-    if "sector" in governing:
-        return _without_codes(governing["sector"])
-    if "measure_basis" in governing:
-        return basis_free(requirement.measure, governing["measure_basis"].options)
+    basis = governing.get("measure_basis")
     source = _selected_source(requirement.id, plan)
-    if source is not None and source.measure_label is not None:
-        return source.measure_label
-    return requirement.measure
+    return concept_name(
+        requirement.measure,
+        sector=_without_codes(governing["sector"]) if "sector" in governing else None,
+        basis_options=basis.options if basis is not None else None,
+        measure_label=source.measure_label if source is not None else None,
+    )
 
 
 def _concepts(plan: Plan) -> dict[str, str]:
@@ -867,12 +900,13 @@ def card_questions(plan: Plan) -> dict[str, str]:
     A scope decision's row asks its axis's short name (`CHOICE_NAMES`).
     Where another row settles the same axis, as for two sources Search
     offers different options on, each adds the inputs it governs, named as
-    the card's labels name them (`_concepts`): "Basis: health". Any other
+    the card's labels name them (`_concepts` of `shown_plan`, so a rolling
+    copy never numbers its origin): "Basis: health". Any other
     row asks the planner's question (`card_decision_text`).
     """
     rows = [decision for decision in shown_decisions(plan) if decision.caveat is None]
     axes = Counter(decision.scope.axis for decision in rows if decision.scope is not None)
-    concepts = _concepts(plan) if any(count > 1 for count in axes.values()) else {}
+    concepts = _concepts(shown_plan(plan)) if any(count > 1 for count in axes.values()) else {}
     questions: dict[str, str] = {}
     for decision in rows:
         name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None
