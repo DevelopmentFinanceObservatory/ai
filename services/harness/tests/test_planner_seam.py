@@ -112,6 +112,7 @@ from planner.plan import (
     PinSource,
     Plan,
     PlanStatus,
+    QuotientRequirement,
     RequirementSide,
     ResolvedBy,
     SessionState,
@@ -4803,9 +4804,10 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     the health aid's gross basis. A switch of the health aid's basis to net
     compiles the total on net too; a switch of its sector alone leaves the
     total on the gross pin compiled for it. A total the planner pinned no
-    dataset for, as in a plan whose translator found it, is searched for in
-    the translator's words and pinned before the plan records, so the switch
-    moves it too, and the search joins the turn's readings."""
+    dataset for, which a quotient divides by, of the United States as a
+    country, such as its GDP, is searched for in the translator's words and pinned before the plan records, so the switch moves
+    it too, and the search joins the turn's readings. (A share's unpinned whole
+    is compiled from its part instead.)"""
 
     def dataset(requirement_id: str, pin: str) -> DatasetRequirement:
         return DatasetRequirement(
@@ -4824,8 +4826,12 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         decisions=[decision()],
         evidence_requirements=[
             health,
-            dataset("total", TOTAL).model_copy(update={"source_spec_id": total_pin}),
-            ShareOfRequirement(
+            dataset("total", TOTAL).model_copy(
+                update={"source_spec_id": total_pin}
+                if total_pin is not None
+                else {"source_spec_id": None, "entities": (Entity(name="United States"),)}
+            ),
+            (ShareOfRequirement if total_pin is not None else QuotientRequirement)(
                 id="share",
                 decision_ids=["measure"],
                 numerator=RequirementSide(input_id="health"),
@@ -4919,7 +4925,7 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
     if total_pin is None:
         (part,) = surface.calls[0]["parts"]
         assert part["variable"] == "total"
-        assert part["entities"] == [{"text": "United States", "role": "donor"}]
+        assert part["entities"] == [{"text": "United States"}]
         assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]

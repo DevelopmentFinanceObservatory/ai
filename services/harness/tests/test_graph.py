@@ -66,7 +66,6 @@ from harness.chart_binding import (
     select_binding_ok,
 )
 from harness.graph import answer as answer_module
-from harness.graph import switch
 from harness.graph.execute import (
     _failed_step,
     _mark_masked_step_failed,
@@ -123,6 +122,7 @@ from planner.plan import (
     authored,
     open_window,
     plan_revision,
+    repinned,
     with_authored_requirements,
 )
 from planner.plan import Plan as PlannerPlan
@@ -3625,15 +3625,15 @@ def test_a_repinned_requirement_keeps_its_series_code_only_where_the_new_dataset
         source_spec_id="spec_" + "a" * 32,
     )
 
-    repinned = switch._repinned(stated, "spec_" + "b" * 32, exact_codes)
+    moved = repinned(stated, "spec_" + "b" * 32, exact_codes)
 
-    assert (repinned.source_spec_id, repinned.source, repinned.source_ref) == (
+    assert (moved.source_spec_id, moved.source, moved.source_ref) == (
         "spec_" + "b" * 32,
         None,
         None,
     )
-    assert repinned.source_exclude is False
-    assert repinned.source_code == ("DT.ODA.ALLD.CD" if kept else None)
+    assert moved.source_exclude is False
+    assert moved.source_code == ("DT.ODA.ALLD.CD" if kept else None)
 
 
 # --- a chip under an answer, applied with no search ----------------------------

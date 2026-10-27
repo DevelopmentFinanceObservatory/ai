@@ -3002,6 +3002,41 @@ def _dataset_shape(requirement: DatasetRequirement, *, first_year: int | None) -
     )
 
 
+def repinned(
+    requirement: DatasetRequirement, spec_id: str, exact_codes: frozenset[str]
+) -> DatasetRequirement:
+    """`requirement` pinned to `spec_id`, a dataset code chose in place of the one it named.
+
+    The source it stated goes with the pin it left: `source`, `source_ref`
+    and `source_exclude`, and `source_code` unless `exact_codes`, the codes
+    `spec_id` is exactly (`exact_codes`), hold it. Discovery checks a pin
+    against a stated source and searches again by it when they differ, so a
+    pin a scope switch (`harness.graph.switch`) or a share's whole compiled
+    from its part (`submission.service._share_wholes`) chose would otherwise
+    be searched back to the dataset it replaced.
+    """
+    update: dict[str, Any] = {
+        "source_spec_id": spec_id,
+        "source": None,
+        "source_ref": None,
+        "source_exclude": False,
+    }
+    if requirement.source_code not in exact_codes:
+        update["source_code"] = None
+    return requirement.model_copy(update=update)
+
+
+def exact_codes(block: Mapping[str, Any] | None) -> frozenset[str]:
+    """The publisher codes the dataset of the spec block `block` is exactly, none when it
+    cannot be read (`compiler.sources.source_from_spec_block`)."""
+    if block is None:
+        return frozenset()
+    try:
+        return frozenset(source_from_spec_block(block).exact_codes)
+    except ValueError:
+        return frozenset()
+
+
 def retrieved_period(requirement: DatasetRequirement, *, first_year: int | None) -> Period:
     """The years a retrieval of `requirement` reads.
 

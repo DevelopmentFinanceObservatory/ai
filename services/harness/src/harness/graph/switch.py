@@ -45,7 +45,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from typing import Any, cast
 
-from compiler.sources import block_groups, source_from_spec_block
+from compiler.sources import block_groups
 from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
@@ -55,9 +55,11 @@ from planner.plan import (
     SessionState,
     authored,
     earlier_block,
+    exact_codes,
     is_scope_choice,
     pin_sources,
     plan_revision,
+    repinned,
     save_pin_sources,
     windowed_pins,
 )
@@ -257,13 +259,11 @@ async def _switched_plan(
             },
         },
     )
-    exact_codes = {
+    codes = {
         item.spec_id: _exact_codes(digest) for item, digest in zip(switched, digests, strict=True)
     }
     requirements = [
-        _repinned(requirement, moved_to[origin], exact_codes[moved_to[origin]]).model_dump(
-            mode="json"
-        )
+        repinned(requirement, moved_to[origin], codes[moved_to[origin]]).model_dump(mode="json")
         for requirement in authored(plan).evidence_requirements
         if isinstance(requirement, DatasetRequirement)
         and (origin := to_origin.get(requirement.source_spec_id or "", requirement.source_spec_id))
@@ -317,33 +317,10 @@ async def _switched_plan(
     }
 
 
-def _repinned(
-    requirement: DatasetRequirement, spec_id: str, exact_codes: frozenset[str]
-) -> DatasetRequirement:
-    """`requirement` pinned to `spec_id`, the dataset the user switched to.
-
-    The source it stated goes with the pin it left: `source`, `source_ref`
-    and `source_exclude`, and `source_code` unless `exact_codes`, the codes
-    `spec_id` is exactly, hold it.
-    """
-    update: dict[str, Any] = {
-        "source_spec_id": spec_id,
-        "source": None,
-        "source_ref": None,
-        "source_exclude": False,
-    }
-    if requirement.source_code not in exact_codes:
-        update["source_code"] = None
-    return requirement.model_copy(update=update)
-
-
 def _exact_codes(digest: Mapping[str, Any]) -> frozenset[str]:
     """The publisher codes the dataset of `digest`'s one part is exactly, none when its block cannot be read."""
     (part,) = digest["part_digests"]
-    try:
-        return frozenset(source_from_spec_block(part["spec_block"]).exact_codes)
-    except ValueError:
-        return frozenset()
+    return exact_codes(part["spec_block"])
 
 
 def _readings(ctx: Context) -> list[SearchReading]:

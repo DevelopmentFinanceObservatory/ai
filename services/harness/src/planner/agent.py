@@ -1495,10 +1495,98 @@ async def compile_whole(
     *,
     state: SessionState,
 ) -> dict[str, object] | None:
-    """Compile the whole of the share `realignment` names, its part's own dataset over every sector, and hold the pin Search answers.
+    """Compile the whole of the share `realignment` names from its part, and hold it in place of the pin the share divided by.
 
-    The part is the pin `realignment.whole_of`. Posts the part's base
-    identity with the slot its sector choice binds
+    The part is the pin `realignment.whole_of`, and the whole is compiled
+    from it (`_whole_of_part`). It is held as a
+    `submission.service.AlignedPin` in place of the pin `realignment.spec_id`.
+
+    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
+    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` as
+    `_whole_of_part` refuses.
+    """
+    part_pin = cast(str, realignment.whole_of)
+    compiled = await _whole_of_part(
+        surface,
+        part_pin=part_pin,
+        step_id=realignment.step_id,
+        whole_id=realignment.requirement_id,
+        state=state,
+        unavailable=functools.partial(_basis_uncompiled, realignment),
+    )
+    if not isinstance(compiled, tuple):
+        return compiled
+    spec_id, digest = compiled
+    save_aligned_pin(
+        state,
+        AlignedPin(
+            origin=realignment.spec_id,
+            option_ids=(),
+            spec_id=spec_id,
+            digest=digest,
+            whole_of=part_pin,
+        ),
+    )
+    return None
+
+
+async def compile_unpinned_whole(
+    surface: ToolSurface,
+    unpinned: Unpinned,
+    *,
+    state: SessionState,
+) -> dict[str, object] | None:
+    """Pin `unpinned`, a share's whole the planner pinned no dataset for, to the whole compiled from its part.
+
+    A share's whole is its part's own dataset over every sector, so it is
+    compiled from the part pinned to `unpinned.whole_of` (`_whole_of_part`)
+    and never searched for. It is held as the search of the requirement's
+    content (`submission.service.SearchedPin`), which the next proposal pins
+    and the planner seam stores as a reading of the conversation
+    (`harness.planner_seam.store_aligned_readings`).
+
+    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
+    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` as
+    `_whole_of_part` refuses.
+    """
+    compiled = await _whole_of_part(
+        surface,
+        part_pin=cast(str, unpinned.whole_of),
+        step_id=unpinned.step_id,
+        whole_id=unpinned.requirement_id,
+        state=state,
+        unavailable=functools.partial(_search_unavailable, unpinned),
+    )
+    if not isinstance(compiled, tuple):
+        return compiled
+    spec_id, digest = compiled
+    save_searched_pin(
+        state,
+        SearchedPin(
+            requirement_key=unpinned.requirement_key,
+            status="definite",
+            spec_id=spec_id,
+            digest=digest,
+            asked_roles=unpinned.asked_roles,
+            open_roles=unpinned.open_roles,
+            whole_of=unpinned.whole_of,
+        ),
+    )
+    return None
+
+
+async def _whole_of_part(
+    surface: ToolSurface,
+    *,
+    part_pin: str,
+    step_id: str,
+    whole_id: str,
+    state: SessionState,
+    unavailable: Callable[[str], dict[str, object]],
+) -> tuple[str, dict[str, Any]] | dict[str, object]:
+    """The whole `whole_id` of the share `step_id`, compiled from its part `part_pin` over every sector, as its spec_id and digest.
+
+    Posts the part's base identity with the slot its sector choice binds
     (`submission.service.sector_slot`) set unbound, under the spec_id that
     identity hashes to, the part's entity groups, and one explicit entry
     from each of its other choices holding its active option, with the
@@ -1508,16 +1596,14 @@ async def compile_whole(
     is made. The answer is shown to the planner as a source of its own,
     its block marking every posted axis as the planner's
     (`harness.scope_choices.mark_planner_axes`) so a later search carries
-    none of them, and held as a `submission.service.AlignedPin` in place of
-    the pin `realignment.spec_id` the share divided by.
+    none of them.
 
-    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
-    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` when the
-    part offers no sector choice, Search refuses the whole (as
+    Returns, in place of the pin, `unavailable`'s problem for the cause
+    when Search did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE`
+    when the part offers no sector choice, Search refuses the whole (as
     `requested_option_unavailable` where it cannot hold an option the part
     holds), or answers with no one dataset.
     """
-    part_pin = cast(str, realignment.whole_of)
     sources = pin_sources(state)
     source = sources.get(part_pin)
     block = source.spec_block(part_pin) if source is not None else None
@@ -1526,11 +1612,7 @@ async def compile_whole(
 
     def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
         return share_whole_underivable(
-            step_id=realignment.step_id,
-            whole_id=realignment.requirement_id,
-            part_spec_id=part_pin,
-            reason=reason,
-            cause=cause,
+            step_id=step_id, whole_id=whole_id, part_spec_id=part_pin, reason=reason, cause=cause
         )
 
     if source is None or block is None or scope is None or slot is None:
@@ -1564,7 +1646,7 @@ async def compile_whole(
         )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
-            return _basis_uncompiled(realignment, str(exc))
+            return unavailable(str(exc))
         return underivable(
             f"Search does not count {part_pin}'s dataset over every sector the way the part is "
             f"counted ({exc.code or 'refused'}): {exc}"
@@ -1579,17 +1661,7 @@ async def compile_whole(
         block=digest["spec_block"], settled=True, asked_roles=source.asked_roles
     )
     save_pin_sources(state, {**sources, spec_id: whole_source})
-    save_aligned_pin(
-        state,
-        AlignedPin(
-            origin=realignment.spec_id,
-            option_ids=(),
-            spec_id=spec_id,
-            digest=digest,
-            whole_of=part_pin,
-        ),
-    )
-    return None
+    return spec_id, digest
 
 
 async def pin_by_search(
@@ -1705,8 +1777,9 @@ async def with_source_reads(
     stating no first year is held too, and the next refusal says so
     (`first_year_read_failed`). A calculation one of whose inputs pins no
     dataset while another carries a basis choice needs that input searched
-    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`); a search held for the
-    requirement's content is made once. A calculation whose inputs are
+    for and pinned (`BASIS_UNKNOWN`, `pin_by_search`), or, as a share's
+    whole, compiled from its part (`compile_unpinned_whole`); a search held
+    for the requirement's content is made once. A calculation whose inputs are
     counted on different measure bases or provider scopes needs each input
     it names compiled on their shared options, every option of one input in
     one compile (`BASES_UNALIGNED`, `compile_on_basis`), and a share whose
@@ -1734,7 +1807,8 @@ async def with_source_reads(
         unpinned = unpinned_wanted(result)
         if unpinned:
             for item in unpinned:
-                refused = await pin_by_search(surface, item, state=state)
+                pin = pin_by_search if item.whole_of is None else compile_unpinned_whole
+                refused = await pin(surface, item, state=state)
                 if refused is not None:
                     return refused
             continue

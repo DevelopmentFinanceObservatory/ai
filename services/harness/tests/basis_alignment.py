@@ -303,11 +303,15 @@ class WholeCompiles:
     """A tool surface whose `resolve_definition` answers the whole of the US health
     part as Search recorded it, `whole` for a bilateral provider entry and
     `whole_inclusive` for an inclusive one, or refuses with `refusal` when given,
-    recording each call's arguments in `calls`."""
+    recording each call's arguments in `calls`. With `searched`, its `search`
+    answers that part of `US_2023`, and is recorded in `calls` as well."""
 
-    def __init__(self, *, refusal: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, *, refusal: Mapping[str, Any] | None = None, searched: str | None = None
+    ) -> None:
         self.calls: list[Mapping[str, Any]] = []
         self.refusal = refusal
+        self.searched = searched
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -316,8 +320,13 @@ class WholeCompiles:
         self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
     ) -> ToolCallResult:
         del on_progress
-        assert tool.name == "resolve_definition", tool
         self.calls.append(arguments)
+        if self.searched is not None and tool.name == "search":
+            part = US_2023[self.searched]
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}}
+            )
+        assert tool.name == "resolve_definition", tool
         if self.refusal is not None:
             return ToolCallResult(is_error=True, structured_content=dict(self.refusal))
         (provider,) = [
