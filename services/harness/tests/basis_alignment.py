@@ -189,10 +189,17 @@ def provider_block(
     return block
 
 
+# The spec_id Search answers the US donor total under counting bilateral flows
+# alone gross, compiled from `TOTAL` on both axes in one resubmit
+# (`ProviderCompiles`).
+TOTAL_GROSS_BILATERAL = f"spec_{'6' * 32}"
+
+
 class ProviderCompiles:
     """A tool surface whose `resolve_definition` compiles the US donor total on the
     provider scope its explicit entry posts, bilateral flows alone as
-    `TOTAL_BILATERAL`, recording each call's arguments in `calls`."""
+    `TOTAL_BILATERAL`, or as `TOTAL_GROSS_BILATERAL` when the resubmit also
+    posts gross disbursements, recording each call's arguments in `calls`."""
 
     def __init__(self) -> None:
         self.calls: list[Mapping[str, Any]] = []
@@ -210,14 +217,18 @@ class ProviderCompiles:
             e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"
         ]
         assert provider == "provider:bilateral", provider
-        block = provider_block(TOTAL_BILATERAL, narrow=False, active=provider)
+        basis = [e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "measure_basis"]
+        assert basis in ([], ["measure_basis:gross"]), basis
+        spec_id = TOTAL_GROSS_BILATERAL if basis else TOTAL_BILATERAL
+        block = provider_block(spec_id, narrow=False, active=provider)
         scope = block["resolved"]["scope_choices"]
         scope["id"] = scope["base"]["spec_id"] = arguments["spec_id"]
         scope["base"]["identity"] = arguments["identity"]
         scope["entries"] = arguments["scope_entries"]
+        posted = {e["axis"] for e in arguments["scope_entries"]}
         for choice in scope["choices"]:
             choice["id"] = f"{arguments['spec_id']}:{choice['axis']}"
-        provider_choice = next(c for c in scope["choices"] if c["axis"] == "provider")
-        provider_choice["provenance"] = "explicit"
+            if choice["axis"] in posted:
+                choice["provenance"] = "explicit"
         part = {"status": "definite", "spec": block}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})

@@ -3289,15 +3289,16 @@ _MIXED: dict[str | None, str] = {
 
 
 class AlignedPin(StrictModel):
-    """A pin compiled from the pin `origin` on the measure basis or provider scope `option_id`, which Search answered as `spec_id`.
+    """A pin compiled from the pin `origin` on the options `option_ids`, which Search answered as `spec_id`.
 
-    `digest` is that answer as a search's digest
-    (`harness.tool_contracts.resolver_digest`), which the planner seam
-    stores as a reading of the conversation.
+    `option_ids` holds one option per axis moved, measure basis or provider
+    scope, sorted (`Realignment.option_ids`). `digest` is Search's answer
+    as a search's digest (`harness.tool_contracts.resolver_digest`), which
+    the planner seam stores as a reading of the conversation.
     """
 
     origin: str
-    option_id: str
+    option_ids: tuple[str, ...]
     spec_id: str
     digest: dict[str, Any]
 
@@ -3308,11 +3309,11 @@ def aligned_pins(state: SessionState) -> tuple[AlignedPin, ...]:
 
 
 def save_aligned_pin(state: SessionState, pin: AlignedPin) -> None:
-    """Hold `pin`, in place of any pin compiled from the same origin on the same basis."""
+    """Hold `pin`, in place of any pin compiled from the same origin on the same options."""
     kept = [
         held
         for held in aligned_pins(state)
-        if (held.origin, held.option_id) != (pin.origin, pin.option_id)
+        if (held.origin, held.option_ids) != (pin.origin, pin.option_ids)
     ]
     state[ALIGNED_PINS_STATE_KEY] = [held.model_dump(mode="json") for held in (*kept, pin)]
 
@@ -3400,25 +3401,38 @@ def unpinned_wanted(result: Mapping[str, object]) -> list[Unpinned]:
 
 
 class Realignment(NamedTuple):
-    """One input a calculation needs compiled on another measure basis or provider scope.
+    """One input a calculation needs compiled on another measure basis, provider scope, or both.
 
-    `spec_id` is the pin as Search first answered it, `option_id` the option
-    to compile it on, `requirement_id` the dataset requirement pinning it and
-    `step_id` the calculation whose inputs it joins.
+    `spec_id` is the pin as Search first answered it, `option_ids` the
+    options to compile it on, one per axis it moves on, sorted so one set
+    of options has one form. `requirement_id` is the dataset requirement
+    pinning it and `step_id` the calculation that wants its first option.
     """
 
     spec_id: str
-    option_id: str
+    option_ids: tuple[str, ...]
     requirement_id: str
     step_id: str
 
+    def detail(self) -> dict[str, object]:
+        """This realignment as a refusal's detail states it."""
+        return {**self._asdict(), "option_ids": list(self.option_ids)}
+
 
 def realignments_wanted(result: Mapping[str, object]) -> list[Realignment]:
-    """The inputs a `BASES_UNALIGNED` refusal asks to compile on another option; empty for any other answer."""
+    """The inputs a `BASES_UNALIGNED` refusal asks to compile on other options; empty for any other answer."""
     if result.get("code") != ProblemCode.BASES_UNALIGNED.value:
         return []
     detail = cast("Mapping[str, Any]", result.get("detail") or {})
-    return [Realignment(**entry) for entry in detail.get("realign") or ()]
+    return [
+        Realignment(
+            spec_id=entry["spec_id"],
+            option_ids=tuple(entry["option_ids"]),
+            requirement_id=entry["requirement_id"],
+            step_id=entry["step_id"],
+        )
+        for entry in detail.get("realign") or ()
+    ]
 
 
 @dataclass(frozen=True)
@@ -3538,14 +3552,14 @@ def _aligned_bases(
     count it twice.
 
     An input already on its options keeps its origin pin. Another is pinned
-    to the pin compiled from its origin on the option it moves to
-    (`aligned`), and the requirement is restated under it, appended when
-    only the plan this call amends states it. An input with no such pin yet
-    answers `BASES_UNALIGNED`, naming each to compile (`Realignment`).
-    `planner.agent.with_source_reads` compiles them and proposes again. An
-    input whose choice does not offer the option, or offers it unavailable,
-    an input two calculations want on different options, and an input that
-    would move on both axes at once answer `OPERATION_UNSUPPORTED`.
+    to the pin compiled from its origin on the options it moves to, one per
+    axis (`aligned`), and the requirement is restated under it, appended
+    when only the plan this call amends states it. An input with no such
+    pin yet answers `BASES_UNALIGNED`, naming each to compile with every
+    option it moves to (`Realignment`). `planner.agent.with_source_reads`
+    compiles them and proposes again. An input whose choice does not offer
+    the option, or offers it unavailable, and an input two calculations
+    want on different options of one axis answer `OPERATION_UNSUPPORTED`.
 
     Args:
         requirements: Every requirement the plan states once this call's
@@ -3576,7 +3590,7 @@ def _aligned_bases(
     requirements = [_pinned(requirement, found) for requirement in requirements]
     evidence_requirements = [_pinned(requirement, found) for requirement in evidence_requirements]
     origins = {pin.spec_id: pin.origin for pin in aligned}
-    compiled = {(pin.origin, pin.option_id): pin.spec_id for pin in aligned}
+    compiled = {(pin.origin, pin.option_ids): pin.spec_id for pin in aligned}
     by_axis = {
         axis: _input_bases(requirements, shown=shown, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
@@ -3620,11 +3634,9 @@ def _aligned_bases(
         return _with_found(evidence_requirements, requirements, found)
     try:
         targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
-        wanted, repinned = _realigned_pins(
-            targets, by_axis, compiled=compiled, view=view, proposer=proposer
-        )
     except _Unservable as exc:
         return exc.problem
+    wanted, repinned = _realigned_pins(targets, by_axis, compiled=compiled)
     if wanted:
         return _bases_unaligned(wanted, by_axis)
     return _with_found(evidence_requirements, requirements, {**found, **repinned})
@@ -3719,53 +3731,28 @@ def _realigned_pins(
     targets: Mapping[tuple[str, str], tuple[str, str]],
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
     *,
-    compiled: Mapping[tuple[str, str], str],
-    view: SessionView,
-    proposer: Proposer,
+    compiled: Mapping[tuple[str, tuple[str, ...]], str],
 ) -> tuple[list[Realignment], dict[str, str]]:
     """The inputs still to compile on their `targets`, and the pins of the inputs compiled already, by requirement id (`_aligned_bases`).
 
-    Raises:
-        _Unservable: When an input would move on both axes at once.
+    An input is compiled from its origin once on every option it moves to,
+    one per axis, so a gross inclusive total wanted net and bilateral is
+    one compile, and `compiled` holds it under the origin and those options.
     """
-    moves: dict[str, list[tuple[str, str, str]]] = {}
+    moves: dict[str, list[tuple[str, str]]] = {}
     for (requirement_id, axis), (target, step_id) in targets.items():
-        moves.setdefault(requirement_id, [])
+        moved = moves.setdefault(requirement_id, [])
         if by_axis[axis][requirement_id].choice.active != target:
-            moves[requirement_id].append((axis, target, step_id))
+            moved.append((target, step_id))
     wanted: list[Realignment] = []
     repinned: dict[str, str] = {}
     for requirement_id, moved in moves.items():
-        origin = next(
-            bases[requirement_id].origin for bases in by_axis.values() if requirement_id in bases
-        )
-        current = next(
-            bases[requirement_id].pin for bases in by_axis.values() if requirement_id in bases
-        )
-        if len(moved) > 1:
-            labels = " and as ".join(
-                by_axis[axis][requirement_id].label(target) for axis, target, _ in moved
-            )
-            _, target, step_id = moved[0]
-            raise _Unservable(
-                _basis_unservable(
-                    view,
-                    proposer,
-                    step_id=step_id,
-                    requirement_id=requirement_id,
-                    spec_id=origin,
-                    option_id=target,
-                    reason=(
-                        f"{requirement_id!r} would be counted as {labels} at once, and its "
-                        "dataset is compiled on one other option at a time"
-                    ),
-                )
-            )
-        pin = origin if not moved else compiled.get((origin, moved[0][1]))
+        basis = next(bases[requirement_id] for bases in by_axis.values() if requirement_id in bases)
+        option_ids = tuple(sorted(target for target, _ in moved))
+        pin = compiled.get((basis.origin, option_ids)) if moved else basis.origin
         if pin is None:
-            _, target, step_id = moved[0]
-            wanted.append(Realignment(origin, target, requirement_id, step_id))
-        elif pin != current:
+            wanted.append(Realignment(basis.origin, option_ids, requirement_id, moved[0][1]))
+        elif pin != basis.pin:
             repinned[requirement_id] = pin
     return wanted, repinned
 
@@ -3840,20 +3827,24 @@ def _bases_unaligned(
     """
 
     def move(item: Realignment) -> str:
-        basis = by_axis[option_axis(item.option_id)][item.requirement_id]
-        return (
-            f"{item.requirement_id!r}, an input of {item.step_id!r}, is counted as "
-            f"{basis.label(basis.choice.active)} and is wanted as {basis.label(item.option_id)}"
+        bases = [
+            (by_axis[option_axis(option_id)][item.requirement_id], option_id)
+            for option_id in item.option_ids
+        ]
+        wanted = " and as ".join(
+            f"{basis.label(option_id)} in place of {basis.label(basis.choice.active)}"
+            for basis, option_id in bases
         )
+        return f"{item.requirement_id!r}, an input of {item.step_id!r}, is wanted as {wanted}"
 
     moves = "; ".join(move(item) for item in wanted)
     return problem(
         ProblemCode.BASES_UNALIGNED,
         f"A calculation's inputs are counted on different measure bases or provider scopes: "
-        f"{moves}. Search compiles each on its calculation's option before the plan is "
+        f"{moves}. Search compiles each on its calculation's options before the plan is "
         "recorded, and could not be reached to do so; propose the plan again.",
         outcome=Outcome.REFUSED,
-        detail={"realign": [item._asdict() for item in wanted]},
+        detail={"realign": [item.detail() for item in wanted]},
     )
 
 
@@ -3870,15 +3861,14 @@ def _basis_unservable(
     """Record and return the `OPERATION_UNSUPPORTED` problem for a calculation whose inputs cannot share one basis or provider scope.
 
     `detail.basis` names the calculation, the input, and its pin and the
-    option it cannot be counted on, both `None` for an input with no pin.
+    option it cannot be counted on, `None` and no option for an input with
+    no pin.
     """
     return basis_unservable(
-        {
-            "spec_id": spec_id,
-            "option_id": option_id,
-            "requirement_id": requirement_id,
-            "step_id": step_id,
-        },
+        spec_id=spec_id,
+        option_ids=(option_id,) if option_id is not None else (),
+        requirement_id=requirement_id,
+        step_id=step_id,
         reason=reason,
         record=view.record_unsupported,
         proposer=proposer,
@@ -3886,32 +3876,39 @@ def _basis_unservable(
 
 
 def basis_unservable(
-    basis: Mapping[str, str | None],
     *,
+    spec_id: str | None,
+    option_ids: Sequence[str],
+    requirement_id: str,
+    step_id: str,
     reason: str,
     record: Callable[[UnsupportedOperation], None],
     proposer: Proposer,
 ) -> dict[str, object]:
-    """Record and return the `OPERATION_UNSUPPORTED` problem for `basis`, an input that cannot be counted on its calculation's basis or provider scope.
+    """Record and return the `OPERATION_UNSUPPORTED` problem for an input that cannot be counted on its calculation's basis or provider scope.
 
-    `basis` holds a `Realignment`'s fields: the calculation (`step_id`),
-    the input, and its pin and wanted option, `None` where it has none; an
-    input with no option mixes either axis (`_MIXED`). `reason` says why, as
-    a clause. `record` records the `unsupported`
-    answer. `detail.basis` is `basis`.
+    The arguments are a `Realignment`'s fields: the calculation
+    (`step_id`), the input, its pin, `None` where it has none, and the
+    options it is wanted on. Figures mixed on one axis are named by that
+    axis, and with no option or options on both axes by either (`_MIXED`).
+    `reason` says why, as a clause. `record` records the `unsupported`
+    answer. `detail.basis` holds the fields.
     """
-    option_id = basis["option_id"]
-    mixed = _MIXED[option_axis(option_id) if option_id is not None else None]
+    axes = {option_axis(option_id) for option_id in option_ids}
+    mixed = _MIXED[next(iter(axes)) if len(axes) == 1 else None]
     operation = UnsupportedOperation.UNSUPPORTED_ASK
     record(operation)
     refused = _unsupported(
-        UnsupportedPlanError(
-            operation, f"{reason}, so {basis['step_id']!r} would mix figures {mixed}"
-        ),
+        UnsupportedPlanError(operation, f"{reason}, so {step_id!r} would mix figures {mixed}"),
         proposer,
     )
     detail = cast("dict[str, object]", refused["detail"])
-    detail["basis"] = dict(basis)
+    detail["basis"] = {
+        "spec_id": spec_id,
+        "option_ids": list(option_ids),
+        "requirement_id": requirement_id,
+        "step_id": step_id,
+    }
     return refused
 
 

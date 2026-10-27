@@ -201,6 +201,7 @@ from ..basis_alignment import (
     TOTAL,
     TOTAL_BILATERAL,
     TOTAL_GROSS,
+    TOTAL_GROSS_BILATERAL,
     BasisCompiles,
     ProviderCompiles,
     basis_block,
@@ -4832,8 +4833,8 @@ def test_a_basis_the_planner_compiled_in_an_earlier_turn_is_not_read_as_the_user
 
     if compiled:
         assert result["code"] == ProblemCode.BASES_UNALIGNED.value, result
-        assert [(r["spec_id"], r["option_id"]) for r in result["detail"]["realign"]] == [
-            (TOTAL, "measure_basis:net")
+        assert [(r["spec_id"], r["option_ids"]) for r in result["detail"]["realign"]] == [
+            (TOTAL, ["measure_basis:net"])
         ]
     else:
         assert result["outcome"] == Outcome.OK.value, result
@@ -4859,7 +4860,7 @@ def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
         "realign": [
             {
                 "spec_id": HEALTH,
-                "option_id": "measure_basis:net",
+                "option_ids": ["measure_basis:net"],
                 "requirement_id": "health",
                 "step_id": "share",
             }
@@ -4903,7 +4904,7 @@ async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
             "realign": [
                 {
                     "spec_id": TOTAL,
-                    "option_id": "measure_basis:gross",
+                    "option_ids": ["measure_basis:gross"],
                     "requirement_id": requirement_id,
                     "step_id": "share",
                 }
@@ -4942,7 +4943,7 @@ async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refus
         "operation": UnsupportedOperation.UNSUPPORTED_ASK.value,
         "basis": {
             "spec_id": TOTAL,
-            "option_id": "measure_basis:gross",
+            "option_ids": ["measure_basis:gross"],
             "requirement_id": "total",
             "step_id": "share",
         },
@@ -4991,13 +4992,13 @@ def _sum_of_health(propose: Callable[..., Any], ctx: _FakeToolContext, decision:
         pytest.param(
             ("provider:bilateral", "default"),
             ("provider:inclusive", "default"),
-            [(TOTAL, "provider:bilateral", "total")],
+            [(TOTAL, ["provider:bilateral"], "total")],
             id="narrowest-wins",
         ),
         pytest.param(
             ("provider:bilateral", "default"),
             ("provider:inclusive", "explicit"),
-            [(HEALTH, "provider:inclusive", "health")],
+            [(HEALTH, ["provider:inclusive"], "health")],
             id="stated-wins",
         ),
     ],
@@ -5007,7 +5008,7 @@ def test_a_calculation_counts_its_inputs_on_one_provider_scope(
     decision: DecisionFactory,
     health: tuple[str, str],
     total: tuple[str, str],
-    realign: list[tuple[str, str, str]],
+    realign: list[tuple[str, list[str], str]],
     calculation: Callable[..., Any],
 ) -> None:
     """US health aid counted bilateral beside the US total counted with imputed
@@ -5026,7 +5027,7 @@ def test_a_calculation_counts_its_inputs_on_one_provider_scope(
 
     assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
     assert [
-        (r["spec_id"], r["option_id"], r["requirement_id"]) for r in refused["detail"]["realign"]
+        (r["spec_id"], r["option_ids"], r["requirement_id"]) for r in refused["detail"]["realign"]
     ] == realign
     assert load_plan(ctx.state) is None
 
@@ -5058,19 +5059,22 @@ def test_inputs_the_user_stated_on_different_provider_scopes_are_shared_and_neve
     if code == ProblemCode.OPERATION_UNSUPPORTED.value:
         assert result["detail"]["basis"] == {
             "spec_id": TOTAL,
-            "option_id": "provider:bilateral",
+            "option_ids": ["provider:bilateral"],
             "requirement_id": "total",
             "step_id": "sum",
         }
         assert load_plan(ctx.state) is None
 
 
-def test_an_input_that_would_move_on_both_basis_and_provider_scope_is_refused(
+async def test_an_input_moving_on_basis_and_provider_scope_is_compiled_once_on_both(
     decision: DecisionFactory,
 ) -> None:
-    """The total counted in grant equivalents with imputed multilateral flows, beside
-    health aid counted gross and bilateral: one compile moves one option, so the
-    share is refused naming the total."""
+    """The US total counted in grant equivalents with imputed multilateral flows,
+    read by two shares beside health aid counted gross and bilateral. Each total
+    moves on both axes, so the total is compiled once through one resubmit
+    posting both options, and the second requirement on the same pin and
+    options takes the same compiled pin."""
+    surface = ProviderCompiles()
     ctx = _FakeToolContext()
     _show_blocks(
         ctx,
@@ -5083,10 +5087,65 @@ def test_an_input_that_would_move_on_both_basis_and_provider_scope_is_refused(
         ),
     )
 
-    refused = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
 
-    assert refused["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, refused
-    assert refused["detail"]["basis"]["requirement_id"] == "total"
+    def share(step_id: str, total_id: str) -> ShareOfRequirement:
+        return ShareOfRequirement(
+            id=step_id,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id="health"),
+            denominator=RequirementSide(input_id=total_id),
+        )
+
+    result = await _tools_reading(surface)["propose_plan"].func(
+        question="What share of US aid, and of US ODA, goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total net ODA", TOTAL),
+            dataset("total_again", "US total ODA", TOTAL),
+            share("share", "total"),
+            share("share_again", "total_again"),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    (call,) = surface.calls
+    assert call["scope_entries"] == [
+        {
+            "axis": "measure_basis",
+            "option_id": "measure_basis:gross",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:measure_basis"},
+        },
+        {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "provenance": "explicit",
+            "origin": {"kind": "choice", "choice_id": f"{TOTAL}_base:provider"},
+        },
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert [
+        (r.id, r.source_spec_id)
+        for r in plan.evidence_requirements
+        if isinstance(r, DatasetRequirement)
+    ] == [
+        ("health", HEALTH),
+        ("total", TOTAL_GROSS_BILATERAL),
+        ("total_again", TOTAL_GROSS_BILATERAL),
+    ]
 
 
 async def test_a_total_compiled_on_the_bilateral_scope_is_pinned_with_the_planners_decision(
@@ -5183,7 +5242,7 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
         "operation": UnsupportedOperation.UNSUPPORTED_ASK.value,
         "basis": {
             "spec_id": None,
-            "option_id": None,
+            "option_ids": [],
             "requirement_id": "total",
             "step_id": "share",
         },
