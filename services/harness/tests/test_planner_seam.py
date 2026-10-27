@@ -50,7 +50,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from harness import plan_display, planner_seam
+from harness import planner_seam
 from harness.graph import switch
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -75,7 +75,6 @@ from harness.planner_seam import (
 )
 from harness.scripted import use_compiled_proposals
 from harness.sentences import (
-    PlanWords,
     SeamCode,
     referral_reason,
     referral_sentence,
@@ -2411,7 +2410,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
                 "reason": "entity_required",
                 "repeated": True,
             },
-            "the comparison",
+            "'cmp'",
         ),
         (
             {
@@ -2421,7 +2420,7 @@ def test_a_stalled_referral_ends_the_entry_on_plan_not_ready_carrying_its_constr
                 "reason": "used 4 discovery calls",
                 "budget_spent": True,
             },
-            "GDP of Guatemala",
+            "'gdp_gtm'",
         ),
     ],
     ids=["internal", "repeated", "budget-spent"],
@@ -2431,18 +2430,16 @@ def test_a_closing_referral_ends_the_entry_on_the_proposal_carrying_it(
 ) -> None:
     """An internal failure, a translation that failed the way it failed
     before, or a data service that timed out until the discovery budget was
-    spent ends the entry as a final refusal naming what stopped it, a
-    requirement by its reader's name, as soon as a proposal's translation
-    answers with it."""
+    spent ends the entry as a final refusal naming what stopped it, as soon
+    as a proposal's translation answers with it."""
     tracker = _RunTracker()
     _track_proposal(tracker, referral)
 
     assert tracker.ready_to_break
     assert tracker.submitted is None
     assert tracker.refused is not None
-    names = {"cmp": "the comparison", "gdp_gtm": "GDP of Guatemala"}
-    assert named in refusal_sentence(tracker.refused, words=PlanWords(names=names))
-    assert PlannerSeam._refused(tracker.refused, words=PlanWords())["refused"]["final"] is True
+    assert named in refusal_sentence(tracker.refused)
+    assert PlannerSeam._refused(tracker.refused)["refused"]["final"] is True
 
 
 _NOT_CALLED = "'search' was not called: the planner entry has no time left for it"
@@ -3144,10 +3141,7 @@ async def test_a_repeating_referral_ends_the_entry_on_its_second_identical_refer
 
     referred = {"kind": "no_data", "requirement_id": "gdp_gtm"}
     assert result["refused"] == {
-        "text": refusal_sentence(
-            {"code": SeamCode.PLAN_NOT_READY, "detail": referred},
-            words=plan_display.plan_words(draft),
-        ),
+        "text": refusal_sentence({"code": SeamCode.PLAN_NOT_READY, "detail": referred}),
         "final": False,
         "code": SeamCode.PLAN_NOT_READY,
     }
@@ -4638,10 +4632,9 @@ async def test_a_revision_the_translation_refers_back_refuses_with_its_code_and_
 
     refused = result["refused"]
     assert (refused["code"], refused["final"]) == (SeamCode.PLAN_NOT_READY, False)
-    assert refused["text"].startswith('No plan was made for "health aid": ')
+    assert refused["text"].startswith(f"No plan was made for requirement {dataset.id!r}: ")
     assert refused["reason"] == f'For "health aid", {referral_reason(kind)}.'
     assert referral_reason(kind) in refused["text"]
-    assert dataset.id not in refused["text"]
 
 
 async def test_a_pin_compiled_onto_a_shared_basis_is_stored_as_a_reading_a_switch_finds(

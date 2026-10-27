@@ -263,9 +263,10 @@ _DECISION_KEPT = (
     "that choice again on the plan to change it."
 )
 
-# Filled by `refusal_sentence`: `about` names the requirement a refusal is
-# about by its reader's name, "the plan" when it has none, and `at` is
-# " for <that name>" or nothing, so no requirement id reaches a reader;
+# Filled by `refusal_sentence` for the planner and the orchestrator, which
+# repair a plan by its requirement ids: `about` names the requirement a refusal
+# is about by its id ("the plan" when it names none), `at` is " for <about>"
+# or nothing,
 # `why` the reason clause of the referral it ended on, `asks` the declined asks,
 # `unsupported` why a calculation cannot be made, and `rounds`, `tool` and
 # `reference` come straight from the refusal's detail.
@@ -461,22 +462,25 @@ class PlanWords:
 _NO_WORDS = PlanWords()
 
 
-def refusal_sentence(refused: Mapping[str, object], *, words: PlanWords = _NO_WORDS) -> str:
-    """The sentence a refusal that ends a planner entry becomes for the user.
+def refusal_sentence(refused: Mapping[str, object]) -> str:
+    """The sentence a refusal that ends a planner entry becomes for the
+    planner and the orchestrator, naming a requirement by its id, which a
+    repair cites.
 
     `refused` is `{"code", "detail"}`, the shape `harness.planner_seam` stamps
-    and `propose_plan` refuses with; `words` names the plan's requirements. A
-    code in no table gives a plain sentence that claims nothing about why.
+    and `propose_plan` refuses with. A code in no table gives a plain
+    sentence that claims nothing about why.
     """
     code = refused.get("code")
     template = SEAM_SENTENCES.get(code, _UNKNOWN_REFUSAL) if isinstance(code, str) else None
-    return (template or _UNKNOWN_REFUSAL).format_map(_refusal_fields(refused, words))
+    return (template or _UNKNOWN_REFUSAL).format_map(_refusal_fields(refused, None))
 
 
 def refusal_reason(refused: Mapping[str, object], *, words: PlanWords = _NO_WORDS) -> str:
-    """Why `refused` refused, as one sentence (`SEAM_REASONS`), naming the
-    plan's requirements by `words`. A code in no table gives a plain clause
-    that claims nothing about why."""
+    """Why `refused` refused, as one sentence for the user (`SEAM_REASONS`),
+    naming the plan's requirements by `words` and never by id, which reads
+    as a fault. A code in no table gives a plain clause that claims nothing
+    about why."""
     code = refused.get("code")
     template = SEAM_REASONS.get(code, _STOPPED) if isinstance(code, str) else _STOPPED
     reason = template.format_map(_refusal_fields(refused, words))
@@ -484,18 +488,24 @@ def refusal_reason(refused: Mapping[str, object], *, words: PlanWords = _NO_WORD
     return f"{reason[:first]}{reason[first].upper()}{reason[first + 1 :]}."
 
 
-def _refusal_fields(refused: Mapping[str, object], words: PlanWords) -> dict[str, object]:
+def _refusal_fields(refused: Mapping[str, object], words: PlanWords | None) -> dict[str, object]:
     detail = refused.get("detail")
     return _fields(detail if isinstance(detail, Mapping) else {}, words)
 
 
-def _fields(detail: Mapping[Any, object], words: PlanWords) -> dict[str, object]:
+def _fields(detail: Mapping[Any, object], words: PlanWords | None) -> dict[str, object]:
     """What a `SEAM_SENTENCES` or `SEAM_REASONS` template reads, from a
-    refusal's `detail` and the reader's `words` for the plan's requirements."""
+    refusal's `detail`: a requirement by its reader's name in `words`, or by
+    its id when `words` is `None`."""
     basis = detail.get("basis")
     basis = basis if isinstance(basis, Mapping) else None
     requirement_id = detail.get("requirement_id") or (basis or {}).get("requirement_id")
-    about = words.names.get(requirement_id) if isinstance(requirement_id, str) else None
+    about = None
+    if isinstance(requirement_id, str) and requirement_id:
+        about = (
+            f"requirement {requirement_id!r}" if words is None else words.names.get(requirement_id)
+        )
+    words = words or _NO_WORDS
     declined = detail.get("declined")
     unsupported = _unsupported_reason(detail.get("operation"), basis)
     return {

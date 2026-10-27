@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import get_args
@@ -121,11 +121,10 @@ def test_a_plan_not_ready_sentence_carries_the_referral_it_ended_on() -> None:
                 "requirement_id": "aid_by_donor",
                 "constraint": "family_unsummable",
             },
-        },
-        words=PlanWords(names={"aid_by_donor": "aid by donor"}),
+        }
     )
 
-    assert text.startswith("No plan was made for aid by donor: ")
+    assert "'aid_by_donor'" in text
     assert COMPILE_REASONS[CompileIssueCode.FAMILY_UNSUMMABLE] in text
 
 
@@ -143,30 +142,22 @@ _STEP_ID = "share_health"
     ids=["requirement", "basis"],
 )
 @pytest.mark.parametrize("named", [True, False], ids=["named", "unnamed"])
-@pytest.mark.parametrize(
-    ("render", "table"),
-    [(refusal_sentence, SEAM_SENTENCES), (refusal_reason, SEAM_REASONS)],
-    ids=["sentence", "reason"],
-)
-def test_a_sentence_names_a_requirement_by_its_readers_name_and_never_by_its_id(
-    code: StrEnum,
-    where: dict[str, object],
-    named: bool,
-    render: Callable[..., str],
-    table: Mapping[StrEnum, str],
+def test_a_reason_names_a_requirement_by_its_readers_name_and_never_by_its_id(
+    code: StrEnum, where: dict[str, object], named: bool
 ) -> None:
-    """A requirement a refusal is about reads by the name the plan card gives
-    it, and with no name it goes unnamed: its id reads as a fault."""
+    """A requirement the user's reason is about reads by the name the plan
+    card gives it, and with no name it goes unnamed: its id reads as a fault.
+    The planner's sentence keeps the id, which a repair cites."""
     words = PlanWords(
         names={_REQUIREMENT_ID: "official development assistance"} if named else {},
         inputs={_STEP_ID: ("health_crs", _REQUIREMENT_ID)},
     )
 
-    text = render({"code": code, "detail": where}, words=words)
+    text = refusal_reason({"code": code, "detail": where}, words=words)
 
     assert _REQUIREMENT_ID not in text
     assert not {_STEP_ID, "health_crs"} & set(re.findall(r"[\w']+", text))
-    if named and any(f"{{{slot}}}" in table[code] for slot in ("at", "about", "lead")):
+    if named and any(f"{{{slot}}}" in SEAM_REASONS[code] for slot in ("at", "about", "lead")):
         assert "official development assistance" in text
 
 
@@ -231,11 +222,10 @@ def test_an_unsupported_calculation_says_why_it_cannot_be_made(
         {
             "code": ProblemCode.OPERATION_UNSUPPORTED,
             "detail": {**detail, "requirement_id": "total"},
-        },
-        words=PlanWords(names={"total": "official development assistance"}),
+        }
     )
 
-    assert text.startswith("This cannot be calculated as planned for official development")
+    assert text.startswith("This cannot be calculated as planned for requirement 'total'")
     assert reason in text
 
 

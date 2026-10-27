@@ -682,8 +682,7 @@ class PlannerSeam:
                 ctx=ctx, message=message, on_progress=on_progress
             )
             if refused is not None:
-                state = cast(SessionState, ctx.state)
-                return self._refused(refused, words=_plan_words(state, load_plan(state)))
+                return self._refused(refused)
             assert submitted is not None and plan is not None, (
                 "_propose answers a refusal unless a proposal declared the plan on record "
                 "ready (see planner.agent.declare_ready)"
@@ -1193,14 +1192,14 @@ class PlannerSeam:
     )
 
     @staticmethod
-    def _refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
+    def _refused(refused: dict[str, Any]) -> dict[str, Any]:
         """What `__call__` answers for a refusal that ends the entry: its plain
-        sentence (`harness.sentences.refusal_sentence`), naming a requirement
-        by `words` (`_plan_words`), whether another plan for the same ask
-        could succeed, and its code."""
+        sentence (`harness.sentences.refusal_sentence`), which the planner and
+        the orchestrator read, whether another plan for the same ask could
+        succeed, and its code."""
         return {
             "refused": {
-                "text": refusal_sentence(refused, words=words),
+                "text": refusal_sentence(refused),
                 "final": refused.get("code") in PlannerSeam._FINAL_CODES,
                 "code": refused.get("code"),
             }
@@ -1209,9 +1208,10 @@ class PlannerSeam:
     @staticmethod
     def _revision_refused(refused: dict[str, Any], *, words: PlanWords) -> dict[str, Any]:
         """What `revise` answers for a refusal: `_refused`'s, with why alone
-        as one sentence (`harness.sentences.refusal_reason`) under `reason`,
-        which a switch that did not apply shows under its choice."""
-        answer = PlannerSeam._refused(refused, words=words)
+        as one sentence for the user (`harness.sentences.refusal_reason`),
+        naming requirements by `words` (`_plan_words`), under `reason`, which
+        a switch that did not apply shows under its choice."""
+        answer = PlannerSeam._refused(refused)
         answer["refused"]["reason"] = refusal_reason(refused, words=words)
         return answer
 
