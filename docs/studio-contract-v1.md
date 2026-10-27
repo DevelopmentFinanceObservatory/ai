@@ -506,8 +506,7 @@ ignores it and an older harness omits it.
   set on the plan re-offered after a switch that did not apply.
   `choice_id` and `option_id` name the option the user picked, `code` is
   the refusal's code, and `reason` says in a reader's words why it failed.
-- `plan.approved`: `{plan_version_id, version, revision?, title,
-summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
+- `plan.approved`: `{plan_version_id, version, revision?, title, summary?, steps[], choices[]}`. Each step is `{label, gives_answer?}`;
   each choice is `{question, chosen, changed_from?}`, where `question` is
   the choice's short name (for example "Basis"), `chosen` the option label
   and `changed_from` the label it held before the user switched it. The

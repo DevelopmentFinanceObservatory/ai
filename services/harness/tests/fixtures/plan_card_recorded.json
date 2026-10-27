@@ -1,2706 +1,2706 @@
 {
- "long": {
-  "answer_mode": "computed",
-  "answered": [
-   {
-    "ask": 0,
-    "outputs": [
-     "health_share"
-    ]
-   }
-  ],
-  "approved_at": null,
-  "approved_revision": null,
-  "ask_breakdowns": [],
-  "asks": [
-   "health share of US ODA in 2023"
-  ],
-  "asks_across_years": [],
-  "decisions": [
-   {
-    "chosen": "crs_total",
-    "description": "Denominator source for US total ODA to compute the sector share",
-    "fixes": null,
-    "options": [
-     "crs_total",
-     "dac1_headline"
-    ],
-    "rationale": "Using the CRS total ensures consistent cash-flow accounting between numerator and denominator, avoiding grant-equivalent vs cash disbursement mismatches and CRS reporting gaps against DAC1.",
-    "resolved_by": "planner_default",
-    "slot": "denominator_choice"
-   },
-   {
-    "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
-    "description": "Which sector codes the figures count.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "health incl. population and reproductive health (CRS 120 + 130)",
-     "health, CRS 120 alone",
-     "population policy, programme, and reproductive health, CRS 130 alone"
-    ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "sector",
-     "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:sector",
-     "options": [
+  "long": {
+    "answer_mode": "computed",
+    "answered": [
       {
-       "code": null,
-       "option_id": "sector:120+130",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:120",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:130",
-       "status": "available",
-       "years": null
+        "ask": 0,
+        "outputs": [
+          "health_share"
+        ]
       }
-     ]
-    },
-    "slot": "scope_sector_spec_61d37f5bd032b8bba3d077187e627ded"
-   },
-   {
-    "chosen": "gross disbursements, current USD",
-    "description": "Which basis the figures are measured on.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "gross disbursements, current USD",
-     "net disbursements, current USD",
-     "grant equivalents (OECD headline), current USD",
-     "commitments, current USD"
     ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "measure_basis",
-     "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:measure_basis",
-     "options": [
+    "approved_at": null,
+    "approved_revision": null,
+    "ask_breakdowns": [],
+    "asks": [
+      "health share of US ODA in 2023"
+    ],
+    "asks_across_years": [],
+    "decisions": [
       {
-       "code": null,
-       "option_id": "measure_basis:gross",
-       "status": "available",
-       "years": null
+        "chosen": "crs_total",
+        "description": "Denominator source for US total ODA to compute the sector share",
+        "fixes": null,
+        "options": [
+          "crs_total",
+          "dac1_headline"
+        ],
+        "rationale": "Using the CRS total ensures consistent cash-flow accounting between numerator and denominator, avoiding grant-equivalent vs cash disbursement mismatches and CRS reporting gaps against DAC1.",
+        "resolved_by": "planner_default",
+        "slot": "denominator_choice"
       },
       {
-       "code": null,
-       "option_id": "measure_basis:net",
-       "status": "available",
-       "years": null
+        "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
+        "description": "Which sector codes the figures count.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "health incl. population and reproductive health (CRS 120 + 130)",
+          "health, CRS 120 alone",
+          "population policy, programme, and reproductive health, CRS 130 alone"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "sector",
+          "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:sector",
+          "options": [
+            {
+              "code": null,
+              "option_id": "sector:120+130",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:120",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:130",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_sector_spec_61d37f5bd032b8bba3d077187e627ded"
       },
       {
-       "code": null,
-       "option_id": "measure_basis:grant_equivalent",
-       "status": "available",
-       "years": null
+        "chosen": "gross disbursements, current USD",
+        "description": "Which basis the figures are measured on.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "measure_basis",
+          "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:measure_basis",
+          "options": [
+            {
+              "code": null,
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_measure_basis_spec_61d37f5bd032b8bba3d077187e627ded"
       },
       {
-       "code": null,
-       "option_id": "measure_basis:commitments",
-       "status": "available",
-       "years": null
+        "chosen": "gross disbursements, current USD",
+        "description": "Which basis the figures are measured on.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "rationale": "The plan's wording of this input asked for gross disbursements, current USD.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "measure_basis",
+          "choice_id": "spec_a85874f71d3d96e35c368b9454e051ca:measure_basis",
+          "options": [
+            {
+              "code": null,
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
       }
-     ]
-    },
-    "slot": "scope_measure_basis_spec_61d37f5bd032b8bba3d077187e627ded"
-   },
-   {
-    "chosen": "gross disbursements, current USD",
-    "description": "Which basis the figures are measured on.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "gross disbursements, current USD",
-     "net disbursements, current USD",
-     "grant equivalents (OECD headline), current USD",
-     "commitments, current USD"
     ],
-    "rationale": "The plan's wording of this input asked for gross disbursements, current USD.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "measure_basis",
-     "choice_id": "spec_a85874f71d3d96e35c368b9454e051ca:measure_basis",
-     "options": [
+    "declined": [],
+    "evidence_requirements": [
       {
-       "code": null,
-       "option_id": "measure_basis:gross",
-       "status": "available",
-       "years": null
+        "across": [],
+        "breakdown": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "decision_ids": [
+          "scope_sector_spec_61d37f5bd032b8bba3d077187e627ded",
+          "scope_measure_basis_spec_61d37f5bd032b8bba3d077187e627ded"
+        ],
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "frequency": "annual",
+        "id": "us_health_aid_raw",
+        "kind": "dataset",
+        "measure": "health and population policy, programme, and reproductive health gross disbursements",
+        "period": {
+          "end": 2023,
+          "start": 2023
+        },
+        "period_end_open": false,
+        "source": "OECD Creditor Reporting System (CRS)",
+        "source_code": null,
+        "source_exclude": false,
+        "source_ref": null,
+        "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+        "stat_vars": null,
+        "unit": null
       },
       {
-       "code": null,
-       "option_id": "measure_basis:net",
-       "status": "available",
-       "years": null
+        "across": [],
+        "breakdown": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "decision_ids": [
+          "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
+        ],
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "frequency": "annual",
+        "id": "us_total_aid_raw",
+        "kind": "dataset",
+        "measure": "official development assistance gross disbursements",
+        "period": {
+          "end": 2023,
+          "start": 2023
+        },
+        "period_end_open": false,
+        "source": "OECD Creditor Reporting System (CRS)",
+        "source_code": null,
+        "source_exclude": false,
+        "source_ref": null,
+        "source_spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
+        "stat_vars": null,
+        "unit": null
       },
       {
-       "code": null,
-       "option_id": "measure_basis:grant_equivalent",
-       "status": "available",
-       "years": null
+        "decision_ids": [],
+        "group_by": [
+          "period"
+        ],
+        "id": "us_health_aid_sum",
+        "input_id": "us_health_aid_raw",
+        "kind": "aggregate",
+        "reduction": "sum"
       },
       {
-       "code": null,
-       "option_id": "measure_basis:commitments",
-       "status": "available",
-       "years": null
+        "decision_ids": [],
+        "group_by": [
+          "period"
+        ],
+        "id": "us_total_aid_sum",
+        "input_id": "us_total_aid_raw",
+        "kind": "aggregate",
+        "reduction": "sum"
+      },
+      {
+        "axis": null,
+        "decision_ids": [
+          "denominator_choice"
+        ],
+        "denominator": {
+          "entity": null,
+          "input_id": "us_total_aid_sum"
+        },
+        "denominator_scope": null,
+        "id": "health_share",
+        "kind": "share_of",
+        "numerator": {
+          "entity": null,
+          "input_id": "us_health_aid_sum"
+        }
       }
-     ]
+    ],
+    "first_years": [],
+    "period_licences": [],
+    "previous_version": null,
+    "question": "What share of US official development assistance went to health and population policy, programme, and reproductive health in 2023? Calculated from OECD CRS gross disbursements, comparing US health ODA disbursements to total US ODA disbursements in 2023.",
+    "revision": "98895680bd3b5389a4e7f38692002363a4c32c99df0c84d44be5d827d3b072d1",
+    "rolling_copies": [],
+    "status": "pending_approval",
+    "summary": {
+      "revision": "98895680bd3b5389a4e7f38692002363a4c32c99df0c84d44be5d827d3b072d1",
+      "version": 1,
+      "warnings": [
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_health_aid_raw",
+          "severity": "warning"
+        },
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_total_aid_raw",
+          "severity": "warning"
+        }
+      ]
     },
-    "slot": "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
-   }
-  ],
-  "declined": [],
-  "evidence_requirements": [
-   {
-    "across": [],
-    "breakdown": null,
-    "coverage": {
-     "on_missing": "report_gaps"
+    "translation": {
+      "operations": [
+        {
+          "id": "us_health_aid_raw",
+          "kind": "retrieve",
+          "requirement_id": "us_health_aid_raw",
+          "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded"
+        },
+        {
+          "id": "us_total_aid_raw",
+          "kind": "retrieve",
+          "requirement_id": "us_total_aid_raw",
+          "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca"
+        },
+        {
+          "group_by": [
+            "period"
+          ],
+          "id": "us_health_aid_sum",
+          "input": "us_health_aid_raw",
+          "kind": "aggregate",
+          "reduction": "sum",
+          "requirement_id": "us_health_aid_sum"
+        },
+        {
+          "group_by": [
+            "period"
+          ],
+          "id": "us_total_aid_sum",
+          "input": "us_total_aid_raw",
+          "kind": "aggregate",
+          "reduction": "sum",
+          "requirement_id": "us_total_aid_sum"
+        },
+        {
+          "axis": null,
+          "denominator": {
+            "entity": null,
+            "input": "us_total_aid_sum"
+          },
+          "denominator_scope": null,
+          "id": "health_share",
+          "kind": "share_of",
+          "numerator": {
+            "entity": null,
+            "input": "us_health_aid_sum"
+          },
+          "requirement_id": "health_share"
+        }
+      ],
+      "terminal": [
+        "health_share"
+      ]
     },
-    "decision_ids": [
-     "scope_sector_spec_61d37f5bd032b8bba3d077187e627ded",
-     "scope_measure_basis_spec_61d37f5bd032b8bba3d077187e627ded"
-    ],
-    "entities": [
-     {
-      "name": "United States",
-      "role": "donor"
-     }
-    ],
-    "frequency": "annual",
-    "id": "us_health_aid_raw",
-    "kind": "dataset",
-    "measure": "health and population policy, programme, and reproductive health gross disbursements",
-    "period": {
-     "end": 2023,
-     "start": 2023
-    },
-    "period_end_open": false,
-    "source": "OECD Creditor Reporting System (CRS)",
-    "source_code": null,
-    "source_exclude": false,
-    "source_ref": null,
-    "source_spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-    "stat_vars": null,
-    "unit": null
-   },
-   {
-    "across": [],
-    "breakdown": null,
-    "coverage": {
-     "on_missing": "report_gaps"
-    },
-    "decision_ids": [
-     "scope_measure_basis_spec_a85874f71d3d96e35c368b9454e051ca"
-    ],
-    "entities": [
-     {
-      "name": "United States",
-      "role": "donor"
-     }
-    ],
-    "frequency": "annual",
-    "id": "us_total_aid_raw",
-    "kind": "dataset",
-    "measure": "official development assistance gross disbursements",
-    "period": {
-     "end": 2023,
-     "start": 2023
-    },
-    "period_end_open": false,
-    "source": "OECD Creditor Reporting System (CRS)",
-    "source_code": null,
-    "source_exclude": false,
-    "source_ref": null,
-    "source_spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
-    "stat_vars": null,
-    "unit": null
-   },
-   {
-    "decision_ids": [],
-    "group_by": [
-     "period"
-    ],
-    "id": "us_health_aid_sum",
-    "input_id": "us_health_aid_raw",
-    "kind": "aggregate",
-    "reduction": "sum"
-   },
-   {
-    "decision_ids": [],
-    "group_by": [
-     "period"
-    ],
-    "id": "us_total_aid_sum",
-    "input_id": "us_total_aid_raw",
-    "kind": "aggregate",
-    "reduction": "sum"
-   },
-   {
-    "axis": null,
-    "decision_ids": [
-     "denominator_choice"
-    ],
-    "denominator": {
-     "entity": null,
-     "input_id": "us_total_aid_sum"
-    },
-    "denominator_scope": null,
-    "id": "health_share",
-    "kind": "share_of",
-    "numerator": {
-     "entity": null,
-     "input_id": "us_health_aid_sum"
+    "version": 1,
+    "workflow": {
+      "evidence_bindings": [
+        {
+          "requirement_id": "us_health_aid_raw",
+          "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+          "step_id": "us_health_aid_raw"
+        },
+        {
+          "requirement_id": "us_total_aid_raw",
+          "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
+          "step_id": "us_total_aid_raw"
+        }
+      ],
+      "sources": [
+        {
+          "confidence": "high",
+          "coverage_kind": "breadth",
+          "coverage_window": null,
+          "definition": null,
+          "elected_measure": {
+            "alternatives": [],
+            "label": "gross disbursements"
+          },
+          "entities": [
+            {
+              "label": "United States of America",
+              "ref": "country/USA",
+              "role": "origin"
+            }
+          ],
+          "entity_refs": {
+            "united states": "country/USA"
+          },
+          "groups": [],
+          "has_data": true,
+          "identity": {
+            "entities": {
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "identity_version": "spec1",
+            "requested_window": {
+              "end_year": 2023,
+              "kind": "range",
+              "start_year": 2023
+            },
+            "shape": {
+              "kind": "statvar_schema",
+              "measured_property": "amount",
+              "measurement_qualifier": "Nominal",
+              "population_type": "FinancialFlow",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsCooperationModality"
+              },
+              {
+                "binding": {
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ],
+                  "state": "set"
+                },
+                "property": "crsPurpose"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsTypeOfFinance"
+              },
+              {
+                "binding": {
+                  "ref": "CRSTypeOfFlow10",
+                  "state": "value"
+                },
+                "property": "crsTypeOfFlow"
+              },
+              {
+                "binding": {
+                  "ref": "Disbursement",
+                  "state": "value"
+                },
+                "property": "financialFlowType"
+              },
+              {
+                "binding": {
+                  "ref": "Gross",
+                  "state": "value"
+                },
+                "property": "nettingBasis"
+              }
+            ]
+          },
+          "measure_label": "gross disbursements (official development assistance, standard grant)",
+          "open_axes": [
+            {
+              "property": "crsCooperationModality",
+              "summable": true
+            },
+            {
+              "property": "crsPurpose",
+              "summable": true
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "summable": true
+            }
+          ],
+          "open_entity_axes": [
+            {
+              "column": "destination",
+              "member_count": 129
+            }
+          ],
+          "provenance_account": "provider",
+          "provenance_label": "OECD Creditor Reporting System (CRS)",
+          "provenance_ref": "provenance/OECDCreditorReportingSystem",
+          "resolved_sources": [],
+          "searched_as": "health and population policy, programme, and reproductive health gross disbursements",
+          "sentence": "United States of America's gross ODA disbursements to 129 recipients for health and population policy, programme, and reproductive health in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+          "served_count": 375,
+          "shape_member_count": 375,
+          "shape_member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
+          "slot_codes": {
+            "crsPurpose": [
+              "CRSPurposeCode120",
+              "CRSPurposeCode121",
+              "CRSPurposeCode12110",
+              "CRSPurposeCode12181",
+              "CRSPurposeCode12182",
+              "CRSPurposeCode12191",
+              "CRSPurposeCode122",
+              "CRSPurposeCode12220",
+              "CRSPurposeCode12230",
+              "CRSPurposeCode12240",
+              "CRSPurposeCode12250",
+              "CRSPurposeCode12261",
+              "CRSPurposeCode12262",
+              "CRSPurposeCode12263",
+              "CRSPurposeCode12264",
+              "CRSPurposeCode12281",
+              "CRSPurposeCode123",
+              "CRSPurposeCode12310",
+              "CRSPurposeCode12320",
+              "CRSPurposeCode12330",
+              "CRSPurposeCode12340",
+              "CRSPurposeCode12350",
+              "CRSPurposeCode12382",
+              "CRSPurposeCode130",
+              "CRSPurposeCode13010",
+              "CRSPurposeCode13020",
+              "CRSPurposeCode13030",
+              "CRSPurposeCode13040",
+              "CRSPurposeCode13081"
+            ],
+            "crsTypeOfFlow": [
+              "CRSTypeOfFlow10"
+            ],
+            "financialFlowType": [
+              "Disbursement"
+            ],
+            "nettingBasis": [
+              "Gross"
+            ]
+          },
+          "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+          "stat_var_member_count": 57,
+          "stat_var_member_count_exact": true,
+          "stat_var_reading": "sum",
+          "stat_var_reading_set_by": "rule",
+          "unit_label": "US Dollar",
+          "unit_per_series": null,
+          "unit_ref": "CurrencyUSD"
+        },
+        {
+          "confidence": "high",
+          "coverage_kind": "breadth",
+          "coverage_window": null,
+          "definition": null,
+          "elected_measure": {
+            "alternatives": [],
+            "label": "gross disbursements"
+          },
+          "entities": [
+            {
+              "label": "United States of America",
+              "ref": "country/USA",
+              "role": "origin"
+            }
+          ],
+          "entity_refs": {
+            "united states": "country/USA"
+          },
+          "groups": [],
+          "has_data": true,
+          "identity": {
+            "entities": {
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "facets": {
+              "provenance": {
+                "ref": "provenance/OECDCreditorReportingSystem",
+                "state": "value"
+              }
+            },
+            "identity_version": "spec1",
+            "requested_window": {
+              "end_year": 2023,
+              "kind": "range",
+              "start_year": 2023
+            },
+            "shape": {
+              "kind": "statvar_schema",
+              "measured_property": "amount",
+              "measurement_qualifier": "Nominal",
+              "population_type": "FinancialFlow",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsCooperationModality"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsPurpose"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsTypeOfFinance"
+              },
+              {
+                "binding": {
+                  "ref": "CRSTypeOfFlow10",
+                  "state": "value"
+                },
+                "property": "crsTypeOfFlow"
+              },
+              {
+                "binding": {
+                  "ref": "Disbursement",
+                  "state": "value"
+                },
+                "property": "financialFlowType"
+              },
+              {
+                "binding": {
+                  "ref": "Gross",
+                  "state": "value"
+                },
+                "property": "nettingBasis"
+              }
+            ]
+          },
+          "measure_label": "gross disbursements (official development assistance)",
+          "open_axes": [
+            {
+              "property": "crsCooperationModality",
+              "summable": true
+            },
+            {
+              "property": "crsPurpose",
+              "summable": true
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "summable": true
+            }
+          ],
+          "open_entity_axes": [
+            {
+              "column": "destination",
+              "member_count": 152
+            }
+          ],
+          "provenance_account": "provider",
+          "provenance_label": "OECD Creditor Reporting System (CRS)",
+          "provenance_ref": "provenance/OECDCreditorReportingSystem",
+          "resolved_sources": [],
+          "searched_as": "official development assistance gross disbursements",
+          "sentence": "United States of America's gross ODA disbursements to 152 recipients in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+          "served_count": 3687,
+          "shape_member_count": 3687,
+          "shape_member_digest": "a7115fa9b30afef48979db31549005a0cd84c73758f339a615ef3ff98aa37930",
+          "slot_codes": {
+            "crsTypeOfFlow": [
+              "CRSTypeOfFlow10"
+            ],
+            "financialFlowType": [
+              "Disbursement"
+            ],
+            "nettingBasis": [
+              "Gross"
+            ]
+          },
+          "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
+          "stat_var_member_count": 360,
+          "stat_var_member_count_exact": true,
+          "stat_var_reading": "sum",
+          "stat_var_reading_set_by": "rule",
+          "unit_label": "US Dollar",
+          "unit_per_series": null,
+          "unit_ref": "CurrencyUSD"
+        }
+      ],
+      "steps": [
+        {
+          "args": {
+            "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
+            "stat_vars": "sum",
+            "without_party_totals": true
+          },
+          "bindings": {},
+          "expected_role_keys": [
+            "origin"
+          ],
+          "id": "us_health_aid_raw",
+          "implementation_version": "1",
+          "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
+          "operation_id": "us_health_aid_raw",
+          "output_schema_hash": null,
+          "tool": {
+            "name": "get_data",
+            "server": "data-mcp"
+          }
+        },
+        {
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "bindings": {
+            "frame_ref": {
+              "from_step": "us_health_aid_raw",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "us_health_aid_sum",
+          "implementation_version": "1",
+          "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
+          "operation_id": "us_health_aid_sum",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "aggregate",
+            "server": "analysis-mcp"
+          }
+        },
+        {
+          "args": {
+            "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
+            "stat_vars": "sum",
+            "without_party_totals": true
+          },
+          "bindings": {},
+          "expected_role_keys": [
+            "origin"
+          ],
+          "id": "us_total_aid_raw",
+          "implementation_version": "1",
+          "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
+          "operation_id": "us_total_aid_raw",
+          "output_schema_hash": null,
+          "tool": {
+            "name": "get_data",
+            "server": "data-mcp"
+          }
+        },
+        {
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "bindings": {
+            "frame_ref": {
+              "from_step": "us_total_aid_raw",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "us_total_aid_sum",
+          "implementation_version": "1",
+          "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
+          "operation_id": "us_total_aid_sum",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "aggregate",
+            "server": "analysis-mcp"
+          }
+        },
+        {
+          "args": {},
+          "bindings": {
+            "denominator_frame_ref": {
+              "from_step": "us_total_aid_sum",
+              "output": "frame_ref"
+            },
+            "frame_ref": {
+              "from_step": "us_health_aid_sum",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "health_share",
+          "implementation_version": "1",
+          "input_schema_hash": "43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
+          "operation_id": "health_share",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "share_of",
+            "server": "analysis-mcp"
+          }
+        }
+      ],
+      "terminal_steps": [
+        "health_share"
+      ],
+      "warnings": [
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_health_aid_raw",
+          "severity": "warning"
+        },
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_total_aid_raw",
+          "severity": "warning"
+        }
+      ]
     }
-   }
-  ],
-  "first_years": [],
-  "period_licences": [],
-  "previous_version": null,
-  "question": "What share of US official development assistance went to health and population policy, programme, and reproductive health in 2023? Calculated from OECD CRS gross disbursements, comparing US health ODA disbursements to total US ODA disbursements in 2023.",
-  "revision": "98895680bd3b5389a4e7f38692002363a4c32c99df0c84d44be5d827d3b072d1",
-  "rolling_copies": [],
-  "status": "pending_approval",
-  "summary": {
-   "revision": "98895680bd3b5389a4e7f38692002363a4c32c99df0c84d44be5d827d3b072d1",
-   "version": 1,
-   "warnings": [
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_health_aid_raw",
-     "severity": "warning"
-    },
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_total_aid_raw",
-     "severity": "warning"
-    }
-   ]
   },
-  "translation": {
-   "operations": [
-    {
-     "id": "us_health_aid_raw",
-     "kind": "retrieve",
-     "requirement_id": "us_health_aid_raw",
-     "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded"
+  "long_switched_to_net": {
+    "answer_mode": "computed",
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "health_share"
+        ]
+      }
+    ],
+    "approved_at": null,
+    "approved_revision": null,
+    "ask_breakdowns": [],
+    "asks": [
+      "health share of US ODA in 2023"
+    ],
+    "asks_across_years": [],
+    "decisions": [
+      {
+        "chosen": "crs_total",
+        "description": "Denominator source for US total ODA to compute the sector share",
+        "fixes": null,
+        "options": [
+          "crs_total",
+          "dac1_headline"
+        ],
+        "rationale": "Using the CRS total ensures consistent cash-flow accounting between numerator and denominator, avoiding grant-equivalent vs cash disbursement mismatches and CRS reporting gaps against DAC1.",
+        "resolved_by": "planner_default",
+        "slot": "denominator_choice"
+      },
+      {
+        "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
+        "description": "Which sector codes the figures count.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "health incl. population and reproductive health (CRS 120 + 130)",
+          "health, CRS 120 alone",
+          "population policy, programme, and reproductive health, CRS 130 alone"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "sector",
+          "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:sector",
+          "options": [
+            {
+              "code": null,
+              "option_id": "sector:120+130",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:120",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:130",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_sector_spec_b80254f94a38b60a951a128c2baf60d0"
+      },
+      {
+        "chosen": "net disbursements, current USD",
+        "description": "Which basis the figures are measured on.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "rationale": "The user chose net disbursements, current USD on the plan.",
+        "resolved_by": "user",
+        "scope": {
+          "axis": "measure_basis",
+          "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:measure_basis",
+          "options": [
+            {
+              "code": null,
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_measure_basis_spec_b80254f94a38b60a951a128c2baf60d0"
+      },
+      {
+        "chosen": "net disbursements, current USD",
+        "description": "Which basis the figures are measured on.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "rationale": "The user chose net disbursements, current USD on the plan.",
+        "resolved_by": "user",
+        "scope": {
+          "axis": "measure_basis",
+          "choice_id": "spec_a85874f71d3d96e35c368b9454e051ca:measure_basis",
+          "options": [
+            {
+              "code": null,
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_measure_basis_spec_03889dfe8b27c84b8b34bbe3866cbbc0"
+      }
+    ],
+    "declined": [],
+    "evidence_requirements": [
+      {
+        "across": [],
+        "breakdown": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "decision_ids": [
+          "scope_sector_spec_b80254f94a38b60a951a128c2baf60d0",
+          "scope_measure_basis_spec_b80254f94a38b60a951a128c2baf60d0"
+        ],
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "frequency": "annual",
+        "id": "us_health_aid_raw",
+        "kind": "dataset",
+        "measure": "health and population policy, programme, and reproductive health gross disbursements",
+        "period": {
+          "end": 2023,
+          "start": 2023
+        },
+        "period_end_open": false,
+        "source": "OECD Creditor Reporting System (CRS)",
+        "source_code": null,
+        "source_exclude": false,
+        "source_ref": null,
+        "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+        "stat_vars": null,
+        "unit": null
+      },
+      {
+        "across": [],
+        "breakdown": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "decision_ids": [
+          "scope_measure_basis_spec_03889dfe8b27c84b8b34bbe3866cbbc0"
+        ],
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          }
+        ],
+        "frequency": "annual",
+        "id": "us_total_aid_raw",
+        "kind": "dataset",
+        "measure": "official development assistance gross disbursements",
+        "period": {
+          "end": 2023,
+          "start": 2023
+        },
+        "period_end_open": false,
+        "source": "OECD Creditor Reporting System (CRS)",
+        "source_code": null,
+        "source_exclude": false,
+        "source_ref": null,
+        "source_spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
+        "stat_vars": null,
+        "unit": null
+      },
+      {
+        "decision_ids": [],
+        "group_by": [
+          "period"
+        ],
+        "id": "us_health_aid_sum",
+        "input_id": "us_health_aid_raw",
+        "kind": "aggregate",
+        "reduction": "sum"
+      },
+      {
+        "decision_ids": [],
+        "group_by": [
+          "period"
+        ],
+        "id": "us_total_aid_sum",
+        "input_id": "us_total_aid_raw",
+        "kind": "aggregate",
+        "reduction": "sum"
+      },
+      {
+        "axis": null,
+        "decision_ids": [
+          "denominator_choice"
+        ],
+        "denominator": {
+          "entity": null,
+          "input_id": "us_total_aid_sum"
+        },
+        "denominator_scope": null,
+        "id": "health_share",
+        "kind": "share_of",
+        "numerator": {
+          "entity": null,
+          "input_id": "us_health_aid_sum"
+        }
+      }
+    ],
+    "first_years": [],
+    "moved": [],
+    "period_licences": [],
+    "previous_version": 1,
+    "question": "What share of US official development assistance went to health and population policy, programme, and reproductive health in 2023? Calculated from OECD CRS gross disbursements, comparing US health ODA disbursements to total US ODA disbursements in 2023.",
+    "revision": "2c63808cb86f76cf798ee89f7d3d1021d9f4c11ecdbd57d12be3ab5eaf2e74b7",
+    "rolling_copies": [],
+    "status": "pending_approval",
+    "summary": {
+      "revision": "2c63808cb86f76cf798ee89f7d3d1021d9f4c11ecdbd57d12be3ab5eaf2e74b7",
+      "version": 2,
+      "warnings": [
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_health_aid_raw",
+          "severity": "warning"
+        },
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_total_aid_raw",
+          "severity": "warning"
+        }
+      ]
     },
-    {
-     "id": "us_total_aid_raw",
-     "kind": "retrieve",
-     "requirement_id": "us_total_aid_raw",
-     "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca"
+    "translation": {
+      "operations": [
+        {
+          "id": "us_health_aid_raw",
+          "kind": "retrieve",
+          "requirement_id": "us_health_aid_raw",
+          "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0"
+        },
+        {
+          "id": "us_total_aid_raw",
+          "kind": "retrieve",
+          "requirement_id": "us_total_aid_raw",
+          "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0"
+        },
+        {
+          "group_by": [
+            "period"
+          ],
+          "id": "us_health_aid_sum",
+          "input": "us_health_aid_raw",
+          "kind": "aggregate",
+          "reduction": "sum",
+          "requirement_id": "us_health_aid_sum"
+        },
+        {
+          "group_by": [
+            "period"
+          ],
+          "id": "us_total_aid_sum",
+          "input": "us_total_aid_raw",
+          "kind": "aggregate",
+          "reduction": "sum",
+          "requirement_id": "us_total_aid_sum"
+        },
+        {
+          "axis": null,
+          "denominator": {
+            "entity": null,
+            "input": "us_total_aid_sum"
+          },
+          "denominator_scope": null,
+          "id": "health_share",
+          "kind": "share_of",
+          "numerator": {
+            "entity": null,
+            "input": "us_health_aid_sum"
+          },
+          "requirement_id": "health_share"
+        }
+      ],
+      "terminal": [
+        "health_share"
+      ]
     },
-    {
-     "group_by": [
-      "period"
-     ],
-     "id": "us_health_aid_sum",
-     "input": "us_health_aid_raw",
-     "kind": "aggregate",
-     "reduction": "sum",
-     "requirement_id": "us_health_aid_sum"
-    },
-    {
-     "group_by": [
-      "period"
-     ],
-     "id": "us_total_aid_sum",
-     "input": "us_total_aid_raw",
-     "kind": "aggregate",
-     "reduction": "sum",
-     "requirement_id": "us_total_aid_sum"
-    },
-    {
-     "axis": null,
-     "denominator": {
-      "entity": null,
-      "input": "us_total_aid_sum"
-     },
-     "denominator_scope": null,
-     "id": "health_share",
-     "kind": "share_of",
-     "numerator": {
-      "entity": null,
-      "input": "us_health_aid_sum"
-     },
-     "requirement_id": "health_share"
+    "version": 2,
+    "workflow": {
+      "evidence_bindings": [
+        {
+          "requirement_id": "us_health_aid_raw",
+          "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+          "step_id": "us_health_aid_raw"
+        },
+        {
+          "requirement_id": "us_total_aid_raw",
+          "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
+          "step_id": "us_total_aid_raw"
+        }
+      ],
+      "sources": [
+        {
+          "confidence": "high",
+          "coverage_kind": "breadth",
+          "coverage_window": null,
+          "definition": null,
+          "elected_measure": {
+            "alternatives": [],
+            "label": "net disbursements"
+          },
+          "entities": [
+            {
+              "label": "United States of America",
+              "ref": "country/USA",
+              "role": "origin"
+            }
+          ],
+          "entity_refs": {
+            "united states": "country/USA"
+          },
+          "groups": [],
+          "has_data": true,
+          "identity": {
+            "entities": {
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "identity_version": "spec1",
+            "requested_window": {
+              "end_year": 2023,
+              "kind": "range",
+              "start_year": 2023
+            },
+            "shape": {
+              "kind": "statvar_schema",
+              "measured_property": "amount",
+              "measurement_qualifier": "Nominal",
+              "population_type": "FinancialFlow",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsCooperationModality"
+              },
+              {
+                "binding": {
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ],
+                  "state": "set"
+                },
+                "property": "crsPurpose"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsTypeOfFinance"
+              },
+              {
+                "binding": {
+                  "ref": "CRSTypeOfFlow10",
+                  "state": "value"
+                },
+                "property": "crsTypeOfFlow"
+              },
+              {
+                "binding": {
+                  "ref": "Disbursement",
+                  "state": "value"
+                },
+                "property": "financialFlowType"
+              },
+              {
+                "binding": {
+                  "ref": "Net",
+                  "state": "value"
+                },
+                "property": "nettingBasis"
+              }
+            ]
+          },
+          "measure_label": "net disbursements (official development assistance)",
+          "open_axes": [
+            {
+              "property": "crsCooperationModality",
+              "summable": true
+            },
+            {
+              "property": "crsPurpose",
+              "summable": true
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "summable": true
+            }
+          ],
+          "open_entity_axes": [
+            {
+              "column": "destination",
+              "member_count": 129
+            }
+          ],
+          "provenance_account": "provider",
+          "provenance_label": "OECD Creditor Reporting System (CRS)",
+          "provenance_ref": "provenance/OECDCreditorReportingSystem",
+          "resolved_sources": [],
+          "searched_as": "health and population policy, programme, and reproductive health gross disbursements",
+          "sentence": "United States of America's net ODA disbursements to 129 recipients for health and population policy, programme, and reproductive health in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+          "served_count": 386,
+          "shape_member_count": 386,
+          "shape_member_digest": "23ecf645d281835a142560f8d89f711061705479003de89acefe0772c7d7343e",
+          "slot_codes": {
+            "crsPurpose": [
+              "CRSPurposeCode120",
+              "CRSPurposeCode121",
+              "CRSPurposeCode12110",
+              "CRSPurposeCode12181",
+              "CRSPurposeCode12182",
+              "CRSPurposeCode12191",
+              "CRSPurposeCode122",
+              "CRSPurposeCode12220",
+              "CRSPurposeCode12230",
+              "CRSPurposeCode12240",
+              "CRSPurposeCode12250",
+              "CRSPurposeCode12261",
+              "CRSPurposeCode12262",
+              "CRSPurposeCode12263",
+              "CRSPurposeCode12264",
+              "CRSPurposeCode12281",
+              "CRSPurposeCode123",
+              "CRSPurposeCode12310",
+              "CRSPurposeCode12320",
+              "CRSPurposeCode12330",
+              "CRSPurposeCode12340",
+              "CRSPurposeCode12350",
+              "CRSPurposeCode12382",
+              "CRSPurposeCode130",
+              "CRSPurposeCode13010",
+              "CRSPurposeCode13020",
+              "CRSPurposeCode13030",
+              "CRSPurposeCode13040",
+              "CRSPurposeCode13081"
+            ],
+            "crsTypeOfFlow": [
+              "CRSTypeOfFlow10"
+            ],
+            "financialFlowType": [
+              "Disbursement"
+            ],
+            "nettingBasis": [
+              "Net"
+            ]
+          },
+          "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+          "stat_var_member_count": 63,
+          "stat_var_member_count_exact": true,
+          "stat_var_reading": "sum",
+          "stat_var_reading_set_by": "rule",
+          "unit_label": "US Dollar",
+          "unit_per_series": null,
+          "unit_ref": "CurrencyUSD"
+        },
+        {
+          "confidence": "high",
+          "coverage_kind": "breadth",
+          "coverage_window": null,
+          "definition": null,
+          "elected_measure": {
+            "alternatives": [],
+            "label": "net disbursements"
+          },
+          "entities": [
+            {
+              "label": "United States of America",
+              "ref": "country/USA",
+              "role": "origin"
+            }
+          ],
+          "entity_refs": {
+            "united states": "country/USA"
+          },
+          "groups": [],
+          "has_data": true,
+          "identity": {
+            "entities": {
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "facets": {
+              "provenance": {
+                "ref": "provenance/OECDCreditorReportingSystem",
+                "state": "value"
+              }
+            },
+            "identity_version": "spec1",
+            "requested_window": {
+              "end_year": 2023,
+              "kind": "range",
+              "start_year": 2023
+            },
+            "shape": {
+              "kind": "statvar_schema",
+              "measured_property": "amount",
+              "measurement_qualifier": "Nominal",
+              "population_type": "FinancialFlow",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsCooperationModality"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsPurpose"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsTypeOfFinance"
+              },
+              {
+                "binding": {
+                  "ref": "CRSTypeOfFlow10",
+                  "state": "value"
+                },
+                "property": "crsTypeOfFlow"
+              },
+              {
+                "binding": {
+                  "ref": "Disbursement",
+                  "state": "value"
+                },
+                "property": "financialFlowType"
+              },
+              {
+                "binding": {
+                  "ref": "Net",
+                  "state": "value"
+                },
+                "property": "nettingBasis"
+              }
+            ]
+          },
+          "measure_label": "net disbursements (official development assistance)",
+          "open_axes": [
+            {
+              "property": "crsCooperationModality",
+              "summable": true
+            },
+            {
+              "property": "crsPurpose",
+              "summable": true
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "summable": true
+            }
+          ],
+          "open_entity_axes": [
+            {
+              "column": "destination",
+              "member_count": 152
+            }
+          ],
+          "provenance_account": "provider",
+          "provenance_label": "OECD Creditor Reporting System (CRS)",
+          "provenance_ref": "provenance/OECDCreditorReportingSystem",
+          "resolved_sources": [],
+          "searched_as": "official development assistance gross disbursements",
+          "sentence": "United States of America's net ODA disbursements to 152 recipients in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+          "served_count": 3769,
+          "shape_member_count": 3769,
+          "shape_member_digest": "8df4f12f00174c8ba14de56acb1793657dd21b2066d916616165744a7f467f85",
+          "slot_codes": {
+            "crsTypeOfFlow": [
+              "CRSTypeOfFlow10"
+            ],
+            "financialFlowType": [
+              "Disbursement"
+            ],
+            "nettingBasis": [
+              "Net"
+            ]
+          },
+          "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
+          "stat_var_member_count": 391,
+          "stat_var_member_count_exact": true,
+          "stat_var_reading": "sum",
+          "stat_var_reading_set_by": "rule",
+          "unit_label": "US Dollar",
+          "unit_per_series": null,
+          "unit_ref": "CurrencyUSD"
+        }
+      ],
+      "steps": [
+        {
+          "args": {
+            "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
+            "stat_vars": "sum",
+            "without_party_totals": true
+          },
+          "bindings": {},
+          "expected_role_keys": [
+            "origin"
+          ],
+          "id": "us_health_aid_raw",
+          "implementation_version": "1",
+          "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
+          "operation_id": "us_health_aid_raw",
+          "output_schema_hash": null,
+          "tool": {
+            "name": "get_data",
+            "server": "data-mcp"
+          }
+        },
+        {
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "bindings": {
+            "frame_ref": {
+              "from_step": "us_health_aid_raw",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "us_health_aid_sum",
+          "implementation_version": "1",
+          "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
+          "operation_id": "us_health_aid_sum",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "aggregate",
+            "server": "analysis-mcp"
+          }
+        },
+        {
+          "args": {
+            "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
+            "stat_vars": "sum",
+            "without_party_totals": true
+          },
+          "bindings": {},
+          "expected_role_keys": [
+            "origin"
+          ],
+          "id": "us_total_aid_raw",
+          "implementation_version": "1",
+          "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
+          "operation_id": "us_total_aid_raw",
+          "output_schema_hash": null,
+          "tool": {
+            "name": "get_data",
+            "server": "data-mcp"
+          }
+        },
+        {
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "bindings": {
+            "frame_ref": {
+              "from_step": "us_total_aid_raw",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "us_total_aid_sum",
+          "implementation_version": "1",
+          "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
+          "operation_id": "us_total_aid_sum",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "aggregate",
+            "server": "analysis-mcp"
+          }
+        },
+        {
+          "args": {},
+          "bindings": {
+            "denominator_frame_ref": {
+              "from_step": "us_total_aid_sum",
+              "output": "frame_ref"
+            },
+            "frame_ref": {
+              "from_step": "us_health_aid_sum",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "health_share",
+          "implementation_version": "1",
+          "input_schema_hash": "43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
+          "operation_id": "health_share",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "share_of",
+            "server": "analysis-mcp"
+          }
+        }
+      ],
+      "terminal_steps": [
+        "health_share"
+      ],
+      "warnings": [
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_health_aid_raw",
+          "severity": "warning"
+        },
+        {
+          "code": "period_unverified",
+          "detail": "the source reports no coverage window",
+          "found": null,
+          "required": {
+            "end": 2023,
+            "start": 2023
+          },
+          "requirement_id": "us_total_aid_raw",
+          "severity": "warning"
+        }
+      ]
     }
-   ],
-   "terminal": [
-    "health_share"
-   ]
   },
-  "version": 1,
-  "workflow": {
-   "evidence_bindings": [
-    {
-     "requirement_id": "us_health_aid_raw",
-     "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-     "step_id": "us_health_aid_raw"
+  "short": {
+    "answer_mode": "computed",
+    "answered": [
+      {
+        "ask": 0,
+        "outputs": [
+          "total_health_aid"
+        ]
+      }
+    ],
+    "approved_at": null,
+    "approved_revision": null,
+    "ask_breakdowns": [
+      {
+        "ask": 0,
+        "by": [],
+        "over": [
+          "recipient"
+        ]
+      }
+    ],
+    "asks": [
+      "total health aid from the United States to Africa in 2024"
+    ],
+    "asks_across_years": [],
+    "decisions": [
+      {
+        "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
+        "description": "Which sector codes the figures count.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "health incl. population and reproductive health (CRS 120 + 130)",
+          "health, CRS 120 alone",
+          "population policy, programme, and reproductive health, CRS 130 alone"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "sector",
+          "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:sector",
+          "options": [
+            {
+              "code": null,
+              "option_id": "sector:120+130",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:120",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "sector:130",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_sector_spec_7c3066e68a49cef8c9033ba06c99789e"
+      },
+      {
+        "chosen": "Africa incl. regional and unspecified amounts",
+        "description": "Which places the region's figures count.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "Africa incl. regional and unspecified amounts",
+          "Africa's countries only"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "region",
+          "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:region",
+          "options": [
+            {
+              "code": null,
+              "option_id": "region:members_and_residuals",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "region:members_only",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_region_spec_7c3066e68a49cef8c9033ba06c99789e"
+      },
+      {
+        "chosen": "gross disbursements, current USD",
+        "description": "Which basis the figures are measured on.",
+        "fixes": {
+          "across": null,
+          "among": null,
+          "axis": null,
+          "change": null,
+          "denominator_scope": null,
+          "direction": null,
+          "entities": null,
+          "group_by": null,
+          "limit": null,
+          "measure": null,
+          "per_period": null,
+          "period": null,
+          "predicates": null,
+          "reduction": null,
+          "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+          "stat_vars": null,
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "options": [
+          "gross disbursements, current USD",
+          "net disbursements, current USD",
+          "grant equivalents (OECD headline), current USD",
+          "commitments, current USD"
+        ],
+        "rationale": "Search's default for this question.",
+        "resolved_by": "planner_default",
+        "scope": {
+          "axis": "measure_basis",
+          "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:measure_basis",
+          "options": [
+            {
+              "code": null,
+              "option_id": "measure_basis:gross",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:net",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:grant_equivalent",
+              "status": "available",
+              "years": null
+            },
+            {
+              "code": null,
+              "option_id": "measure_basis:commitments",
+              "status": "available",
+              "years": null
+            }
+          ]
+        },
+        "slot": "scope_measure_basis_spec_7c3066e68a49cef8c9033ba06c99789e"
+      }
+    ],
+    "declined": [],
+    "evidence_requirements": [
+      {
+        "across": [],
+        "breakdown": null,
+        "coverage": {
+          "on_missing": "report_gaps"
+        },
+        "decision_ids": [
+          "scope_sector_spec_7c3066e68a49cef8c9033ba06c99789e",
+          "scope_region_spec_7c3066e68a49cef8c9033ba06c99789e",
+          "scope_measure_basis_spec_7c3066e68a49cef8c9033ba06c99789e"
+        ],
+        "entities": [
+          {
+            "name": "United States",
+            "role": "donor"
+          },
+          {
+            "members": true,
+            "name": "Africa",
+            "role": "recipient"
+          }
+        ],
+        "frequency": "annual",
+        "id": "health_aid_disbursements",
+        "kind": "dataset",
+        "measure": "total health aid",
+        "period": {
+          "end": 2024,
+          "start": 2024
+        },
+        "period_end_open": false,
+        "source": null,
+        "source_code": null,
+        "source_exclude": false,
+        "source_ref": null,
+        "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+        "stat_vars": null,
+        "unit": null
+      },
+      {
+        "decision_ids": [],
+        "group_by": [
+          "period"
+        ],
+        "id": "total_health_aid",
+        "input_id": "health_aid_disbursements",
+        "kind": "aggregate",
+        "reduction": "sum"
+      }
+    ],
+    "first_years": [],
+    "period_licences": [],
+    "previous_version": null,
+    "question": "total health aid from the United States to Africa in 2024 (gross ODA disbursements, current US dollars, OECD CRS)",
+    "revision": "8a7fef12a165f128f32c485613574d9788e5d73811c21a0e153ee3b652153ebc",
+    "rolling_copies": [],
+    "status": "pending_approval",
+    "summary": {
+      "revision": "8a7fef12a165f128f32c485613574d9788e5d73811c21a0e153ee3b652153ebc",
+      "version": 1,
+      "warnings": []
     },
-    {
-     "requirement_id": "us_total_aid_raw",
-     "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
-     "step_id": "us_total_aid_raw"
+    "translation": {
+      "operations": [
+        {
+          "id": "health_aid_disbursements",
+          "kind": "retrieve",
+          "requirement_id": "health_aid_disbursements",
+          "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e"
+        },
+        {
+          "group_by": [
+            "period"
+          ],
+          "id": "total_health_aid",
+          "input": "health_aid_disbursements",
+          "kind": "aggregate",
+          "reduction": "sum",
+          "requirement_id": "total_health_aid"
+        }
+      ],
+      "terminal": [
+        "total_health_aid"
+      ]
+    },
+    "version": 1,
+    "workflow": {
+      "evidence_bindings": [
+        {
+          "requirement_id": "health_aid_disbursements",
+          "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+          "step_id": "health_aid_disbursements"
+        }
+      ],
+      "sources": [
+        {
+          "bound_refs": [
+            {
+              "identity": "United States",
+              "refs": [
+                "country/USA"
+              ],
+              "role": "from",
+              "text": "United States"
+            },
+            {
+              "identity": "Africa",
+              "refs": [
+                "africa",
+                "country/AGO",
+                "country/BDI",
+                "country/BEN",
+                "country/BFA",
+                "country/BWA",
+                "country/CAF",
+                "country/CIV",
+                "country/CMR",
+                "country/COD",
+                "country/COG",
+                "country/COM",
+                "country/CPV",
+                "country/DJI",
+                "country/DZA",
+                "country/EGY",
+                "country/ERI",
+                "country/ETH",
+                "country/GAB",
+                "country/GHA",
+                "country/GIN",
+                "country/GMB",
+                "country/GNB",
+                "country/GNQ",
+                "country/KEN",
+                "country/LBR",
+                "country/LBY",
+                "country/LSO",
+                "country/MAR",
+                "country/MDG",
+                "country/MLI",
+                "country/MOZ",
+                "country/MRT",
+                "country/MUS",
+                "country/MWI",
+                "country/NAM",
+                "country/NER",
+                "country/NGA",
+                "country/RWA",
+                "country/SDN",
+                "country/SEN",
+                "country/SLE",
+                "country/SOM",
+                "country/SSD",
+                "country/STP",
+                "country/SWZ",
+                "country/SYC",
+                "country/TCD",
+                "country/TGO",
+                "country/TUN",
+                "country/TZA",
+                "country/UGA",
+                "country/ZAF",
+                "country/ZMB",
+                "country/ZWE"
+              ],
+              "role": "to",
+              "text": "Africa"
+            }
+          ],
+          "confidence": "medium",
+          "coverage_kind": "exact",
+          "coverage_window": {
+            "end": 2024,
+            "start": 2024
+          },
+          "definition": null,
+          "elected_measure": {
+            "alternatives": [],
+            "label": "gross disbursements"
+          },
+          "entities": [
+            {
+              "label": "Africa, unallocated by country (DAC)",
+              "ref": "DACAfricaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "Eastern Africa, unallocated by country (DAC)",
+              "ref": "DACEasternAfricaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "Middle Africa, unallocated by country (DAC)",
+              "ref": "DACMiddleAfricaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "North of Sahara, unallocated by country (DAC)",
+              "ref": "DACNorthOfSaharaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "South of Sahara, unallocated by country (DAC)",
+              "ref": "DACSouthOfSaharaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "Southern Africa, unallocated by country (DAC)",
+              "ref": "DACSouthernAfricaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "Western Africa, unallocated by country (DAC)",
+              "ref": "DACWesternAfricaUnallocated",
+              "role": "destination"
+            },
+            {
+              "label": "Angola",
+              "ref": "country/AGO",
+              "role": "destination"
+            },
+            {
+              "label": "Burundi",
+              "ref": "country/BDI",
+              "role": "destination"
+            },
+            {
+              "label": "Benin",
+              "ref": "country/BEN",
+              "role": "destination"
+            },
+            {
+              "label": "Burkina Faso",
+              "ref": "country/BFA",
+              "role": "destination"
+            },
+            {
+              "label": "Botswana",
+              "ref": "country/BWA",
+              "role": "destination"
+            },
+            {
+              "label": "Central African Republic",
+              "ref": "country/CAF",
+              "role": "destination"
+            },
+            {
+              "label": "Ivory Coast",
+              "ref": "country/CIV",
+              "role": "destination"
+            },
+            {
+              "label": "Cameroon",
+              "ref": "country/CMR",
+              "role": "destination"
+            },
+            {
+              "label": "Democratic Republic of the Congo",
+              "ref": "country/COD",
+              "role": "destination"
+            },
+            {
+              "label": "Republic of the Congo",
+              "ref": "country/COG",
+              "role": "destination"
+            },
+            {
+              "label": "Comoros",
+              "ref": "country/COM",
+              "role": "destination"
+            },
+            {
+              "label": "Cape Verde",
+              "ref": "country/CPV",
+              "role": "destination"
+            },
+            {
+              "label": "Djibouti",
+              "ref": "country/DJI",
+              "role": "destination"
+            },
+            {
+              "label": "Algeria",
+              "ref": "country/DZA",
+              "role": "destination"
+            },
+            {
+              "label": "Egypt",
+              "ref": "country/EGY",
+              "role": "destination"
+            },
+            {
+              "label": "Eritrea",
+              "ref": "country/ERI",
+              "role": "destination"
+            },
+            {
+              "label": "Ethiopia",
+              "ref": "country/ETH",
+              "role": "destination"
+            },
+            {
+              "label": "Gabon",
+              "ref": "country/GAB",
+              "role": "destination"
+            },
+            {
+              "label": "Ghana",
+              "ref": "country/GHA",
+              "role": "destination"
+            },
+            {
+              "label": "Guinea",
+              "ref": "country/GIN",
+              "role": "destination"
+            },
+            {
+              "label": "The Gambia",
+              "ref": "country/GMB",
+              "role": "destination"
+            },
+            {
+              "label": "Guinea-Bissau",
+              "ref": "country/GNB",
+              "role": "destination"
+            },
+            {
+              "label": "Equatorial Guinea",
+              "ref": "country/GNQ",
+              "role": "destination"
+            },
+            {
+              "label": "Kenya",
+              "ref": "country/KEN",
+              "role": "destination"
+            },
+            {
+              "label": "Liberia",
+              "ref": "country/LBR",
+              "role": "destination"
+            },
+            {
+              "label": "Libya",
+              "ref": "country/LBY",
+              "role": "destination"
+            },
+            {
+              "label": "Lesotho",
+              "ref": "country/LSO",
+              "role": "destination"
+            },
+            {
+              "label": "Morocco",
+              "ref": "country/MAR",
+              "role": "destination"
+            },
+            {
+              "label": "Madagascar",
+              "ref": "country/MDG",
+              "role": "destination"
+            },
+            {
+              "label": "Mali",
+              "ref": "country/MLI",
+              "role": "destination"
+            },
+            {
+              "label": "Mozambique",
+              "ref": "country/MOZ",
+              "role": "destination"
+            },
+            {
+              "label": "Mauritania",
+              "ref": "country/MRT",
+              "role": "destination"
+            },
+            {
+              "label": "Mauritius",
+              "ref": "country/MUS",
+              "role": "destination"
+            },
+            {
+              "label": "Malawi",
+              "ref": "country/MWI",
+              "role": "destination"
+            },
+            {
+              "label": "Namibia",
+              "ref": "country/NAM",
+              "role": "destination"
+            },
+            {
+              "label": "Niger",
+              "ref": "country/NER",
+              "role": "destination"
+            },
+            {
+              "label": "Nigeria",
+              "ref": "country/NGA",
+              "role": "destination"
+            },
+            {
+              "label": "Rwanda",
+              "ref": "country/RWA",
+              "role": "destination"
+            },
+            {
+              "label": "Sudan",
+              "ref": "country/SDN",
+              "role": "destination"
+            },
+            {
+              "label": "Senegal",
+              "ref": "country/SEN",
+              "role": "destination"
+            },
+            {
+              "label": "Sierra Leone",
+              "ref": "country/SLE",
+              "role": "destination"
+            },
+            {
+              "label": "Somalia",
+              "ref": "country/SOM",
+              "role": "destination"
+            },
+            {
+              "label": "South Sudan",
+              "ref": "country/SSD",
+              "role": "destination"
+            },
+            {
+              "label": "S\u00e3o Tom\u00e9 and Pr\u00edncipe",
+              "ref": "country/STP",
+              "role": "destination"
+            },
+            {
+              "label": "Swaziland",
+              "ref": "country/SWZ",
+              "role": "destination"
+            },
+            {
+              "label": "Seychelles",
+              "ref": "country/SYC",
+              "role": "destination"
+            },
+            {
+              "label": "Chad",
+              "ref": "country/TCD",
+              "role": "destination"
+            },
+            {
+              "label": "Togo",
+              "ref": "country/TGO",
+              "role": "destination"
+            },
+            {
+              "label": "Tunisia",
+              "ref": "country/TUN",
+              "role": "destination"
+            },
+            {
+              "label": "Tanzania",
+              "ref": "country/TZA",
+              "role": "destination"
+            },
+            {
+              "label": "Uganda",
+              "ref": "country/UGA",
+              "role": "destination"
+            },
+            {
+              "label": "South Africa",
+              "ref": "country/ZAF",
+              "role": "destination"
+            },
+            {
+              "label": "Zambia",
+              "ref": "country/ZMB",
+              "role": "destination"
+            },
+            {
+              "label": "Zimbabwe",
+              "ref": "country/ZWE",
+              "role": "destination"
+            },
+            {
+              "label": "United States",
+              "ref": "country/USA",
+              "role": "origin"
+            }
+          ],
+          "groups": [
+            {
+              "label": "Africa",
+              "ref": "africa",
+              "role": "destination"
+            }
+          ],
+          "has_data": true,
+          "identity": {
+            "entities": {
+              "destination": [
+                "DACAfricaUnallocated",
+                "DACEasternAfricaUnallocated",
+                "DACMiddleAfricaUnallocated",
+                "DACNorthOfSaharaUnallocated",
+                "DACSouthOfSaharaUnallocated",
+                "DACSouthernAfricaUnallocated",
+                "DACWesternAfricaUnallocated",
+                "country/AGO",
+                "country/BDI",
+                "country/BEN",
+                "country/BFA",
+                "country/BWA",
+                "country/CAF",
+                "country/CIV",
+                "country/CMR",
+                "country/COD",
+                "country/COG",
+                "country/COM",
+                "country/CPV",
+                "country/DJI",
+                "country/DZA",
+                "country/EGY",
+                "country/ERI",
+                "country/ETH",
+                "country/GAB",
+                "country/GHA",
+                "country/GIN",
+                "country/GMB",
+                "country/GNB",
+                "country/GNQ",
+                "country/KEN",
+                "country/LBR",
+                "country/LBY",
+                "country/LSO",
+                "country/MAR",
+                "country/MDG",
+                "country/MLI",
+                "country/MOZ",
+                "country/MRT",
+                "country/MUS",
+                "country/MWI",
+                "country/NAM",
+                "country/NER",
+                "country/NGA",
+                "country/RWA",
+                "country/SDN",
+                "country/SEN",
+                "country/SLE",
+                "country/SOM",
+                "country/SSD",
+                "country/STP",
+                "country/SWZ",
+                "country/SYC",
+                "country/TCD",
+                "country/TGO",
+                "country/TUN",
+                "country/TZA",
+                "country/UGA",
+                "country/ZAF",
+                "country/ZMB",
+                "country/ZWE"
+              ],
+              "origin": [
+                "country/USA"
+              ]
+            },
+            "identity_version": "spec1",
+            "requested_window": {
+              "end_year": 2024,
+              "kind": "range",
+              "start_year": 2024
+            },
+            "shape": {
+              "kind": "statvar_schema",
+              "measured_property": "amount",
+              "measurement_qualifier": "Nominal",
+              "population_type": "FinancialFlow",
+              "stat_type": "measuredValue"
+            },
+            "slots": [
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsCooperationModality"
+              },
+              {
+                "binding": {
+                  "refs": [
+                    "CRSPurposeCode120",
+                    "CRSPurposeCode130"
+                  ],
+                  "state": "set"
+                },
+                "property": "crsPurpose"
+              },
+              {
+                "binding": {
+                  "state": "unbound"
+                },
+                "property": "crsTypeOfFinance"
+              },
+              {
+                "binding": {
+                  "ref": "CRSTypeOfFlow10",
+                  "state": "value"
+                },
+                "property": "crsTypeOfFlow"
+              },
+              {
+                "binding": {
+                  "ref": "Disbursement",
+                  "state": "value"
+                },
+                "property": "financialFlowType"
+              },
+              {
+                "binding": {
+                  "ref": "Gross",
+                  "state": "value"
+                },
+                "property": "nettingBasis"
+              }
+            ]
+          },
+          "measure_label": "gross disbursements (official development assistance, standard grant)",
+          "open_axes": [
+            {
+              "property": "crsCooperationModality",
+              "summable": true
+            },
+            {
+              "property": "crsPurpose",
+              "summable": true
+            },
+            {
+              "property": "crsTypeOfFinance",
+              "summable": true
+            }
+          ],
+          "open_entity_axes": [],
+          "provenance_account": "provider",
+          "provenance_label": "OECD Creditor Reporting System (CRS)",
+          "provenance_ref": "provenance/OECDCreditorReportingSystem",
+          "resolved_sources": [],
+          "searched_as": "total health aid",
+          "sentence": "United States' gross ODA disbursements to the 61 countries in Africa for health and population policy, programme, and reproductive health in 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
+          "served_count": 375,
+          "shape_member_count": 375,
+          "shape_member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
+          "slot_codes": {
+            "crsPurpose": [
+              "CRSPurposeCode120",
+              "CRSPurposeCode121",
+              "CRSPurposeCode12110",
+              "CRSPurposeCode12181",
+              "CRSPurposeCode12182",
+              "CRSPurposeCode12191",
+              "CRSPurposeCode122",
+              "CRSPurposeCode12220",
+              "CRSPurposeCode12230",
+              "CRSPurposeCode12240",
+              "CRSPurposeCode12250",
+              "CRSPurposeCode12261",
+              "CRSPurposeCode12262",
+              "CRSPurposeCode12263",
+              "CRSPurposeCode12264",
+              "CRSPurposeCode12281",
+              "CRSPurposeCode123",
+              "CRSPurposeCode12310",
+              "CRSPurposeCode12320",
+              "CRSPurposeCode12330",
+              "CRSPurposeCode12340",
+              "CRSPurposeCode12350",
+              "CRSPurposeCode12382",
+              "CRSPurposeCode130",
+              "CRSPurposeCode13010",
+              "CRSPurposeCode13020",
+              "CRSPurposeCode13030",
+              "CRSPurposeCode13040",
+              "CRSPurposeCode13081"
+            ],
+            "crsTypeOfFlow": [
+              "CRSTypeOfFlow10"
+            ],
+            "financialFlowType": [
+              "Disbursement"
+            ],
+            "nettingBasis": [
+              "Gross"
+            ]
+          },
+          "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+          "stat_var_member_count": 46,
+          "stat_var_member_count_exact": true,
+          "stat_var_reading": "sum",
+          "stat_var_reading_set_by": "rule",
+          "unit_label": "US Dollar",
+          "unit_per_series": null,
+          "unit_ref": "CurrencyUSD"
+        }
+      ],
+      "steps": [
+        {
+          "args": {
+            "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
+            "stat_vars": "sum",
+            "without_party_totals": true
+          },
+          "bindings": {},
+          "expected_role_keys": [
+            "destination",
+            "origin"
+          ],
+          "id": "health_aid_disbursements",
+          "implementation_version": "1",
+          "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
+          "operation_id": "health_aid_disbursements",
+          "output_schema_hash": null,
+          "tool": {
+            "name": "get_data",
+            "server": "data-mcp"
+          }
+        },
+        {
+          "args": {
+            "aggregation": "sum",
+            "group_by": [
+              "time_period"
+            ]
+          },
+          "bindings": {
+            "frame_ref": {
+              "from_step": "health_aid_disbursements",
+              "output": "frame_ref"
+            }
+          },
+          "expected_role_keys": [],
+          "id": "total_health_aid",
+          "implementation_version": "1",
+          "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
+          "operation_id": "total_health_aid",
+          "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
+          "tool": {
+            "name": "aggregate",
+            "server": "analysis-mcp"
+          }
+        }
+      ],
+      "terminal_steps": [
+        "total_health_aid"
+      ],
+      "warnings": []
     }
-   ],
-   "sources": [
-    {
-     "confidence": "high",
-     "coverage_kind": "breadth",
-     "coverage_window": null,
-     "definition": null,
-     "elected_measure": {
-      "alternatives": [],
-      "label": "gross disbursements"
-     },
-     "entities": [
-      {
-       "label": "United States of America",
-       "ref": "country/USA",
-       "role": "origin"
-      }
-     ],
-     "entity_refs": {
-      "united states": "country/USA"
-     },
-     "groups": [],
-     "has_data": true,
-     "identity": {
-      "entities": {
-       "origin": [
-        "country/USA"
-       ]
-      },
-      "identity_version": "spec1",
-      "requested_window": {
-       "end_year": 2023,
-       "kind": "range",
-       "start_year": 2023
-      },
-      "shape": {
-       "kind": "statvar_schema",
-       "measured_property": "amount",
-       "measurement_qualifier": "Nominal",
-       "population_type": "FinancialFlow",
-       "stat_type": "measuredValue"
-      },
-      "slots": [
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsCooperationModality"
-       },
-       {
-        "binding": {
-         "refs": [
-          "CRSPurposeCode120",
-          "CRSPurposeCode130"
-         ],
-         "state": "set"
-        },
-        "property": "crsPurpose"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsTypeOfFinance"
-       },
-       {
-        "binding": {
-         "ref": "CRSTypeOfFlow10",
-         "state": "value"
-        },
-        "property": "crsTypeOfFlow"
-       },
-       {
-        "binding": {
-         "ref": "Disbursement",
-         "state": "value"
-        },
-        "property": "financialFlowType"
-       },
-       {
-        "binding": {
-         "ref": "Gross",
-         "state": "value"
-        },
-        "property": "nettingBasis"
-       }
-      ]
-     },
-     "measure_label": "gross disbursements (official development assistance, standard grant)",
-     "open_axes": [
-      {
-       "property": "crsCooperationModality",
-       "summable": true
-      },
-      {
-       "property": "crsPurpose",
-       "summable": true
-      },
-      {
-       "property": "crsTypeOfFinance",
-       "summable": true
-      }
-     ],
-     "open_entity_axes": [
-      {
-       "column": "destination",
-       "member_count": 129
-      }
-     ],
-     "provenance_account": "provider",
-     "provenance_label": "OECD Creditor Reporting System (CRS)",
-     "provenance_ref": "provenance/OECDCreditorReportingSystem",
-     "resolved_sources": [],
-     "searched_as": "health and population policy, programme, and reproductive health gross disbursements",
-     "sentence": "United States of America's gross ODA disbursements to 129 recipients for health and population policy, programme, and reproductive health in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
-     "served_count": 375,
-     "shape_member_count": 375,
-     "shape_member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
-     "slot_codes": {
-      "crsPurpose": [
-       "CRSPurposeCode120",
-       "CRSPurposeCode121",
-       "CRSPurposeCode12110",
-       "CRSPurposeCode12181",
-       "CRSPurposeCode12182",
-       "CRSPurposeCode12191",
-       "CRSPurposeCode122",
-       "CRSPurposeCode12220",
-       "CRSPurposeCode12230",
-       "CRSPurposeCode12240",
-       "CRSPurposeCode12250",
-       "CRSPurposeCode12261",
-       "CRSPurposeCode12262",
-       "CRSPurposeCode12263",
-       "CRSPurposeCode12264",
-       "CRSPurposeCode12281",
-       "CRSPurposeCode123",
-       "CRSPurposeCode12310",
-       "CRSPurposeCode12320",
-       "CRSPurposeCode12330",
-       "CRSPurposeCode12340",
-       "CRSPurposeCode12350",
-       "CRSPurposeCode12382",
-       "CRSPurposeCode130",
-       "CRSPurposeCode13010",
-       "CRSPurposeCode13020",
-       "CRSPurposeCode13030",
-       "CRSPurposeCode13040",
-       "CRSPurposeCode13081"
-      ],
-      "crsTypeOfFlow": [
-       "CRSTypeOfFlow10"
-      ],
-      "financialFlowType": [
-       "Disbursement"
-      ],
-      "nettingBasis": [
-       "Gross"
-      ]
-     },
-     "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-     "stat_var_member_count": 57,
-     "stat_var_member_count_exact": true,
-     "stat_var_reading": "sum",
-     "stat_var_reading_set_by": "rule",
-     "unit_label": "US Dollar",
-     "unit_per_series": null,
-     "unit_ref": "CurrencyUSD"
-    },
-    {
-     "confidence": "high",
-     "coverage_kind": "breadth",
-     "coverage_window": null,
-     "definition": null,
-     "elected_measure": {
-      "alternatives": [],
-      "label": "gross disbursements"
-     },
-     "entities": [
-      {
-       "label": "United States of America",
-       "ref": "country/USA",
-       "role": "origin"
-      }
-     ],
-     "entity_refs": {
-      "united states": "country/USA"
-     },
-     "groups": [],
-     "has_data": true,
-     "identity": {
-      "entities": {
-       "origin": [
-        "country/USA"
-       ]
-      },
-      "facets": {
-       "provenance": {
-        "ref": "provenance/OECDCreditorReportingSystem",
-        "state": "value"
-       }
-      },
-      "identity_version": "spec1",
-      "requested_window": {
-       "end_year": 2023,
-       "kind": "range",
-       "start_year": 2023
-      },
-      "shape": {
-       "kind": "statvar_schema",
-       "measured_property": "amount",
-       "measurement_qualifier": "Nominal",
-       "population_type": "FinancialFlow",
-       "stat_type": "measuredValue"
-      },
-      "slots": [
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsCooperationModality"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsPurpose"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsTypeOfFinance"
-       },
-       {
-        "binding": {
-         "ref": "CRSTypeOfFlow10",
-         "state": "value"
-        },
-        "property": "crsTypeOfFlow"
-       },
-       {
-        "binding": {
-         "ref": "Disbursement",
-         "state": "value"
-        },
-        "property": "financialFlowType"
-       },
-       {
-        "binding": {
-         "ref": "Gross",
-         "state": "value"
-        },
-        "property": "nettingBasis"
-       }
-      ]
-     },
-     "measure_label": "gross disbursements (official development assistance)",
-     "open_axes": [
-      {
-       "property": "crsCooperationModality",
-       "summable": true
-      },
-      {
-       "property": "crsPurpose",
-       "summable": true
-      },
-      {
-       "property": "crsTypeOfFinance",
-       "summable": true
-      }
-     ],
-     "open_entity_axes": [
-      {
-       "column": "destination",
-       "member_count": 152
-      }
-     ],
-     "provenance_account": "provider",
-     "provenance_label": "OECD Creditor Reporting System (CRS)",
-     "provenance_ref": "provenance/OECDCreditorReportingSystem",
-     "resolved_sources": [],
-     "searched_as": "official development assistance gross disbursements",
-     "sentence": "United States of America's gross ODA disbursements to 152 recipients in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
-     "served_count": 3687,
-     "shape_member_count": 3687,
-     "shape_member_digest": "a7115fa9b30afef48979db31549005a0cd84c73758f339a615ef3ff98aa37930",
-     "slot_codes": {
-      "crsTypeOfFlow": [
-       "CRSTypeOfFlow10"
-      ],
-      "financialFlowType": [
-       "Disbursement"
-      ],
-      "nettingBasis": [
-       "Gross"
-      ]
-     },
-     "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
-     "stat_var_member_count": 360,
-     "stat_var_member_count_exact": true,
-     "stat_var_reading": "sum",
-     "stat_var_reading_set_by": "rule",
-     "unit_label": "US Dollar",
-     "unit_per_series": null,
-     "unit_ref": "CurrencyUSD"
-    }
-   ],
-   "steps": [
-    {
-     "args": {
-      "spec_id": "spec_61d37f5bd032b8bba3d077187e627ded",
-      "stat_vars": "sum",
-      "without_party_totals": true
-     },
-     "bindings": {},
-     "expected_role_keys": [
-      "origin"
-     ],
-     "id": "us_health_aid_raw",
-     "implementation_version": "1",
-     "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
-     "operation_id": "us_health_aid_raw",
-     "output_schema_hash": null,
-     "tool": {
-      "name": "get_data",
-      "server": "data-mcp"
-     }
-    },
-    {
-     "args": {
-      "aggregation": "sum",
-      "group_by": [
-       "time_period"
-      ]
-     },
-     "bindings": {
-      "frame_ref": {
-       "from_step": "us_health_aid_raw",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "us_health_aid_sum",
-     "implementation_version": "1",
-     "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-     "operation_id": "us_health_aid_sum",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "aggregate",
-      "server": "analysis-mcp"
-     }
-    },
-    {
-     "args": {
-      "spec_id": "spec_a85874f71d3d96e35c368b9454e051ca",
-      "stat_vars": "sum",
-      "without_party_totals": true
-     },
-     "bindings": {},
-     "expected_role_keys": [
-      "origin"
-     ],
-     "id": "us_total_aid_raw",
-     "implementation_version": "1",
-     "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
-     "operation_id": "us_total_aid_raw",
-     "output_schema_hash": null,
-     "tool": {
-      "name": "get_data",
-      "server": "data-mcp"
-     }
-    },
-    {
-     "args": {
-      "aggregation": "sum",
-      "group_by": [
-       "time_period"
-      ]
-     },
-     "bindings": {
-      "frame_ref": {
-       "from_step": "us_total_aid_raw",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "us_total_aid_sum",
-     "implementation_version": "1",
-     "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-     "operation_id": "us_total_aid_sum",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "aggregate",
-      "server": "analysis-mcp"
-     }
-    },
-    {
-     "args": {},
-     "bindings": {
-      "denominator_frame_ref": {
-       "from_step": "us_total_aid_sum",
-       "output": "frame_ref"
-      },
-      "frame_ref": {
-       "from_step": "us_health_aid_sum",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "health_share",
-     "implementation_version": "1",
-     "input_schema_hash": "43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
-     "operation_id": "health_share",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "share_of",
-      "server": "analysis-mcp"
-     }
-    }
-   ],
-   "terminal_steps": [
-    "health_share"
-   ],
-   "warnings": [
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_health_aid_raw",
-     "severity": "warning"
-    },
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_total_aid_raw",
-     "severity": "warning"
-    }
-   ]
   }
- },
- "long_switched_to_net": {
-  "answer_mode": "computed",
-  "answered": [
-   {
-    "ask": 0,
-    "outputs": [
-     "health_share"
-    ]
-   }
-  ],
-  "approved_at": null,
-  "approved_revision": null,
-  "ask_breakdowns": [],
-  "asks": [
-   "health share of US ODA in 2023"
-  ],
-  "asks_across_years": [],
-  "decisions": [
-   {
-    "chosen": "crs_total",
-    "description": "Denominator source for US total ODA to compute the sector share",
-    "fixes": null,
-    "options": [
-     "crs_total",
-     "dac1_headline"
-    ],
-    "rationale": "Using the CRS total ensures consistent cash-flow accounting between numerator and denominator, avoiding grant-equivalent vs cash disbursement mismatches and CRS reporting gaps against DAC1.",
-    "resolved_by": "planner_default",
-    "slot": "denominator_choice"
-   },
-   {
-    "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
-    "description": "Which sector codes the figures count.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "health incl. population and reproductive health (CRS 120 + 130)",
-     "health, CRS 120 alone",
-     "population policy, programme, and reproductive health, CRS 130 alone"
-    ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "sector",
-     "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:sector",
-     "options": [
-      {
-       "code": null,
-       "option_id": "sector:120+130",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:120",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:130",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_sector_spec_b80254f94a38b60a951a128c2baf60d0"
-   },
-   {
-    "chosen": "net disbursements, current USD",
-    "description": "Which basis the figures are measured on.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "gross disbursements, current USD",
-     "net disbursements, current USD",
-     "grant equivalents (OECD headline), current USD",
-     "commitments, current USD"
-    ],
-    "rationale": "The user chose net disbursements, current USD on the plan.",
-    "resolved_by": "user",
-    "scope": {
-     "axis": "measure_basis",
-     "choice_id": "spec_61d37f5bd032b8bba3d077187e627ded:measure_basis",
-     "options": [
-      {
-       "code": null,
-       "option_id": "measure_basis:gross",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:net",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:grant_equivalent",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:commitments",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_measure_basis_spec_b80254f94a38b60a951a128c2baf60d0"
-   },
-   {
-    "chosen": "net disbursements, current USD",
-    "description": "Which basis the figures are measured on.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "gross disbursements, current USD",
-     "net disbursements, current USD",
-     "grant equivalents (OECD headline), current USD",
-     "commitments, current USD"
-    ],
-    "rationale": "The user chose net disbursements, current USD on the plan.",
-    "resolved_by": "user",
-    "scope": {
-     "axis": "measure_basis",
-     "choice_id": "spec_a85874f71d3d96e35c368b9454e051ca:measure_basis",
-     "options": [
-      {
-       "code": null,
-       "option_id": "measure_basis:gross",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:net",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:grant_equivalent",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:commitments",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_measure_basis_spec_03889dfe8b27c84b8b34bbe3866cbbc0"
-   }
-  ],
-  "declined": [],
-  "evidence_requirements": [
-   {
-    "across": [],
-    "breakdown": null,
-    "coverage": {
-     "on_missing": "report_gaps"
-    },
-    "decision_ids": [
-     "scope_sector_spec_b80254f94a38b60a951a128c2baf60d0",
-     "scope_measure_basis_spec_b80254f94a38b60a951a128c2baf60d0"
-    ],
-    "entities": [
-     {
-      "name": "United States",
-      "role": "donor"
-     }
-    ],
-    "frequency": "annual",
-    "id": "us_health_aid_raw",
-    "kind": "dataset",
-    "measure": "health and population policy, programme, and reproductive health gross disbursements",
-    "period": {
-     "end": 2023,
-     "start": 2023
-    },
-    "period_end_open": false,
-    "source": "OECD Creditor Reporting System (CRS)",
-    "source_code": null,
-    "source_exclude": false,
-    "source_ref": null,
-    "source_spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-    "stat_vars": null,
-    "unit": null
-   },
-   {
-    "across": [],
-    "breakdown": null,
-    "coverage": {
-     "on_missing": "report_gaps"
-    },
-    "decision_ids": [
-     "scope_measure_basis_spec_03889dfe8b27c84b8b34bbe3866cbbc0"
-    ],
-    "entities": [
-     {
-      "name": "United States",
-      "role": "donor"
-     }
-    ],
-    "frequency": "annual",
-    "id": "us_total_aid_raw",
-    "kind": "dataset",
-    "measure": "official development assistance gross disbursements",
-    "period": {
-     "end": 2023,
-     "start": 2023
-    },
-    "period_end_open": false,
-    "source": "OECD Creditor Reporting System (CRS)",
-    "source_code": null,
-    "source_exclude": false,
-    "source_ref": null,
-    "source_spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
-    "stat_vars": null,
-    "unit": null
-   },
-   {
-    "decision_ids": [],
-    "group_by": [
-     "period"
-    ],
-    "id": "us_health_aid_sum",
-    "input_id": "us_health_aid_raw",
-    "kind": "aggregate",
-    "reduction": "sum"
-   },
-   {
-    "decision_ids": [],
-    "group_by": [
-     "period"
-    ],
-    "id": "us_total_aid_sum",
-    "input_id": "us_total_aid_raw",
-    "kind": "aggregate",
-    "reduction": "sum"
-   },
-   {
-    "axis": null,
-    "decision_ids": [
-     "denominator_choice"
-    ],
-    "denominator": {
-     "entity": null,
-     "input_id": "us_total_aid_sum"
-    },
-    "denominator_scope": null,
-    "id": "health_share",
-    "kind": "share_of",
-    "numerator": {
-     "entity": null,
-     "input_id": "us_health_aid_sum"
-    }
-   }
-  ],
-  "first_years": [],
-  "moved": [],
-  "period_licences": [],
-  "previous_version": 1,
-  "question": "What share of US official development assistance went to health and population policy, programme, and reproductive health in 2023? Calculated from OECD CRS gross disbursements, comparing US health ODA disbursements to total US ODA disbursements in 2023.",
-  "revision": "2c63808cb86f76cf798ee89f7d3d1021d9f4c11ecdbd57d12be3ab5eaf2e74b7",
-  "rolling_copies": [],
-  "status": "pending_approval",
-  "summary": {
-   "revision": "2c63808cb86f76cf798ee89f7d3d1021d9f4c11ecdbd57d12be3ab5eaf2e74b7",
-   "version": 2,
-   "warnings": [
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_health_aid_raw",
-     "severity": "warning"
-    },
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_total_aid_raw",
-     "severity": "warning"
-    }
-   ]
-  },
-  "translation": {
-   "operations": [
-    {
-     "id": "us_health_aid_raw",
-     "kind": "retrieve",
-     "requirement_id": "us_health_aid_raw",
-     "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0"
-    },
-    {
-     "id": "us_total_aid_raw",
-     "kind": "retrieve",
-     "requirement_id": "us_total_aid_raw",
-     "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0"
-    },
-    {
-     "group_by": [
-      "period"
-     ],
-     "id": "us_health_aid_sum",
-     "input": "us_health_aid_raw",
-     "kind": "aggregate",
-     "reduction": "sum",
-     "requirement_id": "us_health_aid_sum"
-    },
-    {
-     "group_by": [
-      "period"
-     ],
-     "id": "us_total_aid_sum",
-     "input": "us_total_aid_raw",
-     "kind": "aggregate",
-     "reduction": "sum",
-     "requirement_id": "us_total_aid_sum"
-    },
-    {
-     "axis": null,
-     "denominator": {
-      "entity": null,
-      "input": "us_total_aid_sum"
-     },
-     "denominator_scope": null,
-     "id": "health_share",
-     "kind": "share_of",
-     "numerator": {
-      "entity": null,
-      "input": "us_health_aid_sum"
-     },
-     "requirement_id": "health_share"
-    }
-   ],
-   "terminal": [
-    "health_share"
-   ]
-  },
-  "version": 2,
-  "workflow": {
-   "evidence_bindings": [
-    {
-     "requirement_id": "us_health_aid_raw",
-     "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-     "step_id": "us_health_aid_raw"
-    },
-    {
-     "requirement_id": "us_total_aid_raw",
-     "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
-     "step_id": "us_total_aid_raw"
-    }
-   ],
-   "sources": [
-    {
-     "confidence": "high",
-     "coverage_kind": "breadth",
-     "coverage_window": null,
-     "definition": null,
-     "elected_measure": {
-      "alternatives": [],
-      "label": "net disbursements"
-     },
-     "entities": [
-      {
-       "label": "United States of America",
-       "ref": "country/USA",
-       "role": "origin"
-      }
-     ],
-     "entity_refs": {
-      "united states": "country/USA"
-     },
-     "groups": [],
-     "has_data": true,
-     "identity": {
-      "entities": {
-       "origin": [
-        "country/USA"
-       ]
-      },
-      "identity_version": "spec1",
-      "requested_window": {
-       "end_year": 2023,
-       "kind": "range",
-       "start_year": 2023
-      },
-      "shape": {
-       "kind": "statvar_schema",
-       "measured_property": "amount",
-       "measurement_qualifier": "Nominal",
-       "population_type": "FinancialFlow",
-       "stat_type": "measuredValue"
-      },
-      "slots": [
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsCooperationModality"
-       },
-       {
-        "binding": {
-         "refs": [
-          "CRSPurposeCode120",
-          "CRSPurposeCode130"
-         ],
-         "state": "set"
-        },
-        "property": "crsPurpose"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsTypeOfFinance"
-       },
-       {
-        "binding": {
-         "ref": "CRSTypeOfFlow10",
-         "state": "value"
-        },
-        "property": "crsTypeOfFlow"
-       },
-       {
-        "binding": {
-         "ref": "Disbursement",
-         "state": "value"
-        },
-        "property": "financialFlowType"
-       },
-       {
-        "binding": {
-         "ref": "Net",
-         "state": "value"
-        },
-        "property": "nettingBasis"
-       }
-      ]
-     },
-     "measure_label": "net disbursements (official development assistance)",
-     "open_axes": [
-      {
-       "property": "crsCooperationModality",
-       "summable": true
-      },
-      {
-       "property": "crsPurpose",
-       "summable": true
-      },
-      {
-       "property": "crsTypeOfFinance",
-       "summable": true
-      }
-     ],
-     "open_entity_axes": [
-      {
-       "column": "destination",
-       "member_count": 129
-      }
-     ],
-     "provenance_account": "provider",
-     "provenance_label": "OECD Creditor Reporting System (CRS)",
-     "provenance_ref": "provenance/OECDCreditorReportingSystem",
-     "resolved_sources": [],
-     "searched_as": "health and population policy, programme, and reproductive health gross disbursements",
-     "sentence": "United States of America's net ODA disbursements to 129 recipients for health and population policy, programme, and reproductive health in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
-     "served_count": 386,
-     "shape_member_count": 386,
-     "shape_member_digest": "23ecf645d281835a142560f8d89f711061705479003de89acefe0772c7d7343e",
-     "slot_codes": {
-      "crsPurpose": [
-       "CRSPurposeCode120",
-       "CRSPurposeCode121",
-       "CRSPurposeCode12110",
-       "CRSPurposeCode12181",
-       "CRSPurposeCode12182",
-       "CRSPurposeCode12191",
-       "CRSPurposeCode122",
-       "CRSPurposeCode12220",
-       "CRSPurposeCode12230",
-       "CRSPurposeCode12240",
-       "CRSPurposeCode12250",
-       "CRSPurposeCode12261",
-       "CRSPurposeCode12262",
-       "CRSPurposeCode12263",
-       "CRSPurposeCode12264",
-       "CRSPurposeCode12281",
-       "CRSPurposeCode123",
-       "CRSPurposeCode12310",
-       "CRSPurposeCode12320",
-       "CRSPurposeCode12330",
-       "CRSPurposeCode12340",
-       "CRSPurposeCode12350",
-       "CRSPurposeCode12382",
-       "CRSPurposeCode130",
-       "CRSPurposeCode13010",
-       "CRSPurposeCode13020",
-       "CRSPurposeCode13030",
-       "CRSPurposeCode13040",
-       "CRSPurposeCode13081"
-      ],
-      "crsTypeOfFlow": [
-       "CRSTypeOfFlow10"
-      ],
-      "financialFlowType": [
-       "Disbursement"
-      ],
-      "nettingBasis": [
-       "Net"
-      ]
-     },
-     "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-     "stat_var_member_count": 63,
-     "stat_var_member_count_exact": true,
-     "stat_var_reading": "sum",
-     "stat_var_reading_set_by": "rule",
-     "unit_label": "US Dollar",
-     "unit_per_series": null,
-     "unit_ref": "CurrencyUSD"
-    },
-    {
-     "confidence": "high",
-     "coverage_kind": "breadth",
-     "coverage_window": null,
-     "definition": null,
-     "elected_measure": {
-      "alternatives": [],
-      "label": "net disbursements"
-     },
-     "entities": [
-      {
-       "label": "United States of America",
-       "ref": "country/USA",
-       "role": "origin"
-      }
-     ],
-     "entity_refs": {
-      "united states": "country/USA"
-     },
-     "groups": [],
-     "has_data": true,
-     "identity": {
-      "entities": {
-       "origin": [
-        "country/USA"
-       ]
-      },
-      "facets": {
-       "provenance": {
-        "ref": "provenance/OECDCreditorReportingSystem",
-        "state": "value"
-       }
-      },
-      "identity_version": "spec1",
-      "requested_window": {
-       "end_year": 2023,
-       "kind": "range",
-       "start_year": 2023
-      },
-      "shape": {
-       "kind": "statvar_schema",
-       "measured_property": "amount",
-       "measurement_qualifier": "Nominal",
-       "population_type": "FinancialFlow",
-       "stat_type": "measuredValue"
-      },
-      "slots": [
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsCooperationModality"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsPurpose"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsTypeOfFinance"
-       },
-       {
-        "binding": {
-         "ref": "CRSTypeOfFlow10",
-         "state": "value"
-        },
-        "property": "crsTypeOfFlow"
-       },
-       {
-        "binding": {
-         "ref": "Disbursement",
-         "state": "value"
-        },
-        "property": "financialFlowType"
-       },
-       {
-        "binding": {
-         "ref": "Net",
-         "state": "value"
-        },
-        "property": "nettingBasis"
-       }
-      ]
-     },
-     "measure_label": "net disbursements (official development assistance)",
-     "open_axes": [
-      {
-       "property": "crsCooperationModality",
-       "summable": true
-      },
-      {
-       "property": "crsPurpose",
-       "summable": true
-      },
-      {
-       "property": "crsTypeOfFinance",
-       "summable": true
-      }
-     ],
-     "open_entity_axes": [
-      {
-       "column": "destination",
-       "member_count": 152
-      }
-     ],
-     "provenance_account": "provider",
-     "provenance_label": "OECD Creditor Reporting System (CRS)",
-     "provenance_ref": "provenance/OECDCreditorReportingSystem",
-     "resolved_sources": [],
-     "searched_as": "official development assistance gross disbursements",
-     "sentence": "United States of America's net ODA disbursements to 152 recipients in 2023. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
-     "served_count": 3769,
-     "shape_member_count": 3769,
-     "shape_member_digest": "8df4f12f00174c8ba14de56acb1793657dd21b2066d916616165744a7f467f85",
-     "slot_codes": {
-      "crsTypeOfFlow": [
-       "CRSTypeOfFlow10"
-      ],
-      "financialFlowType": [
-       "Disbursement"
-      ],
-      "nettingBasis": [
-       "Net"
-      ]
-     },
-     "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
-     "stat_var_member_count": 391,
-     "stat_var_member_count_exact": true,
-     "stat_var_reading": "sum",
-     "stat_var_reading_set_by": "rule",
-     "unit_label": "US Dollar",
-     "unit_per_series": null,
-     "unit_ref": "CurrencyUSD"
-    }
-   ],
-   "steps": [
-    {
-     "args": {
-      "spec_id": "spec_b80254f94a38b60a951a128c2baf60d0",
-      "stat_vars": "sum",
-      "without_party_totals": true
-     },
-     "bindings": {},
-     "expected_role_keys": [
-      "origin"
-     ],
-     "id": "us_health_aid_raw",
-     "implementation_version": "1",
-     "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
-     "operation_id": "us_health_aid_raw",
-     "output_schema_hash": null,
-     "tool": {
-      "name": "get_data",
-      "server": "data-mcp"
-     }
-    },
-    {
-     "args": {
-      "aggregation": "sum",
-      "group_by": [
-       "time_period"
-      ]
-     },
-     "bindings": {
-      "frame_ref": {
-       "from_step": "us_health_aid_raw",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "us_health_aid_sum",
-     "implementation_version": "1",
-     "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-     "operation_id": "us_health_aid_sum",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "aggregate",
-      "server": "analysis-mcp"
-     }
-    },
-    {
-     "args": {
-      "spec_id": "spec_03889dfe8b27c84b8b34bbe3866cbbc0",
-      "stat_vars": "sum",
-      "without_party_totals": true
-     },
-     "bindings": {},
-     "expected_role_keys": [
-      "origin"
-     ],
-     "id": "us_total_aid_raw",
-     "implementation_version": "1",
-     "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
-     "operation_id": "us_total_aid_raw",
-     "output_schema_hash": null,
-     "tool": {
-      "name": "get_data",
-      "server": "data-mcp"
-     }
-    },
-    {
-     "args": {
-      "aggregation": "sum",
-      "group_by": [
-       "time_period"
-      ]
-     },
-     "bindings": {
-      "frame_ref": {
-       "from_step": "us_total_aid_raw",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "us_total_aid_sum",
-     "implementation_version": "1",
-     "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-     "operation_id": "us_total_aid_sum",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "aggregate",
-      "server": "analysis-mcp"
-     }
-    },
-    {
-     "args": {},
-     "bindings": {
-      "denominator_frame_ref": {
-       "from_step": "us_total_aid_sum",
-       "output": "frame_ref"
-      },
-      "frame_ref": {
-       "from_step": "us_health_aid_sum",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "health_share",
-     "implementation_version": "1",
-     "input_schema_hash": "43b9e7c16d3ccd10af39b2c2e5d5140e823737d170f951f22aec8d48b4777944",
-     "operation_id": "health_share",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "share_of",
-      "server": "analysis-mcp"
-     }
-    }
-   ],
-   "terminal_steps": [
-    "health_share"
-   ],
-   "warnings": [
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_health_aid_raw",
-     "severity": "warning"
-    },
-    {
-     "code": "period_unverified",
-     "detail": "the source reports no coverage window",
-     "found": null,
-     "required": {
-      "end": 2023,
-      "start": 2023
-     },
-     "requirement_id": "us_total_aid_raw",
-     "severity": "warning"
-    }
-   ]
-  }
- },
- "short": {
-  "answer_mode": "computed",
-  "answered": [
-   {
-    "ask": 0,
-    "outputs": [
-     "total_health_aid"
-    ]
-   }
-  ],
-  "approved_at": null,
-  "approved_revision": null,
-  "ask_breakdowns": [
-   {
-    "ask": 0,
-    "by": [],
-    "over": [
-     "recipient"
-    ]
-   }
-  ],
-  "asks": [
-   "total health aid from the United States to Africa in 2024"
-  ],
-  "asks_across_years": [],
-  "decisions": [
-   {
-    "chosen": "health incl. population and reproductive health (CRS 120 + 130)",
-    "description": "Which sector codes the figures count.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "health incl. population and reproductive health (CRS 120 + 130)",
-     "health, CRS 120 alone",
-     "population policy, programme, and reproductive health, CRS 130 alone"
-    ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "sector",
-     "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:sector",
-     "options": [
-      {
-       "code": null,
-       "option_id": "sector:120+130",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:120",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "sector:130",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_sector_spec_7c3066e68a49cef8c9033ba06c99789e"
-   },
-   {
-    "chosen": "Africa incl. regional and unspecified amounts",
-    "description": "Which places the region's figures count.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "Africa incl. regional and unspecified amounts",
-     "Africa's countries only"
-    ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "region",
-     "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:region",
-     "options": [
-      {
-       "code": null,
-       "option_id": "region:members_and_residuals",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "region:members_only",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_region_spec_7c3066e68a49cef8c9033ba06c99789e"
-   },
-   {
-    "chosen": "gross disbursements, current USD",
-    "description": "Which basis the figures are measured on.",
-    "fixes": {
-     "across": null,
-     "among": null,
-     "axis": null,
-     "change": null,
-     "denominator_scope": null,
-     "direction": null,
-     "entities": null,
-     "group_by": null,
-     "limit": null,
-     "measure": null,
-     "per_period": null,
-     "period": null,
-     "predicates": null,
-     "reduction": null,
-     "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-     "stat_vars": null,
-     "unit": null,
-     "window_end": null,
-     "window_start": null
-    },
-    "options": [
-     "gross disbursements, current USD",
-     "net disbursements, current USD",
-     "grant equivalents (OECD headline), current USD",
-     "commitments, current USD"
-    ],
-    "rationale": "Search's default for this question.",
-    "resolved_by": "planner_default",
-    "scope": {
-     "axis": "measure_basis",
-     "choice_id": "spec_7c3066e68a49cef8c9033ba06c99789e:measure_basis",
-     "options": [
-      {
-       "code": null,
-       "option_id": "measure_basis:gross",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:net",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:grant_equivalent",
-       "status": "available",
-       "years": null
-      },
-      {
-       "code": null,
-       "option_id": "measure_basis:commitments",
-       "status": "available",
-       "years": null
-      }
-     ]
-    },
-    "slot": "scope_measure_basis_spec_7c3066e68a49cef8c9033ba06c99789e"
-   }
-  ],
-  "declined": [],
-  "evidence_requirements": [
-   {
-    "across": [],
-    "breakdown": null,
-    "coverage": {
-     "on_missing": "report_gaps"
-    },
-    "decision_ids": [
-     "scope_sector_spec_7c3066e68a49cef8c9033ba06c99789e",
-     "scope_region_spec_7c3066e68a49cef8c9033ba06c99789e",
-     "scope_measure_basis_spec_7c3066e68a49cef8c9033ba06c99789e"
-    ],
-    "entities": [
-     {
-      "name": "United States",
-      "role": "donor"
-     },
-     {
-      "members": true,
-      "name": "Africa",
-      "role": "recipient"
-     }
-    ],
-    "frequency": "annual",
-    "id": "health_aid_disbursements",
-    "kind": "dataset",
-    "measure": "total health aid",
-    "period": {
-     "end": 2024,
-     "start": 2024
-    },
-    "period_end_open": false,
-    "source": null,
-    "source_code": null,
-    "source_exclude": false,
-    "source_ref": null,
-    "source_spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-    "stat_vars": null,
-    "unit": null
-   },
-   {
-    "decision_ids": [],
-    "group_by": [
-     "period"
-    ],
-    "id": "total_health_aid",
-    "input_id": "health_aid_disbursements",
-    "kind": "aggregate",
-    "reduction": "sum"
-   }
-  ],
-  "first_years": [],
-  "period_licences": [],
-  "previous_version": null,
-  "question": "total health aid from the United States to Africa in 2024 (gross ODA disbursements, current US dollars, OECD CRS)",
-  "revision": "8a7fef12a165f128f32c485613574d9788e5d73811c21a0e153ee3b652153ebc",
-  "rolling_copies": [],
-  "status": "pending_approval",
-  "summary": {
-   "revision": "8a7fef12a165f128f32c485613574d9788e5d73811c21a0e153ee3b652153ebc",
-   "version": 1,
-   "warnings": []
-  },
-  "translation": {
-   "operations": [
-    {
-     "id": "health_aid_disbursements",
-     "kind": "retrieve",
-     "requirement_id": "health_aid_disbursements",
-     "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e"
-    },
-    {
-     "group_by": [
-      "period"
-     ],
-     "id": "total_health_aid",
-     "input": "health_aid_disbursements",
-     "kind": "aggregate",
-     "reduction": "sum",
-     "requirement_id": "total_health_aid"
-    }
-   ],
-   "terminal": [
-    "total_health_aid"
-   ]
-  },
-  "version": 1,
-  "workflow": {
-   "evidence_bindings": [
-    {
-     "requirement_id": "health_aid_disbursements",
-     "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-     "step_id": "health_aid_disbursements"
-    }
-   ],
-   "sources": [
-    {
-     "bound_refs": [
-      {
-       "identity": "United States",
-       "refs": [
-        "country/USA"
-       ],
-       "role": "from",
-       "text": "United States"
-      },
-      {
-       "identity": "Africa",
-       "refs": [
-        "africa",
-        "country/AGO",
-        "country/BDI",
-        "country/BEN",
-        "country/BFA",
-        "country/BWA",
-        "country/CAF",
-        "country/CIV",
-        "country/CMR",
-        "country/COD",
-        "country/COG",
-        "country/COM",
-        "country/CPV",
-        "country/DJI",
-        "country/DZA",
-        "country/EGY",
-        "country/ERI",
-        "country/ETH",
-        "country/GAB",
-        "country/GHA",
-        "country/GIN",
-        "country/GMB",
-        "country/GNB",
-        "country/GNQ",
-        "country/KEN",
-        "country/LBR",
-        "country/LBY",
-        "country/LSO",
-        "country/MAR",
-        "country/MDG",
-        "country/MLI",
-        "country/MOZ",
-        "country/MRT",
-        "country/MUS",
-        "country/MWI",
-        "country/NAM",
-        "country/NER",
-        "country/NGA",
-        "country/RWA",
-        "country/SDN",
-        "country/SEN",
-        "country/SLE",
-        "country/SOM",
-        "country/SSD",
-        "country/STP",
-        "country/SWZ",
-        "country/SYC",
-        "country/TCD",
-        "country/TGO",
-        "country/TUN",
-        "country/TZA",
-        "country/UGA",
-        "country/ZAF",
-        "country/ZMB",
-        "country/ZWE"
-       ],
-       "role": "to",
-       "text": "Africa"
-      }
-     ],
-     "confidence": "medium",
-     "coverage_kind": "exact",
-     "coverage_window": {
-      "end": 2024,
-      "start": 2024
-     },
-     "definition": null,
-     "elected_measure": {
-      "alternatives": [],
-      "label": "gross disbursements"
-     },
-     "entities": [
-      {
-       "label": "Africa, unallocated by country (DAC)",
-       "ref": "DACAfricaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "Eastern Africa, unallocated by country (DAC)",
-       "ref": "DACEasternAfricaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "Middle Africa, unallocated by country (DAC)",
-       "ref": "DACMiddleAfricaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "North of Sahara, unallocated by country (DAC)",
-       "ref": "DACNorthOfSaharaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "South of Sahara, unallocated by country (DAC)",
-       "ref": "DACSouthOfSaharaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "Southern Africa, unallocated by country (DAC)",
-       "ref": "DACSouthernAfricaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "Western Africa, unallocated by country (DAC)",
-       "ref": "DACWesternAfricaUnallocated",
-       "role": "destination"
-      },
-      {
-       "label": "Angola",
-       "ref": "country/AGO",
-       "role": "destination"
-      },
-      {
-       "label": "Burundi",
-       "ref": "country/BDI",
-       "role": "destination"
-      },
-      {
-       "label": "Benin",
-       "ref": "country/BEN",
-       "role": "destination"
-      },
-      {
-       "label": "Burkina Faso",
-       "ref": "country/BFA",
-       "role": "destination"
-      },
-      {
-       "label": "Botswana",
-       "ref": "country/BWA",
-       "role": "destination"
-      },
-      {
-       "label": "Central African Republic",
-       "ref": "country/CAF",
-       "role": "destination"
-      },
-      {
-       "label": "Ivory Coast",
-       "ref": "country/CIV",
-       "role": "destination"
-      },
-      {
-       "label": "Cameroon",
-       "ref": "country/CMR",
-       "role": "destination"
-      },
-      {
-       "label": "Democratic Republic of the Congo",
-       "ref": "country/COD",
-       "role": "destination"
-      },
-      {
-       "label": "Republic of the Congo",
-       "ref": "country/COG",
-       "role": "destination"
-      },
-      {
-       "label": "Comoros",
-       "ref": "country/COM",
-       "role": "destination"
-      },
-      {
-       "label": "Cape Verde",
-       "ref": "country/CPV",
-       "role": "destination"
-      },
-      {
-       "label": "Djibouti",
-       "ref": "country/DJI",
-       "role": "destination"
-      },
-      {
-       "label": "Algeria",
-       "ref": "country/DZA",
-       "role": "destination"
-      },
-      {
-       "label": "Egypt",
-       "ref": "country/EGY",
-       "role": "destination"
-      },
-      {
-       "label": "Eritrea",
-       "ref": "country/ERI",
-       "role": "destination"
-      },
-      {
-       "label": "Ethiopia",
-       "ref": "country/ETH",
-       "role": "destination"
-      },
-      {
-       "label": "Gabon",
-       "ref": "country/GAB",
-       "role": "destination"
-      },
-      {
-       "label": "Ghana",
-       "ref": "country/GHA",
-       "role": "destination"
-      },
-      {
-       "label": "Guinea",
-       "ref": "country/GIN",
-       "role": "destination"
-      },
-      {
-       "label": "The Gambia",
-       "ref": "country/GMB",
-       "role": "destination"
-      },
-      {
-       "label": "Guinea-Bissau",
-       "ref": "country/GNB",
-       "role": "destination"
-      },
-      {
-       "label": "Equatorial Guinea",
-       "ref": "country/GNQ",
-       "role": "destination"
-      },
-      {
-       "label": "Kenya",
-       "ref": "country/KEN",
-       "role": "destination"
-      },
-      {
-       "label": "Liberia",
-       "ref": "country/LBR",
-       "role": "destination"
-      },
-      {
-       "label": "Libya",
-       "ref": "country/LBY",
-       "role": "destination"
-      },
-      {
-       "label": "Lesotho",
-       "ref": "country/LSO",
-       "role": "destination"
-      },
-      {
-       "label": "Morocco",
-       "ref": "country/MAR",
-       "role": "destination"
-      },
-      {
-       "label": "Madagascar",
-       "ref": "country/MDG",
-       "role": "destination"
-      },
-      {
-       "label": "Mali",
-       "ref": "country/MLI",
-       "role": "destination"
-      },
-      {
-       "label": "Mozambique",
-       "ref": "country/MOZ",
-       "role": "destination"
-      },
-      {
-       "label": "Mauritania",
-       "ref": "country/MRT",
-       "role": "destination"
-      },
-      {
-       "label": "Mauritius",
-       "ref": "country/MUS",
-       "role": "destination"
-      },
-      {
-       "label": "Malawi",
-       "ref": "country/MWI",
-       "role": "destination"
-      },
-      {
-       "label": "Namibia",
-       "ref": "country/NAM",
-       "role": "destination"
-      },
-      {
-       "label": "Niger",
-       "ref": "country/NER",
-       "role": "destination"
-      },
-      {
-       "label": "Nigeria",
-       "ref": "country/NGA",
-       "role": "destination"
-      },
-      {
-       "label": "Rwanda",
-       "ref": "country/RWA",
-       "role": "destination"
-      },
-      {
-       "label": "Sudan",
-       "ref": "country/SDN",
-       "role": "destination"
-      },
-      {
-       "label": "Senegal",
-       "ref": "country/SEN",
-       "role": "destination"
-      },
-      {
-       "label": "Sierra Leone",
-       "ref": "country/SLE",
-       "role": "destination"
-      },
-      {
-       "label": "Somalia",
-       "ref": "country/SOM",
-       "role": "destination"
-      },
-      {
-       "label": "South Sudan",
-       "ref": "country/SSD",
-       "role": "destination"
-      },
-      {
-       "label": "S\u00e3o Tom\u00e9 and Pr\u00edncipe",
-       "ref": "country/STP",
-       "role": "destination"
-      },
-      {
-       "label": "Swaziland",
-       "ref": "country/SWZ",
-       "role": "destination"
-      },
-      {
-       "label": "Seychelles",
-       "ref": "country/SYC",
-       "role": "destination"
-      },
-      {
-       "label": "Chad",
-       "ref": "country/TCD",
-       "role": "destination"
-      },
-      {
-       "label": "Togo",
-       "ref": "country/TGO",
-       "role": "destination"
-      },
-      {
-       "label": "Tunisia",
-       "ref": "country/TUN",
-       "role": "destination"
-      },
-      {
-       "label": "Tanzania",
-       "ref": "country/TZA",
-       "role": "destination"
-      },
-      {
-       "label": "Uganda",
-       "ref": "country/UGA",
-       "role": "destination"
-      },
-      {
-       "label": "South Africa",
-       "ref": "country/ZAF",
-       "role": "destination"
-      },
-      {
-       "label": "Zambia",
-       "ref": "country/ZMB",
-       "role": "destination"
-      },
-      {
-       "label": "Zimbabwe",
-       "ref": "country/ZWE",
-       "role": "destination"
-      },
-      {
-       "label": "United States",
-       "ref": "country/USA",
-       "role": "origin"
-      }
-     ],
-     "groups": [
-      {
-       "label": "Africa",
-       "ref": "africa",
-       "role": "destination"
-      }
-     ],
-     "has_data": true,
-     "identity": {
-      "entities": {
-       "destination": [
-        "DACAfricaUnallocated",
-        "DACEasternAfricaUnallocated",
-        "DACMiddleAfricaUnallocated",
-        "DACNorthOfSaharaUnallocated",
-        "DACSouthOfSaharaUnallocated",
-        "DACSouthernAfricaUnallocated",
-        "DACWesternAfricaUnallocated",
-        "country/AGO",
-        "country/BDI",
-        "country/BEN",
-        "country/BFA",
-        "country/BWA",
-        "country/CAF",
-        "country/CIV",
-        "country/CMR",
-        "country/COD",
-        "country/COG",
-        "country/COM",
-        "country/CPV",
-        "country/DJI",
-        "country/DZA",
-        "country/EGY",
-        "country/ERI",
-        "country/ETH",
-        "country/GAB",
-        "country/GHA",
-        "country/GIN",
-        "country/GMB",
-        "country/GNB",
-        "country/GNQ",
-        "country/KEN",
-        "country/LBR",
-        "country/LBY",
-        "country/LSO",
-        "country/MAR",
-        "country/MDG",
-        "country/MLI",
-        "country/MOZ",
-        "country/MRT",
-        "country/MUS",
-        "country/MWI",
-        "country/NAM",
-        "country/NER",
-        "country/NGA",
-        "country/RWA",
-        "country/SDN",
-        "country/SEN",
-        "country/SLE",
-        "country/SOM",
-        "country/SSD",
-        "country/STP",
-        "country/SWZ",
-        "country/SYC",
-        "country/TCD",
-        "country/TGO",
-        "country/TUN",
-        "country/TZA",
-        "country/UGA",
-        "country/ZAF",
-        "country/ZMB",
-        "country/ZWE"
-       ],
-       "origin": [
-        "country/USA"
-       ]
-      },
-      "identity_version": "spec1",
-      "requested_window": {
-       "end_year": 2024,
-       "kind": "range",
-       "start_year": 2024
-      },
-      "shape": {
-       "kind": "statvar_schema",
-       "measured_property": "amount",
-       "measurement_qualifier": "Nominal",
-       "population_type": "FinancialFlow",
-       "stat_type": "measuredValue"
-      },
-      "slots": [
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsCooperationModality"
-       },
-       {
-        "binding": {
-         "refs": [
-          "CRSPurposeCode120",
-          "CRSPurposeCode130"
-         ],
-         "state": "set"
-        },
-        "property": "crsPurpose"
-       },
-       {
-        "binding": {
-         "state": "unbound"
-        },
-        "property": "crsTypeOfFinance"
-       },
-       {
-        "binding": {
-         "ref": "CRSTypeOfFlow10",
-         "state": "value"
-        },
-        "property": "crsTypeOfFlow"
-       },
-       {
-        "binding": {
-         "ref": "Disbursement",
-         "state": "value"
-        },
-        "property": "financialFlowType"
-       },
-       {
-        "binding": {
-         "ref": "Gross",
-         "state": "value"
-        },
-        "property": "nettingBasis"
-       }
-      ]
-     },
-     "measure_label": "gross disbursements (official development assistance, standard grant)",
-     "open_axes": [
-      {
-       "property": "crsCooperationModality",
-       "summable": true
-      },
-      {
-       "property": "crsPurpose",
-       "summable": true
-      },
-      {
-       "property": "crsTypeOfFinance",
-       "summable": true
-      }
-     ],
-     "open_entity_axes": [],
-     "provenance_account": "provider",
-     "provenance_label": "OECD Creditor Reporting System (CRS)",
-     "provenance_ref": "provenance/OECDCreditorReportingSystem",
-     "resolved_sources": [],
-     "searched_as": "total health aid",
-     "sentence": "United States' gross ODA disbursements to the 61 countries in Africa for health and population policy, programme, and reproductive health in 2024. Current US dollars \u00b7 OECD Creditor Reporting System (CRS).",
-     "served_count": 375,
-     "shape_member_count": 375,
-     "shape_member_digest": "769b7fe44c1a9ab15a477d24c1c844335549f39826dc86428fa6274a50798849",
-     "slot_codes": {
-      "crsPurpose": [
-       "CRSPurposeCode120",
-       "CRSPurposeCode121",
-       "CRSPurposeCode12110",
-       "CRSPurposeCode12181",
-       "CRSPurposeCode12182",
-       "CRSPurposeCode12191",
-       "CRSPurposeCode122",
-       "CRSPurposeCode12220",
-       "CRSPurposeCode12230",
-       "CRSPurposeCode12240",
-       "CRSPurposeCode12250",
-       "CRSPurposeCode12261",
-       "CRSPurposeCode12262",
-       "CRSPurposeCode12263",
-       "CRSPurposeCode12264",
-       "CRSPurposeCode12281",
-       "CRSPurposeCode123",
-       "CRSPurposeCode12310",
-       "CRSPurposeCode12320",
-       "CRSPurposeCode12330",
-       "CRSPurposeCode12340",
-       "CRSPurposeCode12350",
-       "CRSPurposeCode12382",
-       "CRSPurposeCode130",
-       "CRSPurposeCode13010",
-       "CRSPurposeCode13020",
-       "CRSPurposeCode13030",
-       "CRSPurposeCode13040",
-       "CRSPurposeCode13081"
-      ],
-      "crsTypeOfFlow": [
-       "CRSTypeOfFlow10"
-      ],
-      "financialFlowType": [
-       "Disbursement"
-      ],
-      "nettingBasis": [
-       "Gross"
-      ]
-     },
-     "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-     "stat_var_member_count": 46,
-     "stat_var_member_count_exact": true,
-     "stat_var_reading": "sum",
-     "stat_var_reading_set_by": "rule",
-     "unit_label": "US Dollar",
-     "unit_per_series": null,
-     "unit_ref": "CurrencyUSD"
-    }
-   ],
-   "steps": [
-    {
-     "args": {
-      "spec_id": "spec_7c3066e68a49cef8c9033ba06c99789e",
-      "stat_vars": "sum",
-      "without_party_totals": true
-     },
-     "bindings": {},
-     "expected_role_keys": [
-      "destination",
-      "origin"
-     ],
-     "id": "health_aid_disbursements",
-     "implementation_version": "1",
-     "input_schema_hash": "715ad12d88a3fd52dc20412ab52b01aae472118c4d551d85a19b42623408e25c",
-     "operation_id": "health_aid_disbursements",
-     "output_schema_hash": null,
-     "tool": {
-      "name": "get_data",
-      "server": "data-mcp"
-     }
-    },
-    {
-     "args": {
-      "aggregation": "sum",
-      "group_by": [
-       "time_period"
-      ]
-     },
-     "bindings": {
-      "frame_ref": {
-       "from_step": "health_aid_disbursements",
-       "output": "frame_ref"
-      }
-     },
-     "expected_role_keys": [],
-     "id": "total_health_aid",
-     "implementation_version": "1",
-     "input_schema_hash": "3eaff6ae7ba33c164757f9e54fc090018e2d3e6822f8ed1416e1add95eb33a4b",
-     "operation_id": "total_health_aid",
-     "output_schema_hash": "acb941a449802674dd6cbf162e1e4d805521c9c5a67d7bf2459968b2fd973f3a",
-     "tool": {
-      "name": "aggregate",
-      "server": "analysis-mcp"
-     }
-    }
-   ],
-   "terminal_steps": [
-    "total_health_aid"
-   ],
-   "warnings": []
-  }
- }
 }
