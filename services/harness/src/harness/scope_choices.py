@@ -4,8 +4,8 @@
 record dfo-apis writes for each part (`search.models.scope` there): one
 `ScopeChoice` per axis a declared rule or the request settled (sector,
 region, measure basis, provider scope), each with its options and their
-availability, the explicit and carried `Entry`s applied, and the identity
-they compile to. `harness.turn_records.SearchReading.scope` stores it.
+availability, the explicit and carried entries applied
+(`data_mcp.scope.ScopeEntry`), and the identity they compile to. `harness.turn_records.SearchReading.scope` stores it.
 Identities stay the JSON documents Search wrote, since a later resubmit
 posts them back byte for byte.
 
@@ -24,67 +24,51 @@ its `get_data` manifest (`served_facts`): the entities bound on each role,
 the measure basis and the components. `harness.turn_records.basis_line`
 states the turn's choices in their options' labels, correcting each from
 it where the served figures hold another option. `REASON_COPY` holds that
-line's words for reason codes.
+line's words for reason codes, the ones the search digest uses
+(`data_mcp.scope`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
-from planner.records import OptionStatus, ScopeAxis, StrictModel
-from pydantic import Field
+from data_mcp.scope import (
+    REASON_COPY,
+    ChoiceOrigin,
+    OptionId,
+    ScopeAxis,
+    ScopeEntry,
+    ScopeReasonCode,
+)
+from planner.records import OptionStatus, StrictModel
+from pydantic import Field, ValidationInfo, field_validator
 
-EntryProvenance = Literal["explicit", "carried"]
 ChoiceProvenance = Literal["explicit", "carried", "default"]
-ComponentRole = Literal["whole", "bilateral", "imputed", "headline_net", "headline_ge"]
-ScopeReasonCode = Literal[
-    "provider_not_offered",
-    "imputed_coverage",
-    "basis_not_published",
-    "residuals_need_summed_region",
-    "conflicts_with",
-    "carried_choice_not_applied",
-    "stated_choice_not_applied",
-    "option_not_covered",
-]
-
-# "<axis>:<value>": `sector:120+130`, `region:members_and_residuals`,
-# `measure_basis:gross`, `provider:inclusive`. One option has one id on every part.
-OptionId = Annotated[str, Field(pattern=r"^(sector|region|measure_basis|provider):[A-Za-z0-9_+]+$")]
+DroppedCode = Literal["carried_choice_not_applied", "stated_choice_not_applied"]
 
 YearSpan = tuple[int, int]
 
-
-class TextOrigin(StrictModel):
-    """The words of the user's message an explicit entry was read from."""
-
-    kind: Literal["text"] = "text"
-    text: str
-    start: int
-    end: int
+# The axes and reason codes this release reads. Search's vocabularies are
+# open: a later release can add to either, and a record holding a value
+# outside them stays readable (`_on_known_axes`, `OptionAvailability.code`,
+# `DroppedEntry.code`).
+_KNOWN_AXES = frozenset(get_args(ScopeAxis))
+_KNOWN_REASONS = frozenset(get_args(ScopeReasonCode))
 
 
-class ChoiceOrigin(StrictModel):
-    """The scope choice an entry was switched or carried from."""
+def _on_known_axes(items: Any, *path: str) -> Any:
+    """`items`, a raw list from Search, less each item whose axis at `path` this release does not read.
 
-    kind: Literal["choice"] = "choice"
-    choice_id: str
-
-
-class Entry(StrictModel):
-    """One explicit or carried entry: an option asked for on one axis.
-
-    `concept` is the concept the entry was made for ("health"), so a carried
-    entry attaches only to a part asking for that concept; `None` when the
-    axis has no concept.
+    An item holding no axis string there is kept, so validation refuses it.
     """
 
-    axis: ScopeAxis
-    option_id: OptionId
-    provenance: EntryProvenance
-    concept: str | None = None
-    origin: Annotated[TextOrigin | ChoiceOrigin, Field(discriminator="kind")]
+    def known(item: Any) -> bool:
+        for key in path:
+            item = item.get(key) if isinstance(item, Mapping) else None
+        return not isinstance(item, str) or item in _KNOWN_AXES
+
+    return [item for item in items if known(item)] if isinstance(items, list | tuple) else items
 
 
 class SlotBinding(StrictModel):
@@ -129,6 +113,12 @@ class OptionAvailability(StrictModel):
     code: ScopeReasonCode | None = None
     detail: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("code", mode="before")
+    @classmethod
+    def _known_code(cls, code: object) -> object:
+        """A reason code this release does not read, as none: the status still says what holds."""
+        return code if not isinstance(code, str) or code in _KNOWN_REASONS else None
+
 
 class Option(StrictModel):
     """One value a scope choice can take."""
@@ -165,11 +155,19 @@ class DroppedEntry(StrictModel):
     (`carried_choice_not_applied`) or an option the user's words asked for
     that the part cannot serve (`stated_choice_not_applied`)."""
 
-    entry: Entry
-    code: Literal["carried_choice_not_applied", "stated_choice_not_applied"] = (
-        "carried_choice_not_applied"
-    )
+    entry: ScopeEntry
+    code: DroppedCode = "carried_choice_not_applied"
     cause: str
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _known_code(cls, code: object, info: ValidationInfo) -> object:
+        """A code this release does not read, as the one the entry's provenance gives."""
+        if not isinstance(code, str) or code in get_args(DroppedCode):
+            return code
+        entry = info.data.get("entry")
+        explicit = isinstance(entry, ScopeEntry) and entry.provenance == "explicit"
+        return "stated_choice_not_applied" if explicit else "carried_choice_not_applied"
 
 
 class ScopeDefinition(StrictModel):
@@ -181,9 +179,9 @@ class ScopeDefinition(StrictModel):
 
 
 class Component(StrictModel):
-    """One series the compiled identity is served from."""
+    """One series the compiled identity is served from, by its `role` as Search names it."""
 
-    role: ComponentRole
+    role: str
     periods: tuple[YearSpan, ...] | None = None
     provenance: str | None = None
     content_version: str | None = None
@@ -202,8 +200,8 @@ class LedgerStep(StrictModel):
     """One switch, kept so it can be undone with its prior provenance."""
 
     axis: ScopeAxis
-    prior: Entry | None = None
-    applied: Entry
+    prior: ScopeEntry | None = None
+    applied: ScopeEntry
     revision: int
 
 
@@ -214,11 +212,23 @@ class PartScope(StrictModel):
     id: str
     base: ScopeDefinition
     rule_version: str
-    entries: tuple[Entry, ...]
+    entries: tuple[ScopeEntry, ...]
     dropped_entries: tuple[DroppedEntry, ...] = ()
     choices: tuple[ScopeChoice, ...]
     compiled: CompiledScope
     ledger: tuple[LedgerStep, ...] = ()
+
+    @field_validator("entries", "choices", "ledger", mode="before")
+    @classmethod
+    def _known_axes(cls, items: object) -> object:
+        """Each choice, entry and switch on an axis this release reads; the others are left out."""
+        return _on_known_axes(items, "axis")
+
+    @field_validator("dropped_entries", mode="before")
+    @classmethod
+    def _known_dropped_axes(cls, items: object) -> object:
+        """Each dropped entry on an axis this release reads; the others are left out."""
+        return _on_known_axes(items, "entry", "axis")
 
     @classmethod
     def from_search(cls, raw: object) -> PartScope:
@@ -227,7 +237,11 @@ class PartScope(StrictModel):
         A field Search added that this mirror does not declare, anywhere in
         the record, is ignored, so an additive dfo-apis release leaves the
         part's scope choices readable. The record keeps the declared fields
-        alone, and a stored one is read back with no field ignored.
+        alone, and a stored one is read back with no field ignored. A value
+        Search added to an open vocabulary degrades only what holds it: a
+        choice or entry on an unknown axis is left out, an unknown reason
+        code reads as none, a dropped entry's unknown code as the one its
+        provenance gives, and a component keeps whatever role it names.
 
         Raises:
             ValidationError: If a declared field is missing or does not fit.
@@ -269,7 +283,7 @@ def mark_planner_axes(digest: dict[str, Any], axes: Iterable[str]) -> None:
 
 def carried_entries(
     scopes: Iterable[PartScope], *, planner: Mapping[str, Collection[str]] | None = None
-) -> list[Entry]:
+) -> list[ScopeEntry]:
     """The entries a later search carries from `scopes`, oldest first.
 
     Every choice an explicit or carried entry settled becomes a `carried`
@@ -281,7 +295,7 @@ def carried_entries(
     still carry. The newest choice per axis and concept wins.
     """
     planner = planner or {}
-    newest: dict[tuple[str, str | None], Entry] = {}
+    newest: dict[tuple[str, str | None], ScopeEntry] = {}
     for scope in scopes:
         for choice in scope.choices:
             if choice.provenance == "default" or choice.axis in planner.get(
@@ -298,7 +312,7 @@ def carried_entries(
             )
             key = (choice.axis, concept)
             newest.pop(key, None)
-            newest[key] = Entry(
+            newest[key] = ScopeEntry(
                 axis=choice.axis,
                 option_id=choice.active,
                 provenance="carried",
@@ -308,7 +322,7 @@ def carried_entries(
     return list(newest.values())
 
 
-def switch_entries(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> list[Entry]:
+def switch_entries(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> list[ScopeEntry]:
     """The scope entries a switch of `choice` to `option_id` posts over `scope.base`.
 
     The scope's own entries, less any on the choice's axis, then the switch
@@ -320,7 +334,7 @@ def switch_entries(scope: PartScope, *, choice: ScopeChoice, option_id: str) -> 
     replaced = next((entry for entry in scope.entries if entry.axis == choice.axis), None)
     return [
         *(entry for entry in scope.entries if entry.axis != choice.axis),
-        Entry(
+        ScopeEntry(
             axis=choice.axis,
             option_id=option_id,
             provenance="explicit",
@@ -386,7 +400,7 @@ class ServedComponent(StrictModel):
     """One series the served figures were drawn from, with the years its
     frame covers; `periods` is `None` when the manifest states no window."""
 
-    role: ComponentRole
+    role: str
     periods: tuple[YearSpan, ...] | None = None
 
 
@@ -499,16 +513,3 @@ def served_facts(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
 
 # What a basis line says when the served figures match no option of a choice.
 SERVED_OTHERWISE = "the figures served differ from this choice"
-
-
-# What each scope reason code says to a reader, one clause.
-REASON_COPY: dict[str, str] = {
-    "provider_not_offered": "imputed multilateral aid is not offered for this question",
-    "imputed_coverage": "imputed multilateral aid covers only some years",
-    "basis_not_published": "this basis is not published for these figures",
-    "residuals_need_summed_region": "regional buckets apply only to a summed region",
-    "conflicts_with": "it conflicts with another choice",
-    "carried_choice_not_applied": "an earlier choice did not apply here",
-    "stated_choice_not_applied": "the option you asked for is not available here",
-    "option_not_covered": "the data holds no series for this option",
-}

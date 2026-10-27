@@ -89,7 +89,9 @@ from translator.discovery import (
     SEARCH,
     DefinitionNotResolvedError,
     PartNotResolvedError,
+    call_within_entry,
     load_log,
+    refusal_retryable,
     resolve_definition,
     resolved_spec,
 )
@@ -1312,17 +1314,11 @@ def _first_year_unreadable(
     )
 
 
-# The seconds one compile of a pin on another basis may take
-# (`compile_on_basis`), for the reason `FIRST_YEAR_READ_DEADLINE_SECONDS` gives.
-BASIS_COMPILE_DEADLINE_SECONDS = 10.0
-
-
 async def compile_on_basis(
     surface: ToolSurface,
     realignment: Realignment,
     *,
     state: SessionState,
-    deadline_s: float = BASIS_COMPILE_DEADLINE_SECONDS,
 ) -> dict[str, object] | None:
     """Compile `realignment`'s pin on its calculation's basis and hold the pin Search answers.
 
@@ -1338,6 +1334,11 @@ async def compile_on_basis(
     marks (`harness.scope_choices.mark_planner_axes`), so the next proposal
     pins it and the planner seam stores it as a reading of the
     conversation (`harness.planner_seam.store_aligned_readings`).
+
+    The compile takes the time a resubmit has
+    (`translator.discovery.call_within_entry`): the capability row's call
+    timeout, above data-mcp's resubmit budget, within the planner entry's
+    time left.
 
     Returns `None` once the pin is held, or the refusal the proposal
     answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
@@ -1369,16 +1370,13 @@ async def compile_on_basis(
         for entry in switch_entries(scope, choice=choice, option_id=realignment.option_id)
     ]
     try:
-        async with asyncio.timeout(deadline_s):
-            part = await resolve_definition(
-                surface,
-                spec_id=scope.base.spec_id,
-                identity=scope.base.identity,
-                groups=block_groups(block),
-                scope_entries=entries,
-            )
-    except TimeoutError:
-        return _basis_uncompiled(realignment, f"Search did not answer in {deadline_s:.0f} s")
+        part = await resolve_definition(
+            surface,
+            spec_id=scope.base.spec_id,
+            identity=scope.base.identity,
+            groups=block_groups(block),
+            scope_entries=entries,
+        )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
             return _basis_uncompiled(realignment, str(exc))
@@ -1414,7 +1412,6 @@ async def pin_by_search(
     unpinned: Unpinned,
     *,
     state: SessionState,
-    deadline_s: float = BASIS_COMPILE_DEADLINE_SECONDS,
 ) -> dict[str, object] | None:
     """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
 
@@ -1427,26 +1424,26 @@ async def pin_by_search(
     (`planner.plan.save_pin_sources`) and held as a
     `submission.service.SearchedPin` with its digest, so the next proposal
     pins it and the planner seam stores it as a reading of the conversation
-    (`harness.planner_seam.store_aligned_readings`). Any other answer, a
-    refusal included, is held as a search that settled on nothing, under
-    Search's part status, and the next proposal is refused
-    (`submission.service._aligned_bases`).
+    (`harness.planner_seam.store_aligned_readings`). Any other answer is
+    held as a search that settled on nothing, under Search's part status, or
+    `refused` for a refusal, and the next proposal is refused
+    (`submission.service._aligned_bases`). The search takes the time the
+    translator's own discovery gives one
+    (`translator.discovery.call_within_entry`).
 
     Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
-    Search did not answer and can later.
+    Search did not answer, or refused in a way that can succeed later
+    (`translator.discovery.refusal_retryable`); nothing is held then, so the
+    next proposal searches again.
     """
     try:
-        async with asyncio.timeout(deadline_s):
-            answer = await surface.call_tool(tool=SEARCH, arguments={"parts": [unpinned.part]})
-    except (TimeoutError, ToolSurfaceUnavailableError) as exc:
-        return problem(
-            ProblemCode.SURFACE_UNAVAILABLE,
-            f"{unpinned.requirement_id!r}, an input of {unpinned.step_id!r}, pins no dataset, "
-            f"and Search could not be asked for one: {exc or 'no answer in time'}. The plan is "
-            "sound and nothing was recorded; propose it again.",
-            outcome=Outcome.REFUSED,
-            detail={"search": unpinned.model_dump(mode="json")},
-        )
+        answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [unpinned.part]})
+    except ToolSurfaceUnavailableError as exc:
+        return _search_unavailable(unpinned, str(exc))
+    if answer.is_error and refusal_retryable(answer):
+        refusal = answer.structured_content or {}
+        cause = refusal.get("message") or answer.text or "Search refused it for now"
+        return _search_unavailable(unpinned, str(cause))
     envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
     parts = envelope.get("parts") if isinstance(envelope, dict) else None
     part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
@@ -1455,7 +1452,11 @@ async def pin_by_search(
     spec_id = spec.get("spec_id") if isinstance(spec, dict) else None
     searched = SearchedPin(
         requirement_key=unpinned.requirement_key,
-        status=status if isinstance(status, str) else "unreadable",
+        status="refused"
+        if answer.is_error
+        else status
+        if isinstance(status, str)
+        else "unreadable",
         asked_roles=unpinned.asked_roles,
         open_roles=unpinned.open_roles,
     )
@@ -1474,6 +1475,21 @@ async def pin_by_search(
     save_pin_sources(state, {**pin_sources(state), spec_id: shown})
     save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
     return None
+
+
+def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
+    """Return the `SURFACE_UNAVAILABLE` problem for a search of `unpinned` that can succeed later.
+
+    The same proposal can succeed later, so nothing in it needs changing.
+    """
+    return problem(
+        ProblemCode.SURFACE_UNAVAILABLE,
+        f"{unpinned.requirement_id!r}, an input of {unpinned.step_id!r}, pins no dataset, "
+        f"and Search could not be asked for one: {cause}. The plan is sound and nothing was "
+        "recorded; propose it again.",
+        outcome=Outcome.REFUSED,
+        detail={"search": unpinned.model_dump(mode="json")},
+    )
 
 
 def _basis_uncompiled(realignment: Realignment, cause: str) -> dict[str, object]:

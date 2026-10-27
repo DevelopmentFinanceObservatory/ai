@@ -300,6 +300,20 @@ async def test_a_context_of_the_wrong_shape_is_refused_before_search_is_called(
     assert sent == []
 
 
+async def test_a_context_of_the_wrong_shape_is_dropped_unread_when_the_setting_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the setting off no context reaches Search, so its shape refuses nothing."""
+    monkeypatch.setenv("SEARCH_SENDS_CONVERSATION_CONTEXT", "false")
+
+    result, sent = await _search_with_meta({SEARCH_CONTEXT_META_KEY: {"message": "now Ghana"}})
+
+    assert result.is_error is False
+    assert [body["input"] for body in sent] == [
+        {"kind": "parsed", "parts": [{"variable_text": "aid"}]}
+    ]
+
+
 def test_to_wire_request_carries_open_roles_as_given() -> None:
     parts = [
         SearchPart(

@@ -68,14 +68,16 @@ def basis_block(
                 "code": "basis_not_published",
                 "detail": {},
             }
-    if provenance == "explicit":
+    if provenance != "default":
         scope["entries"] = [
             *scope["entries"],
             {
                 "axis": "measure_basis",
                 "option_id": active,
-                "provenance": "explicit",
-                "origin": {"kind": "text", "text": "net", "start": 0, "end": 3},
+                "provenance": provenance,
+                "origin": {"kind": "text", "text": "net", "start": 0, "end": 3}
+                if provenance == "explicit"
+                else {"kind": "choice", "choice_id": basis["id"]},
             },
         ]
     return {
@@ -90,16 +92,22 @@ class BasisCompiles:
     basis its explicit entry posts, gross disbursements as `TOTAL_GROSS` and net
     as `TOTAL_NET`, over the base identity and entries posted, and whose `search`
     answers `searched`, by default the US donor total as `TOTAL`, counted as
-    grant equivalents by default, recording each call's tool and arguments in
-    `calls`."""
+    grant equivalents by default, or refuses with `search_refusal` when given,
+    recording each call's tool and arguments in `calls`."""
 
-    def __init__(self, *, searched: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        searched: Mapping[str, Any] | None = None,
+        search_refusal: Mapping[str, Any] | None = None,
+    ) -> None:
         self.calls: list[Mapping[str, Any]] = []
         self.tools: list[str] = []
         self.searched = searched or {
             "status": "definite",
             "spec": basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
         }
+        self.search_refusal = search_refusal
 
     async def list_tools(self) -> list[Any]:
         return []
@@ -110,6 +118,8 @@ class BasisCompiles:
         del on_progress
         self.calls.append(arguments)
         self.tools.append(tool.name)
+        if tool.name == "search" and self.search_refusal is not None:
+            return ToolCallResult(is_error=True, structured_content=dict(self.search_refusal))
         if tool.name == "search":
             return ToolCallResult(
                 is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [dict(self.searched)]}}

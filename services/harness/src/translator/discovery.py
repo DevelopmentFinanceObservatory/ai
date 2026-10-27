@@ -78,7 +78,7 @@ capability row), per wave of concurrent calls
 the budget admits, rather than one deadline per call. A turn discovering
 `DISCOVERY_CALL_BUDGET` requirements at once waits out that one deadline
 together. Inside a planner entry a call is also cut off at the request's
-wall-clock bound (`_call_within_entry`), and recorded as a
+wall-clock bound (`call_within_entry`), and recorded as a
 timeout. A search the entry had no time left to issue (`NoTimeLeftError`)
 is not recorded and spends nothing, and refers the requirement back marked
 `not_issued`. A cut `resolve_definition` keeps running for the entry's next
@@ -1899,7 +1899,7 @@ class CutCalls:
     cancelled, since Search often answers it moments later (a cold member
     walk) and the definition it stores is the same whichever call stores it.
     The next call with the same tool and arguments in the same entry takes
-    the kept task (`_call_within_entry`) and is served its answer once it
+    the kept task (`call_within_entry`) and is served its answer once it
     has one. A call is kept from the moment it is issued until it finishes,
     so a caller cancelled mid-await leaves it here too. `close` cancels
     whatever is still kept, so no call outlives the entry.
@@ -1939,7 +1939,7 @@ class CutCalls:
 current_cut_calls: ContextVar[CutCalls | None] = ContextVar("cut_calls", default=None)
 
 
-async def _call_within_entry(
+async def call_within_entry(
     surface: ToolSurface,
     *,
     tool: ToolId,
@@ -1999,7 +1999,7 @@ async def _call_within_entry(
 
 
 class NoTimeLeftError(ToolSurfaceUnavailableError):
-    """A call `_call_within_entry` never issued, the planner entry having no time left for it."""
+    """A call `call_within_entry` never issued, the planner entry having no time left for it."""
 
 
 def _no_time_left(tool: ToolId) -> NoTimeLeftError:
@@ -2056,6 +2056,16 @@ def resolving_once() -> Iterator[ResolvedAnswers]:
         current_resolved_answers.reset(token)
 
 
+def refusal_retryable(answer: ToolCallResult) -> bool:
+    """Whether `answer`, a data-mcp refusal, can succeed if the same call is made later.
+
+    data-mcp marks such a refusal `retry_after_delay`: Search or the
+    definition store could not be reached or could not take the call. Any
+    other refusal is Search's answer to the call as made.
+    """
+    return (answer.structured_content or {}).get("retry_mode") == "retry_after_delay"
+
+
 async def resolve_definition(
     surface: ToolSurface,
     *,
@@ -2079,7 +2089,7 @@ async def resolve_definition(
     dropped: its places still bind, and its name is lost.
 
     `scope_entries`, the explicit and carried entries of a part's stored
-    scope choices (`harness.scope_choices.Entry` as JSON), are posted beside
+    scope choices (`data_mcp.scope.ScopeEntry` as JSON), are posted beside
     a part's base identity, and Search answers with the identity they
     compile to, under that identity's own spec_id.
 
@@ -2099,7 +2109,7 @@ async def resolve_definition(
         arguments["scope_entries"] = [dict(entry) for entry in scope_entries]
 
     def call() -> Awaitable[ToolCallResult]:
-        return _call_within_entry(
+        return call_within_entry(
             surface, tool=RESOLVE_DEFINITION, arguments=arguments, keep_when_cut=True
         )
 
@@ -2115,7 +2125,7 @@ async def resolve_definition(
         ) from exc
     if answer.is_error:
         refusal = answer.structured_content or {}
-        if refusal.get("retry_mode") == "retry_after_delay":
+        if refusal_retryable(answer):
             raise DefinitionNotResolvedError(
                 str(refusal.get("message") or answer.text), retryable=True
             )
@@ -2906,7 +2916,7 @@ def build_discovery_tools(*, surface: ToolSurface) -> list[FunctionTool]:
             )
 
         try:
-            answer = await _call_within_entry(surface, tool=SEARCH, arguments={"parts": [part]})
+            answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [part]})
         except ToolSurfaceUnavailableError as exc:
             if isinstance(exc, NoTimeLeftError):
                 # Never issued, so nothing is spent: no record, and the

@@ -25,6 +25,7 @@ import pytest
 from analysis_mcp.server import mcp as analysis_mcp
 from common.materialisation import FrameRef
 from compiler.evidence import check_evidence, evidence_from_source
+from compiler.sources import block_groups, wire_groups
 from compiler.surface import (
     FixtureSurface,
     McpSurface,
@@ -3232,12 +3233,14 @@ async def _switch_runner(
     *,
     option_id: str = "sector:120+130",
     aligned: bool = False,
+    entity_groups: dict[str, Any] | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`), then answered with a switch to `option_id`, by default its
-    sector to CRS 120 and 130, through `search`. Returns the runner, the
-    seam, the plan, the scope and the resumed turn's events."""
+    `aligned`) beside its block naming `entity_groups` when given, then
+    answered with a switch to `option_id`, by default its sector to CRS 120
+    and 130, through `search`. Returns the runner, the seam, the plan, the
+    scope and the resumed turn's events."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     plan = _scoped_plan(pin, scope, schemas=real_schemas)
@@ -3262,6 +3265,13 @@ async def _switch_runner(
         }
     )
     _session_state(runner)[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+    if entity_groups is not None:
+        _session_state(runner)[ORCHESTRATOR_SPECS_KEY] = {
+            pin: {
+                "spec_id": pin,
+                "resolved": {"scope_choices": scope, "entity_groups": entity_groups},
+            }
+        }
     choice_id = f"{scope['id']}:{option_id.split(':', maxsplit=1)[0]}"
     events = await _resume(
         runner,
@@ -3328,6 +3338,28 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
             "reason": "It conflicts with another choice.",
         }
     ]
+
+
+async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """The part's block names Africa as the set its recipients were asked for,
+    with the total party Search states for it. The switch posts the set as a
+    compile on another basis does (`compiler.sources.wire_groups`): its label
+    and ref, and no total, which Search recomputes."""
+    scope = _hashed_scope()
+    _, envelope = _switched_answer(scope)
+    search = SearchStub(answer={scope["id"]: envelope})
+    groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
+
+    await _switch_runner(real_schemas, search, entity_groups=groups)
+
+    (posted,) = search.posted
+    (entry,) = posted["input"]["entries"]
+    assert entry["entity_groups"] == wire_groups(
+        block_groups({"resolved": {"entity_groups": groups}})
+    )
+    assert entry["entity_groups"] == {"destination": {"label": "Africa", "ref": "africa"}}
 
 
 @pytest.mark.parametrize(

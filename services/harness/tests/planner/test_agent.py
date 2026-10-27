@@ -114,6 +114,7 @@ from planner.plan import (
     UnsupportedOperation,
     WindowedPin,
     clear_unsupported,
+    current_discovery_time_left,
     current_recorded_identity,
     fix_disagreements,
     is_dataset,
@@ -4606,6 +4607,53 @@ def test_scope_decisions_past_the_decision_cap_are_left_out_with_no_refusal(
     )
 
 
+def test_a_repin_at_the_decision_cap_states_the_new_pins_scope_decision(
+    decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
+) -> None:
+    """A plan at `MAX_PLAN_DECISIONS` re-pins its US total from the grant-equivalent
+    count to the gross one. The old pin's decisions lose their last citation and
+    go, so the new pin's basis decision is written and cited in their place."""
+    tools = _tools_by_name()
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+        basis_block(TOTAL_GROSS, narrow=False, active="measure_basis:gross"),
+    )
+    own = [decision(slot=f"d{index}") for index in range(MAX_PLAN_DECISIONS - 2)]
+    total = requirement(
+        id="total",
+        decision_ids=tuple(d.slot for d in own),
+        measure="US total ODA",
+        entities=[Entity(name="United States", role="donor")],
+        source_spec_id=TOTAL,
+    )
+    first = tools["propose_plan"].func(
+        question="q",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts(own),
+        evidence_requirements=[total],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert len(plan.decisions) == MAX_PLAN_DECISIONS
+
+    second = tools["propose_plan"].func(
+        evidence_requirements=[total.model_copy(update={"source_spec_id": TOTAL_GROSS})],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    basis = scope_choice_slot(TOTAL_GROSS, "measure_basis")
+    assert [d.slot for d in plan.decisions if is_scope_choice(d)] == [basis]
+    assert basis in plan.requirement("total").decision_ids
+
+
 def test_a_windowed_pin_takes_its_scope_decisions_to_the_copy(
     decision: DecisionFactory, requirement: Callable[..., DatasetRequirement]
 ) -> None:
@@ -4830,17 +4878,19 @@ def test_a_basis_the_planner_compiled_in_an_earlier_turn_is_not_read_as_the_user
         assert result["outcome"] == Outcome.OK.value, result
 
 
+@pytest.mark.parametrize("provenance", ["explicit", "carried"], ids=["asked-now", "chose-earlier"])
 def test_a_basis_the_user_stated_on_one_input_is_the_one_every_input_takes(
-    decision: DecisionFactory,
+    decision: DecisionFactory, provenance: str
 ) -> None:
-    """ "Health aid as a share of net ODA": the user stated net on the total alone, so
-    the health part, though narrower, is the input to compile, on net. With no tool
-    surface to compile through, the proposal is refused naming it."""
+    """ "Health aid as a share of net ODA": the user stated net on the total alone,
+    in this question or by a choice earlier in the conversation, so the health
+    part, though narrower, is the input to compile, on net. With no tool surface
+    to compile through, the proposal is refused naming it."""
     ctx = _FakeToolContext()
     _show_blocks(
         ctx,
         basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
-        basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance="explicit"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:net", provenance=provenance),
     )
 
     refused = _share_of_health(_tools_by_name()["propose_plan"].func, ctx, decision())
@@ -5004,6 +5054,115 @@ async def test_a_share_whose_unpinned_input_search_does_not_settle_is_refused(
     }
     assert surface.tools == ["search"]
     assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize(
+    ("retry_mode", "code", "held"),
+    [
+        ("retry_after_delay", ProblemCode.SURFACE_UNAVAILABLE, ()),
+        ("do_not_retry", ProblemCode.OPERATION_UNSUPPORTED, ("refused",)),
+    ],
+    ids=["retryable", "settled"],
+)
+async def test_a_refused_search_for_an_unpinned_input_is_held_only_when_it_settles(
+    decision: DecisionFactory, retry_mode: str, code: ProblemCode, held: tuple[str, ...]
+) -> None:
+    """Search refuses the search for the unpinned US total. A refusal that can
+    succeed later answers that the surface is unavailable and holds nothing, so
+    the next proposal searches again; one that cannot is held as a search that
+    settled on nothing, and the plan is refused as unsupported."""
+    surface = BasisCompiles(
+        search_refusal={"code": "upstream_unavailable", "retry_mode": retry_mode}
+    )
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+
+    refused = await _share_of_health(
+        _tools_reading(surface)["propose_plan"].func, ctx, decision(), total=None
+    )
+
+    assert refused["code"] == code.value, refused
+    assert tuple(pin.status for pin in searched_pins(ctx.state)) == held
+    assert load_plan(ctx.state) is None
+
+
+async def test_a_search_for_an_unpinned_input_takes_only_the_time_the_entry_has_left(
+    decision: DecisionFactory,
+) -> None:
+    """The planner entry has a moment left and Search never answers the search
+    for the unpinned US total: the search is cut off when the entry's time runs
+    out, the refusal names why, and nothing is held."""
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(HEALTH, narrow=True, active="measure_basis:gross"))
+    token = current_discovery_time_left.set(lambda: 0.05)
+    try:
+        async with asyncio.timeout(2.0):
+            refused = await _share_of_health(
+                _tools_reading(_SilentSurface())["propose_plan"].func, ctx, decision(), total=None
+            )
+    finally:
+        current_discovery_time_left.reset(token)
+
+    assert refused["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, refused
+    assert "the planner entry had left" in refused["message"], refused
+    assert searched_pins(ctx.state) == ()
+
+
+def test_nested_calculations_put_every_input_they_reach_on_one_basis(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid as a share of the sum of two US totals counted in grant
+    equivalents. The sum and the share read connected inputs, so all three take
+    one basis, the narrowest part's: both totals are asked for gross, with no
+    refusal for the totals the sum and the share both read."""
+    other_total = f"spec_{'5' * 32}"
+    ctx = _FakeToolContext()
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=True, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"),
+        basis_block(other_total, narrow=False, active="measure_basis:grant_equivalent"),
+    )
+
+    def dataset(requirement_id: str, measure: str, pin: str) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=measure,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2015, end=2024),
+            source_spec_id=pin,
+        )
+
+    refused = _tools_by_name()["propose_plan"].func(
+        question="What share of US aid goes to health?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            dataset("health", "US aid to health", HEALTH),
+            dataset("total", "US total net ODA", TOTAL),
+            dataset("other", "US other official flows", other_total),
+            SumOfRequirement(
+                id="both",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="total"),
+                right=RequirementSide(input_id="other"),
+            ),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="both"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert sorted((r["spec_id"], r["option_id"]) for r in refused["detail"]["realign"]) == [
+        (TOTAL, "measure_basis:gross"),
+        (other_total, "measure_basis:gross"),
+    ]
 
 
 _MEASURE_FIXED = DecisionFixes(measure="external debt service paid")

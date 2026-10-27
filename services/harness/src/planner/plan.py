@@ -56,6 +56,7 @@ from common.hashed_fields import HASHED_WHEN_SET, revision_content
 from compiler.sources import source_from_spec_block
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import windowed_identity
+from data_mcp.scope import ScopeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from planner.operations import Translation
@@ -95,7 +96,6 @@ from planner.records import (
     RollingIssue,
     RollingPlanError,
     RollingWindow,
-    ScopeAxis,
     SpecId,
     StatVarReading,
     StrictModel,

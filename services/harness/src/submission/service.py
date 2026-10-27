@@ -3194,9 +3194,14 @@ def _scope_decisions(
     it no longer states has that citation dropped. A decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
-    states its choice. The count is every slot of `previous` this call does
-    not remove and every slot it states, so it never falls short of the
-    plan's own and the cap never refuses. One `previous` records as Search's
+    states its choice. The count is every slot this call states and every
+    slot of `previous` it does not remove that stays: one a requirement
+    still cites once this call's citations are patched, the scope decisions
+    of this call's pins among them, or a user's, which
+    `_uncited_carried_decisions` may keep. A planner's decision no
+    requirement cites any more, such as a re-pinned dataset's scope
+    decision, is swept and not counted. The count never falls short of the
+    plan's own, so the cap never refuses. One `previous` records as Search's
     default is restated when Search now says otherwise, unless this call
     states its slot; a user's stands.
 
@@ -3214,26 +3219,51 @@ def _scope_decisions(
     """
     carried = previous.decisions if previous is not None else ()
     known = {decision.slot: decision for decision in (*carried, *decisions)}
-    held = {decision.slot for decision in carried} - set(removed)
     stated = {decision.slot for decision in decisions}
-    held |= stated
-    written: list[Decision] = []
-    patched: list[EvidenceRequirement] = []
-    for requirement in evidence_requirements:
-        if not isinstance(requirement, DatasetRequirement):
-            patched.append(requirement)
-            continue
-        pin = requirement.source_spec_id
-        cited = [
+    citations = [
+        [
             slot
             for slot in requirement.decision_ids
             if not (
                 (decision := known.get(slot)) is not None
                 and is_scope_choice(decision)
                 and decision.fixes is not None
-                and decision.fixes.source_spec_id != pin
+                and decision.fixes.source_spec_id != requirement.source_spec_id
             )
         ]
+        if isinstance(requirement, DatasetRequirement)
+        else list(requirement.decision_ids)
+        for requirement in evidence_requirements
+    ]
+    restated = {requirement.id for requirement in evidence_requirements}
+    cited_after = {
+        *(slot for cited in citations for slot in cited),
+        *(
+            slot
+            for requirement in (previous.evidence_requirements if previous is not None else ())
+            if requirement.id not in restated
+            for slot in requirement.decision_ids
+        ),
+        *(
+            derived.slot
+            for requirement in evidence_requirements
+            if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id
+            for derived in scopes.get(requirement.source_spec_id, ())
+        ),
+    }
+    held = stated | {
+        decision.slot
+        for decision in carried
+        if decision.slot not in removed
+        and (decision.slot in cited_after or decision.resolved_by is not ResolvedBy.PLANNER_DEFAULT)
+    }
+    written: list[Decision] = []
+    patched: list[EvidenceRequirement] = []
+    for requirement, cited in zip(evidence_requirements, citations, strict=True):
+        if not isinstance(requirement, DatasetRequirement):
+            patched.append(requirement)
+            continue
+        pin = requirement.source_spec_id
         for derived in scopes.get(pin, ()) if pin is not None else ():
             standing = known.get(derived.slot)
             if standing is None:
@@ -3319,8 +3349,8 @@ class SearchedPin(StrictModel):
     as a reading of the conversation; both are `None` when Search settled on
     no one dataset, and `_aligned_bases` then refuses the plan. `status` is
     the status Search answered the part with (`definite`, `ambiguous`,
-    `candidates`, `no_data`), or `unreadable` for an answer holding no one
-    part. `asked_roles` and `open_roles` are the parties the search named
+    `candidates`, `no_data`), `refused` for a refusal that cannot succeed
+    later, or `unreadable` for an answer holding no one part. `asked_roles` and `open_roles` are the parties the search named
     and held open.
     """
 
@@ -3414,7 +3444,8 @@ class _InputBasis:
     compiled from (itself, unless a proposal of this entry put it on another
     basis). `choice` is the origin's measure-basis choice, so a basis the
     user stated reads as theirs whatever the pin was aligned to. `stated`
-    says the user stated it: an explicit entry settled the choice, and the
+    says the user stated it: an explicit entry settled the choice, or a
+    carried one, the user's choice earlier in the conversation, and the
     origin's block does not mark the basis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part
     is (`_part_rank`).
@@ -3481,7 +3512,7 @@ def _input_bases(
             pin=pin,
             origin=origin,
             choice=choice,
-            stated=choice.provenance == "explicit" and _BASIS_AXIS not in planner_axes(block),
+            stated=choice.provenance != "default" and _BASIS_AXIS not in planner_axes(block),
             rank=_part_rank(scope.base.identity),
         )
     return bases
@@ -3511,12 +3542,16 @@ def _aligned_bases(
     A calculation reading several inputs (a comparison, sum, share, quotient
     or join) contrasts sector, region and provider, and keeps those as
     stated. It contrasts the measure basis only when the user stated
-    different bases on its inputs (`_InputBasis.stated`: explicit entries
-    naming different options, leaving out an entry this planner compiled).
+    different bases on its inputs (`_InputBasis.stated`: explicit or carried
+    entries naming different options, leaving out an entry this planner
+    compiled).
     Otherwise its dataset inputs with a measure-basis choice are counted on
-    one basis. That is the one the user stated on any of them, else the one
+    one basis. Calculations sharing an input, such as a sum read by a share,
+    form one group and take one basis for every input any of them reaches
+    (`_shared_basis`): the one the user stated on any of them, else the one
     the narrowest part is counted on (`_part_rank`), the first such input in
-    plan order on a tie.
+    plan order on a tie. A group whose inputs the user stated on different
+    bases has no one basis, and each of its calculations takes its own.
 
     An input already on that basis keeps its origin pin. Another is pinned
     to the pin compiled from its origin on that basis (`aligned`), and the
@@ -3596,14 +3631,28 @@ def _aligned_bases(
         return _basis_unknown(list(unpinned.values()))
     if len(bases) < 2:
         return _with_found(evidence_requirements, requirements, found)
-    targets: dict[str, tuple[str, str]] = {}
+    aligning: list[tuple[EvidenceRequirement, list[_InputBasis], str]] = []
     for step in steps:
         under = reached(step.id, reads)
         inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
-        stated = {basis.choice.active for basis in inputs if basis.stated}
-        if len(inputs) < 2 or len(stated) > 1:
-            continue
-        target = next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
+        own = _shared_basis(inputs)
+        if len(inputs) >= 2 and own is not None:
+            aligning.append((step, inputs, own))
+    groups: list[set[str]] = []
+    for _, inputs, _ in aligning:
+        joined = {basis.requirement_id for basis in inputs}
+        for group in [group for group in groups if group & joined]:
+            joined |= group
+            groups.remove(group)
+        groups.append(joined)
+    group_target = {
+        requirement_id: _shared_basis([b for r, b in bases.items() if r in group])
+        for group in groups
+        for requirement_id in group
+    }
+    targets: dict[str, tuple[str, str]] = {}
+    for step, inputs, own in aligning:
+        target = group_target[inputs[0].requirement_id] or own
         for basis in inputs:
             held, held_by = targets.setdefault(basis.requirement_id, (target, step.id))
             option = next((o for o in basis.choice.options if o.option_id == target), None)
@@ -3644,6 +3693,19 @@ def _aligned_bases(
     if wanted:
         return _bases_unaligned(wanted, bases)
     return _with_found(evidence_requirements, requirements, {**found, **repinned})
+
+
+def _shared_basis(inputs: Sequence[_InputBasis]) -> str | None:
+    """The basis `inputs` are counted on together, or `None` when the user stated different ones.
+
+    The one basis the user stated on any of them (`_InputBasis.stated`),
+    else the one the narrowest part is counted on (`_part_rank`), the first
+    such input on a tie.
+    """
+    stated = {basis.choice.active for basis in inputs if basis.stated}
+    if len(stated) > 1:
+        return None
+    return next(iter(stated)) if stated else max(inputs, key=lambda b: b.rank).choice.active
 
 
 def _pinned(requirement: EvidenceRequirement, pins: Mapping[str, str]) -> EvidenceRequirement:

@@ -6,7 +6,8 @@ the decision the user switched and every decision the card lists with it
 and that source's stored scope (`harness.turn_records.SearchReading.scope`).
 It posts the scope's base identity with its entries and the switch
 (`harness.scope_choices.switch_entries`) through data-mcp's
-`resolve_definition`, which registers the identity they compile to. The
+`resolve_definition` (`translator.discovery.resolve_definition`), which
+registers the identity they compile to. The
 plan is then revised by the planner seam with no model call
 (`harness.graph.seams.PlannerModel.revise`): each requirement pinning a
 switched source pins the compiled one, the decisions follow their pins,
@@ -29,8 +30,8 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
-from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from compiler.sources import block_groups
+from compiler.surface import ToolSurface
 from google.adk import Context, Event
 from planner.plan import (
     DatasetRequirement,
@@ -46,7 +47,7 @@ from planner.plan import (
 )
 from planner.plan import Plan as PlannerPlan
 from pydantic import ValidationError
-from translator.discovery import RESOLVE_DEFINITION
+from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
 from harness.graph.seams import PlannerModel
 from harness.graph.state import (
@@ -306,47 +307,43 @@ async def _resubmit(
 ) -> _Switched:
     """Post `scope`'s base identity with `entries` through data-mcp's `resolve_definition`.
 
-    Posts the part's entity groups beside it, when its block holds any, so
-    Search names them again.
+    The same resubmit a compile on another basis posts
+    (`planner.agent.compile_on_basis`), through
+    `translator.discovery.resolve_definition`: the part's entity groups
+    beside it, when its block holds any, as every resubmit posts them
+    (`compiler.sources.wire_groups`), so Search names them again.
 
     Raises:
         SwitchFailedError: If the call does not complete, Search refuses it,
             or its answer is not one definite part with a scope.
     """
-    arguments: dict[str, object] = {
-        "spec_id": scope.base.spec_id,
-        "identity": scope.base.identity,
-        "scope_entries": entries,
-    }
-    groups = ((block or {}).get("resolved") or {}).get("entity_groups")
-    if groups:
-        arguments["entity_groups"] = groups
     try:
-        answer = await surface.call_tool(tool=RESOLVE_DEFINITION, arguments=arguments)
-    except ToolSurfaceUnavailableError as exc:
-        logger.warning("plan switch resubmit unavailable: pin=%s: %s", pin, exc)
-        raise SwitchFailedError(
-            f"Search could not be reached to count {label}, so nothing changed."
-        ) from exc
-    if answer.is_error:
-        refusal = answer.structured_content or {}
-        code = refusal.get("upstream_code") or refusal.get("code")
-        logger.info("plan switch refused: pin=%s code=%s", pin, code)
-        if code in _SCOPE_REFUSALS:
+        part = await resolve_definition(
+            surface,
+            spec_id=scope.base.spec_id,
+            identity=scope.base.identity,
+            groups=block_groups(block) if block is not None else (),
+            scope_entries=entries,
+        )
+    except DefinitionNotResolvedError as exc:
+        logger.info("plan switch not compiled: pin=%s code=%s: %s", pin, exc.code, exc)
+        if exc.code in _SCOPE_REFUSALS:
             raise SwitchFailedError(
                 f"Search cannot count {label} for this source, so nothing changed."
-            )
-        raise SwitchFailedError(f"Search could not count {label} just now, so nothing changed.")
-    envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
-    parts = envelope.get("parts") if isinstance(envelope, dict) else None
-    part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
-    spec = part.get("spec") if isinstance(part, dict) and part.get("status") == "definite" else None
+            ) from exc
+        if exc.retryable or exc.refused:
+            raise SwitchFailedError(
+                f"Search could not count {label} just now, so nothing changed."
+            ) from exc
+        raise SwitchFailedError(
+            f"Search holds no data counted as {label} here, so nothing changed."
+        ) from exc
+    spec = part.get("spec") if part.get("status") == "definite" else None
     if not isinstance(spec, dict) or not spec.get("spec_id"):
         raise SwitchFailedError(
             f"Search holds no data counted as {label} here, so nothing changed."
         )
-    block = cast(dict[str, Any], spec)
-    resolved = block.get("resolved")
+    resolved = spec.get("resolved")
     try:
         after = PartScope.from_search(
             resolved.get("scope_choices") if isinstance(resolved, dict) else None
@@ -359,8 +356,8 @@ async def _resubmit(
         pin=pin,
         reading=reading,
         scope=scope,
-        envelope=cast(dict[str, Any], envelope),
-        spec_id=str(block["spec_id"]),
+        envelope={"parts": [dict(part)]},
+        spec_id=str(spec["spec_id"]),
         after=after,
     )
 

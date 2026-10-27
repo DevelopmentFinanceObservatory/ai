@@ -20,6 +20,8 @@ from typing import Any
 
 from common.skills import ordered_skill_ids
 
+from data_mcp.scope import REASON_COPY
+
 # Up to two nearest-real suggestions are ever rendered on a no_data part,
 # matching the engine's own cap on how many it returns.
 _NEAREST_REAL_CAP = 2
@@ -77,22 +79,17 @@ _CHOICE_AXIS_LEADS: dict[str, str] = {"what": "other counts", "unit": "other pri
 _OFFERED_STATUSES = frozenset({"available", "partial"})
 
 # The words for each cause Search gives a dropped scope entry
-# (`PartScope.dropped_entries[].cause`): the option's own unavailability
-# reason, or what kept the entry out of the compile. Causes with a
-# parameter (`both_on_<axis>`, `blocks_every_<axis>_option:<conflict>`) and
-# a declared conflict's own cause are worded in `_dropped_cause_words`.
+# (`PartScope.dropped_entries[].cause`): what kept the entry out of the
+# compile, or a reason code of the option it asked for (`REASON_COPY`).
+# Causes with a parameter (`both_on_<axis>`, `blocks_every_<axis>_option:<conflict>`)
+# and a declared conflict's own cause are worded in `_dropped_cause_words`.
 _DROPPED_CAUSE_WORDS: dict[str, str] = {
     "entry_on_axis": "another choice settles that axis",
     "not_served": "the answer serves another option",
     "option_unavailable": "that option is not available here",
     "option_partial": "that option covers only some years",
     "conflicts_with_entry": "it conflicts with another choice",
-    "conflicts_with": "it conflicts with another choice",
-    "provider_not_offered": "imputed multilateral aid is not offered for this question",
-    "imputed_coverage": "imputed multilateral aid covers only some years",
-    "basis_not_published": "this basis is not published for these figures",
-    "residuals_need_summed_region": "regional buckets apply only to a summed region",
-    "option_not_covered": "the data holds no series for this option",
+    **REASON_COPY,
 }
 
 _BASIS_DISPLAY: dict[str, str] = {
