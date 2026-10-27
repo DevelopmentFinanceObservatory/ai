@@ -1229,7 +1229,7 @@ class PlanAsk(_WireModel):
 class PlanSwitchFailed(_WireModel):
     """A switch that did not apply: `choice_id` and `option_id` name the
     option the user picked, `code` is the refusal's code, and `reason` says,
-    in a reader's words, why it failed and what still holds."""
+    in a reader's words, why it failed."""
 
     choice_id: str
     option_id: str

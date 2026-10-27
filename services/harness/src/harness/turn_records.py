@@ -1342,7 +1342,7 @@ def part_name(reading: SearchReading, block: Mapping[str, Any] | None) -> str:
 
     A part with no words of its own, or none left to name it by, is named
     by what its block measures (`_served_name`, else `measure_label`), else
-    by the title of the dataset it counts from, and never by its spec_id.
+    by the title of the dataset it counts from, else "these figures".
     """
     scope = reading.scope
     assert scope is not None

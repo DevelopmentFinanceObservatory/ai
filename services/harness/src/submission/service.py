@@ -3361,8 +3361,8 @@ def _scope_decisions(
     (`_measure_decisions`), so those come first under the cap. Each dataset
     requirement of `evidence_requirements` pinning a spec_id of `scopes`
     cites that pin's scope decisions; one citing a scope decision, or a
-    stated whole's (`_stated_whole_decisions`), for a pin it no longer
-    states has that citation dropped. A decision whose slot is
+    stated whole's (`_stated_whole_decisions`), for a pin it does not
+    state has that citation dropped. A decision whose slot is
     new is written while the plan holds fewer than `MAX_PLAN_DECISIONS`;
     past that it is neither written nor cited, and the basis line still
     states its choice. The count is every slot this call states and every
@@ -3771,9 +3771,10 @@ def _aligned_bases(
 
     A share whose part binds a sector and whose whole counts from another
     dataset takes as its whole the part's own dataset over every sector
-    (`_share_wholes`), unless the user's own words name the whole's source:
-    that whole stands, keeps its own provider scope, and a decision says the
-    two sides count different providers (`_stated_whole_decisions`). A whole not compiled yet answers `BASES_UNALIGNED`
+    (`_share_wholes`), unless the user's own words name the whole's source.
+    That whole then stands, keeps its own provider scope, and a decision says
+    the two sides count different providers (`_stated_whole_decisions`). A
+    whole not compiled yet answers `BASES_UNALIGNED`
     naming it (`Realignment.whole_of`), and one compiled already
     (`aligned`) pins the share's denominator. A part with no sector choice
     to unbind answers `SHARE_WHOLE_UNDERIVABLE`.

@@ -103,9 +103,9 @@ def _on_known_axes(items: Any, *path: str) -> Any:
 
 
 def _readable_choices(items: Any) -> Any:
-    """`items`, a scope's raw choices from Search, less each on an axis this release does
-    not read (`_on_known_axes`) or holding an option whose provider scope it does not
-    read, as a choice on an unknown axis is left out.
+    """`items`, a scope's raw choices from Search, without each choice on an axis this
+    release does not read (`_on_known_axes`) and each holding an option of a provider
+    scope it does not read.
 
     An option holding no scope string is kept, so validation refuses it.
     """

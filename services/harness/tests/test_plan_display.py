@@ -3197,7 +3197,8 @@ def test_requirements_a_sentence_names_alike_are_told_apart_by_the_facet_that_di
     names: tuple[str, str],
 ) -> None:
     """Two retrievals named alike read with the one facet that sets each
-    apart, never a number; a calculation reads by the names it reads."""
+    apart, and a number tells none apart. A calculation reads by the names it
+    reads."""
 
     def dataset(requirement_id: str, place: str, start: int, end: int) -> DatasetRequirement:
         return DatasetRequirement(

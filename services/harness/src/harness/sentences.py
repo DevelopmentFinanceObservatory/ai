@@ -313,7 +313,7 @@ SEAM_SENTENCES: Mapping[SeamCode | ProblemCode, str] = {
         "This cannot be calculated by this system, so nothing was planned: {asks}."
     ),
     ProblemCode.OPERATION_UNSUPPORTED: (
-        "This cannot be calculated as planned{at}: {unsupported}, so nothing was recorded."
+        "This cannot be calculated as planned{at}, because {unsupported}, so nothing was recorded."
     ),
     ProblemCode.BASES_UNALIGNED: (
         "The figures the plan combines{at} could not be put on one measure basis and provider "
@@ -452,7 +452,7 @@ class PlanWords:
     """How the requirements of the plan a refusal is about read
     (`harness.plan_display.plan_words`): `names`, each one's name on the plan
     card, and `inputs`, the ids each one reads, by requirement id. A
-    requirement with no name is left unnamed: its id reads as a fault."""
+    requirement with no name is left unnamed, and its id reaches no reader."""
 
     names: Mapping[str, str] = field(default_factory=dict)
     inputs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)

@@ -1148,7 +1148,7 @@ def plan_approved(card: PlanProposed, *, seq: int) -> PlanApproved:
 def _switch_failed(payload: Mapping[str, Any]) -> PlanSwitchFailed | None:
     """The switch that did not apply, on a plan the `switch` node offers
     again unchanged (`harness.graph.switch`): the choice and option the user
-    picked, the refusal's code and the note saying why and what still holds.
+    picked, the refusal's code and the sentence saying why it failed.
     `None` on any other plan."""
     failed = payload.get("switch_failed")
     return PlanSwitchFailed.model_validate(failed) if failed else None
