@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+from compiler.sources import block_groups, wire_groups
 from data_mcp.digest import _dropped_cause_words
 from data_mcp.search_tool import SearchContext
 from harness.scope_choices import REASON_COPY, PartScope, ScopeEntry, ScopeReasonCode
 from harness.tool_contracts import graph_envelope, reading_facts
+from planner.workflow import ResolvedGroup
 from pydantic import ValidationError
 
 from .basis_alignment import dac1_with_contributions
@@ -644,6 +646,31 @@ def test_a_part_summary_with_a_set_of_an_unknown_class_says_no_reading() -> None
     assert "group_readings" not in summary
     facts = reading_facts(part["spec"])
     assert (facts["entity_groups"], facts["entity_groups_unreadable"]) == ([], True)
+
+
+def test_a_stored_reading_keeps_a_set_without_its_members() -> None:
+    """A resubmit posts a set by label, ref and group id, so the stored set holds no
+    member list, and posts the same sets as the block it was read from."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"] |= {
+        "entity_groups": {
+            "origin": {
+                "ref": None,
+                "label": "DAC countries",
+                "total": "DAC",
+                "members": ["country/FRA", "country/DEU"],
+            }
+        },
+    }
+    block_read = block_groups(part["spec"])
+
+    stored = reading_facts(part["spec"])["entity_groups"]
+
+    assert block_read[0].members == ("country/FRA", "country/DEU")
+    assert all("members" not in group for group in stored)
+    assert wire_groups([ResolvedGroup.model_validate(group) for group in stored]) == wire_groups(
+        block_read
+    )
 
 
 @pytest.mark.parametrize(

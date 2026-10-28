@@ -553,9 +553,10 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
     `_scope` reads it, and `planner_axes` the axes the planner's own words
     settled (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `entity_groups`
     are the named sets the part's places were asked for as
-    (`compiler.sources.readable_groups`), which a later resubmit of the reading,
-    such as a chip's, posts again. Where they are not readable they are none,
-    with a warning logged, and `entity_groups_unreadable` is true, so that
+    (`compiler.sources.readable_groups`), without their `members`, which a
+    resubmit does not post (`compiler.sources.wire_groups`), and which a later
+    resubmit of the reading, such as a chip's, posts again. Where they are not
+    readable they are none, with a warning logged, and `entity_groups_unreadable` is true, so that
     resubmit refuses rather than post the part without them. These are keys
     `harness.turn_records.SearchReading.from_part` reads, and the
     orchestrator's search result shows the model none of them. The block's
@@ -575,7 +576,9 @@ def reading_facts(spec: Mapping[str, Any]) -> dict[str, Any]:
         "open_entity_axes": facts["open_entity_axes"],
         "scope": _scope(spec.get("spec_id"), resolved.get("scope_choices")),
         "planner_axes": sorted(planner_axes(spec)),
-        "entity_groups": [group.model_dump(mode="json") for group in groups or ()],
+        "entity_groups": [
+            group.model_dump(mode="json", exclude={"members"}) for group in groups or ()
+        ],
         "entity_groups_unreadable": groups is None,
     }
 

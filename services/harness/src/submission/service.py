@@ -59,7 +59,7 @@ from compiler.sources import (
     readable_groups,
     readable_source,
     slot_codes,
-    stat_var_reading,
+    stat_var_reading_of,
 )
 from data_mcp.scope import ChoiceOrigin
 from data_mcp.settings import Settings as DataMcpSettings
@@ -3922,12 +3922,12 @@ def _reading(
     requirement: DatasetRequirement, source: SelectedSource | None
 ) -> StatVarReading | None:
     """How a retrieval for `requirement` reads its StatVars, `source` its pin's source:
-    as the compiler settles it (`compiler.sources.stat_var_reading`), a breakdown read
-    separately, and as the plan states it where no source is held."""
+    as the compiler settles it (`compiler.sources.stat_var_reading_of`), a breakdown
+    read separately, and as the plan states it where no source is held."""
     requested = (
         StatVarReading.SEPARATE if requirement.breakdown is not None else requirement.stat_vars
     )
-    return requested if source is None else stat_var_reading(source, requested).stat_var_reading
+    return requested if source is None else stat_var_reading_of(source, requested)
 
 
 @dataclass(frozen=True)
@@ -4300,11 +4300,12 @@ def _aligned_bases(
     inputs sharing no money, such as US bilateral aid plus US core
     contributions to multilaterals, is served as stated. A sum whose inputs
     are aligned on one provider scope is refused the same way where their
-    reporters' own flows count different money (`_double_counted`), as DAC
-    countries' inclusive aid plus IDA's outflows both count the donors' aid
-    through multilaterals, or may count different money, as donors left open
-    may, unless their flows are apart: grants plus loans to Kenya from all
-    donors on the inclusive scope is served.
+    reporters differ (`_double_counted`): their own flows count different money,
+    as DAC countries' inclusive aid plus IDA's outflows both count the donors' aid
+    through multilaterals, or may, as two organisations Search marks nothing of
+    may, unless their flows are apart. The same donors on one scope count each
+    money by the same streams, so ODA to Kenya plus ODA to Africa, regional, from
+    all donors on the inclusive scope is served.
 
     A calculation aligns each group of inputs it reads (`_input_groups`). A
     share or quotient beneath another calculation is one figure, its own
@@ -5179,17 +5180,17 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
     streams and can count one flow (`_Flows.meet`); `None` when none can.
 
     Two inputs count a money by different streams where they hold different
-    options, or one option whose reporters' own flows count different money
-    (`_Origin.own_flows`) where the option counts multilateral money by another
-    stream too: DAC countries' inclusive aid and IDA's outflows on the inclusive
-    scope both count the donors' aid through multilaterals, one as an imputed share
-    and one as what IDA spends. Two inputs on one option whose reporters' own
-    flows are known to count the same money count it by the same streams, and
-    whether their flows overlap is no question of provider scope. `ANY_REPORTERS`
-    states that the money is unknown, so two inputs holding it may each be
-    a country or a multilateral and go on like any other pair: two organisations
-    Search states nothing of, on the inclusive scope, may be one's outflows
-    beside the other's imputed share of them.
+    options. On one option they do only where their reporters differ: Search
+    states different money for their own flows (`_Origin.own_flows`), as DAC
+    countries' inclusive aid and IDA's outflows on the inclusive scope both count
+    the donors' aid through multilaterals, one as an imputed share and one as what
+    IDA spends; or their own flows' money is unknown (`ANY_REPORTERS`) and the two
+    bind different donors (`_same_donors`), as two organisations Search states
+    nothing of may be one's outflows beside the other's imputed share of them. The
+    same donors on one option count each money by the same streams, whatever those
+    donors are, so ODA to Kenya plus ODA to Africa, regional, from all donors on the
+    inclusive scope counts nothing twice by provider scope; whether the two parts'
+    flows overlap is no question of provider scope.
 
     `_refuse_double_count` gives the inputs (`_alignment_targets`)."""
     return next(
@@ -5200,13 +5201,27 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
             if (
                 first.choice.active != other.choice.active
                 or first.held.own_flows != other.held.own_flows
-                or first.held.own_flows == ANY_REPORTERS
+                or (first.held.own_flows == ANY_REPORTERS and not _same_donors(first, other))
             )
             and _shared_money(first, other)
             and first.held.flows.meet(other.held.flows)
         ),
         None,
     )
+
+
+def _same_donors(first: _InputBasis, other: _InputBasis) -> bool:
+    """Whether `first` and `other` bind one donor population: the same donors
+    (`_Flows.donors`), or both leave the donor role open on one dataset
+    (`harness.scope_choices.block_dataset`). A dataset Search names on neither
+    block reads as two populations."""
+    donors = first.held.flows.donors
+    if donors != other.held.flows.donors:
+        return False
+    if donors:
+        return True
+    dataset = block_dataset(first.held.block).ref
+    return dataset is not None and dataset == block_dataset(other.held.block).ref
 
 
 def _wider(first: _InputBasis, other: _InputBasis) -> _InputBasis | None:

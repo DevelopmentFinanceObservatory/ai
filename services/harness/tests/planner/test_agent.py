@@ -5498,48 +5498,134 @@ def _by_instrument(block: dict[str, Any], codes: list[str], *, added: list[str])
 
 @pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
 @pytest.mark.parametrize(
-    ("loans", "added", "code"),
+    "donors",
     [
+        pytest.param(None, id="all-donors"),
         pytest.param(
-            ["CRSTypeOfFinance400"], ["CRSTypeOfFinance421"], Outcome.OK.value, id="loans"
-        ),
-        pytest.param(
-            ["CRSTypeOfFinance400"],
-            ["CRSTypeOfFinance110"],
-            ProblemCode.OPERATION_UNSUPPORTED.value,
-            id="a-code-in-common",
-        ),
-        # A set Search states no expansion of may hold any descendant of its values.
-        pytest.param(
-            ["CRSTypeOfFinance400", "CRSTypeOfFinance421"],
-            [],
-            ProblemCode.OPERATION_UNSUPPORTED.value,
-            id="codes-unknown",
+            ("AsianDevelopmentBank", "InternationalDevelopmentAssociation"),
+            id="two-unmarked-organisations",
         ),
     ],
 )
-def test_a_sum_on_one_provider_scope_from_all_donors_counts_no_flow_twice_over_apart_slots(
-    decision: DecisionFactory, accept: bool, loans: list[str], added: list[str], code: str
+@pytest.mark.parametrize(
+    ("loans", "added", "apart"),
+    [
+        pytest.param(["CRSTypeOfFinance400"], ["CRSTypeOfFinance421"], True, id="loans"),
+        pytest.param(
+            ["CRSTypeOfFinance400"], ["CRSTypeOfFinance110"], False, id="a-code-in-common"
+        ),
+        # A set Search states no expansion of may hold any descendant of its values.
+        pytest.param(["CRSTypeOfFinance400", "CRSTypeOfFinance421"], [], False, id="codes-unknown"),
+    ],
+)
+def test_a_sum_on_one_provider_scope_counts_no_flow_twice_over_apart_slots(
+    decision: DecisionFactory,
+    accept: bool,
+    donors: tuple[str, str] | None,
+    loans: list[str],
+    added: list[str],
+    apart: bool,
 ) -> None:
-    """Grants plus loans to Kenya from all donors, both counted with imputed
-    multilateral flows. Donors left open may include multilateral organisations,
-    whose outflows the other input's imputed share can count, but no flow is both a
-    grant and a loan, so the sum counts nothing twice and is served. Where the two
-    bindings share a code, or one's codes are unknown, a flow can lie in both and
-    the sum is refused."""
+    """Grants plus loans to Kenya, both counted with imputed multilateral flows. From
+    all donors on both, the two count one donor population's money by the same
+    streams, so the provider scope counts nothing twice and the sum is served
+    whatever the slots bind. From two organisations Search marks nothing of, one's
+    outflows may be what the other's imputed share counts, so the sum is served only
+    where no flow is both a grant and a loan, and refused where the two bindings
+    share a code or one's codes are unknown, since a flow can lie in both."""
     ctx = _FakeToolContext()
     grants, other = (
         _to_recipients(
-            _from_donors(provider_block(spec_id, narrow=False, active="provider:inclusive"), []),
+            _from_donors(
+                provider_block(spec_id, narrow=False, active="provider:inclusive"),
+                [donor] if donor is not None else [],
+            ),
             ["country/KEN"],
         )
-        for spec_id in (HEALTH, TOTAL)
+        for spec_id, donor in zip((HEALTH, TOTAL), donors or (None, None), strict=True)
     )
+    for block in (grants, other):
+        for entity in block["resolved"]["entities"]:
+            entity.update(entity_type="Organization")
     _show_blocks(
         ctx,
         _by_instrument(grants, ["CRSTypeOfFinance100"], added=["CRSTypeOfFinance110"]),
         _by_instrument(other, loans, added=added),
     )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+
+    if donors is None or apart:
+        assert result.get("outcome") == Outcome.OK.value, result
+        assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
+    else:
+        assert result.get("code") == ProblemCode.OPERATION_UNSUPPORTED.value, result
+        assert result["detail"]["basis"]["step_id"] == "sum"
+        assert load_plan(ctx.state) is None
+
+
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize(
+    ("donors", "dataset", "code"),
+    [
+        pytest.param(([], []), None, Outcome.OK.value, id="all-donors"),
+        # Every donor of another dataset is another population, which may hold a
+        # multilateral whose outflows the other's imputed share counts.
+        pytest.param(
+            ([], []),
+            "provenance/OECDCRS",
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="all-donors-of-two-datasets",
+        ),
+        pytest.param(
+            ([], ["DACMultilaterals"]),
+            None,
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="all-donors-and-an-unmarked-organisation",
+        ),
+        # A multilaterals' total Search marks nothing of, as it marks none: its outflows
+        # may spend the money the DAC countries' imputed share counts.
+        pytest.param(
+            (["country/FRA", "country/DEU"], ["DACMultilaterals"]),
+            None,
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="dac-countries-and-a-multilaterals-total",
+        ),
+    ],
+)
+def test_a_sum_on_one_provider_scope_counts_one_donor_population_by_the_same_streams(
+    decision: DecisionFactory,
+    accept: bool,
+    donors: tuple[list[str], list[str]],
+    dataset: str | None,
+    code: str,
+) -> None:
+    """ODA to Kenya plus ODA to Africa, regional, from all donors, both counted with
+    imputed multilateral flows. Donors left open may include multilateral
+    organisations, but both inputs count the one population's money by the same
+    streams, so the provider scope counts nothing twice and the sum is served.
+    Where the donors differ, open on two datasets, open beside an organisation
+    Search marks nothing of, or DAC countries beside a multilaterals' total, one's
+    outflows may be what the other's imputed share counts, and the sum is refused."""
+    ctx = _FakeToolContext()
+    kenya, africa = (
+        _to_recipients(
+            _from_donors(provider_block(spec_id, narrow=False, active="provider:inclusive"), bound),
+            [recipient],
+        )
+        for spec_id, bound, recipient in zip(
+            (HEALTH, TOTAL), donors, ("country/KEN", "AfricaRegional"), strict=True
+        )
+    )
+    for donor in africa["resolved"]["entities"]:
+        if not donor["ref"].startswith("country/"):
+            donor.update(entity_type="Organization")
+    if dataset is not None:
+        africa["resolved"]["facets"] = {
+            **africa["resolved"]["facets"],
+            "provenance": {"ref": dataset, "label": dataset},
+        }
+    _show_blocks(ctx, kenya, africa)
 
     result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
 

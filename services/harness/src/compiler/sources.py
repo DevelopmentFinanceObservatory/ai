@@ -832,19 +832,31 @@ def default_reading(source: SelectedSource) -> StatVarReading:
     return StatVarReading.SEPARATE
 
 
-def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
-    """`source` stating how its retrieval reads it, and who said so.
+def stat_var_reading_of(
+    source: SelectedSource, requested: StatVarReading | None
+) -> StatVarReading | None:
+    """How a retrieval of `source` reads its StatVars, `requested` the requirement's reading.
 
-    A source binding one StatVar has no reading. A family takes the
-    requirement's `requested` reading when it states one, and
-    `default_reading` otherwise.
+    A source binding one StatVar has no reading. A family takes `requested`
+    when it states one, and `default_reading` otherwise.
     """
     if not is_family(source):
-        reading, set_by = None, None
-    elif requested is not None:
-        reading, set_by = requested, ReadingSetBy.PLAN
-    else:
-        reading, set_by = default_reading(source), ReadingSetBy.RULE
+        return None
+    return requested if requested is not None else default_reading(source)
+
+
+def stat_var_reading(source: SelectedSource, requested: StatVarReading | None) -> SelectedSource:
+    """`source` stating how its retrieval reads it (`stat_var_reading_of`), and who
+    said so: the plan where it stated the reading, the rule where `default_reading`
+    settled it."""
+    reading = stat_var_reading_of(source, requested)
+    set_by = (
+        None
+        if reading is None
+        else ReadingSetBy.PLAN
+        if requested is not None
+        else ReadingSetBy.RULE
+    )
     return source.model_copy(
         update={"stat_var_reading": reading, "stat_var_reading_set_by": set_by}
     )
