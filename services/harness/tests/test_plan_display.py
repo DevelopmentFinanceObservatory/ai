@@ -35,7 +35,6 @@ from harness.plan_display import (
     shown_plan,
     step_rows,
 )
-from planner.agent import planner_instruction
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -52,14 +51,10 @@ from planner.operations import (
     Translation,
 )
 from planner.plan import (
-    DAC_TOTAL_READING,
-    TOP_DONORS_READING,
-    UNNAMED_DONORS_SLOT,
     AggregateRequirement,
     ComparisonRequirement,
     DatasetRequirement,
     Decision,
-    DecisionDraft,
     DecisionFixes,
     DecisionScope,
     Entity,
@@ -80,7 +75,6 @@ from planner.plan import (
     WholeOf,
     frame_shapes,
     scope_choice_slot,
-    settle_decisions,
 )
 from planner.records import (
     Breakdown,
@@ -3627,49 +3621,3 @@ def test_a_share_whose_sides_read_one_retrieval_still_says_as_a_share_of() -> No
         "Gross disbursements, current USD, in 2023, from the OECD Creditor Reporting "
         f"System (CRS): {side}, as a share of {side}."
     )
-
-
-def test_a_plan_for_major_donors_lists_the_dac_total_and_the_top_donors_on_its_card() -> None:
-    """For "How much did major donors' total ODA change", the planner instruction has the
-    plan name DAC countries' published total and record the reading as a decision. That
-    plan validates, and its card asks the decision with both readings, the total
-    chosen, so the user can switch to the top donors."""
-    instruction = planner_instruction(has_translator=True)
-    for constant in (UNNAMED_DONORS_SLOT, DAC_TOTAL_READING, TOP_DONORS_READING):
-        assert constant in instruction
-    dac = Entity(name="DAC countries", role="donor")
-    oda = DatasetRequirement(
-        id="oda",
-        decision_ids=[UNNAMED_DONORS_SLOT],
-        measure="official development assistance",
-        entities=[dac],
-        period=Period(start=2024, end=2025),
-    )
-    change = GrowthRequirement(id="change", input_id="oda", window_start=2024, window_end=2025)
-    (decision,) = settle_decisions(
-        [
-            DecisionDraft(
-                slot=UNNAMED_DONORS_SLOT,
-                description="Which donors 'major donors' means",
-                options=[DAC_TOTAL_READING, TOP_DONORS_READING],
-                chosen=DAC_TOTAL_READING,
-                resolved_by=ResolvedBy.PLANNER_DEFAULT,
-                rationale="DAC countries' total is the standard reading of major donors",
-                fixes=("entities",),
-            )
-        ],
-        [oda, change],
-    )
-    plan = Plan(
-        question="How much did major donors' total ODA change between 2024 and 2025?",
-        decisions=[decision],
-        evidence_requirements=[oda, change],
-    )
-
-    (shown,) = plan.decisions
-    assert (shown.options, shown.chosen) == (
-        (DAC_TOTAL_READING, TOP_DONORS_READING),
-        DAC_TOTAL_READING,
-    )
-    assert shown.fixes == DecisionFixes(entities=(dac,))
-    assert UNNAMED_DONORS_SLOT in card_questions(plan)

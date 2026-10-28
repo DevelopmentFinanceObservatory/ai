@@ -119,11 +119,8 @@ from translator.tool import Translate, authored_answer
 
 from planner.declaration import PlanTool
 from planner.plan import (
-    DAC_TOTAL_READING,
     MAX_PLAN_DECISIONS,
     MAX_PLAN_REQUIREMENTS,
-    TOP_DONORS_READING,
-    UNNAMED_DONORS_SLOT,
     AnswerMode,
     AskAnswer,
     DecisionDraft,
@@ -243,13 +240,6 @@ _PLANNING = (
     'alone, such as "Africa", is one entity with its own figure. "African '
     'countries", or a figure for each member, names the set once with '
     "`members` set, however many members it has.\n\n"
-    'Unnamed donors ("major donors", "main donors") are DAC countries\' '
-    'published total: name "DAC countries" as donor, without `members`. '
-    f"Record a `Decision` `{UNNAMED_DONORS_SLOT}` with `options` "
-    f'["{DAC_TOTAL_READING}", "{TOP_DONORS_READING}"]: the first by '
-    "`planner_default`, fixing `entities`, or the one the user picked by "
-    "`user`, which every later plan keeps. The second states `across` "
-    "donor, fixing it, and ranks every donor's latest ODA, top 10.\n\n"
     "A result's open axes (`open_entity_axes`) are the columns left open: "
     "`origin` is the giving party (an entity `role` of donor, creditor or "
     "exporter), `destination` the receiving party (recipient, debtor or "

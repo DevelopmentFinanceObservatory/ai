@@ -373,10 +373,12 @@ def stop_cause(outcome: Refused) -> StopCause:
 
 # What the user can do about a run the evidence check stopped, one sentence
 # written for the end user, by the code of its first error (`failed_step`). A
-# run's `entity_missing` names a party on a side the approved source binds.
-# A name on a side it leaves open is refused before approval
+# run's `entity_missing` names a party the approved source does not resolve
+# on a side it binds, so the name is the user's to correct. A name on a side
+# it leaves open is refused before approval
 # (`compiler.evidence.named_on_open_axes`), so asking without the names would
-# answer another question.
+# answer another question. `entity_no_series` has no remedy, since the
+# source resolves the name and the retrieval holds no series for it.
 ISSUE_REMEDIES: dict[EvidenceIssueCode, str] = {
     EvidenceIssueCode.ENTITY_MISSING: "Ask again with each name as the data lists it",
 }

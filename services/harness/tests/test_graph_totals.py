@@ -1006,22 +1006,28 @@ def _finding(code: EvidenceIssueCode, required: str) -> EvidenceIssue:
     ("code", "window", "stated"),
     [
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2015, end=2024),
             ["Uganda has no data from 2015 to 2024 and was left out."],
             id="span",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2024, end=2024),
             ["Uganda has no data in 2024 and was left out."],
             id="one-year",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             None,
             ["Uganda has no data in the years retrieved and was left out."],
             id="no-window",
+        ),
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            Period(start=2015, end=2024),
+            ["Uganda has no data from 2015 to 2024 and was left out."],
+            id="stored-entity-missing-warning",
         ),
         pytest.param(EvidenceIssueCode.WINDOW_SHORT, None, [], id="other-gap"),
     ],

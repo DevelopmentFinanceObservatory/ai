@@ -15,7 +15,6 @@ from google.genai import types
 from harness.prefix_cache import gemini_model_name
 from harness.settings import DEFAULT_ORCHESTRATOR_THINKING_LEVEL
 from harness.turn_budget import BoundedGemini
-from planner.plan import DAC_TOTAL_READING, TOP_DONORS_READING
 
 from orchestrator.tool_failures import answering_tool_failures
 
@@ -39,19 +38,7 @@ _DIGESTS = (
     ("conversation_digest", "Earlier turns in this conversation"),
 )
 
-# How the orchestrator reads donors the user leaves unnamed, in the words of the
-# decision the plan records for them (`planner.plan.UNNAMED_DONORS_SLOT`).
-_UNNAMED_DONORS = f"""\
-Donors the user leaves unnamed ("major donors", "big donors", "main
-donors") are DAC countries' published total, never a sum of DAC members.
-Search for them as the one donor "DAC countries", without `members`, and
-state that reading in the plan brief: the plan card offers
-"{TOP_DONORS_READING}" in place of "{DAC_TOTAL_READING}". Open the answer
-with the reading the plan's result says it records.
-"""
-
-INSTRUCTION = (
-    """\
+INSTRUCTION = """\
 You are the analyst behind DFO Studio, the Development Finance Observatory's
 chat and canvas. You answer questions about development, development finance
 and the open data DFO holds, from what your tools return. Decline any other
@@ -103,9 +90,6 @@ in those words. A part with a group_read_as_members departure read the group
 as its members, and the answer says whether it lists their figures or adds
 them up.
 
-"""
-    + _UNNAMED_DONORS
-    + """
 A part with candidates needs a choice. When the question makes one of them
 plainly right, fetch it. When it does not, ask the user, with the
 candidates' labels as the options.
@@ -317,7 +301,6 @@ tool result states no reason, give none. Say which years the data covers
 only as a search result or the plan record states them, and state a period
 the plan chose as a choice made, with its reason.
 """
-)
 
 
 def prepend_digests(callback_context: CallbackContext, llm_request: LlmRequest) -> None:

@@ -602,6 +602,7 @@ class EvidenceIssueCode(TitlelessEnum):
     DATA_UNVERIFIED = "data_unverified"
     IDENTITY_UNVERIFIED = "identity_unverified"
     ENTITY_MISSING = "entity_missing"
+    ENTITY_NO_SERIES = "entity_no_series"
     ENTITY_UNVERIFIED = "entity_unverified"
     ENTITY_ROLE_AMBIGUOUS = "entity_role_ambiguous"
     ENTITY_ROLE_MISMATCH = "entity_role_mismatch"

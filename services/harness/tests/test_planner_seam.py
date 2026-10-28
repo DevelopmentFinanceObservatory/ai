@@ -2386,6 +2386,39 @@ def test_errors_past_the_cap_follow_the_cut_refusal(
     assert len(message) < 5 * MAX_QUESTION_CHARS
 
 
+class _Uncomparable(dict[str, Any]):
+    """An issue that fails the test when compared with another, as only a pairwise scan does."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("the refusal's issues were compared pairwise")
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+def test_a_refusal_of_thousands_of_errors_renders_as_its_small_counterpart() -> None:
+    """Twelve thousand series errors render as three hundred do, their counts aside, and
+    the issues are split by severity in one pass, with no pairwise comparison."""
+
+    def rendered(series: int) -> str:
+        refusal = _entities_unmet_refusal()
+        refusal["issues"] = [
+            _Uncomparable(issue)
+            for issue in [*refusal["issues"], *(_grain_ambiguous("gdp", n) for n in range(series))]
+        ]
+        return _render(_seam(), fresh=False, refusal=refusal)
+
+    small, large = rendered(300), rendered(12_000)
+
+    listed, counted = _errors_and_left_out(small.partition("\nErrors: ")[2])
+    assert len(listed) + sum(counted.values()) == len(_DONORS) + 300
+    more = {**counted, "grain_ambiguous": counted["grain_ambiguous"] + 11_700}
+    assert large == small.replace(
+        json.dumps({"entity_missing": len(_DONORS), "grain_ambiguous": 300}),
+        json.dumps({"entity_missing": len(_DONORS), "grain_ambiguous": 12_000}),
+    ).replace(f"Errors left out: {json.dumps(counted)}", f"Errors left out: {json.dumps(more)}")
+
+
 def test_a_short_refusal_is_rendered_whole() -> None:
     message = _render(_seam(), fresh=False, refusal=_rediscovery_refusal(SPEC))
 

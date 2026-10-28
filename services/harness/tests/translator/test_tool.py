@@ -1419,6 +1419,7 @@ _DAC_MEMBERS_BLOCK = _spec(
     ],
     ids=["group-of-members", "group-total", "members-alone"],
 )
+@pytest.mark.parametrize("axis", ["donor", None], ids=["axis-stated", "axis-the-sole-role"])
 async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
     real_schemas: list[ToolSchema],
     decision: Callable[..., Any],
@@ -1428,12 +1429,13 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
     context_holding: ContextHolding,
     entity_groups: dict[str, Any],
     named: bool,
+    axis: str | None,
 ) -> None:
     """For "largest DAC donors", a rank over every donor pinned to the DAC members, the
     pin giving way would rank 50 providers, Turkey among the top ten. The group is named
-    for its members in place of `across`, so the rank keeps to them. A group the pin
-    binds as its published total, or a side held to named members alone, is left as it
-    is."""
+    for its members in place of `across`, so the rank keeps to them, whether it states
+    its axis or ranks over its input's one role. A group the pin binds as its published
+    total, or a side held to named members alone, is left as it is."""
     context = context_holding(
         draft(
             decisions=[
@@ -1460,7 +1462,7 @@ async def test_a_rank_over_a_side_a_pin_holds_to_a_group_ranks_its_members(
                     input_id="req_oda",
                     direction=RankDirection.HIGHEST_FIRST,
                     among=RankAmong.POPULATION,
-                    axis="donor",
+                    axis=axis,
                     limit=10,
                     window_start=2024,
                     window_end=2024,

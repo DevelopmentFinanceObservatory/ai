@@ -15,7 +15,6 @@ from harness.prefix_cache import PrefixCache, PrefixCachedGemini
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.turn_budget import BoundedGemini
 from orchestrator.agent import AGENT_NAME, INSTRUCTION, create_orchestrator_agent
-from planner.plan import DAC_TOTAL_READING, TOP_DONORS_READING
 
 from ..data_mcp_definitions import DataMcpDefinitions
 from ..orchestrator_fakes import (
@@ -290,10 +289,3 @@ async def test_a_stored_submit_analysis_call_replays_to_a_model_that_is_not_offe
     assert "submit_analysis" not in declared
     answers = [e.content.parts[0].text for e in events if e.author == AGENT_NAME and e.content]
     assert answers[-1] == "Kenya's figure stands."
-
-
-def test_the_instruction_offers_the_readings_the_unnamed_donors_decision_records():
-    """The orchestrator names "major donors" by the options the plan's
-    `UNNAMED_DONORS_SLOT` decision records, so its brief and the card agree."""
-    assert DAC_TOTAL_READING in INSTRUCTION
-    assert TOP_DONORS_READING in INSTRUCTION

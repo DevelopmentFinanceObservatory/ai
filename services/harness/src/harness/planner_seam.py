@@ -1499,24 +1499,21 @@ def _refusal_text(refusal: Mapping[str, Any]) -> str:
     (`_errors_listed`), so four `window_short` warnings never push the
     `entity_missing` errors behind them out of the planner's sight.
     """
-    ordered = _issues_shown(refusal, warnings=True)
+    split = _split(refusal)
+    ordered = _issues_shown(split, warnings=True)
     if len(text := json.dumps(ordered)) <= MAX_QUESTION_CHARS:
         return text
-    summarised = _issues_shown(refusal, warnings=False)
+    summarised = _issues_shown(split, warnings=False)
     if len(text := json.dumps(summarised)) <= MAX_QUESTION_CHARS:
         return text
-    stopped = [
-        refusal,
-        *(one for one in refusal.get("also_stopped") or () if isinstance(one, dict)),
-    ]
+    stopped = [split, *(one for one in split.also_stopped or () if isinstance(one, _Split))]
     failing = [
         {key: issue[key] for key in _ERROR_FIELDS if key in issue}
         for one in stopped
-        for issue in _issue_list(one)
-        if issue.get("severity") == Severity.ERROR.value
+        for issue in one.failing
     ]
     rest = cut_user_text(
-        json.dumps(_issues_shown(refusal, warnings=False, errors=False)), MAX_QUESTION_CHARS
+        json.dumps(_issues_shown(split, warnings=False, errors=False)), MAX_QUESTION_CHARS
     )
     return f"{rest}\n{_errors_listed(failing)}" if failing else rest
 
@@ -1566,34 +1563,58 @@ def _errors_listed(failing: Sequence[Mapping[str, Any]]) -> str:
     return f"{text}\nErrors left out: {json.dumps(dict(left_out))}" if left_out else text
 
 
-def _issue_list(refusal: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The evidence issues `refusal` carries, empty when it carries none."""
+@dataclass(frozen=True, slots=True)
+class _Split:
+    """A replan refusal with its evidence issues split once by severity, for `_issues_shown`.
+
+    `failing` holds the issues whose severity is `error` and `others` the
+    rest, each in the refusal's order; both are empty when `issues` is not a
+    list. `also_stopped` holds each `also_stopped` entry split the same way,
+    an entry that is not a dict as it is, and is `None` when the refusal's
+    `also_stopped` is not a list.
+    """
+
+    refusal: Mapping[str, Any]
+    failing: list[Mapping[str, Any]]
+    others: list[Mapping[str, Any]]
+    also_stopped: list[_Split | Any] | None
+
+
+def _split(refusal: Mapping[str, Any]) -> _Split:
+    """`refusal` and each of its `also_stopped`, their issues split by severity in one pass."""
+    failing: list[Mapping[str, Any]] = []
+    others: list[Mapping[str, Any]] = []
     issues = refusal.get("issues")
-    return (
-        [issue for issue in issues if isinstance(issue, dict)] if isinstance(issues, list) else []
+    for issue in issues if isinstance(issues, list) else ():
+        if isinstance(issue, dict):
+            (failing if issue.get("severity") == Severity.ERROR.value else others).append(issue)
+    siblings = refusal.get("also_stopped")
+    return _Split(
+        refusal=refusal,
+        failing=failing,
+        others=others,
+        also_stopped=[_split(one) if isinstance(one, dict) else one for one in siblings]
+        if isinstance(siblings, list)
+        else None,
     )
 
 
-def _issues_shown(
-    refusal: Mapping[str, Any], *, warnings: bool, errors: bool = True
-) -> dict[str, Any]:
-    """`refusal` and each of its `also_stopped` with its issues' errors first, then, when
-    `warnings`, the rest; otherwise the rest counted by code under `warnings_left_out`.
+def _issues_shown(split: _Split, *, warnings: bool, errors: bool = True) -> dict[str, Any]:
+    """`split`'s refusal and each of its `also_stopped` with its issues' errors first, then,
+    when `warnings`, the rest; otherwise the rest counted by code under `warnings_left_out`.
     Without `errors`, the errors are counted by code under `errors_listed` too."""
-    shown = dict(refusal)
+    shown = dict(split.refusal)
     if "issues" in shown:
-        issues = _issue_list(refusal)
-        failing = [issue for issue in issues if issue.get("severity") == Severity.ERROR.value]
-        others = [issue for issue in issues if issue not in failing]
+        failing, others = split.failing, split.others
         shown["issues"] = [*(failing if errors else ()), *(others if warnings else ())]
         if others and not warnings:
             shown["warnings_left_out"] = dict(Counter(str(issue.get("code")) for issue in others))
         if failing and not errors:
             shown["errors_listed"] = dict(Counter(str(issue.get("code")) for issue in failing))
-    if isinstance(siblings := shown.get("also_stopped"), list):
+    if split.also_stopped is not None:
         shown["also_stopped"] = [
-            _issues_shown(one, warnings=warnings, errors=errors) if isinstance(one, dict) else one
-            for one in siblings
+            _issues_shown(one, warnings=warnings, errors=errors) if isinstance(one, _Split) else one
+            for one in split.also_stopped
         ]
     return shown
 

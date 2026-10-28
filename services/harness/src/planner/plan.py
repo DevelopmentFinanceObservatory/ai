@@ -287,15 +287,6 @@ MAX_ASK_CHARS = 300
 # restates the user's, and `cut_user_text` shortens a longer one before it
 # reaches a plan or the brief.
 MAX_QUESTION_CHARS = 2_000
-
-# The decision a plan records for a donor set the question leaves unnamed
-# ("major donors", "big donors", "main donors"): DAC countries' published
-# total by default, or the largest donors by their latest ODA. The plan card
-# lists both, and the reply opens with the one chosen
-# (`harness.graph.plan_done`).
-UNNAMED_DONORS_SLOT = "unnamed_donors"
-DAC_TOTAL_READING = "DAC countries' total"
-TOP_DONORS_READING = "the top 10 donors by latest ODA"
 MAX_DECISION_DESCRIPTION_CHARS = 500
 MAX_DECISION_RATIONALE_CHARS = 800
 # A decision's options list every candidate the planner weighed, among them each

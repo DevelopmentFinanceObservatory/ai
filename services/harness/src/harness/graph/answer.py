@@ -52,7 +52,7 @@ from planner.plan import (
     stored_plan,
 )
 from planner.plan import Plan as PlannerPlan
-from planner.records import EvidenceIssueCode, Period, Reduction, SeriesEntity
+from planner.records import EvidenceIssueCode, Period, Reduction, SeriesEntity, Severity
 from planner.shapes import PLACE_PHRASE, join_key_pairs
 from planner.workflow import ReadingSetBy, ResolvedGroup, SelectedSource, WorkflowStep
 from planner.workflow import Workflow as PlanWorkflow
@@ -718,9 +718,10 @@ def _left_out_entity_sentences(
     terminals: Collection[str] | None = None,
 ) -> list[str]:
     """One sentence per entity a retrieval under an answer frame held no
-    series for and left out (an `ENTITY_MISSING` among its
-    `EvidenceRecord.gaps`), over every answer frame (`answer_frames`) or
-    only those of `terminals`.
+    series for and left out (an `ENTITY_NO_SERIES` among its
+    `EvidenceRecord.gaps`, or an `ENTITY_MISSING` warning, which is how a
+    run recorded before `ENTITY_NO_SERIES` stored it), over every answer
+    frame (`answer_frames`) or only those of `terminals`.
 
     The sentence names the entity and the years the retrieval holds
     (`EvidenceRecord.window`), in which it has no data. Retrievals are taken
@@ -737,7 +738,9 @@ def _left_out_entity_sentences(
         else:
             years = f"from {window.start} to {window.end}"
         for gap in record.gaps:
-            if gap.code is not EvidenceIssueCode.ENTITY_MISSING:
+            if gap.code is not EvidenceIssueCode.ENTITY_NO_SERIES and not (
+                gap.code is EvidenceIssueCode.ENTITY_MISSING and gap.severity is Severity.WARNING
+            ):
                 continue
             sentence = f"{gap.required} has no data {years} and was left out."
             if sentence not in sentences:
