@@ -172,7 +172,6 @@ from planner.plan import (
     predicate_key,
     reached,
     repinned,
-    requirement_step_order,
     requirements_over,
     roles_not_kept,
     scope_choice_slot,
@@ -3936,30 +3935,48 @@ class _Flows:
 
     `donors` and `recipients` are the parties the part binds on its `origin`
     and `destination` roles (`bound_parties`), empty for a part counting every
-    one. `sector` is the slot the part's sector choice binds (`axis_slot`)
-    with every code it admits, the codes the code index widened its bound
-    codes to included (`compiler.sources.slot_codes`), `None` when the part
-    binds no sector or its codes are unknown. `years` are the first and last
-    year its identity requests, the last `None` for a window open at its end,
-    and `years` is `None` for a window stating no range.
+    one. `slots` are the codes each summable slot the part binds admits, the
+    codes the code index widened its bound codes to included, by constraint
+    property (`compiler.sources.slot_codes`), a slot whose codes are unknown
+    mapping to `None`, and empty where the block lists no readable slots.
+    Search marks a slot summable (`Slot.summable`) where its code system gives
+    each record one code and sibling codes add up to their parent, so two
+    summable bindings sharing no code count no record in common. Other slots,
+    such as DAC1's aid type, where the total line holds the bilateral one, or
+    the netting basis, which counts one flow gross and net, are left out.
+    `years` are the first and last year its identity requests, the last
+    `None` for a window open at its end, and `years` is `None` for a window
+    stating no range.
     """
 
     donors: frozenset[str]
     recipients: frozenset[str]
-    sector: tuple[str, frozenset[str]] | None
+    slots: Mapping[str, frozenset[str] | None]
     years: tuple[int, int | None] | None
 
     @classmethod
     def of(cls, scope: PartScope, block: Mapping[str, Any] | None) -> _Flows:
         """The flows of the part `scope` records, `block` its spec block."""
-        slot = axis_slot(scope, "sector")
-        codes = (slot_codes((block or {}).get("resolved") or {}) or {}).get(slot or "")
+        resolved = (block or {}).get("resolved") or {}
+        summable = {
+            slot["key"]["property"].get("ref")
+            for slot in resolved.get("slots") or ()
+            if isinstance(slot, Mapping)
+            and slot.get("summable") is True
+            and isinstance(slot.get("key"), Mapping)
+            and isinstance(slot["key"].get("property"), Mapping)
+        }
+        codes = slot_codes(resolved) or {}
         window = scope.base.identity.get("requested_window") or {}
         start, end = window.get("start_year"), window.get("end_year")
         return cls(
             donors=frozenset(bound_parties(scope, "origin")),
             recipients=frozenset(bound_parties(scope, "destination")),
-            sector=(slot, frozenset(codes)) if slot is not None and codes is not None else None,
+            slots={
+                slot: frozenset(refs) if refs is not None else None
+                for slot, refs in codes.items()
+                if slot in summable
+            },
             years=(start, end)
             if window.get("kind") == "range" and isinstance(start, int)
             else None,
@@ -3969,22 +3986,20 @@ class _Flows:
         """Whether one flow can lie in both parts: no axis keeps them apart.
 
         Two parts are apart on donors or recipients when both bind countries
-        alone with none in common (`compiler.sources.countries_apart`), on the
-        sector when both bind one slot to codes sharing none, and on years when
-        both request ranges that share none. Anything a part leaves open or does
-        not state keeps them together.
+        alone with none in common (`compiler.sources.countries_apart`), on a
+        summable slot both bind to known codes sharing none, as grants and
+        loans are, and on years when both request ranges that share none.
+        Anything a part leaves open or does not state, and a slot whose codes
+        are unknown, keeps them together.
         """
         if countries_apart(self.donors, other.donors) or countries_apart(
             self.recipients, other.recipients
         ):
             return False
-        if (
-            self.sector is not None
-            and other.sector is not None
-            and self.sector[0] == other.sector[0]
-            and self.sector[1].isdisjoint(other.sector[1])
-        ):
-            return False
+        for slot, codes in self.slots.items():
+            theirs = other.slots.get(slot)
+            if codes is not None and theirs is not None and codes.isdisjoint(theirs):
+                return False
         if self.years is None or other.years is None:
             return True
         (start, end), (other_start, other_end) = self.years, other.years
@@ -4272,7 +4287,7 @@ def _aligned_bases(
     its own. A sum whose inputs the user stated on different provider
     scopes, or one accepting a provider difference whose inputs are on
     different scopes, is refused where two of them can count one flow
-    (`_Flows.meet`: no donor, recipient, sector or year keeps them apart),
+    (`_Flows.meet`: no donor, recipient, summable slot or year keeps them apart),
     where they count one money (`_shared_money`), since an inclusive figure
     already holds the bilateral one and the sum would count it twice. A
     multilateral organisation's own outflows count multilateral money
@@ -4286,7 +4301,9 @@ def _aligned_bases(
     are aligned on one provider scope is refused the same way where their
     reporters' own flows count different money (`_double_counted`), as DAC
     countries' inclusive aid plus IDA's outflows both count the donors' aid
-    through multilaterals.
+    through multilaterals, or may count different money, as donors left open
+    may, unless their flows are apart: grants plus loans to Kenya from all
+    donors on the inclusive scope is served.
 
     A calculation aligns each group of inputs it reads (`_input_groups`). A
     share or quotient beneath another calculation is one figure, its own
@@ -5688,15 +5705,8 @@ def _card_names(
     states no concept. Each retrieval reads the source of the block its pin was
     shown with (`sources`), and is named afresh as the card of the compiled plan
     names it (`harness.plan_display.card_rows`), whatever the card it revises
-    named it. Retrievals named alike are numbered in the order the compiled
-    plan's workflow runs them (`planner.plan.requirement_step_order`), the card's
-    order, whatever order the plan states them in."""
-    order = {
-        requirement_id: at
-        for at, requirement_id in enumerate(
-            requirement_step_order({requirement.id: requirement for requirement in requirements})
-        )
-    }
+    named it. Retrievals named alike are numbered in the order the plan states
+    them, as the card numbers them (`harness.plan_display._card_order`)."""
     datasets = [
         requirement.model_copy(
             update={
@@ -5711,7 +5721,7 @@ def _card_names(
         )
         if requirement.source_spec_id is not None
         else requirement
-        for requirement in sorted(requirements, key=lambda held: order[held.id])
+        for requirement in requirements
         if isinstance(requirement, DatasetRequirement)
     ]
     # The card names a retrieval off the retrievals and decisions alone. The

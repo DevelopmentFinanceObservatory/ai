@@ -651,12 +651,9 @@ class SeedEntityGroup(BaseModel):
 
     The members are apis' `EntityGroup` fields, and any other key is refused,
     so a block from an older Search wire fails rather than losing its `ref`.
-    Each field the harness reads of a searched set (`planner.workflow.ResolvedGroup`)
-    is carried into the set the seed resolves as Search served it: `ref` or `group_id`,
-    `total`, `whole_of`, `side_classes`, `members`, `left_out` (`None` where
-    Search states nothing), `sum_differs` and `holds_multilaterals`
-    (`harness.seeds.resolve_seed`). The resubmit post omits
-    `holds_multilaterals`, since Search derives it on every answer. Each field
+    The seed's resubmit (`harness.seeds.resolve_seed`) posts each set's `label`
+    and its `ref` or `group_id` on its role (`compiler.sources.wire_groups`).
+    The set the turn reads is the one Search answers with. Each field
     is held to the bound apis sets on it, so no set Search serves fails here;
     a residual label in `left_out`, which apis does not bound, is held only by
     the seed's byte cap (`MAX_SEED_SPEC_BYTES`).

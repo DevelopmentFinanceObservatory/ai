@@ -81,6 +81,7 @@ from planner.plan import (
     WholeOf,
     frame_shapes,
     scope_choice_slot,
+    split_of,
 )
 from planner.records import (
     Breakdown,
@@ -116,6 +117,8 @@ from planner.workflow import (
     Workflow,
     WorkflowStep,
 )
+from submission.service import SourceReadings, _card_names
+from translator.mechanical import build_translation
 
 from .share_plan import (
     ALL_DONORS,
@@ -794,11 +797,11 @@ def _retrieve_then_aggregate_plan(
     return draft.with_translation(translation=translation, workflow=workflow)
 
 
-def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
+def test_steps_that_read_alike_are_numbered_in_the_order_the_plan_states_them(
     decision: DecisionFactory,
 ) -> None:
-    # The workflow runs `second_totals` before `first_totals`, so the card
-    # lists it first and it takes "(1)".
+    # The plan states `first_totals` first, so it takes "(1)", though the workflow
+    # runs `second_totals` first and the card lists it first.
     plan = _retrieve_then_aggregate_plan(decision)
     assert plan.translation is not None and plan.workflow is not None
     dataset, totals = plan.evidence_requirements
@@ -844,8 +847,8 @@ def test_steps_that_read_alike_are_numbered_in_the_order_the_card_lists_them(
 
     assert [(row["id"], row["label"]) for row in rows] == [
         ("annual_debt_service", "Fetch external debt service paid for Kenya"),
-        ("second_totals", "Total external debt service paid by year (1)"),
-        ("first_totals", "Total external debt service paid by year (2)"),
+        ("second_totals", "Total external debt service paid by year (2)"),
+        ("first_totals", "Total external debt service paid by year (1)"),
     ]
 
 
@@ -4006,6 +4009,120 @@ def test_a_retrieval_a_revision_repins_is_named_by_searchs_answer_for_its_pin(
 
     assert words.names["us_health_aid_raw"] == name
     assert words.names["us_total_aid_raw"] == "official development assistance"
+
+
+def test_namesakes_are_numbered_as_the_plan_states_them_before_and_after_compile(
+    decision: DecisionFactory,
+) -> None:
+    """Two retrievals named alike, stated `z_aid` then `m_aid`, against the order of
+    their ids. A rolling growth reads `z_aid` from its first year, so the split runs
+    a copy, `z_aid_history`, beside it, and the compiler, taking operations by
+    requirement id, runs `m_aid` before `z_aid`. The sentence a proposal writes over
+    the plan as stated (`submission.service._card_names`), a revision's sentence over
+    the plan not compiled, and the compiled card each number them as the plan states
+    them."""
+    retrieval = DatasetRequirement(
+        id="z_aid",
+        decision_ids=["measure"],
+        measure="aid",
+        entities=[Entity(name="Kenya", role="recipient")],
+        period=Period(start=2015, end=2024),
+        period_end_open=True,
+    )
+    draft = Plan(
+        question="Aid to Kenya",
+        decisions=[decision()],
+        evidence_requirements=[
+            retrieval,
+            retrieval.model_copy(update={"id": "m_aid", "period_end_open": False}),
+            GrowthRequirement(
+                id="a_growth",
+                input_id="z_aid",
+                window_start=2019,
+                window_end=2024,
+                rolling=RollingWindow(
+                    window_start=RelativePeriod(offset=-5), window_end=RelativePeriod(offset=0)
+                ),
+            ),
+            SumOfRequirement(
+                id="s_sum",
+                decision_ids=["measure"],
+                left=RequirementSide(input_id="m_aid"),
+                right=RequirementSide(input_id="z_aid"),
+            ),
+        ],
+        first_years=[FirstYear(requirement_id="z_aid", year=2000)],
+    )
+    split = split_of(draft)
+    assert [copy.copy_id for copy in split.copies] == ["z_aid_history"]
+    uncompiled = Plan.model_validate(
+        {
+            **draft.model_dump(),
+            "evidence_requirements": split.requirements,
+            "rolling_copies": split.copies,
+        }
+    )
+    pins = {"z_aid": SPEC_DEBT, "z_aid_history": SPEC_DEBT_HISTORY, "m_aid": "spec_" + "c" * 32}
+    translation = build_translation(uncompiled, pins)
+
+    def retrieve(step_id: str) -> WorkflowStep:
+        return WorkflowStep(
+            id=step_id,
+            operation_id=step_id,
+            tool=ToolId(server="data-mcp", name="get_data"),
+            args={"spec_id": pins[step_id]},
+            input_schema_hash="hash",
+        )
+
+    def frame(step_id: str) -> Binding:
+        return Binding(from_step=step_id, output=ArtifactKind.FRAME_REF)
+
+    workflow = Workflow(
+        # The compiler's order: requirements by id, each after the inputs it reads.
+        steps=[
+            retrieve("z_aid_history"),
+            WorkflowStep(
+                id="a_growth",
+                operation_id="a_growth",
+                tool=ToolId(server="analysis-mcp", name="growth"),
+                bindings={"frame_ref": frame("z_aid_history")},
+                input_schema_hash="hash",
+            ),
+            retrieve("m_aid"),
+            retrieve("z_aid"),
+            WorkflowStep(
+                id="s_sum",
+                operation_id="s_sum",
+                tool=ToolId(server="analysis-mcp", name="sum_of"),
+                bindings={"left_ref": frame("m_aid"), "right_ref": frame("z_aid")},
+                input_schema_hash="hash",
+            ),
+        ],
+        sources=[
+            SelectedSource(spec_id=spec_id, sentence="aid", has_data=True)
+            for spec_id in pins.values()
+        ],
+        evidence_bindings=[
+            EvidenceBinding(requirement_id=rid, step_id=rid, spec_id=spec_id)
+            for rid, spec_id in pins.items()
+        ],
+        terminal_steps=["a_growth", "s_sum"],
+    )
+    compiled = uncompiled.with_translation(translation=translation, workflow=workflow)
+
+    caveat = _card_names(
+        draft.evidence_requirements,
+        decisions=draft.decisions,
+        scope_decisions={},
+        sources=SourceReadings(lambda _: None),
+    )
+    revision = plan_words(uncompiled).names
+    card = plan_words(compiled).names
+
+    retrievals = ("z_aid", "m_aid")
+    assert [caveat[rid] for rid in retrievals] == ["aid to Kenya (1)", "aid to Kenya (2)"]
+    assert [revision[rid] for rid in retrievals] == [caveat[rid] for rid in retrievals]
+    assert [card[rid] for rid in retrievals] == [caveat[rid] for rid in retrievals]
 
 
 # `_concepts` numbers the namesakes "aid" and "aid (1)" in card order, the "aid"

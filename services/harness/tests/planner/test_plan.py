@@ -5498,6 +5498,16 @@ _ON_THE_NEWEST = RollingWindow(window_start=_OFFSET[0], window_end=_OFFSET[0])
             "excess",
             id="a-following-first-year-against-a-fixed-cap-on-the-other-side",
         ),
+        # Two steps refused alike: the refusal names the first step the plan
+        # states, whatever the ids sort to.
+        pytest.param(
+            [
+                _years("recent", _DATASET, _gte(2019, -5), _lte(2024)),
+                _years("earlier", _DATASET, _gte(2019, -5), _lte(2024)),
+            ],
+            "recent",
+            id="the-first-of-two-refused-steps-the-plan-states",
+        ),
     ],
 )
 def test_a_first_year_following_the_newest_data_below_a_fixed_last_year_is_refused(

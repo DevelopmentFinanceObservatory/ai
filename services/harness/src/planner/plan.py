@@ -3135,7 +3135,8 @@ def _build_shapes(
     whole_history: Mapping[str, int],
     origins: Mapping[str, str],
 ) -> dict[str, FrameShape]:
-    """Walk every requirement in topological order, rejecting an illegal shape as it is found.
+    """Walk every requirement in the order the plan states them, each after its inputs
+    (`requirement_step_order`), rejecting an illegal shape as it is found.
 
     Each requirement's output shape is computed from its inputs' -- already
     built, since the walk is topological -- through the one transform
@@ -3204,17 +3205,16 @@ def _build_shapes(
 
 
 def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]) -> list[str]:
-    """Every requirement id in the order the compiled workflow runs the operation
-    carrying out each, one per requirement.
+    """Every requirement id in the order `requirements_by_id` holds them, each after
+    every id it reads, one per requirement.
 
-    A post-order depth-first walk taking the requirements, and each one's
-    inputs (`inputs_of`), by id, as the compiler takes operations by
-    requirement id (`compiler.compile._canonical_key`) and runs each after the
-    inputs it reads (`compiler.compile._Build._topological_order`). So each
-    id comes after every id it reads, in whatever order `requirements_by_id`
-    holds them. An input missing from `requirements_by_id` is skipped. Assumes
-    the requirements form a DAG; `_check_reads_resolve` calls `_find_cycle`
-    before shapes are built.
+    A post-order depth-first walk taking the requirements in the order the
+    mapping holds them, the order the plan states them, and each one's inputs
+    (`inputs_of`) in the order it reads them. So `_build_shapes` meets the
+    steps the model wrote in the order it wrote them, each after its inputs.
+    An input missing from `requirements_by_id` is skipped. Assumes the
+    requirements form a DAG, which `_check_reads_resolve` guarantees by calling
+    `_find_cycle` before shapes are built.
     """
     order: list[str] = []
     visited: set[str] = set()
@@ -3223,11 +3223,11 @@ def requirement_step_order(requirements_by_id: Mapping[str, EvidenceRequirement]
         if requirement_id in visited or requirement_id not in requirements_by_id:
             return
         visited.add(requirement_id)
-        for input_id in sorted(inputs_of(requirements_by_id[requirement_id])):
+        for input_id in inputs_of(requirements_by_id[requirement_id]):
             visit(input_id)
         order.append(requirement_id)
 
-    for requirement_id in sorted(requirements_by_id):
+    for requirement_id in requirements_by_id:
         visit(requirement_id)
     return order
 

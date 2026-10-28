@@ -20,7 +20,7 @@ from typing import Any
 import httpx2
 import pytest
 from common.hashed_fields import revision_content
-from compiler.sources import source_from_spec_block
+from compiler.sources import source_from_spec_block, wire_groups
 from data_mcp import client_holder
 from data_mcp.client import UpstreamClient
 from data_mcp.definition_store import (
@@ -515,21 +515,11 @@ async def test_a_seed_carries_a_sets_published_total_and_posts_it_to_no_one() ->
                 "side_classes": ["official", "residual"],
             },
         ),
-        (
-            {"holds_multilaterals": False},
-            {
-                "role": "observationAbout",
-                "label": "Africa",
-                "ref": "africa",
-                "holds_multilaterals": False,
-            },
-        ),
         ({}, {"role": "observationAbout", "label": "Africa", "ref": "africa"}),
     ],
     ids=[
         "with-the-marker",
         "with-the-sides-classes",
-        "holding-no-multilateral",
         "without-the-field",
     ],
 )
@@ -560,8 +550,8 @@ async def test_a_seed_resolves_its_set_with_the_classes_its_whole_total_holds(
 async def test_a_seed_resolves_its_sets_as_the_harness_reads_them_searched(
     monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """A recorded block's sets, seeded, reach the seed's resubmit as
-    `compiler.sources` reads the same block searched."""
+    """A recorded block's sets, seeded, post on the seed's resubmit as the same
+    block's sets, searched, post on theirs (`compiler.sources.wire_groups`)."""
     fixture = Path(__file__).parent / "fixtures" / "share_whole_dac_donor_wholes.json"
     block = json.loads(fixture.read_text())[case]["whole"]
     (taken,) = take_seeds([{"spec": block, "operations": []}], record_step=None)
@@ -575,7 +565,7 @@ async def test_a_seed_resolves_its_sets_as_the_harness_reads_them_searched(
 
     await resolve_seed(ScriptedSurface(), taken)
 
-    assert tuple(resolved) == source_from_spec_block(block).groups
+    assert wire_groups(resolved) == wire_groups(source_from_spec_block(block).groups)
 
 
 async def test_a_seed_over_a_sets_places_keeps_the_set_when_resolved_again() -> None:

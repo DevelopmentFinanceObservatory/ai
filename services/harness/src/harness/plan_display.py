@@ -394,15 +394,26 @@ def _answer_step(plan: Plan, shown: Plan) -> str | None:
 
 
 def _answer_requirement(plan: Plan, shown: Plan) -> str | None:
-    """The requirement `answer_step` carries out, in `_card_order` of `shown`, `plan`
-    folded (`shown_plan`), or `None` before compile."""
+    """The requirement `answer_step` carries out, the last answering one in
+    `_step_order` of `shown`, `plan` folded (`shown_plan`), or `None` before
+    compile."""
     if plan.translation is None or plan.workflow is None:
         return None
     answering = answering_results(plan)
-    order = [requirement.id for requirement in _card_order(shown)]
+    order = _step_order(shown)
     asked = [rid for rid in order if answering.get(rid) is not None]
     candidates = asked or [rid for rid in order if rid in answering]
     return candidates[-1] if candidates else None
+
+
+def _step_order(shown: Plan) -> list[str]:
+    """The requirement ids of `shown`, compiled, in the order its workflow runs the
+    steps carrying them out, the order `step_rows` follows, and any requirement no
+    step carries out after them."""
+    assert shown.translation is not None and shown.workflow is not None
+    operations_by_id = {operation.id: operation for operation in shown.translation.operations}
+    stepped = [operations_by_id[step.operation_id].requirement_id for step in shown.workflow.steps]
+    return [*stepped, *(r.id for r in shown.evidence_requirements if r.id not in stepped)]
 
 
 # The plan card's title when no ask of the user's titles it (`card_title`).
@@ -859,8 +870,9 @@ def _concepts(
     side of the flow each is on (`_who`): "health from United States to
     Kenya". Any still alike whose periods differ add their period, "health to
     Kenya in 2023", and any still alike a number no other name holds, "(1)",
-    "(2)", each set of namesakes in card order. A retrieval in `carried`
-    keeps the name given there; namesakes are found by these facets, carried
+    "(2)", each set of namesakes in the order the plan states them
+    (`_card_order`). A retrieval in `carried` keeps the name given there;
+    namesakes are found by these facets, carried
     or not, so the others are told apart from it as from each other. The names are read off each retrieval's naming facets,
     `namings` where given, else read by `_namings`, a plan not compiled
     reading its sources off `sources` (`_source`).
@@ -1159,7 +1171,7 @@ def card_questions(plan: Plan) -> dict[str, str]:
 
 def _governed_concepts(plan: Plan, decision: Decision, concepts: Mapping[str, str]) -> list[str]:
     """The names `concepts` gives the retrievals pinning a source the row of scope
-    decision `decision` stands for (`listed_together`), in card order."""
+    decision `decision` stands for (`listed_together`), in the order the plan states them."""
     pinned = {
         member.fixes.source_spec_id
         for member in listed_together(plan, decision.slot)
@@ -2082,8 +2094,8 @@ def _label(requirement: EvidenceRequirement, plan: Plan) -> str:
     dataset requirement it ultimately reads. Two steps can read the same,
     e.g. a total over the top 5 recipients and a total over all of them
     are both "Total ODA by year", so a label the plan's other steps share
-    ends in its place among them, "(1)" or "(2)", in the order the card
-    lists the steps. A share_of sentence that quotes a label then names
+    ends in its place among them, "(1)" or "(2)", in the order the plan
+    states them. A share_of sentence that quotes a label then names
     exactly one step.
     """
     label = _builder_label(requirement, plan)
@@ -2102,18 +2114,15 @@ def _builder_label(requirement: EvidenceRequirement, plan: Plan) -> str:
 
 
 def _card_order(plan: Plan) -> list[EvidenceRequirement]:
-    """`plan`'s requirements in the order the card lists their steps.
+    """`plan`'s requirements in the order the plan states them, the order namesakes
+    are numbered in (`_concepts`, `_label`).
 
-    A compiled plan lists them in workflow step order, the order `step_rows`
-    follows, and any requirement no step carries out after them; before
-    compile, in the order the plan states them.
+    One order before and after compile, so a sentence written over the plan
+    as proposed (`submission.service._card_names`) numbers namesakes as the
+    compiled card does. The card's rows run in workflow order, so "(2)" can
+    sit above "(1)". A number tells namesakes apart and says nothing of position.
     """
-    if plan.translation is None or plan.workflow is None:
-        return list(plan.evidence_requirements)
-    operations_by_id = {operation.id: operation for operation in plan.translation.operations}
-    stepped = [operations_by_id[step.operation_id].requirement_id for step in plan.workflow.steps]
-    unstepped = [r.id for r in plan.evidence_requirements if r.id not in stepped]
-    return [plan.requirement(requirement_id) for requirement_id in [*stepped, *unstepped]]
+    return list(plan.evidence_requirements)
 
 
 def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:

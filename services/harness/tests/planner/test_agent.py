@@ -5474,6 +5474,83 @@ def _from_donors(block: dict[str, Any], donors: list[str]) -> dict[str, Any]:
     return block
 
 
+def _by_instrument(block: dict[str, Any], codes: list[str], *, added: list[str]) -> dict[str, Any]:
+    """A copy of `block` with a CRS type-of-finance slot bound to `codes`, one a
+    value and several a set, widened by the code index to `added` as Search
+    states it (`compiler.sources.slot_codes`)."""
+    block = json.loads(json.dumps(block))
+    values = [{"ref": {"ref": code}, "value_kind": "enum_value"} for code in codes]
+    binding = (
+        {"kind": "value", "value": values[0]}
+        if len(values) == 1
+        else {"kind": "set", "values": values}
+    )
+    block["resolved"]["slots"].append(
+        {
+            "key": {"axis": "how", "property": {"ref": "crsTypeOfFinance"}},
+            "binding": binding,
+            **({"expansion": {"added": [{"ref": code} for code in added]}} if added else {}),
+            "summable": True,
+        }
+    )
+    return block
+
+
+@pytest.mark.parametrize("accept", [False, True], ids=["aligned", "accepted"])
+@pytest.mark.parametrize(
+    ("loans", "added", "code"),
+    [
+        pytest.param(
+            ["CRSTypeOfFinance400"], ["CRSTypeOfFinance421"], Outcome.OK.value, id="loans"
+        ),
+        pytest.param(
+            ["CRSTypeOfFinance400"],
+            ["CRSTypeOfFinance110"],
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="a-code-in-common",
+        ),
+        # A set Search states no expansion of may hold any descendant of its values.
+        pytest.param(
+            ["CRSTypeOfFinance400", "CRSTypeOfFinance421"],
+            [],
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="codes-unknown",
+        ),
+    ],
+)
+def test_a_sum_on_one_provider_scope_from_all_donors_counts_no_flow_twice_over_apart_slots(
+    decision: DecisionFactory, accept: bool, loans: list[str], added: list[str], code: str
+) -> None:
+    """Grants plus loans to Kenya from all donors, both counted with imputed
+    multilateral flows. Donors left open may include multilateral organisations,
+    whose outflows the other input's imputed share can count, but no flow is both a
+    grant and a loan, so the sum counts nothing twice and is served. Where the two
+    bindings share a code, or one's codes are unknown, a flow can lie in both and
+    the sum is refused."""
+    ctx = _FakeToolContext()
+    grants, other = (
+        _to_recipients(
+            _from_donors(provider_block(spec_id, narrow=False, active="provider:inclusive"), []),
+            ["country/KEN"],
+        )
+        for spec_id in (HEALTH, TOTAL)
+    )
+    _show_blocks(
+        ctx,
+        _by_instrument(grants, ["CRSTypeOfFinance100"], added=["CRSTypeOfFinance110"]),
+        _by_instrument(other, loans, added=added),
+    )
+
+    result = _sum_of_health(_tools_by_name()["propose_plan"].func, ctx, decision(), accept=accept)
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == Outcome.OK.value:
+        assert _pins(ctx) == [("health", HEALTH), ("total", TOTAL)]
+    else:
+        assert result["detail"]["basis"]["step_id"] == "sum"
+        assert load_plan(ctx.state) is None
+
+
 @pytest.mark.parametrize(
     ("left", "right", "code"),
     [
@@ -7552,16 +7629,16 @@ async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions
         assert subject in stated.rationale, (subject, stated.rationale)
 
 
-async def test_a_provider_difference_numbers_namesake_inputs_in_the_cards_step_order(
+async def test_a_provider_difference_numbers_namesake_inputs_in_the_order_the_plan_states(
     decision: DecisionFactory,
 ) -> None:
     """The comparison of `test_a_provider_difference_names_inputs_of_one_concept_as_
     the_card_does` over two CRS totals named alike, one counting bilateral flows and
     the other, declared first, imputed multilateral ones too. The card numbers
-    the two "official development assistance" inputs in the order its workflow runs
-    them, which the compiler sets by requirement id (`compiler.compile._canonical_key`),
-    so the stated difference numbers them in that order too, whatever order the plan
-    declares them in."""
+    the two "official development assistance" inputs in the order the plan states
+    them, whatever order its workflow runs them in, which the compiler sets by
+    requirement id (`compiler.compile._canonical_key`), so the stated difference
+    numbers them in that order too."""
     ctx = _FakeToolContext()
     inclusive = _another_part(_search_labelled("whole"))
     provider = next(
@@ -7601,7 +7678,7 @@ async def test_a_provider_difference_numbers_namesake_inputs_in_the_cards_step_o
     plan = load_plan(ctx.state)
     assert plan is not None
     (stated,) = [d for d in plan.decisions if d.caveat == "providers_differ"]
-    # The card's names over the plan compiled, the retrievals in its workflow's order.
+    # The card's names over the plan compiled, whose workflow runs the retrievals by id.
     tools = await McpSurface(
         sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
     ).list_tools()
@@ -7617,7 +7694,7 @@ async def test_a_provider_difference_numbers_namesake_inputs_in_the_cards_step_o
     plan = plan.with_translation(translation=translation, workflow=compiled.workflow)
     pinned = {block["spec_id"]: source_from_spec_block(block) for block in blocks.values()}
     names = plan_words(plan, pinned=pinned).names
-    assert names[_PART].endswith("(1)"), names
+    assert names[_WHOLE].endswith("(1)"), names
     for requirement_id, block in blocks.items():
         (choice,) = [
             c for c in block["resolved"]["scope_choices"]["choices"] if c["axis"] == "provider"

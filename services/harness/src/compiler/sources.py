@@ -1034,11 +1034,7 @@ def block_groups(
             of party outside `PartyClass`.
     """
     groups = _mapping(_mapping(block.get("resolved")).get("entity_groups"))
-    return tuple(
-        group
-        for role in groups
-        if role != leaving_out and (group := block_group(block, role)) is not None
-    )
+    return _groups({role: group for role, group in groups.items() if role != leaving_out})
 
 
 def block_group(block: Mapping[str, object], role: str) -> ResolvedGroup | None:

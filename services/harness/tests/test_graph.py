@@ -3324,13 +3324,14 @@ async def _switch_runner(
     aligned: bool = False,
     entity_groups: dict[str, Any] | None = None,
     stored_unreadable: bool = False,
+    stored_groups: list[dict[str, Any]] | None = None,
     seam_type: type[_RevisingSeam] = _RevisingSeam,
     earlier_whole: AlignedPin | None = None,
 ) -> tuple[Runner, _RevisingSeam, PlannerPlan, dict[str, Any], list[Event]]:
     """A turn paused on a plan pinning the compiled US health aid source, its
     reading stored (marked as one the planner compiled to align a basis when
-    `aligned`, and as one whose sets were not readable when `stored_unreadable`)
-    beside its block naming `entity_groups` when given, held as the
+    `aligned`, as one whose sets were not readable when `stored_unreadable`, and
+    as one resolved with `stored_groups` when given) beside its block naming `entity_groups` when given, held as the
     whole `earlier_whole` an earlier plan compiled from its part when given,
     then answered with a switch to `option_id`, by default its sector to CRS
     120 and 130, through `search`. Returns the runner, the seam, the plan, the scope and the
@@ -3356,6 +3357,7 @@ async def _switch_runner(
             "spec_id": pin,
             "scope": scope,
             "planner_axes": ["measure_basis"] if aligned else [],
+            "entity_groups": stored_groups or [],
             "entity_groups_unreadable": stored_unreadable,
         }
     )
@@ -3532,31 +3534,35 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     assert offered["revision"] == plan_revision(revised)
 
 
+_AFRICA_TOTAL = {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}
+
+
 @pytest.mark.parametrize(
-    ("group", "posted_groups"),
+    ("group", "stored_unreadable", "stored_groups"),
     [
+        pytest.param(_AFRICA_TOTAL, False, None, id="block-reads-stored-readable"),
+        pytest.param(_AFRICA_TOTAL, True, None, id="block-reads-stored-unreadable"),
         pytest.param(
-            {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"},
-            {"destination": {"label": "Africa", "ref": "africa"}},
-            id="readable",
+            {"label": "Africa", "ref": "africa", "whole_of": ["sovereign_fund"]},
+            False,
+            [{"role": "destination", **_AFRICA_TOTAL}],
+            id="block-unreadable-stored-readable",
         ),
     ],
-)
-@pytest.mark.parametrize(
-    "stored_unreadable", [False, True], ids=["stored-readable", "stored-unreadable"]
 )
 async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     real_schemas: list[ToolSchema],
     group: dict[str, Any],
-    posted_groups: dict[str, Any],
     stored_unreadable: bool,
+    stored_groups: list[dict[str, Any]] | None,
 ) -> None:
     """The part's block names Africa as the set its recipients were asked for,
     with the total party Search states for it. The switch posts the set as a
     compile on another basis does (`compiler.sources.wire_groups`): its label
     and ref, and no total, which Search recomputes. It reads the block again,
     so a reading stored when an earlier release could not read the set switches
-    once this release can."""
+    once this release can, and where the block's set does not read, it posts
+    the readable set the reading was stored with."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
     search = SearchStub(answer={scope["id"]: envelope})
@@ -3566,11 +3572,12 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
         search,
         entity_groups={"destination": group},
         stored_unreadable=stored_unreadable,
+        stored_groups=stored_groups,
     )
 
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
-    assert entry.get("entity_groups") == posted_groups
+    assert entry.get("entity_groups") == {"destination": {"label": "Africa", "ref": "africa"}}
 
 
 async def test_a_switch_whose_parts_sets_cannot_be_read_offers_the_plan_unchanged(

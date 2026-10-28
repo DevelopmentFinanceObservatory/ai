@@ -320,10 +320,6 @@ async def resolve_seed(surface: ToolSurface, taken: TakenSeed) -> Mapping[str, A
                 total=group.total,
                 whole_of=group.whole_of,
                 side_classes=group.side_classes,
-                members=group.members,
-                left_out=group.left_out,
-                sum_differs=group.sum_differs,
-                holds_multilaterals=group.holds_multilaterals,
             )
             for role, group in (spec.entity_groups or {}).items()
         ),

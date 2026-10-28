@@ -518,30 +518,33 @@ async def _resubmit(
     `translator.discovery.resolve_definition`: the part's entity groups
     beside it, as every resubmit posts them (`compiler.sources.wire_groups`),
     so Search names them again. They are `block`'s groups
-    (`compiler.sources.block_groups`) where `block` is at hand, read again so a
+    (`compiler.sources.block_groups`) where `block` is at hand and they read, so a
     set this release learnt to read since the reading was stored posts, and
     otherwise the groups `reading` was resolved with (`SearchReading.entity_groups`).
 
     Raises:
-        SwitchFailedError: If `block`'s groups are not readable, or, with no
-            `block`, `reading`'s were not when it was stored
-            (`SearchReading.entity_groups_unreadable`), since the switch would
-            post the part without them. Also if the call does not complete,
+        SwitchFailedError: If neither reads: `block`'s groups are not readable
+            or there is no `block`, and `reading`'s were not readable when it was
+            stored (`SearchReading.entity_groups_unreadable`) or, beside a block
+            naming sets, it holds none, since the switch would post the part
+            without them. Also if the call does not complete,
             Search refuses it, or its answer is not one definite part with a scope.
     """
     unreadable = SwitchFailedError(
         "Search's record of this source could not be read.", code=SCOPE_CHOICE_NOT_APPLIED
     )
+    groups = None
     if block is not None:
         try:
             groups = block_groups(block)
         except ValueError as exc:
-            logger.warning("plan switch not compiled: pin=%s named sets not readable: %s", pin, exc)
-            raise unreadable from exc
-    elif reading.entity_groups_unreadable:
-        logger.warning("plan switch not compiled: pin=%s named sets were not readable", pin)
-        raise unreadable
-    else:
+            logger.warning("plan switch: pin=%s block's named sets not readable: %s", pin, exc)
+    if groups is None:
+        # A block whose sets do not read falls back only to stored sets that do.
+        # An empty stored tuple beside such a block would post the part without them.
+        if reading.entity_groups_unreadable or (block is not None and not reading.entity_groups):
+            logger.warning("plan switch not compiled: pin=%s named sets not readable", pin)
+            raise unreadable
         groups = reading.entity_groups
     try:
         part = await resolve_definition(
