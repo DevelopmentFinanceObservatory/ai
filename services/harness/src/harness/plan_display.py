@@ -1145,7 +1145,9 @@ def card_questions(plan: Plan) -> dict[str, str]:
     for decision in rows:
         name = CHOICE_NAMES.get(decision.scope.axis) if decision.scope is not None else None
         if name is None:
-            questions[decision.slot] = card_decision_text(decision.description, plan)
+            questions[decision.slot] = card_decision_text(
+                decision.description, plan, decision=decision
+            )
             continue
         assert decision.scope is not None
         governed = (

@@ -7467,6 +7467,91 @@ async def test_a_provider_difference_names_inputs_of_one_concept_as_the_card_doe
         assert subject in stated.rationale, (subject, stated.rationale)
 
 
+async def test_a_revisions_provider_difference_names_its_inputs_as_the_revisions_card_does(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid in 2023 from the CRS, whose card names it "health". A revision adds the inclusive CRS health figures, which Search also
+    names "health", and compares them with the first, accepting the difference. The
+    revision's card names both health inputs afresh, so the stated difference names
+    each as that card does, and the first keeps no name the earlier card gave it."""
+    ctx = _FakeToolContext()
+    blocks = [_search_labelled(name) for name in ("health", "health_inclusive")]
+    _show_blocks(ctx, *blocks)
+    tools = _tools_reading(WholeCompiles())
+    health = DatasetRequirement(
+        id=_PART,
+        decision_ids=["measure"],
+        measure="US aid to health",
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2023, end=2023),
+        source_spec_id=us_2023_block("health")["spec_id"],
+    )
+    first = await tools["propose_plan"].func(
+        question="How much US aid went to health in 2023?",
+        answer_mode=AnswerMode.SERIES,
+        decisions=drafts([decision()]),
+        evidence_requirements=[health],
+        tool_context=ctx,
+    )
+    assert first["outcome"] == Outcome.OK.value, first
+    # The card the revision amends shows the first plan compiled.
+    prior = load_plan(ctx.state)
+    assert prior is not None
+    by_spec_id = {block["spec_id"]: source_from_spec_block(block) for block in blocks}
+    discovered = {
+        r.id: by_spec_id[r.source_spec_id]
+        for r in prior.evidence_requirements
+        if isinstance(r, DatasetRequirement) and r.source_spec_id is not None
+    }
+    tools_listed = await McpSurface(
+        sources={"data-mcp": data_mcp, "analysis-mcp": analysis_mcp}
+    ).list_tools()
+    translation = build_translation(prior, {rid: s.spec_id for rid, s in discovered.items()})
+    compiled = compile_plan(
+        plan=prior,
+        translation=translation,
+        schemas={tool.name: tool for tool in tools_listed},
+        discovered=discovered,
+    )
+    assert compiled.workflow is not None, compiled.issues
+    shown = prior.with_translation(translation=translation, workflow=compiled.workflow)
+    assert plan_words(shown).names[_PART] == "health"
+    save_plan(ctx.state, shown)
+    inclusive = "health_inclusive"
+
+    second = await tools["propose_plan"].func(
+        evidence_requirements=[
+            health.model_copy(
+                update={"id": inclusive, "source_spec_id": us_2023_block(inclusive)["spec_id"]}
+            ),
+            ComparisonRequirement(
+                id=_COMPARE,
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id=inclusive),
+                subtrahend=RequirementSide(input_id=_PART),
+                accept_provider_difference=True,
+            ),
+        ],
+        amends_version=first["version"],
+        tool_context=ctx,
+    )
+
+    assert second["outcome"] == Outcome.OK.value, second
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    (stated,) = [
+        d for d in plan.decisions if d.caveat == "providers_differ" and d.slot.endswith(_COMPARE)
+    ]
+    # The revision's card names, read before compile off the blocks the inputs pin.
+    uncompiled = plan.model_copy(update={"translation": None, "workflow": None})
+    names = plan_words(uncompiled, pinned=by_spec_id).names
+    assert names[_PART] != "health", names
+    for requirement_id in (_PART, inclusive):
+        name = names[requirement_id]
+        subject = f"{name[:1].upper()}{name[1:]} counts "
+        assert subject in stated.rationale, (subject, stated.rationale)
+
+
 async def test_a_provider_difference_numbers_namesake_inputs_in_the_cards_step_order(
     decision: DecisionFactory,
 ) -> None:

@@ -34,6 +34,7 @@ these bodies -- see `harness.auth`.
 from __future__ import annotations
 
 import json
+import logging
 from enum import StrEnum
 from typing import Annotated, Any, Literal, cast, get_args
 
@@ -47,6 +48,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _WireModel(BaseModel):
@@ -634,8 +637,13 @@ MAX_SEED_PARTY_CLASSES = len(get_args(PartyClass))
 MAX_SEED_GROUP_MEMBERS = 1024
 MAX_SEED_GROUP_LEFT_OUT = 64
 
-# One ref or label a set lists, held to the bound on any seed text.
-SeedText = Annotated[str, Field(max_length=MAX_SEED_TEXT_CHARS)]
+# The most characters a set's dcid may span, its `ref`, `entity_type`, `total`,
+# `group_id` and each of its `members`, as apis bounds every identity string
+# (`search.models.identity.IdentityString`).
+MAX_SEED_GROUP_DCID_CHARS = 1024
+
+# One dcid a set names or lists.
+SeedGroupDcid = Annotated[str, Field(max_length=MAX_SEED_GROUP_DCID_CHARS)]
 
 
 class SeedEntityGroup(BaseModel):
@@ -648,37 +656,35 @@ class SeedEntityGroup(BaseModel):
     `total`, `whole_of`, `side_classes`, `members`, `left_out` (`None` where
     Search states nothing), `sum_differs` and `holds_multilaterals`
     (`harness.seeds.resolve_seed`). The resubmit post omits
-    `holds_multilaterals`, since Search derives it on every answer.
+    `holds_multilaterals`, since Search derives it on every answer. Each field
+    is held to the bound apis sets on it, so no set Search serves fails here;
+    a residual label in `left_out`, which apis does not bound, is held only by
+    the seed's byte cap (`MAX_SEED_SPEC_BYTES`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, max_length=MAX_SEED_GROUP_LABEL_CHARS)
-    ref: str | None = Field(default=None, max_length=MAX_SEED_TEXT_CHARS)
-    group_id: str | None = Field(
+    ref: SeedGroupDcid | None = None
+    group_id: SeedGroupDcid | None = Field(
         default=None,
-        max_length=MAX_SEED_TEXT_CHARS,
         exclude_if=lambda group_id: group_id is None,
     )
-    entity_type: str | None = Field(
-        default=None,
-        max_length=MAX_SEED_TEXT_CHARS,
-        exclude_if=lambda entity_type: entity_type is None,
+    entity_type: SeedGroupDcid | None = Field(
+        default=None, exclude_if=lambda entity_type: entity_type is None
     )
-    total: str | None = Field(
-        default=None, max_length=MAX_SEED_TEXT_CHARS, exclude_if=lambda total: total is None
-    )
+    total: SeedGroupDcid | None = Field(default=None, exclude_if=lambda total: total is None)
     whole_of: tuple[PartyClass, ...] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
     side_classes: tuple[PartyClass, ...] = Field(
         default=(), max_length=MAX_SEED_PARTY_CLASSES, exclude_if=lambda classes: not classes
     )
-    members: tuple[SeedText, ...] = Field(
+    members: tuple[SeedGroupDcid, ...] = Field(
         default=(), max_length=MAX_SEED_GROUP_MEMBERS, exclude_if=lambda members: not members
     )
     holds_multilaterals: bool | None = Field(default=None, exclude_if=lambda holds: holds is None)
-    left_out: tuple[SeedText, ...] | None = Field(
+    left_out: tuple[str, ...] | None = Field(
         default=None,
         max_length=MAX_SEED_GROUP_LEFT_OUT,
         exclude_if=lambda labels: labels is None,
@@ -740,6 +746,15 @@ class SeedSpec(BaseModel):
                     raise ValueError(
                         f"resolved.entity_groups.{role} carries unknown keys {unknown}"
                     ) from exc
+                # Every bound matches apis' `EntityGroup`, so a set failing here is
+                # one Search would not take on a resubmit; the seed stands without it.
+                label = group.get("label") if isinstance(group, dict) else None
+                logger.warning(
+                    "seed set dropped: role=%s label=%r errors=%s",
+                    role,
+                    label[:MAX_SEED_GROUP_LABEL_CHARS] if isinstance(label, str) else None,
+                    sorted({error["type"] for error in exc.errors()}),
+                )
                 continue
         return {**data, "entity_groups": groups or None}
 

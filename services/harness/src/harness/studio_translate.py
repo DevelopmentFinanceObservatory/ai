@@ -1165,7 +1165,7 @@ def _caveats(plan: PlannerPlan) -> list[str]:
     (`plan_display.card_decision_text`), each sentence once."""
     return list(
         dict.fromkeys(
-            plan_display.card_decision_text(decision.rationale, plan)
+            plan_display.card_decision_text(decision.rationale, plan, decision=decision)
             for decision in plan.decisions
             if decision.caveat is not None
         )

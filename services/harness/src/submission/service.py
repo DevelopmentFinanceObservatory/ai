@@ -539,7 +539,6 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             sources=sources,
             plan_decisions=_decisions_after(previous, settled, removed=removed_decisions),
             scope_decisions=scopes,
-            previous=previous,
         ),
         removed=removed_decisions,
     )
@@ -5679,7 +5678,6 @@ def _card_names(
     *,
     decisions: Sequence[Decision],
     scope_decisions: Mapping[str, Sequence[Decision]],
-    previous: Plan | None,
     sources: SourceReadings,
 ) -> dict[str, str]:
     """What the plan card names each retrieval of `requirements` by, by requirement
@@ -5687,9 +5685,10 @@ def _card_names(
     call lands, not compiled yet: `decisions`, and each retrieval citing the scope
     decisions its pin states (`scope_decisions`, `scope_choice_decisions`), as
     `_scope_decisions` cites them, since its sector decision names it where Search
-    states no concept. Each retrieval the card's plan `previous` holds alike keeps
-    its name there, and any other reads the source of the block its pin was shown
-    with (`sources`). Retrievals named alike are numbered in the order the compiled
+    states no concept. Each retrieval reads the source of the block its pin was
+    shown with (`sources`), and is named afresh as the card of the compiled plan
+    names it (`harness.plan_display.card_rows`), whatever the card it revises
+    named it. Retrievals named alike are numbered in the order the compiled
     plan's workflow runs them (`planner.plan.requirement_step_order`), the card's
     order, whatever order the plan states them in."""
     order = {
@@ -5722,9 +5721,7 @@ def _card_names(
         decisions=(*decisions, *(d for held in scope_decisions.values() for d in held)),
         evidence_requirements=tuple(datasets),
     )
-    return dict(
-        plan_words(draft, shown_as=previous, pinned=pinned_sources(datasets, sources)).names
-    )
+    return dict(plan_words(draft, pinned=pinned_sources(datasets, sources)).names)
 
 
 class _Difference(NamedTuple):
@@ -5785,7 +5782,6 @@ def _difference_decisions(
     sources: SourceReadings,
     plan_decisions: Sequence[Decision] = (),
     scope_decisions: Mapping[str, Sequence[Decision]] | None = None,
-    previous: Plan | None = None,
 ) -> dict[str, tuple[Decision, ...]]:
     """The decisions each comparison, share, quotient or sum states about its inputs'
     provider scopes and measure bases (`_DIFFERENCES`), by its requirement id.
@@ -5811,8 +5807,8 @@ def _difference_decisions(
     so in reader words, one sentence per input naming what it counts, or
     that its dataset does not say (`_difference_sentence`), each input named
     as the plan card names it on the plan `requirements`, `plan_decisions`
-    and the scope decisions of their pins (`scope_decisions`) state, the
-    card's plan `previous` (`_card_names`); where that passes the
+    and the scope decisions of their pins (`scope_decisions`) state
+    (`_card_names`); where that passes the
     rationale's limit, each input is named without its dataset title, and
     where that still does, the first sentence is followed by how many inputs
     the calculation reads (`_fitting_rationale`). It is the planner's,
@@ -5871,7 +5867,6 @@ def _difference_decisions(
                     requirements,
                     decisions=plan_decisions,
                     scope_decisions=scope_decisions or {},
-                    previous=previous,
                     sources=sources,
                 )
             lead = _ACCEPTED_PROVIDER_LEAD if flagged else difference.lead
