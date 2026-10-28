@@ -172,6 +172,7 @@ load-bearing:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -1227,6 +1228,32 @@ def _stop_outcome(stopped: _Stopped) -> MethodChoiceNeeded | Refused | Rediscove
     return stopped.outcome.model_copy(update={"also_stopped": stopped.siblings})
 
 
+class LeftOutEntity(StrictModel):
+    """One entity a retrieval left out, by the role and ref its approved source
+    resolved it to, with its finding (`compiler.evidence.left_out_entities`)."""
+
+    role: str
+    ref: str
+    issue: EvidenceIssue
+
+
+class HeldAnchor(StrictModel):
+    """What a read of one group of rolling steps found, kept so a later read of the
+    same group can stand on it without running its retrievals again.
+
+    `key` is `_Run._group_key`: the group's population, and each retrieval's
+    tool, arguments, approved source and requirement, so it names the same
+    calls and checks whatever the steps are called. `result` is what
+    `resolve_anchor` answered, and `left_out` the entities each retrieval left
+    out, in the order of the group's `roots`, which the check of the steps
+    narrowing to them reads (`_Run._check_left_out_narrowings`).
+    """
+
+    key: str
+    result: AnchorResult
+    left_out: tuple[tuple[LeftOutEntity, ...], ...]
+
+
 @dataclass(frozen=True, slots=True)
 class AnchorRead:
     """The newest period one group of a workflow's rolling steps stands on, read before a run.
@@ -1235,11 +1262,14 @@ class AnchorRead:
     `planned` the newest period their literals state (`planned_anchor`) and
     `result` what `resolve_anchor` answered over the group's retrievals, or
     the stop its run would meet on one of them or on `resolve_anchor`.
+    `held` is the read as a later `read_anchors` may be handed it, `None`
+    when the group stopped.
     """
 
     steps: tuple[str, ...]
     planned: str
     result: AnchorResult | MethodChoiceNeeded | Refused | RediscoveryNeeded
+    held: HeldAnchor | None = None
 
     @property
     def behind(self) -> bool:
@@ -1273,6 +1303,8 @@ async def read_anchors(
     jitter: Jitter = random.uniform,
     max_concurrent_steps: int = 4,
     fetch_series_stats: FetchSeriesStats = default_fetch_series_stats,
+    schemas: Mapping[str, ToolSchema] | None = None,
+    held: Iterable[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded:
     """Resolve the newest period of each group of `workflow`'s rolling steps, as its run would.
 
@@ -1281,8 +1313,14 @@ async def read_anchors(
     evidence, and `resolve_anchor` for each group, over the same
     populations and frames. Nothing is admitted to a ledger and nothing is
     recorded, and no derived step runs. `revision` names the work in a stop's
-    outcome. The other arguments are `execute_approved_plan`'s. No answer is
-    written from the read, so it asks no names for its series (`no_label_refs`).
+    outcome. The other arguments but the last two are
+    `execute_approved_plan`'s. No answer is written from the read, so it asks
+    no names for its series (`no_label_refs`).
+
+    `schemas` are the tools `workflow` was just compiled against, by name;
+    the surface check then reads them in place of listing the surface again.
+    A group whose key (`HeldAnchor.key`) one of `held` carries reads as that
+    one, and its retrievals run only when another group rests on them too.
 
     Returns:
         Each group's `AnchorRead`, in the order its run resolves them, empty
@@ -1308,7 +1346,7 @@ async def read_anchors(
     )
     run = _Run(submission, run_id=None, ledger=None, runtime=runtime)
     try:
-        return await run.read_anchors()
+        return await run.read_anchors(schemas=schemas, held={anchor.key: anchor for anchor in held})
     except _Stopped as stopped:
         return _stop_outcome(stopped)
 
@@ -1428,7 +1466,9 @@ class _Run:
             anchors=self._anchors_so_far(),
         )
 
-    async def read_anchors(self) -> tuple[AnchorRead, ...]:
+    async def read_anchors(
+        self, *, schemas: Mapping[str, ToolSchema] | None, held: Mapping[str, HeldAnchor]
+    ) -> tuple[AnchorRead, ...]:
         """Run the retrievals the anchor groups rest on, seal them, and resolve each group.
 
         The run's own steps for the part of it a group's newest period rests
@@ -1441,9 +1481,33 @@ class _Run:
         group is resolved, as it stops the run (`_check_left_out_narrowings`).
         A group whose resolution stops reads as that stop too. Every other
         group is resolved.
+
+        A group `held` names by its key (`_group_key`) reads as the held
+        result instead, renamed to the group's steps, and the entities its
+        retrievals left out are taken from it; a retrieval runs only for a
+        group `held` does not name. `schemas`, when given, stand in for the
+        surface's own list (`_surface_as_compiled`).
         """
-        schemas = await self._surface_as_compiled()
-        roots = {root for group in self.anchor_groups for root in group.roots}
+        schemas = await self._surface_as_compiled(schemas)
+        keys = {group.steps: self._group_key(group) for group in self.anchor_groups}
+        standing = {
+            group.steps: held[keys[group.steps]]
+            for group in self.anchor_groups
+            if keys[group.steps] in held
+        }
+        roots = {
+            root
+            for group in self.anchor_groups
+            if group.steps not in standing
+            for root in group.roots
+        }
+        for group in self.anchor_groups:
+            if (anchor := standing.get(group.steps)) is not None:
+                for root, left_out in zip(group.roots, anchor.left_out, strict=True):
+                    if root not in roots:
+                        self.left_out[root] = {
+                            (entity.role, entity.ref): entity.issue for entity in left_out
+                        }
         stops: dict[str, MethodChoiceNeeded | Refused | RediscoveryNeeded] = {}
         try:
             await self._run_wave(tuple(s for s in self.workflow.steps if s.id in roots), schemas)
@@ -1462,15 +1526,53 @@ class _Run:
             for group, first in self._groups_starting(wave):
                 if any(read_group.steps == group.steps for read_group in read):
                     continue
-                stop = next((stops[step] for step in group.roots if step in stops), None)
-                read.append(
-                    AnchorRead(
-                        steps=group.steps,
-                        planned=planned_anchor(group, self.steps_by_id),
-                        result=stop or await self._resolved_or_stop(group, first, schemas),
+                planned = planned_anchor(group, self.steps_by_id)
+                if (anchor := standing.get(group.steps)) is not None:
+                    result = anchor.result.model_copy(
+                        update={"steps": group.steps, "roots": group.roots}
                     )
+                    read.append(AnchorRead(group.steps, planned, result, anchor))
+                    continue
+                stop = next((stops[step] for step in group.roots if step in stops), None)
+                result = stop or await self._resolved_or_stop(group, first, schemas)
+                kept = (
+                    HeldAnchor(
+                        key=keys[group.steps], result=result, left_out=self._left_out_of(group)
+                    )
+                    if isinstance(result, AnchorResult)
+                    else None
                 )
+                read.append(AnchorRead(group.steps, planned, result, kept))
         return tuple(read)
+
+    def _group_key(self, group: AnchorGroup) -> str:
+        """What `group`'s read rests on, hashed: its population, and each retrieval's
+        tool, arguments, approved source and requirement, in the group's order.
+        Step ids play no part, so a group compiled again from the same plan keeps it."""
+        roots: list[JsonValue] = []
+        for root in group.roots:
+            step = self.steps_by_id[root]
+            requirement = self.requirements[self.evidence_bindings[root].requirement_id]
+            roots.append(
+                {
+                    "tool": [step.tool.server, step.tool.name],
+                    "args": step.args,
+                    "source": self.approved_source[root].model_dump(mode="json"),
+                    "requirement": requirement.model_dump(mode="json"),
+                }
+            )
+        stated = json.dumps({"population": list(group.population), "roots": roots}, sort_keys=True)
+        return hashlib.sha256(stated.encode()).hexdigest()
+
+    def _left_out_of(self, group: AnchorGroup) -> tuple[tuple[LeftOutEntity, ...], ...]:
+        """The entities each retrieval of `group` left out, in the group's order."""
+        return tuple(
+            tuple(
+                LeftOutEntity(role=role, ref=ref, issue=issue)
+                for (role, ref), issue in self.left_out.get(root, {}).items()
+            )
+            for root in group.roots
+        )
 
     async def _resolved_or_stop(
         self, group: AnchorGroup, first: WorkflowStep, schemas: Mapping[str, ToolSchema]
@@ -1689,18 +1791,26 @@ class _Run:
 
     # -- before the first call ------------------------------------------------------
 
-    async def _surface_as_compiled(self) -> dict[str, ToolSchema]:
+    async def _surface_as_compiled(
+        self, listed: Mapping[str, ToolSchema] | None = None
+    ) -> dict[str, ToolSchema]:
         """Re-read the surface and refuse to run against tools that have changed.
 
         Each step's tool is compared with what the step was compiled against.
         A workflow with a rolling step also calls `resolve_anchor`, which no
         step names, so that tool is compared with its row of the capability
-        table, under the first rolling step's id.
+        table, under the first rolling step's id. `listed`, the surface a
+        caller has just listed, by name, is compared in place of listing it
+        again; a run lists it itself, since the surface may have moved since
+        the plan was approved.
         """
-        try:
-            schemas = {schema.name: schema for schema in await self.surface.list_tools()}
-        except ToolSurfaceUnavailableError as exc:
-            raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
+        if listed is not None:
+            schemas = dict(listed)
+        else:
+            try:
+                schemas = {schema.name: schema for schema in await self.surface.list_tools()}
+            except ToolSurfaceUnavailableError as exc:
+                raise self._refused(RefusalKind.TRANSPORT_FAILED, str(exc)) from exc
         for step in self.workflow.steps:
             self._check_as_compiled(
                 schemas.get(step.tool.name),

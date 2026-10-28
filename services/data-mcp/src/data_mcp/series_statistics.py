@@ -42,6 +42,13 @@ process) takes the table, and `get_data_digest.py`, which renders at most
 have data-mcp's `client_holder` live, since the deployed topology mounts
 data-mcp in-process in both today, per `client_holder.py`'s own docstring,
 so neither parses the Parquet bytes on its own.
+
+The verified table is kept per process under `artifact.artifact_digest`, the
+sha256 of its bytes, with the `expected_series` and `continuing` it was
+checked against (`_TABLES`). A retrieval's `get_data` digest and the harness's
+evidence check on the same mint therefore download and decode the artifact
+once. Only a table that passed every check is kept, so a failure is retried
+by the next call.
 """
 
 from __future__ import annotations
@@ -51,6 +58,7 @@ import hashlib
 import io
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
@@ -76,6 +84,7 @@ __all__ = [
     "SERIES_STATISTICS_SCHEMA",
     "ContinuedSeries",
     "SeriesStatisticsSchemaError",
+    "clear_series_statistics_cache",
     "continued_series",
     "continuing_method",
     "fetch_series_statistics",
@@ -130,6 +139,43 @@ _FACET = TypeAdapter(SeriesStatisticsModel.model_fields["facet"].annotation)
 # degrades cleanly on any failure, so a single attempt is enough -- see each
 # caller's own docstring for what "degrade" means there.
 _FETCH_TIMEOUT_S = 30.0
+
+# The Arrow bytes the verified tables `_TABLES` keeps may hold in total. A
+# 25,000-series CRS file is about 7.5 MiB as Arrow, so this keeps several of
+# the largest and every small one a turn reads.
+_TABLES_MAX_BYTES = 64 * 1024 * 1024
+
+
+class _TableKey(NamedTuple):
+    """What a verified table was read and checked under, which is the artifact's
+    own content digest plus the two arguments `_read` checks the file against."""
+
+    artifact_digest: str
+    expected_series: int | None
+    continuing: str | None
+
+
+# Verified tables, least recently used first. A key names immutable bytes
+# and a deterministic read of them, so an entry never goes stale. It is only
+# evicted to stay under `_TABLES_MAX_BYTES`.
+_TABLES: OrderedDict[_TableKey, pa.Table] = OrderedDict()
+
+
+def _remember(key: _TableKey, table: pa.Table) -> None:
+    """Keep `table` under `key`, evicting the least recently used tables past
+    `_TABLES_MAX_BYTES`. A table larger than the whole budget is not kept."""
+    if table.nbytes > _TABLES_MAX_BYTES:
+        return
+    _TABLES[key] = table
+    held = sum(t.nbytes for t in _TABLES.values())
+    while held > _TABLES_MAX_BYTES:
+        _, evicted = _TABLES.popitem(last=False)
+        held -= evicted.nbytes
+
+
+def clear_series_statistics_cache() -> None:
+    """Forget every verified table, so the next fetch of each goes to the network."""
+    _TABLES.clear()
 
 
 class SeriesStatisticsSchemaError(ValueError):
@@ -224,7 +270,8 @@ async def fetch_series_statistics_table(
     transport: httpx2.AsyncBaseTransport | None = None,
     deadline: CallDeadline | None = None,
 ) -> pa.Table:
-    """Fetch and read `artifact`'s `series-statistics/1` Parquet bytes.
+    """Fetch and read `artifact`'s `series-statistics/1` Parquet bytes, once per
+    process for each artifact digest, series count and continuing method.
 
     Args:
         subject_id: The `spec_` id `artifact` was minted under.
@@ -247,7 +294,9 @@ async def fetch_series_statistics_table(
 
     Returns:
         The file's rows in `SERIES_STATISTICS_ARROW_SCHEMA`, in its own row
-        order -- empty when `artifact` carries zero rows.
+        order -- empty when `artifact` carries zero rows. A table this
+        process already verified under the same key is returned with no
+        link lookup or GET.
 
     Raises:
         fastmcp.exceptions.ResourceError: `artifact_link` could not read the
@@ -274,6 +323,10 @@ async def fetch_series_statistics_table(
     # for its own `artifact_link` import.
     from data_mcp.artifact_resource import artifact_link  # noqa: PLC0415
 
+    key = _TableKey(artifact.artifact_digest, expected_series, continuing)
+    if (held := _TABLES.get(key)) is not None:
+        _TABLES.move_to_end(key)
+        return held
     async with asyncio.timeout(deadline.remaining() if deadline is not None else None):
         link = await artifact_link(subject_id, content_version, artifact.artifact_digest)
         # `Accept-Encoding: identity` is what keeps `_read_bounded`'s cap exact.
@@ -290,7 +343,9 @@ async def fetch_series_statistics_table(
             "fetched artifact bytes do not hash to the advertised artifact_digest "
             f"{artifact.artifact_digest!r}; computed {computed_digest!r}"
         )
-    return _read(fetched, expected_series=expected_series, continuing=continuing)
+    table = _read(fetched, expected_series=expected_series, continuing=continuing)
+    _remember(key, table)
+    return table
 
 
 async def _read_bounded(response: httpx2.Response, *, max_bytes: int) -> bytes:

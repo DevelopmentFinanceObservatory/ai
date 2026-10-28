@@ -4,6 +4,7 @@ inputs on one basis (`submission.service._aligned_bases`)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -378,3 +379,31 @@ class WholeCompiles:
             ]
             scope["choices"] = [{**sector, "id": f"{scope['id']}:sector"}, *scope["choices"]]
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [part]}})
+
+
+class Overlapping:
+    """`surface` with each call held open for a moment, recording in `most` the
+    most calls it had open at once, so a test can tell calls made together from
+    calls made one after another."""
+
+    def __init__(self, surface: Any) -> None:
+        self.surface = surface
+        self.open = 0
+        self.most = 0
+
+    async def list_tools(self) -> list[Any]:
+        return await self.surface.list_tools()
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.open += 1
+        self.most = max(self.most, self.open)
+        try:
+            # Long enough for every call started in the same step to open.
+            await asyncio.sleep(0.01)
+            return await self.surface.call_tool(
+                tool=tool, arguments=arguments, on_progress=on_progress
+            )
+        finally:
+            self.open -= 1

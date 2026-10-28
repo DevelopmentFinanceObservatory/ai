@@ -468,9 +468,16 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         view=view,
         proposer=proposer,
     )
+    # A refusal asking for a Search read waits until the plan's own rules are
+    # checked on the requirements as written, so a plan they refuse costs no
+    # read (`_reads_wanted`).
+    reads: dict[str, object] | None = None
     if isinstance(realigned, dict):
-        return realigned
-    evidence_requirements = realigned
+        if not _reads_wanted(realigned):
+            return realigned
+        reads = realigned
+    else:
+        evidence_requirements = realigned
     # Every requirement once aligned; the decisions below change citations alone.
     aligned_after = _requirements_after(
         previous, evidence_requirements, removed_evidence_requirements
@@ -565,7 +572,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
     )
     if blocked is not None:
-        return blocked
+        return reads or blocked
     try:
         if previous is not None:
             plan = previous.amend(
@@ -618,7 +625,10 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         )
         # `Plan` validation compares the sides of a share by name; the
         # pins resolve them to graph refs, so an alias divides by itself too.
-        check_wholes_span_their_totals(stated, refs=_entity_refs(view))
+        # The refs follow the pins, so a plan whose reads are still to make
+        # is checked once they are made.
+        if reads is None:
+            check_wholes_span_their_totals(stated, refs=_entity_refs(view))
         split = split_of(stated)
         # The recorded plan carries the copies, and `Plan` validation checks
         # they are the split of `stated` before `_window_pins` gives each pin
@@ -634,6 +644,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
             if split.copies
             else stated
         )
+        if reads is not None:
+            return reads
         plan, copies = _window_pins(materialized, shown=pins, definition_lookup=definition_lookup)
     except (ValidationError, ValueError) as exc:
         # The plan-level rules: unique slots and ids, every citation naming
@@ -641,11 +653,14 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         # each field, a non-blank question, and the size limit on the whole. A removal naming an item
         # the plan does not state is a `ValueError` from `Plan.amend` itself,
         # and a first draft or restart with no `question`/`answer_mode` is
-        # one raised above.
+        # one raised above. A first year the plan's pins do not state yet
+        # waits for the reads that move them.
+        unknown = _first_year_unknown_cause(exc)
+        if reads is not None and unknown is not None:
+            return reads
         cause = _unsupported_cause(exc)
         if cause is not None:
             view.record_unsupported(cause.operation)
-        unknown = _first_year_unknown_cause(exc)
         if unknown is not None:
             exc = _first_year_refusal(
                 unknown, shown=pins, read=read, definition_lookup=definition_lookup
@@ -682,6 +697,21 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         rounds=rounds,
         windowed_pins=tuple(copies) if copies or held_copies else None,
     )
+
+
+def _reads_wanted(refusal: Mapping[str, object]) -> bool:
+    """Whether `refusal`, from `_aligned_bases`, asks for a Search read the plan waits on.
+
+    A search for an input pinned to no dataset (`BASIS_UNKNOWN`) or a compile
+    of an input on its calculation's options (`BASES_UNALIGNED`), which
+    `planner.agent.with_source_reads` makes before proposing again. `admit`
+    returns such a refusal only once the plan passes the rules that hold
+    whatever the requirements pin. A plan those rules refuse is refused for
+    them first, and its reads are never made. The checks that read the pins
+    (graph refs, windows, first years, referrals, scope rows) run after the
+    reads.
+    """
+    return bool(unpinned_wanted(refusal) or realignments_wanted(refusal))
 
 
 class _Patch(BaseModel):
@@ -2853,6 +2883,20 @@ def _first_year_refusal(
     )
 
 
+def requirement_window(
+    requirement: DatasetRequirement, *, whole_history: Mapping[str, int]
+) -> dict[str, object]:
+    """The `requested_window` a pinned `requirement` is retrieved over (`_window_pins`).
+
+    Its period, or for one stating `period_end_open` a range with no end
+    year (`_open_window`). `whole_history` is the plan's
+    `planner.plan.HistorySplit.whole_history`.
+    """
+    if requirement.period_end_open:
+        return _open_window(requirement, whole_history=whole_history)
+    return period_window(requirement.period)
+
+
 def _open_window(
     requirement: DatasetRequirement, *, whole_history: Mapping[str, int]
 ) -> dict[str, object]:
@@ -2974,10 +3018,7 @@ def _window_pins(
         if pin is None or recorded is None:
             continue
         pinning[requirement.id] = pin
-        if requirement.period_end_open:
-            window = _open_window(requirement, whole_history=whole_history)
-        else:
-            window = period_window(requirement.period)
+        window = requirement_window(requirement, whole_history=whole_history)
         if recorded.identity.get("requested_window") == window:
             copies[requirement.id] = None
         else:

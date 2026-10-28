@@ -877,6 +877,77 @@ async def _fetch_table(
         )
 
 
+async def _read_twice(
+    data: bytes, *, statuses: tuple[int, int] = (200, 200)
+) -> tuple[list[pa.Table | BaseException], list[str]]:
+    """Read one artifact as `get_data`'s digest does (`fetch_series_statistics`), then as
+    the executor's evidence check does (`fetch_series_statistics_table`), with the GET
+    answering `statuses` in turn. Returns each read's table (the digest's models rebuilt
+    as one) or error, and every request the link route and the GET received."""
+    digest = _digest_for(data)
+    artifact = _manifest(rendering={"statistics": "series"}, artifact_digest=digest).artifacts[0]
+    requests: list[str] = []
+    answers = iter(statuses)
+
+    def snapshot_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("link")
+        return httpx2.Response(200, json=_snapshot_payload(artifact_digest=digest))
+
+    def get_handler(_request: httpx2.Request) -> httpx2.Response:
+        requests.append("get")
+        return httpx2.Response(next(answers), content=data)
+
+    arguments: dict[str, Any] = {
+        "subject_id": _SPEC_ID,
+        "content_version": _CONTENT_VERSION,
+        "artifact": artifact,
+        "expected_series": 1,
+        "continuing": None,
+        "transport": httpx2.MockTransport(get_handler),
+    }
+    results: list[pa.Table | BaseException] = []
+    async with _client(snapshot_handler) as upstream:
+        client_holder.set_client(upstream)
+        try:
+            results.append(series_statistics_table(await fetch_series_statistics(**arguments)))
+        except httpx2.HTTPStatusError as exc:
+            results.append(exc)
+        try:
+            results.append(await fetch_series_statistics_table(**arguments))
+        except httpx2.HTTPStatusError as exc:
+            results.append(exc)
+    return results, requests
+
+
+async def test_a_second_read_of_one_artifact_fetches_nothing() -> None:
+    results, requests = await _read_twice(_parquet_bytes([_row(stat_var="dcid:VarA")]))
+
+    assert requests == ["link", "get"]
+    first, second = results
+    assert isinstance(first, pa.Table)
+    assert isinstance(second, pa.Table)
+    assert second.equals(first)
+
+
+async def test_a_failed_read_is_not_kept() -> None:
+    results, requests = await _read_twice(
+        _parquet_bytes([_row(stat_var="dcid:VarA")]), statuses=(503, 200)
+    )
+
+    assert requests == ["link", "get", "link", "get"]
+    assert isinstance(results[0], httpx2.HTTPStatusError)
+    assert isinstance(results[1], pa.Table)
+    assert results[1]["stat_var"].to_pylist() == ["dcid:VarA"]
+
+
+async def test_another_artifact_is_fetched_on_its_own() -> None:
+    _, first = await _read_twice(_parquet_bytes([_row(stat_var="dcid:VarA")]))
+    _, second = await _read_twice(_parquet_bytes([_row(stat_var="dcid:VarB")]))
+
+    assert first == ["link", "get"]
+    assert second == ["link", "get"]
+
+
 def _with_column(data: bytes, name: str, column: pa.Array) -> bytes:
     """`data` with column `name` replaced by `column`, schema metadata kept."""
     table = pq.read_table(io.BytesIO(data))

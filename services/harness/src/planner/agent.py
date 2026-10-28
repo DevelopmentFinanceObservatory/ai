@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast, override
 
@@ -65,6 +65,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import REQUEST_INPUT_FUNCTIO
 from harness.graph.orchestrate import counts_chosen
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, resume_answers
 from harness.scope_choices import (
+    PartScope,
     ScopeChoice,
     mark_planner_axes,
     option_axis,
@@ -154,6 +155,7 @@ from planner.records import (
 from planner.settings import AGENT_THINKING_CONFIG, drop_thought_parts
 from planner.skills import build_skill_tools
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
+from planner.workflow import ResolvedGroup
 
 if TYPE_CHECKING:
     from harness.prefix_cache import PrefixCache
@@ -1395,12 +1397,24 @@ def _first_year_unreadable(
     )
 
 
+# A read of a source, made: applied to the session state, it makes the read's
+# writes and answers the refusal the proposal is given, or `None` once the
+# read is held. `with_source_reads` makes the reads one refusal asks for at
+# once and applies them in order, so a read after a refused one writes nothing.
+type SourceRead = Callable[[SessionState], dict[str, object] | None]
+
+
+def _refusing(refused: dict[str, object]) -> SourceRead:
+    """The read answering `refused`, writing nothing."""
+    return lambda _: refused
+
+
 async def compile_on_basis(
     surface: ToolSurface,
     realignment: Realignment,
     *,
     state: SessionState,
-) -> dict[str, object] | None:
+) -> SourceRead:
     """Compile `realignment`'s pin on its calculation's options and hold the pin Search answers.
 
     Posts the pin's base identity with its scope entries and each option, on
@@ -1425,10 +1439,11 @@ async def compile_on_basis(
     timeout, above data-mcp's resubmit budget, within the planner entry's
     time left.
 
-    Returns `None` once the pin is held, or the refusal the proposal
-    answers: `SURFACE_UNAVAILABLE` when Search did not answer and can later,
-    `OPERATION_UNSUPPORTED` when it refuses the options or answers with no
-    one dataset.
+    `state` is read; the writes are made when the read returned is applied
+    (`SourceRead`). It answers `None` once the pin is held, or the refusal
+    the proposal answers: `SURFACE_UNAVAILABLE` when Search did not answer
+    and can later, `OPERATION_UNSUPPORTED` when it refuses the options or
+    answers with no one dataset.
 
     A declared whole (`Realignment.whole_axis`) is compiled by `compile_whole`.
     """
@@ -1443,14 +1458,14 @@ async def compile_on_basis(
     )
     axes = [option_axis(option_id) for option_id in realignment.option_ids]
 
-    def unservable(reason: str) -> dict[str, object]:
-        return basis_unservable(
+    def unservable(reason: str) -> SourceRead:
+        return lambda into: basis_unservable(
             spec_id=realignment.spec_id,
             option_ids=realignment.option_ids,
             requirement_id=realignment.requirement_id,
             step_id=realignment.step_id,
             reason=reason,
-            record=lambda operation: record_unsupported(state, operation),
+            record=lambda operation: record_unsupported(into, operation),
             proposer=PROPOSE_PLAN_PROPOSER,
         )
 
@@ -1480,7 +1495,7 @@ async def compile_on_basis(
         )
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
-            return _basis_uncompiled(realignment, str(exc))
+            return _refusing(_basis_uncompiled(realignment, str(exc)))
         return unservable(
             f"Search does not count {realignment.requirement_id!r}'s dataset the way its "
             f"calculation's other inputs share ({exc.code or 'refused'})"
@@ -1495,17 +1510,20 @@ async def compile_on_basis(
     digest = resolver_digest({"parts": [dict(part)]})
     mark_planner_axes(digest, planner_axes(block) | set(axes))
     compiled = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {**sources, spec_id: compiled})
-    save_aligned_pin(
-        state,
-        AlignedPin(
-            origin=realignment.spec_id,
-            option_ids=realignment.option_ids,
-            spec_id=spec_id,
-            digest=digest,
-        ),
-    )
-    return None
+
+    def hold(into: SessionState) -> None:
+        save_pin_sources(into, {**pin_sources(into), spec_id: compiled})
+        save_aligned_pin(
+            into,
+            AlignedPin(
+                origin=realignment.spec_id,
+                option_ids=realignment.option_ids,
+                spec_id=spec_id,
+                digest=digest,
+            ),
+        )
+
+    return hold
 
 
 async def compile_whole(
@@ -1513,7 +1531,7 @@ async def compile_whole(
     realignment: Realignment,
     *,
     state: SessionState,
-) -> dict[str, object] | None:
+) -> SourceRead:
     """Compile the declared whole `realignment` names from its part, and hold it as a pin.
 
     The part is the pin `realignment.spec_id` and the axis left open
@@ -1534,8 +1552,10 @@ async def compile_whole(
     `submission.service.AlignedPin` from the part on that axis, which every
     whole declaring the part and the axis pins.
 
-    Returns `None` once the pin is held, `SURFACE_UNAVAILABLE` when Search
-    did not answer and can later, or `SHARE_WHOLE_UNDERIVABLE` under a cause
+    `state` is read; the writes are made when the read returned is applied
+    (`SourceRead`). It answers `None` once the pin is held,
+    `SURFACE_UNAVAILABLE` when Search did not answer and can later, or
+    `SHARE_WHOLE_UNDERIVABLE` under a cause
     naming why: the part's pin is not among the datasets shown
     (`part_not_shown`), is shown with no block (`part_block_missing`), holds
     scope choices this release cannot read (`scope_unreadable`), or offers no
@@ -1545,45 +1565,31 @@ async def compile_whole(
     """
     part_pin, axis = realignment.spec_id, cast(str, realignment.whole_axis)
 
-    def underivable(reason: str, cause: str = "whole_refused") -> dict[str, object]:
-        return share_whole_underivable(
-            whole_id=realignment.requirement_id, part_spec_id=part_pin, reason=reason, cause=cause
+    def underivable(reason: str, cause: str = "whole_refused") -> SourceRead:
+        return _refusing(
+            share_whole_underivable(
+                whole_id=realignment.requirement_id,
+                part_spec_id=part_pin,
+                reason=reason,
+                cause=cause,
+            )
         )
 
-    sources = pin_sources(state)
-    source = sources.get(part_pin)
+    source = pin_sources(state).get(part_pin)
     block = source.spec_block(part_pin) if source is not None else None
     scope = part_scope(part_pin, block)
-    slot = axis_slot(scope, axis) if scope is not None else None
-    if source is None or block is None or scope is None or slot is None:
+    request = (
+        whole_request(scope, axis, groups=block_groups(block))
+        if block is not None and scope is not None
+        else None
+    )
+    if source is None or block is None or scope is None or request is None:
         return underivable(*unread_part(part_pin, axis, source=source, block=block, scope=scope))
-    identity = copy.deepcopy(scope.base.identity)
-    for held in identity.get("slots") or ():
-        if held.get("property") == slot:
-            held["binding"] = {"state": "unbound"}
-    concepts = {entry.axis: entry.concept for entry in scope.entries}
-    entries = [
-        ScopeEntry(
-            axis=choice.axis,
-            option_id=choice.active,
-            provenance="explicit",
-            concept=concepts.get(choice.axis),
-            origin=ChoiceOrigin(choice_id=choice.id),
-        )
-        for choice in scope.choices
-        if choice.axis != axis
-    ]
     try:
-        part = await resolve_definition(
-            surface,
-            spec_id=spec_id_for(canonicalize(identity)),
-            identity=identity,
-            groups=block_groups(block),
-            scope_entries=[entry.model_dump(mode="json", exclude_none=True) for entry in entries],
-        )
+        part = await request.resolve(surface)
     except DefinitionNotResolvedError as exc:
         if exc.retryable:
-            return _basis_uncompiled(realignment, str(exc))
+            return _refusing(_basis_uncompiled(realignment, str(exc)))
         return underivable(
             f"Search does not count {part_pin}'s dataset over every {axis} the way the part is "
             f"counted ({exc.code or 'refused'}): {exc}"
@@ -1598,12 +1604,102 @@ async def compile_whole(
     digest = resolver_digest({"parts": [_with_provenance(part, inherited)]})
     mark_planner_axes(digest, planner_axes(block) & inherited.keys())
     whole_source = source.model_copy(update={"block": digest["spec_block"], "earlier_turn": False})
-    save_pin_sources(state, {**sources, spec_id: whole_source})
-    save_aligned_pin(
-        state,
-        AlignedPin(origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis),
+
+    def hold(into: SessionState) -> None:
+        save_pin_sources(into, {**pin_sources(into), spec_id: whole_source})
+        save_aligned_pin(
+            into,
+            AlignedPin(
+                origin=part_pin, option_ids=(), spec_id=spec_id, digest=digest, whole_axis=axis
+            ),
+        )
+
+    return hold
+
+
+@dataclass(frozen=True)
+class WholeRequest:
+    """The resubmit a declared whole is compiled with (`whole_request`)."""
+
+    spec_id: str
+    identity: dict[str, Any]
+    groups: tuple[ResolvedGroup, ...]
+    entries: tuple[ScopeEntry, ...]
+
+    async def resolve(self, surface: ToolSurface) -> Mapping[str, Any]:
+        """Search's part for this whole, through data-mcp's `resolve_definition`.
+
+        Raises:
+            DefinitionNotResolvedError: As `translator.discovery.resolve_definition` raises it.
+        """
+        return await resolve_definition(
+            surface,
+            spec_id=self.spec_id,
+            identity=self.identity,
+            groups=self.groups,
+            scope_entries=[
+                entry.model_dump(mode="json", exclude_none=True) for entry in self.entries
+            ],
+        )
+
+
+def whole_request(
+    scope: PartScope, axis: str, *, groups: Iterable[ResolvedGroup]
+) -> WholeRequest | None:
+    """The resubmit compiling the whole of the part `scope` describes over every option on `axis`.
+
+    The part's base identity with the slot its choice on `axis` binds
+    (`submission.service.axis_slot`) set unbound, under the spec_id that
+    identity hashes to, with `groups`, the part's entity groups, and one
+    explicit entry from each of its other choices holding its active option,
+    with the concept of the part's entry on that axis (`compile_whole`).
+    `None` when the part offers no choice on `axis` binding one slot.
+
+    A plan card switch builds the same request for the part it is about to
+    compile (`harness.graph.switch`), so the whole the revision then compiles
+    is the call the switch already made.
+    """
+    slot = axis_slot(scope, axis)
+    if slot is None:
+        return None
+    identity = copy.deepcopy(scope.base.identity)
+    for held in identity.get("slots") or ():
+        if held.get("property") == slot:
+            held["binding"] = {"state": "unbound"}
+    concepts = {entry.axis: entry.concept for entry in scope.entries}
+    return WholeRequest(
+        spec_id=spec_id_for(canonicalize(identity)),
+        identity=identity,
+        groups=tuple(groups),
+        entries=tuple(
+            ScopeEntry(
+                axis=choice.axis,
+                option_id=choice.active,
+                provenance="explicit",
+                concept=concepts.get(choice.axis),
+                origin=ChoiceOrigin(choice_id=choice.id),
+            )
+            for choice in scope.choices
+            if choice.axis != axis
+        ),
     )
-    return None
+
+
+async def run_together[T](calls: Iterable[Awaitable[T]]) -> list[T]:
+    """Each of `calls`' results in order, run at once.
+
+    The first to raise cancels the rest, which are waited for before it is
+    raised, so none is left running.
+    """
+    tasks = [asyncio.ensure_future(call) for call in calls]
+    try:
+        return list(await asyncio.gather(*tasks))
+    finally:
+        running = [task for task in tasks if not task.done()]
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.wait(running)
 
 
 def _with_provenance(part: Mapping[str, Any], provenance: Mapping[str, str]) -> dict[str, Any]:
@@ -1618,12 +1714,7 @@ def _with_provenance(part: Mapping[str, Any], provenance: Mapping[str, str]) -> 
     return copied
 
 
-async def pin_by_search(
-    surface: ToolSurface,
-    unpinned: Unpinned,
-    *,
-    state: SessionState,
-) -> dict[str, object] | None:
+async def pin_by_search(surface: ToolSurface, unpinned: Unpinned) -> SourceRead:
     """Search for `unpinned`, a calculation's input the planner pinned no dataset for, and hold what Search settles on.
 
     Posts the `search` part the translator's own discovery sends for the
@@ -1642,7 +1733,8 @@ async def pin_by_search(
     translator's own discovery gives one
     (`translator.discovery.call_within_entry`).
 
-    Returns `None` once the search is held, or `SURFACE_UNAVAILABLE` when
+    The holds are made when the read returned is applied (`SourceRead`). It
+    answers `None` once the search is held, or `SURFACE_UNAVAILABLE` when
     Search did not answer, or refused in a way that can succeed later
     (`translator.discovery.refusal_retryable`); nothing is held then, so the
     next proposal searches again.
@@ -1650,11 +1742,11 @@ async def pin_by_search(
     try:
         answer = await call_within_entry(surface, tool=SEARCH, arguments={"parts": [unpinned.part]})
     except ToolSurfaceUnavailableError as exc:
-        return _search_unavailable(unpinned, str(exc))
+        return _refusing(_search_unavailable(unpinned, str(exc)))
     if answer.is_error and refusal_retryable(answer):
         refusal = answer.structured_content or {}
         cause = refusal.get("message") or answer.text or "Search refused it for now"
-        return _search_unavailable(unpinned, str(cause))
+        return _refusing(_search_unavailable(unpinned, str(cause)))
     envelope = None if answer.is_error else (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
     parts = envelope.get("parts") if isinstance(envelope, dict) else None
     part = parts[0] if isinstance(parts, list) and len(parts) == 1 else None
@@ -1672,8 +1764,7 @@ async def pin_by_search(
         open_roles=unpinned.open_roles,
     )
     if not isinstance(spec_id, str) or not isinstance(envelope, dict):
-        save_searched_pin(state, searched)
-        return None
+        return lambda into: save_searched_pin(into, searched)
     digest = resolver_digest(cast(dict[str, Any], envelope))
     scope = part_scope(spec_id, digest["spec_block"])
     mark_planner_axes(
@@ -1683,9 +1774,12 @@ async def pin_by_search(
         else (),
     )
     shown = PinSource(block=digest["spec_block"], settled=True, asked_roles=unpinned.asked_roles)
-    save_pin_sources(state, {**pin_sources(state), spec_id: shown})
-    save_searched_pin(state, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
-    return None
+
+    def hold(into: SessionState) -> None:
+        save_pin_sources(into, {**pin_sources(into), spec_id: shown})
+        save_searched_pin(into, searched.model_copy(update={"spec_id": spec_id, "digest": digest}))
+
+    return hold
 
 
 def _search_unavailable(unpinned: Unpinned, cause: str) -> dict[str, object]:
@@ -1742,6 +1836,12 @@ async def with_source_reads(
     is asked for once, so a refusal naming one
     is answered as it stands, and inputs sharing a pin and a set of options
     compile it once (`_alignment_key`).
+
+    The reads one refusal asks for run at once (`run_together`), so a
+    proposal waits for its slowest read. Their writes are made in the order
+    the refusal names them, up to the first read refused, whose refusal is
+    answered (`_held_in_order`), so the state is the one reading them one
+    after another leaves.
     """
     while True:
         result = propose()
@@ -1760,10 +1860,10 @@ async def with_source_reads(
             continue
         unpinned = unpinned_wanted(result)
         if unpinned:
-            for item in unpinned:
-                refused = await pin_by_search(surface, item, state=state)
-                if refused is not None:
-                    return refused
+            searched = await run_together(pin_by_search(surface, item) for item in unpinned)
+            refused = _held_in_order(searched, state=state)
+            if refused is not None:
+                return refused
             continue
         wanted = realignments_wanted(result)
         done = {
@@ -1773,13 +1873,24 @@ async def with_source_reads(
         keys = [_alignment_key(item.spec_id, item.option_ids, item.whole_axis) for item in wanted]
         if not wanted or any(key in done for key in keys):
             return result
-        for item, key in zip(wanted, keys, strict=True):
-            if key in done:
-                continue
-            refused = await compile_on_basis(surface, item, state=state)
-            if refused is not None:
-                return refused
-            done.add(key)
+        compiles: dict[tuple[str, tuple[str, ...], str | None], Realignment] = {}
+        for key, item in zip(keys, wanted, strict=True):
+            compiles.setdefault(key, item)
+        compiled = await run_together(
+            compile_on_basis(surface, item, state=state) for item in compiles.values()
+        )
+        refused = _held_in_order(compiled, state=state)
+        if refused is not None:
+            return refused
+
+
+def _held_in_order(reads: Iterable[SourceRead], *, state: SessionState) -> dict[str, object] | None:
+    """Apply each of `reads` to `state` in order, stopping at the first refused, and answer its refusal."""
+    for read in reads:
+        refused = read(state)
+        if refused is not None:
+            return refused
+    return None
 
 
 def _alignment_key(

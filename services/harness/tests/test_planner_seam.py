@@ -50,7 +50,7 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     create_request_input_response,
 )
 from google.genai import types
-from harness import planner_seam
+from harness import plan_display, planner_seam
 from harness.graph import switch
 from harness.graph.state import (
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
@@ -117,6 +117,7 @@ from planner.plan import (
     SessionState,
     ShareOfRequirement,
     Unit,
+    WholeOf,
     amendment_entry,
     current_discovery_time_left,
     current_earlier_block,
@@ -150,7 +151,17 @@ from translator.discovery import current_cut_calls
 from translator.mechanical import COMPILE_FAILURES_STATE_KEY
 from translator.referral import ReferralKind
 
-from .basis_alignment import HEALTH, TOTAL, TOTAL_GROSS, TOTAL_NET, BasisCompiles, basis_block
+from .basis_alignment import (
+    HEALTH,
+    TOTAL,
+    TOTAL_GROSS,
+    TOTAL_NET,
+    US_2023,
+    BasisCompiles,
+    Overlapping,
+    WholeCompiles,
+    basis_block,
+)
 from .search_results import search_result_parts
 from .split_plan import SPEC_DEBT, SPEC_DEBT_HISTORY, stored_split_plan
 from .test_turn_records import _switchable_scope
@@ -5025,6 +5036,214 @@ async def test_a_switch_on_a_share_plan_keeps_its_inputs_on_one_basis(
         assert TOTAL in result["read"]
     (health_basis, total_basis) = result["bases"]
     assert health_basis[1] == total_basis[1]
+
+
+class _PartAndWholeCompiles(WholeCompiles):
+    """`WholeCompiles`, whose resubmit of the US health part itself (its sector
+    bound) answers the part as dev Search recorded it on the provider posted."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        (sector,) = [s for s in arguments["identity"]["slots"] if s["property"] == "crsPurpose"]
+        if sector["binding"]["state"] == "unbound":
+            return await super().call_tool(tool=tool, arguments=arguments)
+        self.calls.append(arguments)
+        provider = [e["option_id"] for e in arguments["scope_entries"] if e["axis"] == "provider"]
+        part = US_2023["health_inclusive" if provider == ["provider:inclusive"] else "health"]
+        return ToolCallResult(
+            is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [self.answered(part)]}}
+        )
+
+    def answered(self, part: dict[str, Any]) -> dict[str, Any]:
+        """The part Search answers for the resubmit of `part`: `part` itself."""
+        return part
+
+
+class _PartMovedCompiles(_PartAndWholeCompiles):
+    """`_PartAndWholeCompiles`, whose Search answers the part with a scope other than
+    the one posted: its provider entry carries the concept "health"."""
+
+    @override
+    def answered(self, part: dict[str, Any]) -> dict[str, Any]:
+        moved = copy.deepcopy(part)
+        scope = moved["spec"]["resolved"]["scope_choices"]
+        scope["entries"] = [
+            {**entry, "concept": "health"} if entry["axis"] == "provider" else entry
+            for entry in scope["entries"]
+        ]
+        return moved
+
+
+@pytest.mark.parametrize(
+    ("fake", "options", "calls", "most", "concept"),
+    [
+        (
+            _PartAndWholeCompiles,
+            ("provider:inclusive", "provider:bilateral", "provider:inclusive"),
+            [1, 3, 4, 4],
+            [2, 1, 0],
+            None,
+        ),
+        (_PartMovedCompiles, ("provider:inclusive",), [1, 4], [2], "health"),
+    ],
+    ids=["scope-kept", "scope-moved"],
+)
+async def test_a_provider_switch_compiles_the_parts_whole_beside_it_once_a_turn(
+    decision: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    fake: type[_PartAndWholeCompiles],
+    options: tuple[str, ...],
+    calls: list[int],
+    most: list[int],
+    concept: str | None,
+) -> None:
+    """US health aid in 2023 as a share of its declared whole, switched on the plan
+    card to bilateral plus imputed multilateral aid, back to bilateral, and to the
+    inclusive scope again. Each switch posts the part and the whole the revision
+    compiles from it at once, as dev Search keeps the part's scope through a
+    provider switch, so the revision asks Search nothing; and a resubmit the turn
+    already made is not posted again. The whole on bilateral flows is the one the
+    first draft compiled, and the second inclusive switch repeats the first. Where
+    Search answers the part with another scope, the whole posted beside it is not
+    the one the revision needs, and the revision compiles the whole again from
+    Search's answer."""
+    # The user's words asked for bilateral aid, so the card shows the provider row.
+    searched = copy.deepcopy(US_2023["health"])
+    scope = searched["spec"]["resolved"]["scope_choices"]
+    (provider,) = [c for c in scope["choices"] if c["axis"] == "provider"]
+    provider["provenance"] = "explicit"
+    scope["entries"] = [
+        {
+            "axis": "provider",
+            "option_id": "provider:bilateral",
+            "provenance": "explicit",
+            "origin": {"kind": "text", "text": "bilateral", "start": 0, "end": 9},
+        }
+    ]
+    health = searched["spec"]
+    part_pin = health["spec_id"]
+
+    def dataset(requirement_id: str, **fields: Any) -> DatasetRequirement:
+        return DatasetRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            measure=requirement_id,
+            entities=[Entity(name="United States", role="donor")],
+            period=Period(start=2023, end=2023),
+            **fields,
+        )
+
+    part = dataset("health", source_spec_id=part_pin)
+    plan = Plan(
+        question="What share of US aid went to health in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=[decision()],
+        evidence_requirements=[
+            part,
+            dataset("total", whole_of=WholeOf(part="health", axis="sector")),
+            ShareOfRequirement(
+                id="share",
+                decision_ids=["measure"],
+                numerator=RequirementSide(input_id="health"),
+                denominator=RequirementSide(input_id="total"),
+            ),
+        ],
+    )
+
+    async def translate(tool_context: Any) -> dict[str, object]:
+        del tool_context
+        return {"outcome": "ok"}
+
+    # Each revision is offered as recorded: what it compiles is not this test's.
+    monkeypatch.setattr(
+        planner_seam, "declare_ready", lambda answer, ctx: {**answer, "summary": {}}
+    )
+    compiles = fake()
+    surface = Overlapping(compiles)
+    seam = PlannerSeam(
+        settings=Settings(),
+        surface=cast(Any, surface),
+        translate=translate,
+        model=ScriptedPlannerLlm(script=[]),
+    )
+    switching = switch.switch_node(planner=seam, definition_surface=cast(Any, surface))
+
+    async def _node(ctx: Context, node_input: Any) -> Any:
+        del node_input
+        state = cast(SessionState, ctx.state)
+        save_pin_sources(state, {part_pin: PinSource(block=health, settled=True)})
+        reading = SearchReading.from_part(
+            {"variable": "US health aid", "status": "definite", "spec_id": part_pin, "scope": scope}
+        )
+        ctx.state[ORCHESTRATOR_SEARCHES_KEY] = [reading.model_dump(mode="json")]
+        drafted = await seam.revise(
+            ctx=ctx,
+            prior_plan=plan.model_dump(mode="json"),
+            evidence_requirements=[part.model_dump(mode="json")],
+            inherits={},
+        )
+        assert "plan" in drafted, drafted
+        ctx.state["plan"] = json.dumps(drafted["plan"])
+        counted, opened = [len(compiles.calls)], []
+        for option_id in options:
+            surface.most = 0
+            shown = Plan.model_validate_json(ctx.state["plan"])
+            (row,) = [
+                d
+                for d in shown.decisions
+                if d.scope is not None
+                and d.scope.axis == "provider"
+                and d.fixes is not None
+                and d.fixes.source_spec_id is not None
+                and d.fixes.source_spec_id
+                in {part_pin, US_2023["health_inclusive"]["spec"]["spec_id"]}
+            ]
+            pick = {"choice_id": plan_display.choice_id(shown, row), "option_id": option_id}
+            async for event in switching(ctx, {"switch": pick}):
+                assert "switch_failed" not in event.output, event.output["switch_failed"]
+            counted.append(len(compiles.calls))
+            opened.append(surface.most)
+        shown = Plan.model_validate_json(ctx.state["plan"])
+        return {
+            "calls": counted,
+            "most": opened,
+            "whole": shown.requirement("total").source_spec_id,  # type: ignore[union-attr]
+        }
+
+    sessions = InMemorySessionService()
+    session = await sessions.create_session(app_name=_APP, user_id=_USER)
+    runner = Runner(
+        node=Workflow(name="whole_switch_wf", edges=[(START, node(_node, name="switch"))]),
+        app_name=_APP,
+        session_service=sessions,
+    )
+    (result,) = [
+        event.output
+        async for event in runner.run_async(
+            user_id=_USER,
+            session_id=session.id,
+            new_message=types.Content(role="user", parts=[types.Part(text="switch")]),
+        )
+        if event.output is not None
+    ]
+
+    # The draft compiles the whole; each switch posts at most the part and its whole.
+    assert result["calls"] == calls
+    assert result["most"] == most
+    # The plan reads the inclusive whole, compiled from the part Search answered.
+    assert result["whole"] == US_2023["whole_inclusive"]["spec"]["spec_id"]
+    whole = [
+        call
+        for call in compiles.calls
+        if any(
+            slot["property"] == "crsPurpose" and slot["binding"]["state"] == "unbound"
+            for slot in call["identity"]["slots"]
+        )
+    ][-1]
+    (provider,) = [e for e in whole["scope_entries"] if e["axis"] == "provider"]
+    assert provider.get("concept") == concept
 
 
 def test_a_plan_sentence_names_a_pin_an_earlier_turn_read_by_its_earlier_block(

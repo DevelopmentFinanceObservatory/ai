@@ -19,7 +19,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, cast, override
 
 import pytest
 from analysis_mcp.server import mcp as analysis_mcp
@@ -37,6 +37,7 @@ from compiler.surface import (
 )
 from data_mcp.definition_store import InMemoryDefinitionStore
 from data_mcp.definition_store.identity import canonicalize, spec_id_for
+from data_mcp.definition_writes import windowed_identity
 from data_mcp.server import mcp as data_mcp
 from executor.classify import ToolFailure
 from executor.completion import FramePublished
@@ -3162,6 +3163,23 @@ def _hashed_scope() -> dict[str, Any]:
     return scope
 
 
+# The window the plan of `_scoped_plan` reads its dataset over.
+_PLAN_WINDOW = {"kind": "range", "start_year": 2015, "end_year": 2024}
+
+
+def _posted(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The spec_id and identity a plan card switch of `scope` posts, which are its
+    base identity over the window the plan reads (`_PLAN_WINDOW`) in place of the
+    whole span its search answered."""
+    spec_id, identity = windowed_identity(scope["base"]["identity"], _PLAN_WINDOW)
+    return spec_id, dict(identity)
+
+
+def _posted_id(scope: dict[str, Any]) -> str:
+    """The spec_id a plan card switch of `scope` posts (`_posted`)."""
+    return _posted(scope)[0]
+
+
 def _switched_answer(scope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """The spec_id and envelope Search answers for `scope` switched to CRS
     120 and 130: grant equivalents become the basis, since gross is out of
@@ -3410,7 +3428,7 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
                 ],
             }
         )
-    search = SearchStub(answer={scope["id"]: envelope})
+    search = SearchStub(answer={_posted_id(scope): envelope})
 
     runner, seam, plan, scope, events = await _switch_runner(
         real_schemas, search, {"plan": revised.model_dump(mode="json"), "summary": {}}
@@ -3419,7 +3437,7 @@ async def test_a_switch_compiles_through_search_repins_the_plan_and_says_what_mo
     assert len(seam.calls) == 1  # the first draft; the switch drafts nothing
     (posted,) = search.posted
     (entry,) = posted["input"]["entries"]
-    assert (entry["variable_text"], entry["identity"]) == (scope["id"], scope["base"]["identity"])
+    assert (entry["variable_text"], entry["identity"]) == _posted(scope)
     assert entry["scope_entries"] == [
         scope["entries"][1],
         {
@@ -3512,7 +3530,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
         schemas=real_schemas,
         version=2,
     )
-    search = SearchStub(answer={scope["id"]: envelope})
+    search = SearchStub(answer={_posted_id(scope): envelope})
     part = "spec_" + "4" * 32
     whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
 
@@ -3539,7 +3557,7 @@ async def test_a_switch_posts_the_parts_groups_as_every_resubmit_posts_them(
     and ref, and no total, which Search recomputes."""
     scope = _hashed_scope()
     _, envelope = _switched_answer(scope)
-    search = SearchStub(answer={scope["id"]: envelope})
+    search = SearchStub(answer={_posted_id(scope): envelope})
     groups = {"destination": {"label": "Africa", "ref": "africa", "total": "DACAfricaTotal"}}
 
     await _switch_runner(real_schemas, search, entity_groups=groups)
@@ -3584,7 +3602,7 @@ async def test_a_switch_keeps_the_planners_basis_mark_unless_it_switches_the_bas
         schemas=real_schemas,
         version=2,
     )
-    search = SearchStub(answer={scope["id"]: envelope})
+    search = SearchStub(answer={_posted_id(scope): envelope})
 
     runner, *_ = await _switch_runner(
         real_schemas,
@@ -3634,7 +3652,7 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
     search = (
         SearchStub(
             refuse={
-                scope["id"]: {
+                _posted_id(scope): {
                     "code": code,
                     "title": "Requested Option Unavailable",
                     "detail": "Scope entry 1 cannot apply to this part: option_unknown.",
@@ -3644,7 +3662,7 @@ async def test_a_switch_that_cannot_apply_offers_the_plan_unchanged_with_why(
             }
         )
         if refused_by == "search"
-        else SearchStub(answer={scope["id"]: envelope})
+        else SearchStub(answer={_posted_id(scope): envelope})
     )
 
     why = "Official development assistance would then count different providers' spending."
@@ -3712,7 +3730,7 @@ async def test_a_switch_the_user_stops_offers_the_plan_unchanged_to_answer_again
     try:
         runner, seam, plan, scope, events = await _switch_runner(
             real_schemas,
-            SearchStub(answer={scope["id"]: envelope}),
+            SearchStub(answer={_posted_id(scope): envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
             seam_type=seam_type,
         )
@@ -3775,7 +3793,7 @@ async def test_a_switch_whose_revision_raises_puts_the_state_back_and_raises(
     with pytest.raises(RuntimeError, match="revision broke"):
         await _switch_runner(
             real_schemas,
-            SearchStub(answer={scope["id"]: envelope}),
+            SearchStub(answer={_posted_id(scope): envelope}),
             {"plan": revised.model_dump(mode="json"), "summary": {}},
             seam_type=_RaisingSeam,
         )
@@ -3869,6 +3887,21 @@ _INCLUSIVE_PROVENANCE = {
 }
 
 
+class _RecordedFixtures(FixtureSurface):
+    """A `FixtureSurface` recording each call's tool and arguments in `calls`."""
+
+    def __init__(self, *, schemas: list[ToolSchema]) -> None:
+        super().__init__(schemas=schemas)
+        self.calls: list[tuple[str, Mapping[str, object]]] = []
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, object], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.calls.append((tool.name, arguments))
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
 class _TranslatingSeam(_Seam):
     """A `PlannerModel` drafting `plans` and revising through the real
     `harness.planner_seam.PlannerSeam.revise`: the proposal chain, the
@@ -3876,7 +3909,8 @@ class _TranslatingSeam(_Seam):
 
     def __init__(self, plans: list[dict[str, Any]], *, schemas: list[ToolSchema]) -> None:
         super().__init__(plans)
-        self._seam = PlannerSeam(settings=Settings(), surface=FixtureSurface(schemas=schemas))
+        self.surface = _RecordedFixtures(schemas=schemas)
+        self._seam = PlannerSeam(settings=Settings(), surface=self.surface)
 
     async def revise(self, **kwargs: Any) -> dict[str, Any]:
         return await self._seam.revise(**kwargs)
@@ -3890,7 +3924,11 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     multilateral, a dataset Search names otherwise. The switch drops the
     stated source with the pin it left, so the translation takes the new pin
     with no search, the plan compiles, and its run accepts what the new
-    dataset returns."""
+    dataset returns. The switch posts the identity over the years the plan
+    reads, so Search's answer covers exactly them and the translation asks
+    Search nothing; the identity over every year its search answered would
+    come back covering more years, and the translation would search for the
+    dataset again over the plan's."""
     scope = _hashed_scope()
     pin = scope["compiled"]["spec_id"]
     new_pin, envelope = _switched_answer(scope)
@@ -3922,7 +3960,9 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
     seam = _TranslatingSeam(
         [{"plan": plan.model_dump(mode="json"), "summary": {}}], schemas=real_schemas
     )
-    search = SearchStub(answer={scope["id"]: envelope})
+    every_year = copy.deepcopy(envelope)
+    every_year["parts"][0]["spec"]["resolved"]["coverage"]["window"]["start_year"] = 1995
+    search = SearchStub(answer={_posted_id(scope): envelope, scope["id"]: every_year})
     runner, _ = orchestrator_runner(
         plan_call(_BRIEF),
         planner=seam,
@@ -3944,6 +3984,9 @@ async def test_a_switch_moves_a_requirement_off_the_source_it_stated_and_the_pla
         },
     )
 
+    # The switch posted the identity over the plan's years, so the translation
+    # takes Search's answer as the source and asks Search nothing.
+    assert seam.surface.calls == []
     offered = _output_of(events, "switch")
     assert "switch_failed" not in offered, offered.get("switch_failed")
     revised = PlannerPlan.model_validate_json(_session_state(runner)["plan"])

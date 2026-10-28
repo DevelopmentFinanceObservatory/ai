@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, override
 
 import pytest
 from compiler.compile import CompileIssueCode
@@ -126,6 +126,7 @@ from planner.plan import (
     is_search_pin,
     load_plan,
     load_plan_rounds,
+    load_unsupported,
     open_window,
     pin_slot_moves,
     pin_sources,
@@ -213,6 +214,7 @@ from ..basis_alignment import (
     TOTAL_GROSS,
     TOTAL_GROSS_BILATERAL,
     BasisCompiles,
+    Overlapping,
     ProviderCompiles,
     WholeCompiles,
     basis_block,
@@ -4974,9 +4976,31 @@ def test_a_share_whose_inputs_the_user_stated_on_different_bases_keeps_both(
     ) == (HEALTH, TOTAL)
 
 
-async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
+def _realign(spec_id: str, option_id: str, requirement_id: str) -> dict[str, Any]:
+    """One `BASES_UNALIGNED` realignment: `requirement_id`, of the share, wanted on `option_id`."""
+    return {
+        "spec_id": spec_id,
+        "option_ids": [option_id],
+        "requirement_id": requirement_id,
+        "step_id": "share",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option_id", "answered", "calls"),
+    [
+        ("measure_basis:gross", {"outcome": Outcome.OK.value}, ["resolve_definition"]),
+        ("provider:bilateral", {"requirement_id": "total"}, []),
+    ],
+    ids=["compiled-once", "refusal-names-the-first"],
+)
+async def test_two_requirements_on_one_pin_and_basis_compile_it_once(
+    option_id: str, answered: dict[str, Any], calls: list[str]
+) -> None:
     """A refusal asking two requirements pinning the US total to be counted gross
-    compiles the total on gross once, and the next proposal is answered."""
+    compiles the total on gross once, and the next proposal is answered. Asked to
+    count both on a provider scope the total offers no choice on, the refusal
+    names the first requirement, as compiling it alone would."""
     surface = BasisCompiles()
     ctx = _FakeToolContext()
     _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
@@ -4984,12 +5008,7 @@ async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
         "code": ProblemCode.BASES_UNALIGNED.value,
         "detail": {
             "realign": [
-                {
-                    "spec_id": TOTAL,
-                    "option_ids": ["measure_basis:gross"],
-                    "requirement_id": requirement_id,
-                    "step_id": "share",
-                }
+                _realign(TOTAL, option_id, requirement_id)
                 for requirement_id in ("total", "total_again")
             ]
         },
@@ -4998,8 +5017,51 @@ async def test_two_requirements_on_one_pin_and_basis_compile_it_once() -> None:
 
     result = await with_source_reads(lambda: next(answers), state=ctx.state, surface=surface)
 
-    assert result == {"outcome": Outcome.OK.value}
+    if "outcome" in answered:
+        assert result == answered
+    else:
+        assert result["code"] == ProblemCode.OPERATION_UNSUPPORTED.value, result
+        assert result["detail"]["basis"]["requirement_id"] == answered["requirement_id"]
+    assert surface.tools == calls
+
+
+class _ResolveUnavailable(BasisCompiles):
+    """`BasisCompiles` whose `resolve_definition` is refused as unavailable for now."""
+
+    @override
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Mapping[str, Any], on_progress: Any = None
+    ) -> ToolCallResult:
+        self.tools.append(tool.name)
+        return ToolCallResult(
+            is_error=True,
+            structured_content={"code": "upstream_unavailable", "retry_mode": "retry_after_delay"},
+        )
+
+
+async def test_a_compile_after_a_refused_one_records_nothing() -> None:
+    """The US total wanted gross, which Search cannot compile now, and on bilateral
+    aid, a choice the total does not offer. Both compiles run at once, but the
+    proposal is answered the first refusal alone, and the decline the second would
+    record is not recorded, as when the first stops the reads one after another."""
+    surface = _ResolveUnavailable()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, basis_block(TOTAL, narrow=False, active="measure_basis:grant_equivalent"))
+    refusal = {
+        "code": ProblemCode.BASES_UNALIGNED.value,
+        "detail": {
+            "realign": [
+                _realign(TOTAL, "measure_basis:gross", "total"),
+                _realign(TOTAL, "provider:bilateral", "total_bilateral"),
+            ]
+        },
+    }
+
+    result = await with_source_reads(lambda: refusal, state=ctx.state, surface=surface)
+
+    assert result["code"] == ProblemCode.SURFACE_UNAVAILABLE.value, result
     assert surface.tools == ["resolve_definition"]
+    assert load_unsupported(ctx.state) == frozenset()
 
 
 async def test_a_share_whose_total_is_not_published_on_the_shared_basis_is_refused(
@@ -6357,8 +6419,10 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
 ) -> None:
     """US health aid and US aid to CRS 120 alone, each a share of a declared whole over
     every sector. Both wholes compile to the one CRS total, yet each whole states its
-    own decision, cited by it alone, naming the part it was declared over."""
+    own decision, cited by it alone, naming the part it was declared over. The two
+    compiles run at once, so the proposal waits for the slower alone."""
     surface = WholeCompiles()
+    overlapping = Overlapping(surface)
     ctx = _FakeToolContext()
     narrow = _malaria_block()
     sector = narrow["resolved"]["scope_choices"]["choices"][0]
@@ -6367,7 +6431,7 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     united_states = Entity(name="United States", role="donor")
 
     result = await _us_2023(
-        _tools_reading(surface)["propose_plan"].func,
+        _tools_reading(cast(Any, overlapping))["propose_plan"].func,
         ctx,
         decision(),
         part="health",
@@ -6400,6 +6464,7 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     )
 
     assert result["outcome"] == Outcome.OK.value, result
+    assert (len(surface.calls), overlapping.most) == (2, 2)
     compiled = us_2023_block("whole")["spec_id"]
     assert [pin for rid, pin in _pins(ctx) if rid in (_WHOLE, "narrow_whole")] == [
         compiled,
@@ -6415,6 +6480,31 @@ async def test_two_wholes_compiled_to_one_pin_each_state_their_own_part(
     assert len(stated) == 2
     assert "health incl. population and reproductive health" in named[_WHOLE]
     assert "health, CRS 120 alone" in named["narrow_whole"]
+
+
+async def test_a_plan_its_own_rules_refuse_makes_no_read_it_would_wait_on(
+    decision: DecisionFactory,
+) -> None:
+    """US health aid as a share of a declared whole, with a decision no requirement
+    cites. The whole needs compiling before the plan can record, and the plan breaks
+    a rule that holds whatever it pins, so it is refused for that rule and nothing
+    is posted to Search."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    _show_blocks(ctx, us_2023_block("health"))
+    uncited = decision(slot="denominator_source", description="Which total?")
+    propose = _tools_reading(surface)["propose_plan"].func
+
+    async def with_uncited(**arguments: Any) -> Any:
+        return await propose(
+            **{**arguments, "decisions": [*arguments["decisions"], *drafts([uncited])]}
+        )
+
+    result = await _us_2023(with_uncited, ctx, decision(), part="health", whole=None, declared=True)
+
+    assert result["code"] == ProblemCode.INVALID_PLAN.value, result
+    assert "denominator_source" in result["message"]
+    assert surface.calls == []
 
 
 def _uk_total(spec_id: str) -> dict[str, Any]:
@@ -7489,11 +7579,12 @@ async def test_a_whole_compile_names_why_it_could_not_read_its_part(
     pin = us_2023_block("health")["spec_id"]
     save_pin_sources(ctx.state, {pin: source} if source is not None else {})
 
-    refused = await planner_agent.compile_whole(
+    read = await planner_agent.compile_whole(
         cast(ToolSurface, surface),
         Realignment(pin, (), _WHOLE, _WHOLE, whole_axis="sector"),
         state=ctx.state,
     )
+    refused = read(ctx.state)
 
     assert refused is not None
     assert refused["code"] == ProblemCode.SHARE_WHOLE_UNDERIVABLE.value

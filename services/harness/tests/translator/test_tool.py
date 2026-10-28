@@ -100,6 +100,9 @@ from translator.referral import (
 from translator.tool import (
     IssueResolution,
     _compile_failure_action,
+    _current_listing,
+    _ListedOnce,
+    _Listing,
     _referral_payload,
     authored_answer,
     build_translate,
@@ -153,7 +156,7 @@ class _UnreadableSurface(FixtureSurface):
 
 
 class _CountingSurface(FixtureSurface):
-    """A `FixtureSurface` that counts each tool it was asked to call.
+    """A `FixtureSurface` that counts each tool it was asked to call, and each list.
 
     Proves `propose_operations`'s `describe` fetch is memoized on a
     same-revision retry, rather than only checking the result.
@@ -162,6 +165,11 @@ class _CountingSurface(FixtureSurface):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.calls: dict[str, int] = {}
+        self.listed = 0
+
+    async def list_tools(self) -> list[ToolSchema]:
+        self.listed += 1
+        return await super().list_tools()
 
     async def call_tool(
         self,
@@ -1189,7 +1197,9 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     entity_groups: dict[str, Any],
     named: bool,
 ) -> None:
-    """The group rewrite and discovery both read the pin's identity on record, off one resolve."""
+    """The group rewrite and discovery both read the pin's identity on record, off one resolve,
+    and so does the next translation of the plan, as a switch or an amendment translates it
+    again. Each translation lists the surface once."""
     pinned = requirement(
         measure="official development assistance",
         entities=[Entity(name="France", role="donor")],
@@ -1217,10 +1227,46 @@ async def test_translate_resolves_a_pinned_identity_on_record_once(
     )
     surface = _CountingSurface(schemas=real_schemas, responses={"resolve_definition": resolved})
 
-    answer = await build_translate(surface=surface)(context)
+    translate = build_translate(surface=surface)
+    answer = await translate(context)
 
     assert surface.calls["resolve_definition"] == 1
+    # Only a translation that reaches a compile lists the surface. The set-aside one
+    # goes back before it.
+    assert surface.listed == int(named)
     assert ("named_in_place_of_across" in answer) is named
+
+    translated = context.state[PLAN_STATE_KEY]
+    context.state[PLAN_STATE_KEY] = draft(
+        decisions=[pinning_decision(SPEC_AFRICA)],
+        evidence_requirements=[pinned, derived_requirement()],
+    ).model_dump_json()
+    again = await translate(context)
+
+    assert surface.calls["resolve_definition"] == 1
+    assert surface.listed == 2 * int(named)
+    assert again == answer
+    assert context.state[PLAN_STATE_KEY] == translated
+
+
+async def test_a_translation_lists_the_surface_once_however_many_rounds_it_proposes(
+    real_schemas: list[ToolSchema],
+) -> None:
+    """Inside one translation (`_current_listing`) every proposal round reads the first
+    list. Outside one, and in the next translation, the surface is listed again."""
+    counting = _CountingSurface(schemas=real_schemas)
+    listed = _ListedOnce(counting)
+
+    for _translation in range(2):
+        token = _current_listing.set(_Listing())
+        try:
+            assert await listed.list_tools() == real_schemas
+            assert await listed.list_tools() == real_schemas
+        finally:
+            _current_listing.reset(token)
+    await listed.list_tools()
+
+    assert counting.listed == 3
 
 
 SPEC_G7 = "spec_9c7a11e2" + "0" * 24

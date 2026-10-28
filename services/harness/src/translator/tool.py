@@ -47,13 +47,21 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
+from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import assert_never, cast
 
 from common.telemetry import record_event
 from compiler.compile import CompileIssue, CompileIssueCode, CompileResult, compile_plan
 from compiler.rolling import anchor_groups
-from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
+from compiler.surface import (
+    ProgressCallback,
+    ToolCallResult,
+    ToolSchema,
+    ToolSurface,
+    ToolSurfaceUnavailableError,
+)
 from executor.outcomes import (
     AnchorResult,
     MethodChoiceNeeded,
@@ -63,7 +71,7 @@ from executor.outcomes import (
     failed_step,
     stop_cause,
 )
-from executor.run import AnchorRead, read_anchors
+from executor.run import AnchorRead, HeldAnchor, read_anchors
 from google.adk.tools.tool_context import ToolContext
 from planner.operations import Translation
 from planner.plan import (
@@ -71,6 +79,7 @@ from planner.plan import (
     HistorySplit,
     Plan,
     Restatement,
+    SessionState,
     UnsupportedOperation,
     authored_text,
     discovery_time_left,
@@ -85,10 +94,15 @@ from planner.plan import (
     save_plan,
     split_of,
 )
-from planner.records import AmbiguousEntityReading, EvidenceIssueCode, RollingPlanError
+from planner.records import (
+    AmbiguousEntityReading,
+    EvidenceIssueCode,
+    RollingPlanError,
+    warn_left_out,
+)
 from planner.shapes import pooling_remedy
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem, referred
-from planner.workflow import SelectedSource, Workflow
+from planner.workflow import SelectedSource, ToolId, Workflow
 from pydantic import JsonValue, ValidationError
 
 from translator.discovery import (
@@ -136,6 +150,35 @@ type AnchorReader = Callable[
     ...,
     Awaitable[tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None],
 ]
+
+# The groups the latest newest-year read of this session resolved
+# (`executor.run.HeldAnchor`), by key, which the next translation's read
+# stands on in place of running their retrievals again.
+ANCHOR_READS_STATE_KEY = "translator:anchor_reads"
+
+
+def held_anchor_reads(state: SessionState) -> tuple[HeldAnchor, ...]:
+    """The groups `save_anchor_reads` kept, less any stored in a shape this release rejects."""
+    stored = state.get(ANCHOR_READS_STATE_KEY) or {}
+    held: list[HeldAnchor] = []
+    errors: list[ValidationError] = []
+    for value in stored.values():
+        try:
+            held.append(HeldAnchor.model_validate(value))
+        except ValidationError as exc:
+            errors.append(exc)
+    if errors:
+        warn_left_out(logger, ANCHOR_READS_STATE_KEY, errors, entries=len(errors))
+    return tuple(held)
+
+
+def save_anchor_reads(state: SessionState, read: Sequence[AnchorRead]) -> None:
+    """Keep the groups `read` resolved, in place of those an earlier read kept."""
+    state[ANCHOR_READS_STATE_KEY] = {
+        group.held.key: group.held.model_dump(mode="json")
+        for group in read
+        if group.held is not None
+    }
 
 
 def _other_stale_pins(plan: Plan, log: DiscoveryLog, requirement_id: str) -> tuple[StalePin, ...]:
@@ -791,10 +834,17 @@ def _logged_reference(reason: str) -> str:
 
 
 async def read_within_entry(
-    workflow: Workflow, plan: Plan, *, surface: ToolSurface
+    workflow: Workflow,
+    plan: Plan,
+    *,
+    surface: ToolSurface,
+    schemas: Mapping[str, ToolSchema] | None = None,
+    held: Sequence[HeldAnchor] = (),
 ) -> tuple[AnchorRead, ...] | MethodChoiceNeeded | Refused | RediscoveryNeeded | None:
     """`executor.run.read_anchors` over `workflow`, or `None` when the planner entry has no time for it.
 
+    `schemas` are the tools `workflow` was compiled against and `held` the
+    groups an earlier read resolved, both as `read_anchors` takes them.
     Inside a planner entry the read may take the time the entry has left
     (`planner.plan.discovery_time_left`). A read that time cuts short, or
     one there is no time to start, is logged and recorded on the trace as
@@ -813,6 +863,8 @@ async def read_within_entry(
                         r for r in plan.evidence_requirements if isinstance(r, DatasetRequirement)
                     ],
                     surface=surface,
+                    schemas=schemas,
+                    held=held,
                 )
         except TimeoutError:
             if not deadline.expired():
@@ -885,6 +937,7 @@ def build_translator_core(
         result: CompileResult,
         *,
         compiled: Callable[[Plan, Translation], CompileResult],
+        schemas: Mapping[str, ToolSchema],
         tool_context: ToolContext,
     ) -> tuple[Plan, Translation, CompileResult] | dict[str, object]:
         """`plan`, `translation` and `result`, its compiled workflow, with each group's rolling years stated from the newest year the data holds.
@@ -902,12 +955,28 @@ def build_translator_core(
         again. A read that stops otherwise answers `_run_would_stop`, and a
         restatement a plan rule refuses, or one that does not compile,
         answers `_not_compiled` with `ROLLING_ANCHOR_BEHIND` issues.
+
+        The read takes `schemas`, the surface `result` was compiled against,
+        rather than listing it again. A group whose retrievals and
+        requirements are those of a group the session's previous read
+        resolved stands on that read (`held_anchor_reads`), so a revision
+        that leaves a rolling root as it was reads it once. The run reads it
+        again (`executor.run._Run.execute`).
         """
         workflow = result.workflow
         assert workflow is not None
         if not anchor_groups(workflow):
             return plan, translation, result
-        read = _groups_read(await anchor_read(workflow, plan, surface=surface))
+        answered = await anchor_read(
+            workflow,
+            plan,
+            surface=surface,
+            schemas=schemas,
+            held=held_anchor_reads(tool_context.state),
+        )
+        if isinstance(answered, tuple):
+            save_anchor_reads(tool_context.state, answered)
+        read = _groups_read(answered)
         if isinstance(read, Refused):
             return _run_would_stop(read, workflow=workflow, translation=translation)
         if not any(group.behind for group in read):
@@ -1022,7 +1091,12 @@ def build_translator_core(
         if result.workflow is None:
             return _not_compiled(result, translation, tool_context)
         stated = await stated_from_the_data(
-            plan, translation, result, compiled=compiled, tool_context=tool_context
+            plan,
+            translation,
+            result,
+            compiled=compiled,
+            schemas=by_name,
+            tool_context=tool_context,
         )
         if isinstance(stated, dict):
             return stated
@@ -1308,6 +1382,46 @@ def authored_answer(answer: dict[str, object], split: HistorySplit) -> dict[str,
     return mapped
 
 
+@dataclass
+class _Listing:
+    """The surface one translation listed, `None` until it lists it."""
+
+    schemas: list[ToolSchema] | None = None
+
+
+# The listing of the translation the current call runs in; unset outside one.
+_current_listing: ContextVar[_Listing | None] = ContextVar("translation_listing", default=None)
+
+
+class _ListedOnce:
+    """`surface`, listed at most once inside one translation (`_current_listing`).
+    The first list that succeeds answers every later one, so every proposal
+    round compiles against the one surface. Outside a translation each list
+    reads the surface. The run lists it again for itself."""
+
+    def __init__(self, surface: ToolSurface) -> None:
+        self._surface = surface
+
+    async def list_tools(self) -> list[ToolSchema]:
+        listing = _current_listing.get()
+        if listing is None:
+            return await self._surface.list_tools()
+        if listing.schemas is None:
+            listing.schemas = await self._surface.list_tools()
+        return list(listing.schemas)
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Mapping[str, object],
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        return await self._surface.call_tool(
+            tool=tool, arguments=arguments, on_progress=on_progress
+        )
+
+
 def build_translate(
     *,
     surface: ToolSurface,
@@ -1323,7 +1437,7 @@ def build_translate(
     `describe_nodes` are as `build_translator_core` takes them.
     """
     core = build_translator_core(
-        surface=surface,
+        surface=_ListedOnce(surface),
         resolve_entities=resolve_entities,
         anchor_read=anchor_read,
         describe_nodes=describe_nodes,
@@ -1335,8 +1449,9 @@ def build_translate(
         First names, on the recorded draft, each group a pin holds a
         requirement's `across` side to, in place of that `across`
         (`translator.discovery.name_pinned_groups`). Each identity is
-        resolved at most once in the whole translation
-        (`translator.discovery.resolving_once`).
+        resolved at most once in the turn
+        (`translator.discovery.resolving_once`), so a switch or an amendment
+        that leaves a pin as it was asks Search nothing for it.
 
         Returns:
             `{"outcome": "ok"}` once the plan compiled, with `restated` when
@@ -1346,10 +1461,16 @@ def build_translate(
             was named, each entry the requirement, the entity named and the
             `across` dropped. Each names a requirement by the id the model
             wrote (`authored_answer`).
+
+        The surface is listed once for the whole translation (`_ListedOnce`).
         """
-        with resolving_once():
-            named = await name_pinned_groups(tool_context, surface=surface)
-            answer = _planner_answer(await run_translate(tool_context, core=core))
+        token = _current_listing.set(_Listing())
+        try:
+            with resolving_once(tool_context.state):
+                named = await name_pinned_groups(tool_context, surface=surface)
+                answer = _planner_answer(await run_translate(tool_context, core=core))
+        finally:
+            _current_listing.reset(token)
         if answer.get("outcome") == Outcome.UNSUPPORTED.value:
             # Every kind `OUTCOME_OF` maps to `unsupported` is an
             # `UnsupportedOperation`, so the plan has to decline it.

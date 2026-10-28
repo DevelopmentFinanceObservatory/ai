@@ -2014,46 +2014,96 @@ def _cut_off(tool: ToolId, time_left: float) -> ToolSurfaceUnavailableError:
     )
 
 
-class ResolvedAnswers:
-    """The `resolve_definition` answers one translation has had, by arguments.
+# The prefix of the key each part Search answered a `resolve_definition` call
+# of the turn with is stored under, followed by the sha256 of the call's
+# arguments (`resolving_once`). A Studio turn is one ADK session
+# (`harness.studio`), so the parts last the turn: every invocation of it (the
+# first message, each plan card switch, the approval) is served what an
+# earlier one was answered, on any instance, and the next turn starts empty.
+# A part is written once, when it is resolved. A restore after a failed or
+# stopped switch (`harness.graph.switch._restore`) writes the saved keys again.
+RESOLVED_STATE_PREFIX = "translator:resolved:"
 
-    `translator.tool.build_translate`'s translation opens one
-    (`resolving_once`), so the group rewrite (`name_pinned_groups`) and
-    discovery after it read a pin's identity off one call. An answer is kept
-    whatever it says, a refusal included; a call that did not complete is
-    not kept, so the next asks again. Concurrent callers with the same
-    arguments wait on the first.
+
+def _answered_part(answer: ToolCallResult) -> Mapping[str, Any] | None:
+    """The first part of the Search envelope `answer` carries, or `None` when it carries none."""
+    envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
+    parts = envelope.get("parts") if isinstance(envelope, Mapping) else None
+    if not isinstance(parts, list) or not parts or not isinstance(parts[0], Mapping):
+        return None
+    return cast(Mapping[str, Any], parts[0])
+
+
+class _Invocation:
+    """The `resolve_definition` answers of one invocation (`resolving_once`), by arguments.
+
+    `answers` holds every answer the invocation had, a refusal included,
+    unless it is one the same call can escape later (`refusal_retryable`).
+    A call that did not complete is not kept. Concurrent callers with the
+    same arguments wait on the first.
     """
 
     def __init__(self) -> None:
-        self._answers: dict[bytes, ToolCallResult] = {}
-        self._locks: dict[bytes, asyncio.Lock] = {}
-
-    async def answer(
-        self, key: bytes, call: Callable[[], Awaitable[ToolCallResult]]
-    ) -> ToolCallResult:
-        """The answer kept under `key`, or `call`'s, kept once it completes."""
-        async with self._locks.setdefault(key, asyncio.Lock()):
-            if key not in self._answers:
-                self._answers[key] = await call()
-            return self._answers[key]
+        self.answers: dict[bytes, ToolCallResult] = {}
+        self.locks: dict[bytes, asyncio.Lock] = {}
 
 
-# The `ResolvedAnswers` of the translation the current call runs in; unset outside one.
-current_resolved_answers: ContextVar[ResolvedAnswers | None] = ContextVar(
-    "resolved_answers", default=None
-)
+class _Resolving(NamedTuple):
+    """The invocation a call runs in, and the session state its parts are read from and written to."""
+
+    invocation: _Invocation
+    state: SessionState | None
+
+
+_current_resolving: ContextVar[_Resolving | None] = ContextVar("resolving", default=None)
 
 
 @contextmanager
-def resolving_once() -> Iterator[ResolvedAnswers]:
-    """Serve each identity `resolve_definition` is asked for once, inside the block."""
-    answers = ResolvedAnswers()
-    token = current_resolved_answers.set(answers)
+def resolving_once(state: SessionState | None = None) -> Iterator[None]:
+    """Ask Search for each `resolve_definition` call once a turn, inside the block.
+
+    The outermost block opens the invocation's answers (`_Invocation`), and
+    a block inside it shares them, so concurrent identical calls anywhere in
+    the invocation wait on the first. A call whose part the turn's session
+    state holds (`RESOLVED_STATE_PREFIX`) is served that part and not made;
+    data-mcp stored its definition when it first answered, so the run's
+    `get_data` finds it. Each `definite` part Search answers is stored in
+    `state`, or, with none given, in the state the enclosing block uses.
+    Refusals are kept for the invocation alone, so the next invocation asks
+    again.
+    """
+    outer = _current_resolving.get()
+    invocation = outer.invocation if outer is not None else _Invocation()
+    if state is None and outer is not None:
+        state = outer.state
+    token = _current_resolving.set(_Resolving(invocation, state))
     try:
-        yield answers
+        yield
     finally:
-        current_resolved_answers.reset(token)
+        _current_resolving.reset(token)
+
+
+async def _answer(
+    resolving: _Resolving, key: bytes, call: Callable[[], Awaitable[ToolCallResult]]
+) -> ToolCallResult:
+    """The answer the turn holds for the call `key` names, or `call`'s (`resolving_once`)."""
+    invocation, state = resolving
+    async with invocation.locks.setdefault(key, asyncio.Lock()):
+        if key in invocation.answers:
+            return invocation.answers[key]
+        stored_key = RESOLVED_STATE_PREFIX + hashlib.sha256(key).hexdigest()
+        stored = state.get(stored_key) if state is not None else None
+        if isinstance(stored, Mapping):
+            return ToolCallResult(
+                is_error=False, meta={SEARCH_ENVELOPE_META_KEY: {"parts": [stored]}}
+            )
+        answer = await call()
+        if not (answer.is_error and refusal_retryable(answer)):
+            invocation.answers[key] = answer
+        part = None if answer.is_error else _answered_part(answer)
+        if state is not None and part is not None and part.get("status") == "definite":
+            state[stored_key] = part
+        return answer
 
 
 def refusal_retryable(answer: ToolCallResult) -> bool:
@@ -2076,8 +2126,8 @@ async def resolve_definition(
 ) -> Mapping[str, Any]:
     """The part the Search API resolves `identity` to now, through data-mcp's `resolve_definition`.
 
-    Inside `resolving_once` an identity already answered is served that
-    answer (`ResolvedAnswers`).
+    Inside `resolving_once` a call the turn already made is served its
+    answer.
 
     `groups`, the sets a role's places were asked for as, are posted beside
     the identity (`compiler.sources.wire_groups`), so Search names them again.
@@ -2113,12 +2163,12 @@ async def resolve_definition(
             surface, tool=RESOLVE_DEFINITION, arguments=arguments, keep_when_cut=True
         )
 
-    answers = current_resolved_answers.get()
+    resolving = _current_resolving.get()
     try:
-        if answers is None:
+        if resolving is None:
             answer = await call()
         else:
-            answer = await answers.answer(rfc8785.dumps(arguments), call)
+            answer = await _answer(resolving, rfc8785.dumps(arguments), call)
     except ToolSurfaceUnavailableError as exc:
         raise DefinitionNotResolvedError(
             str(exc), retryable=True, not_issued=isinstance(exc, NoTimeLeftError)
@@ -2137,11 +2187,10 @@ async def resolve_definition(
             refused=True,
             code=code,
         )
-    envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
-    parts = envelope.get("parts") if isinstance(envelope, Mapping) else None
-    if not isinstance(parts, list) or not parts or not isinstance(parts[0], Mapping):
+    part = _answered_part(answer)
+    if part is None:
         raise DefinitionNotResolvedError("Search returns nothing for it", retryable=False)
-    return cast(Mapping[str, Any], parts[0])
+    return part
 
 
 class PartFault(StrEnum):
