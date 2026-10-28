@@ -693,9 +693,10 @@ def basis_free(measure: str, options: Iterable[str]) -> str:
     "health gross disbursements" reads "health" whichever basis holds. An
     option's words are its label up to its first comma ("gross
     disbursements, current USD"), with and without a bracketed note
-    ("grant equivalents (OECD headline)"). A measure made of basis words
-    alone ("gross disbursements") keeps them all, since nothing else names it,
-    and so does one whose rest starts or ends with a connective or bracket
+    ("grant equivalents (OECD headline)"), each matched between non-word
+    characters so a label ending in a bracket is removed whole. A measure made
+    of basis words alone ("gross disbursements") keeps them all, since nothing
+    else names it, and so does one whose rest starts or ends with a connective or bracket
     ("gross disbursements for official development assistance"), since the
     rest is a fragment of it."""
     phrases: set[str] = set()
@@ -704,7 +705,7 @@ def basis_free(measure: str, options: Iterable[str]) -> str:
         phrases.update({words, re.sub(r"\s*\(.*?\)", "", words).strip()})
     free = measure
     for phrase in sorted(filter(None, phrases), key=len, reverse=True):
-        free = re.sub(rf"\b{re.escape(phrase)}\b", "", free, flags=re.IGNORECASE)
+        free = re.sub(rf"(?<!\w){re.escape(phrase)}(?!\w)", "", free, flags=re.IGNORECASE)
     free = " ".join(free.split())
     if not free or _FRAGMENT_EDGE.search(free):
         return measure

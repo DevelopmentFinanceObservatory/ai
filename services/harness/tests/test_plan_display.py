@@ -613,6 +613,8 @@ def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
         ),
         ("aid to health in gross disbursements", "aid to health in gross disbursements"),
         ("official development assistance gross disbursements", "official development assistance"),
+        ("health grant equivalents (OECD headline)", "health"),
+        ("health grant equivalents", "health"),
     ],
     ids=[
         "basis-words-dropped",
@@ -621,13 +623,21 @@ def test_a_share_sides_basis_rows_keep_their_ids_as_they_merge_and_split(
         "bracketed-rest-kept-whole",
         "trailing-connective-kept-whole",
         "leading-concept-kept",
+        "bracketed-label-dropped-whole",
+        "bracketed-label-without-its-note-dropped",
     ],
 )
 def test_a_measure_reads_without_its_basis_words_only_where_the_rest_names_it(
     measure: str, named: str
 ) -> None:
     basis = _scope_decision(_SPEC_A, "measure_basis").model_copy(
-        update={"options": ("gross disbursements, current USD", "net disbursements")}
+        update={
+            "options": (
+                "gross disbursements, current USD",
+                "net disbursements",
+                "grant equivalents (OECD headline)",
+            )
+        }
     )
 
     assert basis_free(measure, basis.options) == named
