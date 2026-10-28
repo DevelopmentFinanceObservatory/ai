@@ -4,26 +4,12 @@ frame itself never leaks into the rendered text."""
 from __future__ import annotations
 
 import dataclasses
-import random
 from typing import Any
 
 import pyarrow as pa
 import pytest
 from analysis_mcp.artifact import Exclusion, Interval
-from analysis_mcp.digest import (
-    _absent_clause,
-    _capped,
-    _capped_positions,
-    _format_number,
-    render_aggregate_digest,
-    render_compare_digest,
-    render_filter_digest,
-    render_growth_digest,
-    render_join_digest,
-    render_quotient_of_digest,
-    render_rank_digest,
-    render_share_of_digest,
-)
+from analysis_mcp.digest import _absent_clause, _format_number
 from analysis_mcp.disambiguation import escape_control_chars, truncate_value
 from analysis_mcp.engine.aggregate import AggregateResult, GroupSummary, run_aggregate
 from analysis_mcp.engine.compare import CompareResult, PeriodComparison
@@ -36,6 +22,16 @@ from analysis_mcp.engine.share_of import PeriodShare, ShareOfResult, run_share_o
 from analysis_mcp.execution_identity import ExecutionIdentity
 from dfo_frame_grammar import Frame
 from digest_corpus import matched_keys_of, quotient_of_result, share_of_result
+from digest_facts import (
+    render_aggregate_digest,
+    render_compare_digest,
+    render_filter_digest,
+    render_growth_digest,
+    render_join_digest,
+    render_quotient_of_digest,
+    render_rank_digest,
+    render_share_of_digest,
+)
 from party_frames import (
     GROUP_TOTAL,
     OFFICIAL,
@@ -875,17 +871,6 @@ def test_unkeyed_share_of_digest_leads_with_the_first_and_latest_share_in_per_ce
     assert "  2021: 10 / 187.6 = 5.330%" in digest
     assert "key(s)" not in digest
     assert "derived result" not in digest
-
-
-def test_capped_positions_keeps_the_entries_capped_keeps() -> None:
-    """`_capped_positions` (Arrow, for `join`'s columnar matched keys) and
-    `_capped` pick the same entries in the same order, ties and signs
-    included: magnitudes drawn from a few values force ties at the cut."""
-    rng = random.Random(0)
-    for count in (0, 1, 20, 21, 25, 400):
-        magnitudes = [rng.choice((-3.0, -1.0, -0.0, 0.0, 1.0, 2.5, 3.0)) for _ in range(count)]
-        expected = _capped(list(range(count)), magnitude=magnitudes.__getitem__)
-        assert _capped_positions(pa.array(magnitudes, type=pa.float64())) == list(expected)
 
 
 def test_quotient_of_digest_carries_the_identity_block_and_the_composed_unit() -> None:

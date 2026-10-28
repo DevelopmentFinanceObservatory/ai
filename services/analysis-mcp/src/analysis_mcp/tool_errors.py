@@ -2,10 +2,12 @@
 `StrEnum` code, a `StrEnum` retry mode, a frozen kw-only `ToolRefusal` with
 one classmethod factory per code, and `to_tool_result` to render one.
 
-Simplified from that precedent: analysis-mcp makes no upstream HTTP calls of
-its own, so there is no `upstream_code`/`trace_id`/`capability_version` to
-carry -- this module's fields are `code`, `message`, `fix`, and the
-`retry_after_s` only `service_unavailable` sets.
+The verbs and `resolve_anchor` compute in dfo-apis' analysis runner
+(`runner_client`), which refuses with the engine's own codes, retry modes and
+fixes, so a runner refusal maps onto the factory-free fields here: `code`,
+`message`, `fix`, the `retry_after_s` `service_unavailable` and a retryable
+`upstream_error` set, and `upstream_code`, the runner's own code where this
+module has none for it.
 
 `unit_heterogeneous` and `facet_heterogeneous` carry a
 `analysis_mcp.disambiguation.DisambiguationPayload` in `fix["disambiguation"]`.
@@ -186,6 +188,16 @@ the key and the period to write the literals from. `rolling_grain_unsupported`
 fires when a population's periods are not calendar years, which the frames
 do not change between calls, so it is `do_not_retry`.
 
+`rendering_not_recorded` fires when a `spec_` frame was fetched with an option
+the runner does not read a root with, such as a `breakdown` or a `stat_vars`
+sum (`options.groupby`), so no runner call reproduces that frame. It is
+retryable over a frame fetched without the option, summed with `aggregate`.
+
+`upstream_error` is a runner refusal under a code this module does not
+define, or an answer the runner could not give: `upstream_code` names the
+runner's code. It is `retry_after_delay` when the refusal was retryable and
+carries a delay, and `do_not_retry` otherwise.
+
 `internal_error` is the registration-site catch-all's code (see
 `server.py`): every other code names something a specific, anticipated
 failure produced; `internal_error` names the absence of one. Every other
@@ -272,6 +284,8 @@ class ToolErrorCode(StrEnum):
     ROLLING_ANCHOR_UNRESOLVED = "rolling_anchor_unresolved"
     ROLLING_GRAIN_UNSUPPORTED = "rolling_grain_unsupported"
     SERVICE_UNAVAILABLE = "service_unavailable"
+    RENDERING_NOT_RECORDED = "rendering_not_recorded"
+    UPSTREAM_ERROR = "upstream_error"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -332,6 +346,8 @@ _RETRY_MODE_BY_CODE: dict[ToolErrorCode, RetryMode] = {
     ToolErrorCode.ROLLING_ANCHOR_UNRESOLVED: RetryMode.CORRECT_AND_RETRY,
     ToolErrorCode.ROLLING_GRAIN_UNSUPPORTED: RetryMode.DO_NOT_RETRY,
     ToolErrorCode.SERVICE_UNAVAILABLE: RetryMode.RETRY_AFTER_DELAY,
+    ToolErrorCode.RENDERING_NOT_RECORDED: RetryMode.CORRECT_AND_RETRY,
+    ToolErrorCode.UPSTREAM_ERROR: RetryMode.RETRY_AFTER_DELAY,
     ToolErrorCode.INTERNAL_ERROR: RetryMode.DO_NOT_RETRY,
 }
 if set(_RETRY_MODE_BY_CODE) != set(ToolErrorCode):
@@ -416,9 +432,13 @@ class ToolRefusal:
     message: str
     fix: dict[str, Any]
     retry_after_s: float | None = None
+    upstream_code: str | None = None
 
     @property
     def retry_mode(self) -> RetryMode:
+        if self.code is ToolErrorCode.UPSTREAM_ERROR and self.retry_after_s is None:
+            # A runner refusal that was not retryable names no delay to wait.
+            return RetryMode.DO_NOT_RETRY
         return _RETRY_MODE_BY_CODE[self.code]
 
     @classmethod
@@ -1498,6 +1518,65 @@ class ToolRefusal:
         )
 
     @classmethod
+    def analysis_pending(cls, *, retry_after_s: float, operations: Sequence[str]) -> Self:
+        """The runner answered 202: a root dataset of the call is still building,
+        and `operations` are the rebuilds it waits on."""
+        return cls(
+            code=ToolErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                "The data this call reads is still being prepared upstream "
+                f"({len(operations)} rebuild(s) queued). Retry the same call after "
+                f"{retry_after_s:.1f}s."
+            ),
+            fix={"service": "dfo-apis", "operations": list(operations)},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def rendering_not_recorded(
+        cls, *, spec_id: str, content_version: str, options: Sequence[str]
+    ) -> Self:
+        """`options` are the mint options of the frame the runner cannot read a root with."""
+        return cls(
+            code=ToolErrorCode.RENDERING_NOT_RECORDED,
+            message=(
+                f"The frame spec_id={spec_id!r}, content_version={content_version!r} was "
+                f"fetched with {', '.join(options)}, which the analysis service cannot read "
+                "a frame with. Call get_data for the same data without a breakdown or a "
+                "stat_vars sum, sum it with aggregate if needed, and retry with that frame_ref."
+            ),
+            fix={"spec_id": spec_id, "content_version": content_version, "options": list(options)},
+        )
+
+    @classmethod
+    def upstream_error(
+        cls,
+        *,
+        upstream_code: str | None,
+        detail: str,
+        retry_after_s: float | None,
+        fix: Mapping[str, Any] | None = None,
+    ) -> Self:
+        """A runner refusal under a code this module does not define, or a call the
+        runner could not answer. `retry_after_s` is `None` when a retry is not
+        expected to succeed."""
+        retry = (
+            f"Retry after {retry_after_s:.1f}s."
+            if retry_after_s is not None
+            else "A repeated call is unlikely to succeed unmodified."
+        )
+        return cls(
+            code=ToolErrorCode.UPSTREAM_ERROR,
+            message=(
+                f"The analysis service refused the call ({upstream_code or 'unclassified'}): "
+                f"{detail}. {retry}"
+            ),
+            fix={"detail": detail, **(fix or {})},
+            retry_after_s=retry_after_s,
+            upstream_code=upstream_code,
+        )
+
+    @classmethod
     def internal_error(cls, *, tool: str) -> Self:
         """The registration-site catch-all's own refusal (see `server.py`'s
         module docstring), for an exception no verb's own typed handling
@@ -1525,7 +1604,8 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
     line of compact JSON, so a client that renders only `content` still sees
     them. `structured_content` carries `retry_after_s` under the same rule.
 
-    `meta` is `common.refusal.refusal_meta` of `code`.
+    `structured_content` also carries `upstream_code` when set, and `meta` is
+    `common.refusal.refusal_meta` of `code` and `upstream_code`.
     """
     return ToolResult(
         content=refusal_text(
@@ -1547,7 +1627,8 @@ def to_tool_result(refusal: ToolRefusal, *, preamble: str | None = None) -> Tool
             "message": refusal.message,
             "fix": refusal.fix,
         }
-        | ({} if refusal.retry_after_s is None else {"retry_after_s": refusal.retry_after_s}),
-        meta=refusal_meta(code=refusal.code.value),
+        | ({} if refusal.retry_after_s is None else {"retry_after_s": refusal.retry_after_s})
+        | ({} if refusal.upstream_code is None else {"upstream_code": refusal.upstream_code}),
+        meta=refusal_meta(code=refusal.code.value, upstream_code=refusal.upstream_code),
         is_error=True,
     )

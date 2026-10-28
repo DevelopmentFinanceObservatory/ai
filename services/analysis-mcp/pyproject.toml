@@ -8,6 +8,7 @@ dependencies = [
     "dfo-spec-kit",
     "dfo-spec-kit-frame-grammar",
     "fastmcp>=4.0.10,<5",
+    "httpx2>=2.13.0",
     "pyarrow>=25.0.1",
     "pydantic-settings>=2.14.2",
 ]

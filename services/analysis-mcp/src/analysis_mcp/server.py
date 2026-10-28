@@ -3,15 +3,16 @@
 Holds infrastructure: the FastMCP instance, the `/healthz` liveness route,
 the fixture-store lifespan, and the console-script entry point (settings,
 logging, telemetry, transport). Registers the closed nine-verb set, one
-tool per verb, each under an explicit wire name, and `resolve_anchor`
-(`rolling_tool.py`), which finds the latest period rolling calls follow and
-computes no frame. `filter` needs the explicit name because the Python
+tool per verb, each under an explicit wire name, and `resolve_anchor`, which
+finds the latest period rolling calls follow and computes no frame. Every
+registered tool (`verbs`) computes in dfo-apis' analysis runner. `filter` needs the explicit name because the Python
 function backing it cannot be called `filter` without shadowing the builtin
 (see `filter_tool.py`'s own docstring).
 
 Refusal policy: every anticipated failure gets its own typed refusal, built
-and returned via `to_tool_result` inside that verb's own tool module (see
-each `*_tool.py`'s own module docstring). Underneath all nine sits the
+and returned via `to_tool_result`: an op-spec that does not validate, a frame
+the runner cannot be sent (`runner_tree`), and each runner refusal
+(`runner_client`). Underneath all nine sits the
 backstop: `_with_internal_error_backstop` wraps each verb at its
 registration site, so an exception the verb's own typed handling missed
 becomes an `internal_error` refusal instead of a raw traceback crossing the
@@ -53,24 +54,24 @@ from fastmcp.tools import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from analysis_mcp.aggregate_tool import aggregate
-from analysis_mcp.compare_tool import compare
-from analysis_mcp.filter_tool import filter_verb
 from analysis_mcp.fixtures import seed_fixture_store
-from analysis_mcp.growth_tool import growth
-from analysis_mcp.join_tool import join
-from analysis_mcp.quotient_of_tool import quotient_of
-from analysis_mcp.rank_tool import rank
 from analysis_mcp.result import IMPLEMENTATION_VERSIONS, VERB_OUTPUT_SCHEMA
-from analysis_mcp.rolling_tool import (
-    RESOLVE_ANCHOR_OUTPUT_SCHEMA,
-    RESOLVE_ANCHOR_VERSION,
-    resolve_anchor,
-)
+from analysis_mcp.rolling_tool import RESOLVE_ANCHOR_OUTPUT_SCHEMA, RESOLVE_ANCHOR_VERSION
+from analysis_mcp.runner_client import runner_holder
 from analysis_mcp.settings import Settings
-from analysis_mcp.share_of_tool import share_of
-from analysis_mcp.sum_of_tool import sum_of
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
+from analysis_mcp.verbs import (
+    aggregate,
+    compare,
+    filter_verb,
+    growth,
+    join,
+    quotient_of,
+    rank,
+    resolve_anchor,
+    share_of,
+    sum_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +138,17 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     ownership rule) -- `store_is_set()` is this lifespan's side of that same rule: skip
     building (and, with it, fixture seeding) entirely rather than replace what's
     already there.
+
+    The store still serves `get_data`'s mint records, which name each root the
+    runner reads, and `resolve_anchor`'s anchor records. The runner client
+    (`runner_client.runner_holder`) is closed on shutdown too.
     """
     if not store_is_set():
         set_store(await _build_store(Settings()))
     try:
         yield
     finally:
+        await runner_holder.aclose()
         await aclose_store()
 
 

@@ -1198,14 +1198,12 @@ async def test_publish_call_carries_the_configured_principal_header(
     assert PRINCIPAL_HEADER not in frame_request.headers
 
 
-async def test_publish_refuses_locally_when_principal_unconfigured(
+async def test_an_ops_ref_reads_from_the_platform_with_no_principal_configured(
     materialisation_store: InMemoryMaterialisationStore,
 ) -> None:
-    """An unset `datasets_first_party_principal` refuses before any network
-    call at all -- the platform would refuse this identically (403
-    `publish_not_permitted`) on every attempt, so there is nothing to gain by
-    reaching it first.
-    """
+    """With no `datasets_first_party_principal`, an `ops_` pair goes straight to
+    the platform's own read: the analysis runner published every pair a verb
+    returns, so nothing is published and nothing refuses here."""
     await _put_ops_frame(materialisation_store)
     frame_ref = {"spec_id": _OPS_SPEC_ID, "content_version": _OCV_CONTENT_VERSION}
     calls, handler = _counting_handler(httpx2.Response(200, json={"spec_id": _OPS_SPEC_ID}))
@@ -1214,10 +1212,11 @@ async def test_publish_refuses_locally_when_principal_unconfigured(
     async with _assembler(handler, settings=settings) as assembler:
         reply = await assembler.get_frame_view(frame_ref=frame_ref)
 
-    assert isinstance(reply, Refusal)
-    assert reply.error == "publish_not_configured"
-    assert reply.retry == RetryMode.DO_NOT_RETRY
-    assert calls == []
+    assert not isinstance(reply, Refusal)
+    assert [request.url.path for request in calls] == [
+        f"/api/presentation/frames/{_OPS_SPEC_ID}/{_OCV_CONTENT_VERSION}"
+    ]
+    assert PRINCIPAL_HEADER not in calls[0].headers
 
 
 async def test_publish_wraps_the_platforms_real_publish_not_permitted_refusal(

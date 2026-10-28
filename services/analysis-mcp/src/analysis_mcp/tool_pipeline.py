@@ -11,6 +11,12 @@ ends with, once its own engine call (and any coverage-floor check) has
 already succeeded. What sits between those two halves -- the engine call
 itself, and mapping its own typed exceptions to a refusal -- stays inline in
 each verb tool: that mapping is genuinely each verb's own.
+
+The registered tools (`verbs`) compute in dfo-apis' analysis runner instead:
+`run_on_runner` sends a validated op-spec as a one-node tree
+(`runner_tree.verb_tree`) and turns the runner's summary into the reply, its
+`VerbResult` and its digest (`digest.render_summary_digest`). The rest of this
+module serves the in-process tools, which no registered tool calls.
 """
 
 from __future__ import annotations
@@ -23,10 +29,13 @@ from fastmcp.tools import ToolResult
 from pydantic import BaseModel, ValidationError
 
 from analysis_mcp.artifact import Exclusion
+from analysis_mcp.digest import render_summary_digest
 from analysis_mcp.execution_identity import ExecutionIdentity, current_execution_identity
 from analysis_mcp.frame_ref_resolution import call_row_claim, op_spec_hash_or_refusal
 from analysis_mcp.identity import mint_toolkit_content_version
 from analysis_mcp.result import VerbResult, observed_shape
+from analysis_mcp.runner_client import run_tree
+from analysis_mcp.runner_tree import verb_tree
 from analysis_mcp.tool_errors import ToolRefusal, to_tool_result
 
 if TYPE_CHECKING:
@@ -199,6 +208,27 @@ async def store_result_and_render(
     return ToolResult(
         content=digest(),
         structured_content=result.model_dump(mode="json"),
+        is_error=False,
+    )
+
+
+async def run_on_runner(op_spec: OpSpecVariant) -> ToolResult:
+    """`op_spec` computed by the runner: the reply every registered verb returns.
+
+    `structured_content` is the summary's `VerbResult` fields and `content` the
+    digest rendered from its facts, as the in-process tools built both. A frame
+    the tree cannot name, and every runner refusal, comes back as its refusal
+    (`runner_client`).
+    """
+    tree = await verb_tree(op_spec)
+    if isinstance(tree, ToolRefusal):
+        return to_tool_result(tree)
+    summary = await run_tree(tree.node, refs_by_root=tree.refs_by_root)
+    if isinstance(summary, ToolRefusal):
+        return to_tool_result(summary)
+    return ToolResult(
+        content=render_summary_digest(summary),
+        structured_content=summary.verb_result().model_dump(mode="json"),
         is_error=False,
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from common.settings import FrameServiceSettings
+from pydantic import SecretStr, field_validator
 
 
 class Settings(FrameServiceSettings):
@@ -42,9 +43,30 @@ class Settings(FrameServiceSettings):
     a full content_version recompute per read. `data_mcp.settings.Settings`
     reads the same env var into the same field name, since either service's
     lifespan may be the one that installs the shared store.
+
+    `dfo_apis_url` is the base URL of dfo-apis, whose analysis runner
+    (`POST /api/datasets/analysis`) computes every verb and `resolve_anchor`
+    (`runner_client`). `analysis_runner_timeout_s` bounds one runner call; it
+    sits above the runner's own 120 s run limit, so the runner's `timeout`
+    refusal arrives before this one.
+
+    `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
+    with the website. A call whose caller the website named as `ip:<digest>`
+    carries it beside that caller (`x-dfo-caller-principal`, `x-dfo-caller`), so
+    dfo-apis counts the website's client. Unset or blank, no caller is sent.
     """
 
     seed_fixture_frames: bool = False
     aggregate_coverage_floor: float = 0.5
     frame_store_bucket: str | None = None
     frame_store_verify_content_version: bool = False
+    dfo_apis_url: str = "http://localhost:8083"
+    analysis_runner_timeout_s: float = 130.0
+    dfo_caller_principal: SecretStr | None = None
+
+    @field_validator("dfo_caller_principal", mode="before")
+    @classmethod
+    def _blank_principal_is_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value

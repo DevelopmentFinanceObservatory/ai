@@ -166,6 +166,7 @@ dependencies = [
     { name = "dfo-spec-kit" },
     { name = "dfo-spec-kit-frame-grammar" },
     { name = "fastmcp" },
+    { name = "httpx2" },
     { name = "pyarrow" },
     { name = "pydantic-settings" },
 ]
@@ -176,6 +177,7 @@ requires-dist = [
     { name = "dfo-spec-kit", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fspec-kit&rev=708f293d39094977bf2ed3a646016d951fddf685" },
     { name = "dfo-spec-kit-frame-grammar", git = "https://github.com/DevelopmentFinanceObservatory/spec-kit.git?subdirectory=python%2Fframe-grammar&rev=708f293d39094977bf2ed3a646016d951fddf685" },
     { name = "fastmcp", specifier = ">=4.0.10,<5" },
+    { name = "httpx2", specifier = ">=2.13.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
 ]

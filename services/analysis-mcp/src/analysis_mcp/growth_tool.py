@@ -51,6 +51,7 @@ from analysis_mcp.engine.growth import (
     GrowthResult,
     run_growth,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     build_interval,
     canonical_columns_and_resolved_frame,
@@ -504,7 +505,7 @@ async def growth(
             window_start=op_spec.window_start,
             window_end=op_spec.window_end,
             entity_by=entity_by,
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

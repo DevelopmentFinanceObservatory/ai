@@ -754,9 +754,13 @@ class PlatformAssembler:
         A `spec_`-prefixed pair is left alone: it names a Datasets
         snapshot, already resolvable through the platform's ordinary
         mint/pin path, and posting it to the publish door (`ops_`-only on
-        the wire) would just be refused. `ops_`/`ocv_` is analysis-mcp's
-        own pair, the one shape `LiveFrameStore` cannot resolve until this
-        door has run for it at least once.
+        the wire) would just be refused. An `ops_`/`ocv_` pair analysis-mcp's
+        verbs return is one dfo-apis' analysis runner computed and
+        published itself, so apis holds it already and the shared store holds
+        nothing to publish. A pair an earlier in-process analysis-mcp wrote to
+        the shared store is published from there when this process has a
+        principal. Without one, the caller's own platform call proceeds and
+        apis answers for the pair.
 
         Memoised per process in `self._published`: a repeat call for a pair
         already published this process's lifetime is a same-request no-op,
@@ -775,10 +779,8 @@ class PlatformAssembler:
         Returns a `Refusal` only when publishing was needed and failed; the
         caller's own platform call proceeds either way otherwise. See
         `frame_publish.publish_body_for` for what "cannot be published"
-        means before any network call, this method's own `except
-        PlatformError` branch for what it means after one, and the
-        `publish_not_configured` branch below for what it means when this
-        process was never given a principal to publish as at all.
+        means before any network call, and this method's own `except
+        PlatformError` branch for what it means after one.
         """
         if not spec_id.startswith("ops_"):
             return None
@@ -787,15 +789,9 @@ class PlatformAssembler:
             return None
 
         if self._publish_principal is None:
-            # Refused locally, before touching the local store or the
-            # network: an unconfigured principal refuses identically on
-            # every call for every pair, so there is nothing this process
-            # could learn by building the body or reaching the platform
-            # first. Reaching the platform anyway would collect apis'
-            # own `publish_not_permitted` 403 -- accurate, but generic ("the
-            # publish permission is not granted to this caller") next to
-            # naming the actual missing setting here.
-            return _PUBLISH_NOT_CONFIGURED
+            # Nothing can be published without a principal, and a runner's
+            # pair needs no publishing: the platform answers for the pair.
+            return None
 
         # Single-flighted per pair: concurrent first callers for the same
         # pair await the same lock rather than each building a body and

@@ -48,6 +48,7 @@ from analysis_mcp.engine.common import (
     UnitHeterogeneousError,
     UnitNotPresentError,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     build_interval,
     canonical_columns_and_resolved_frame,
@@ -354,7 +355,7 @@ async def aggregate(
         digest=lambda: render_aggregate_digest(
             group_by=group_by,
             aggregation=op_spec.aggregation,
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

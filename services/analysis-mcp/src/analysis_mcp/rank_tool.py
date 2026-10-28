@@ -50,6 +50,7 @@ from analysis_mcp.engine.rank import (
     RankResult,
     run_rank,
 )
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     build_interval,
     canonical_columns_and_resolved_frame,
@@ -576,7 +577,7 @@ async def rank(
         step=_rank_step(op_spec, result, trace=output_trace),
         digest=lambda: render_rank_digest(
             rank_by=rank_by,
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,

@@ -116,13 +116,10 @@ class Settings(FrameServiceSettings):
     own `DATASETS_FIRST_PARTY_PRINCIPAL` env var holds; the two are separate
     deployments; nothing keeps them in sync but a deployer setting the same
     value on both. `None` (the default, including a blank env value) means
-    this service cannot publish an analysis-mcp-minted (`ops_`/`ocv_`) frame
-    at all -- `_ensure_published_pair` refuses locally with
-    `publish_not_configured` the moment one is needed, rather than reaching
-    the platform to collect the `publish_not_permitted` 403 it would refuse with
-    anyway. A deployment that never presents an `ops_`/`ocv_` frame_ref (no
-    analysis-mcp toolkit results in play) needs no publish permission and
-    can leave this unset.
+    this service publishes nothing ahead of a read or a write: a frame_ref an
+    analysis verb returns is one dfo-apis' analysis runner published already,
+    so the platform answers for it. `publish_frame` refuses
+    `publish_not_configured` without one.
 
     `presentation_public_url` is the URL at which this service's routes are
     reachable from a browser, mount path included: the co-mounted harness

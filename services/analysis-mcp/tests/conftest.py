@@ -27,6 +27,7 @@ in use.
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,17 @@ import pytest
 from common.materialisation import set_store
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+from analysis_mcp.runner_client import runner_holder
+from runner_replay import ReplayedRunner, replayed_runner
+
+
+@pytest.fixture(autouse=True)
+def runner(monkeypatch: pytest.MonkeyPatch) -> Iterator[ReplayedRunner]:
+    """The registered tools' runner, answering from its recorded replies
+    (`runner_replay`), so no test reaches a network."""
+    yield replayed_runner(monkeypatch)
+    runner_holder.set(None)
 
 
 @pytest.fixture(autouse=True)

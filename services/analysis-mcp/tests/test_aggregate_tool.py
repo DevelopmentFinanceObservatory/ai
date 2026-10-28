@@ -13,7 +13,6 @@ itself (schema, dispatch, response envelope) works end to end.
 from __future__ import annotations
 
 import json
-import secrets
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -44,6 +43,7 @@ from common.materialisation import (
 from common.materialisation.memory_store import FRAME_TTL
 from dfo_frame_grammar import Frame
 from fastmcp import Client
+from runner_replay import frame_digest
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def _minimal_trace() -> Trace:
 
 
 async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) -> dict[str, str]:
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}

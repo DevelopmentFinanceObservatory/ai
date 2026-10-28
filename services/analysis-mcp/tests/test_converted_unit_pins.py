@@ -9,7 +9,6 @@ passing one back verbatim resolves the call in one further call (issue #276).
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 import pytest
@@ -18,9 +17,12 @@ from analysis_mcp.execution_identity import current_execution_identity
 from analysis_mcp.identity import op_spec_hash_for
 from analysis_mcp.op_spec import AggregateOpSpec
 from analysis_mcp.trace import AppliedPolicy, ExecutionRecord, Trace
+from analysis_mcp.units import unit_name
 from common.materialisation import FrameRef, InMemoryMaterialisationStore
 from dfo_frame_grammar import Frame
+from dfo_frame_grammar.grammar import unit_cell_from_json
 from fastmcp import Client
+from runner_replay import frame_digest
 
 EUR_CONSTANT = {"currency": "EUR", "prices": "constant", "base_year": 2020}
 USD_CURRENT = {"currency": "USD", "prices": "current"}
@@ -85,7 +87,7 @@ async def _seed_mixed(
             for year, value in (("2020", base), ("2021", base * 1.5))
         ],
     )
-    token = secrets.token_hex(16)
+    token = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{token}", content_version=f"cv_{token}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -102,11 +104,23 @@ async def store(monkeypatch: pytest.MonkeyPatch) -> InMemoryMaterialisationStore
     return store
 
 
+# The key `_call` keeps a call's digest under, beside its structured content.
+_DIGEST = "_digest"
+
+
 async def _call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     async with Client(server_module.mcp) as client:
         result = await client.call_tool(tool, arguments, raise_on_error=False)
     assert result.structured_content is not None
-    return result.structured_content
+    return {**result.structured_content, _DIGEST: result.content[0].text}
+
+
+def digest_of(result: dict[str, Any]) -> str:
+    return result[_DIGEST]
+
+
+def _pair(result: dict[str, Any]) -> dict[str, str]:
+    return {"spec_id": result["spec_id"], "content_version": result["content_version"]}
 
 
 _DONOR_A = {"donor": "dcid:DonorA"}
@@ -234,20 +248,10 @@ async def _assert_pin_resolves(
             return
         expected = {"numerator": expected, "denominator": expected}
     assert "code" not in result, result
-    held = await store.get(
-        FrameRef(spec_id=result["spec_id"], content_version=result["content_version"])
-    )
-    assert held is not None
-    _frame, trace = held
-    assert isinstance(trace, Trace)
-    applied_policy = trace.model_dump(mode="json")["applied_policy"]
-    if verb == "share_of":
-        # A share is in per cent whatever its sides' unit; the pinned unit
-        # is the numerator's.
-        assert applied_policy["resolved_unit"] == "Percent"
-        assert applied_policy["detail"]["numerator_resolved_unit"] == expected
-        return
-    assert applied_policy["resolved_unit"] == expected
+    # The runner holds the result; its digest names the unit it resolved to, a
+    # share's pinned unit as its numerator's.
+    assert await store.get(FrameRef(**_pair(result))) is None
+    assert unit_name(unit_cell_from_json(expected)) in digest_of(result)
 
 
 async def test_a_converted_pin_absent_from_the_frame_refuses_with_pinnable_candidates(

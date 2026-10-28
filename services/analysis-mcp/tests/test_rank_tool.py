@@ -6,7 +6,6 @@ replay + execution-identity-perturbation determinism proofs.
 from __future__ import annotations
 
 import json
-import secrets
 
 import pytest
 from analysis_mcp import server as server_module
@@ -30,6 +29,7 @@ from dfo_frame_grammar import Frame
 from fastmcp import Client
 from fastmcp.tools import ToolResult
 from rolling_support import anchored, second_version
+from runner_replay import frame_digest
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def _minimal_trace() -> Trace:
 
 
 async def _seed_custom_frame(store: InMemoryMaterialisationStore, frame: Frame) -> dict[str, str]:
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(ref, frame=frame, trace=_minimal_trace(), writer="test")
     return {"spec_id": ref.spec_id, "content_version": ref.content_version}
@@ -611,7 +611,7 @@ async def test_a_rank_over_a_span_frame_keeps_every_entity_and_inherits_its_inte
         ],
     )
     span_interval = build_interval(start="2018", end="2022", observed=["2018", "2020", "2022"])
-    digest = secrets.token_hex(16)
+    digest = frame_digest(frame)
     ref = FrameRef(spec_id=f"spec_{digest}", content_version=f"cv_{digest}")
     await store.put(
         ref,

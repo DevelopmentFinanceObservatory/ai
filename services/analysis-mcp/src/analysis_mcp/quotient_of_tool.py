@@ -60,6 +60,7 @@ from analysis_mcp.engine.quotient_of import (
     run_quotient_of,
 )
 from analysis_mcp.engine.two_sided import NonFiniteCellError
+from analysis_mcp.engine_facts import facts_of
 from analysis_mcp.frame_ref_resolution import (
     canonical_columns_or_refusal,
     canonical_entity_binding,
@@ -552,7 +553,7 @@ async def quotient_of(
         trace=output_trace,
         step=_quotient_step(op_spec, result, trace=output_trace),
         digest=lambda: render_quotient_of_digest(
-            result=result,
+            result=facts_of(result),
             op_spec_hash=op_spec_hash,
             content_version=content_version,
             execution_identity=execution_identity,
