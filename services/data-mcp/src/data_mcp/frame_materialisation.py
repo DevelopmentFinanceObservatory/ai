@@ -32,6 +32,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
+from functools import partial
 from itertools import combinations
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -70,6 +71,7 @@ from dfo_frame_grammar import (
     TIME_PERIOD_COLUMN,
     UNIT_COLUMN,
     VALUE_COLUMN,
+    ComposedUnit,
     Frame,
     FrameError,
     UnitRequest,
@@ -1226,16 +1228,18 @@ def _check_unit_requests(column: pa.ChunkedArray) -> None:
 _UNIT_TYPE = canonical_frame_schema((UNIT_COLUMN,)).field(UNIT_COLUMN).type
 
 
-def _tagged_unit_from_text(text: object) -> object:
+def _tagged_unit_from_text(text: object, *, composed: bool) -> object:
     """One text `unit` cell as the value of the frame's tagged unit struct.
 
     apis writes a text `unit` column (`materialise.formats._cell_text`): a unit ref
-    as its own text, and a converted unit as the JCS text of its
-    `{currency, prices, base_year}` object. A unit ref never starts with `{`, so a cell
-    that does is a converted unit. It must parse as JSON, which makes it an object, and
-    the grammar's `unit_cell_from_json` must read it as a unit request, so Arrow never
-    drops an unknown member or fails on a mistyped one while building the struct. A
-    composed unit is refused `invalid_unit`: an artifact apis mints holds none.
+    as its own text, and a converted or composed unit as the JCS text of its
+    `as_json` object. A unit ref never starts with `{`, so a cell that does is an
+    object. It must parse as JSON, which makes it an object, and the grammar's
+    `unit_cell_from_json` must read it, so Arrow never drops an unknown member or fails
+    on a mistyped one while building the struct. A composed unit (`{numerator,
+    denominator}`) is accepted only when `composed` is set, for a frame the analysis
+    runner computed; it is refused `invalid_unit` otherwise, since an artifact apis
+    mints holds none.
     """
     if text is None:
         return None
@@ -1245,9 +1249,9 @@ def _tagged_unit_from_text(text: object) -> object:
             unit = unit_cell_from_json(json.loads(cell))
         except json.JSONDecodeError as exc:
             raise FrameError(
-                "schema_violation", f"unit text {cell[:80]!r} is not a converted-unit object"
+                "schema_violation", f"unit text {cell[:80]!r} is not a JSON unit object"
             ) from exc
-        if not isinstance(unit, UnitRequest):
+        if not isinstance(unit, UnitRequest) and not (composed and isinstance(unit, ComposedUnit)):
             raise FrameError(
                 "invalid_unit", f"unit text {cell[:80]!r} is not a converted-unit object"
             )
@@ -1256,17 +1260,22 @@ def _tagged_unit_from_text(text: object) -> object:
     return unit_cell_array(unit, 1)[0].as_py()
 
 
-def _with_text_units_decoded(table: pa.Table) -> pa.Table:
+def _with_text_units_decoded(table: pa.Table, *, composed: bool) -> pa.Table:
     """`table` with a text `unit` column decoded into the frame's tagged unit struct
-    (`_tagged_unit_from_text`), each distinct cell once. A table without a `unit`
-    column, or with a struct or null one, is returned unchanged."""
+    (`_tagged_unit_from_text`, composed units accepted under `composed`), each distinct
+    cell once. A table without a `unit` column, or with a struct or null one, is
+    returned unchanged."""
     if UNIT_COLUMN not in table.schema.names:
         return table
     index = table.schema.get_field_index(UNIT_COLUMN)
     column_type = table.schema.field(index).type
     if not (pa.types.is_string(column_type) or pa.types.is_large_string(column_type)):
         return table
-    decoded = map_units(table.column(index), _tagged_unit_from_text, result_type=_UNIT_TYPE)
+    decoded = map_units(
+        table.column(index),
+        partial(_tagged_unit_from_text, composed=composed),
+        result_type=_UNIT_TYPE,
+    )
     return table.set_column(index, UNIT_COLUMN, decoded)
 
 
@@ -1290,7 +1299,7 @@ def holds_family_ref(frame: Frame, *, spec_id: str) -> bool:
     return pc.index(frame.table.column(STAT_VAR_COLUMN), f"dcid:{spec_id}").as_py() >= 0
 
 
-def frame_from_parquet_bytes(data: bytes) -> Frame:
+def frame_from_parquet_bytes(data: bytes, *, composed_units: bool = False) -> Frame:
     """Parse `data` (a whole Parquet file's bytes) into a `Frame`.
 
     `role_keys` is every column name in the table's own schema minus the grammar's
@@ -1305,7 +1314,10 @@ def frame_from_parquet_bytes(data: bytes) -> Frame:
     `unit` column as an integer, is refused like a populated one.
 
     A text `unit` column holds unit refs and converted units as JCS object text, each
-    decoded into the frame's own unit cell (`_with_text_units_decoded`).
+    decoded into the frame's own unit cell (`_with_text_units_decoded`). A frame the
+    analysis runner computed can hold a composed unit too, the JCS text of its
+    `{numerator, denominator}` object, which `composed_units` accepts; a minted artifact
+    holds none, so it is refused `invalid_unit` by default.
 
     A `{role}_type` column, or a party's `{role}_party_kind`, `{role}_party_class` or
     `{role}_party_whole` column (`common.place_type.enrichment_columns`), which
@@ -1322,7 +1334,7 @@ def frame_from_parquet_bytes(data: bytes) -> Frame:
     table = table.set_column(table.schema.get_field_index(VALUE_COLUMN), VALUE_COLUMN, value)
     if UNIT_COLUMN in table.schema.names:
         _check_unit_requests(table.column(UNIT_COLUMN))
-    table = _with_text_units_decoded(_with_null_optionals_as_text(table))
+    table = _with_text_units_decoded(_with_null_optionals_as_text(table), composed=composed_units)
     if STATUS_COLUMN in table.schema.names:
         table = table.drop_columns(STATUS_COLUMN)
     return build_frame_from_arrow(table, role_keys=role_keys)

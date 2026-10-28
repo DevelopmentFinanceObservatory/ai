@@ -76,15 +76,16 @@ def _roots(body: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
 async def _held_root(ref: FrameRef, columns: list[str] | None) -> Frame | None:
     """The frame the store holds for the root `ref` read with `columns`: under the
     frame pair of a mint record naming `ref` as its dataset with those columns, as
-    `get_data` holds a frame of enrichment columns, else under `ref` itself. One
-    dataset version read with and without columns is two frames."""
+    `get_data` holds a frame of enrichment columns, else under `ref` itself. A root
+    sends its columns sorted (`runner_tree.root_node`), so the record's are compared
+    sorted. One dataset version read with and without columns is two frames."""
     store = get_store()
     for listing in await store.list_frames():
         record = await store.get_mint_record(listing.ref)
         if (
             record is not None
             and record.dataset == ref
-            and list(record.options.get("columns") or []) == (columns or [])
+            and sorted(set(record.options.get("columns") or [])) == (columns or [])
             and (held := await store.get(listing.ref)) is not None
         ):
             return held[0]

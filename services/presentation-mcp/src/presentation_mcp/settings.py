@@ -105,18 +105,21 @@ class Settings(FrameServiceSettings):
     `presentation_release_required` exactly like every other startup
     admission failure, rather than crashing the lifespan outright.
 
-    `datasets_first_party_principal` is this service's own half of apis'
-    publish-door authorization (`datasets_api.doors.publish`, mirroring the
-    pin door's identical mechanism): sent as the `x-dfo-principal` header
-    (`client.PRINCIPAL_HEADER`) on the one call `client.PlatformAssembler
-    ._ensure_published_pair` issues to `POST /api/datasets/frames/publish`,
-    and nowhere else. Every other apis route this service calls never
-    reads that header, so sending it there would only add an unused value to
-    the request with no upside. Must equal whatever the apis deployment's
-    own `DATASETS_FIRST_PARTY_PRINCIPAL` env var holds; the two are separate
-    deployments; nothing keeps them in sync but a deployer setting the same
-    value on both. `None` (the default, including a blank env value) means
-    this service publishes nothing ahead of a read or a write: a frame_ref an
+    `datasets_first_party_principal` is the principal apis grants `publish`
+    to, sent as the `x-dfo-principal` header (`client.PRINCIPAL_HEADER`) on
+    the call `client.PlatformAssembler._ensure_published_pair` issues to
+    `POST /api/datasets/frames/publish`, which apis' publish door authorizes
+    by it (`datasets_api.doors.publish`), and on every component create and
+    revise. apis spends one unit of a per-caller daily card allowance on a
+    create or revise and exempts this principal, so without it every
+    conversation through this service shares one client address's allowance.
+    No other apis route this service calls reads the header. Must equal
+    whatever the apis deployment's own `DATASETS_FIRST_PARTY_PRINCIPAL` env
+    var holds; the two are separate deployments; nothing keeps them in sync
+    but a deployer setting the same value on both. `None` (the default,
+    including a blank env value) sends no header, so cards spend the client
+    address's allowance, and this service publishes nothing ahead of a read
+    or a write: a frame_ref an
     analysis verb returns is one dfo-apis' analysis runner published already,
     so the platform answers for it. `publish_frame` refuses
     `publish_not_configured` without one.

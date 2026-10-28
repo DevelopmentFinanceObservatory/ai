@@ -173,9 +173,16 @@ from harness.tool_contracts import (
     harness_refusal,
     resolver_digest,
 )
+from harness.wire import RetryMode as WireRetryMode
 
 logger = logging.getLogger(__name__)
 
+
+# A `describe_frame` whose frame's recipe could not be read just now.
+_DESCRIBE_PENDING_MESSAGE = (
+    "Whether this frame follows the latest data could not be worked out just now, so it "
+    "was not described. Asking again shortly may work."
+)
 
 # The source the card names when neither the manifest nor the chart names one.
 _UNKNOWN_SOURCE = "Unknown source"
@@ -923,6 +930,26 @@ class McpExecutor:
             **({"served": served} if (served := served_facts(manifest)) is not None else {}),
         }
 
+    async def _described_frame(
+        self, args: Mapping[str, Any], body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The outcome of the `describe_frame` call `args` whose view is `body`, marked `rolling`
+        for a frame whose cards are replayed as data moves (`RollingCards.frame`). A
+        frame whose recipe read failed in a way a retry may mend is refused
+        `transient_unavailable` instead, since whether it rolls is not known."""
+        frame_ref = args.get("frame_ref")
+        try:
+            rolling = isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref)
+        except CardWithheld:
+            refusal = harness_refusal(
+                code=HarnessCode.TRANSIENT_UNAVAILABLE,
+                message=_DESCRIBE_PENDING_MESSAGE,
+                retry_mode=WireRetryMode.RETRY_AFTER_DELAY,
+            )
+            return {"outcome": "refusal", "refusal": refusal}
+        view = {**body, "rolling": True} if rolling else body
+        return {"outcome": "ok", "frame_refs": [], "view": view}
+
     async def _presentation(
         self, tool: str, args: dict[str, Any], *, on_progress: ProgressCallback | None = None
     ) -> dict[str, Any]:
@@ -950,10 +977,7 @@ class McpExecutor:
             # contract); a transport-level error still arrives as is_error.
             return _refusal_outcome(body, fallback_text=_result_text(result))
         if tool == "describe_frame":
-            frame_ref = args.get("frame_ref")
-            if isinstance(frame_ref, Mapping) and await self._rolling_cards.frame(frame_ref):
-                body = {**body, "rolling": True}
-            return {"outcome": "ok", "frame_refs": [], "view": body}
+            return await self._described_frame(args, body)
         envelope = (result.meta or {}).get(RESOLVED_PAYLOAD_META_KEY)
         if tool == "describe_component":
             # The body is the model vocabulary. The resolved payload holds the

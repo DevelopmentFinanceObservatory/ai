@@ -25,7 +25,12 @@ from common.materialisation import FrameRef, InMemoryMaterialisationStore, Mater
 from compiler.compile import CompileResult, compile_plan
 from compiler.sources import member_digest, pinned_stat_var
 from compiler.surface import McpSurface, ProgressCallback, ToolCallResult, ToolSchema
-from data_mcp.frame_materialisation import observed_shape
+from data_mcp.frame_materialisation import (
+    DEFAULT_MINT_OPTIONS,
+    KIND_COLUMNS,
+    WITHOUT_PARTY_TOTALS,
+    observed_shape,
+)
 from dfo_frame_grammar import Frame
 from executor.outcomes import (
     Accepted,
@@ -2137,6 +2142,7 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     frame_store: InMemoryMaterialisationStore,
     _stats_by_manifest: dict[tuple[str, str], list[dict[str, Any]]],
     real_schemas: list[ToolSchema],
+    runner: Any,
 ) -> None:
     # "Total aid to Kenya each year": the source binds Kenya and leaves the donors open.
     # The compiled retrieval asks for the frame without donor totals, and each year's
@@ -2184,7 +2190,19 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     )
     plain_ref = FrameRef(spec_id=source.spec_id, content_version=CONTENT_VERSION)
     _held, trace = await frame_store.get(plain_ref)
-    await hold_root(frame_store, without_totals_ref, frame=without_totals_frame, trace=trace)
+    # Minted as `get_data(without_party_totals=True)` mints a flow frame: the kinds
+    # alone, and the totals left out.
+    await hold_root(
+        frame_store,
+        without_totals_ref,
+        frame=without_totals_frame,
+        trace=trace,
+        options={
+            **DEFAULT_MINT_OPTIONS,
+            "columns": list(KIND_COLUMNS),
+            WITHOUT_PARTY_TOTALS: True,
+        },
+    )
     _stats_by_manifest[(source.spec_id, _WITHOUT_TOTALS_CONTENT_VERSION)] = _stats_by_manifest[
         (source.spec_id, CONTENT_VERSION)
     ]
@@ -2211,6 +2229,10 @@ async def test_a_yearly_total_over_every_donor_sums_the_frame_served_without_don
     assert set(total.column("value").to_pylist()) == {38.0}
     ((_, aggregated),) = [call for call in surface.calls if call[0] == "aggregate"]
     assert aggregated["frame_ref"]["content_version"] == _WITHOUT_TOTALS_CONTENT_VERSION
+    # The runner reads the root with the rendering the frame was minted with.
+    ((root,),) = [body["tree"]["inputs"].values() for body in runner.requests]
+    assert root["rendering"]["without_party_totals"] is True
+    assert set(root["rendering"]["columns"]) == set(KIND_COLUMNS)
 
 
 # --- A keyed pairing under a rolling period: the matched keys' newest year ----

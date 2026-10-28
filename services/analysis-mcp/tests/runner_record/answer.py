@@ -109,12 +109,8 @@ class _RenderedRoots(FakeRootSource):
             groupby=groupby,
             enrichment_stamp=None,
         )
-        options = dict(resolved.record["options"])
-        if columns:
-            options["columns"] = list(columns)
-        if groupby is not None:
-            options["groupby"] = groupby
-        record = {**resolved.record, "frame": frame.model_dump(), "options": options}
+        options = resolved.record["options"]
+        record = {**resolved.record, "frame": frame.model_dump()}
         return replace(
             resolved,
             frame=frame,

@@ -25,11 +25,9 @@ from common.materialisation import (
     MintRecord,
     StoredFrameTrace,
 )
+from data_mcp.frame_materialisation import DEFAULT_MINT_OPTIONS
 from dfo_frame_grammar import Frame, canonical_frame_bytes
 from harness.derived_frames import derived_file
-
-# The mint options of a frame read with no enrichment columns.
-_PLAIN_OPTIONS: Mapping[str, Any] = {"format": "parquet", "bundle": False, "layout": "frame"}
 
 
 def dataset_version(ref: FrameRef, frame: Frame) -> FrameRef:
@@ -45,18 +43,19 @@ async def hold_root(
     *,
     frame: Frame,
     trace: StoredFrameTrace,
+    options: Mapping[str, Any] = DEFAULT_MINT_OPTIONS,
     writer: str = "tests",
 ) -> None:
     """Hold `frame` under `ref` as `get_data` holds a fetched frame, with the mint
-    record naming its dataset version (`dataset_version`). The frame is held under
-    that version too, which is where a recording of the runner's answers reads it
-    (`runner_replay`)."""
+    record naming its dataset version (`dataset_version`) and the mint `options` it
+    was fetched with: its columns, party-total cut and groupby, which a verb sends
+    as the root's rendering (`analysis_mcp.runner_tree.root_node`). The frame is held
+    under that version too, which is where a recording of the runner's answers reads
+    it (`runner_replay`)."""
     dataset = dataset_version(ref, frame)
     await store.put(ref, frame=frame, trace=trace, writer=writer)
     await store.put(dataset, frame=frame, trace=trace, writer=writer)
-    await store.put_mint_record(
-        MintRecord(frame=ref, dataset=dataset, options=dict(_PLAIN_OPTIONS))
-    )
+    await store.put_mint_record(MintRecord(frame=ref, dataset=dataset, options=dict(options)))
 
 
 async def result_table(ref: Mapping[str, Any] | FrameRef) -> pa.Table:

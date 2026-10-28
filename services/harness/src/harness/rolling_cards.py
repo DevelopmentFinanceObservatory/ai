@@ -534,6 +534,11 @@ class RollingCards:
         rolling period of its tree reads has no anchor of its own; it answers
         with the recipe `build_recipe` puts on its `RecipeAnchorError`, whose
         `anchor` is null, and a card on it is always replayed.
+
+        Raises:
+            CardWithheld: `rolling_replay_pending` when dfo-apis failed a read of the
+                frame's recipe that may succeed if tried again (`DerivedUnread` with
+                `retryable`), so whether the frame rolls is not known.
         """
         if not str(ref.get("spec_id", "")).startswith(_DERIVED_PREFIX):
             return None
@@ -563,6 +568,10 @@ class RollingCards:
             FrameTooLarge,
             DerivedUnread,
         ) as exc:
+            if isinstance(exc, DerivedUnread) and exc.retryable:
+                # The same read may succeed shortly, so whether the frame rolls is
+                # unknown; a card written now would be fixed or refused wrongly.
+                raise _withheld(HarnessCode.ROLLING_REPLAY_PENDING, _PENDING_MESSAGE, exc) from exc
             # Not kept, because the store or dfo-apis may hold the missing part on a
             # later read.
             _log_no_recipe(frame, exc)

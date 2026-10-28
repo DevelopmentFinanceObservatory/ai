@@ -54,6 +54,7 @@ from types import FunctionType
 from typing import Any, Literal, Protocol, get_args, get_type_hints
 
 import httpx2
+import pyarrow as pa
 from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
 from common.materialisation import FrameRef
@@ -74,6 +75,7 @@ from compiler.surface import ToolSurface, ToolSurfaceUnavailableError
 from data_mcp.get_data_tool import Breakdown, GetDataScope
 from data_mcp.search_tool import SearchContext, SearchPart
 from data_mcp.tool_errors import ToolErrorCode
+from dfo_frame_grammar import FrameError
 from dfo_frame_grammar.grammar import TimeGrain
 from dfo_frame_grammar.rolling import RollingError
 from google.adk.tools import ToolContext
@@ -471,8 +473,20 @@ async def _derived_frame_work[T](
         return None
     with claim:
 
-        def rows_work() -> T:
-            return work(_FrameRows(rows=derived.rows(), rank_positions=derived.rank_positions))
+        def rows_work() -> T | None:
+            try:
+                rows = derived.rows()
+            except (FrameError, pa.ArrowException, KeyError):
+                # dfo-apis served a file this harness cannot decode, a defect on one
+                # side or the other; the select stays as written, as for an unread frame.
+                logger.error(
+                    "make_charts: could not decode the derived frame %s/%s",
+                    ref["spec_id"],
+                    ref["content_version"],
+                    exc_info=True,
+                )
+                return None
+            return work(_FrameRows(rows=rows, rank_positions=derived.rank_positions))
 
         return await claim.hold_through(asyncio.to_thread(rows_work))
 

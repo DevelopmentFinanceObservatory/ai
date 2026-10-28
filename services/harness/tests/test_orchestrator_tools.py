@@ -21,7 +21,14 @@ from typing import Any
 import httpx2
 import pyarrow as pa
 import pytest
-from common.materialisation import FrameTooLarge
+from analysis_mcp import verbs as analysis_verbs
+from common.materialisation import (
+    FrameRef,
+    FrameTooLarge,
+    InMemoryMaterialisationStore,
+    MaterialisationTrace,
+    set_store,
+)
 from common.place_type import (
     PARTY_ROLES,
     class_column,
@@ -59,6 +66,7 @@ from harness.graph.state import (
     PendingPlan,
     frame_id_for,
     pending_action,
+    register_frames,
     store_search,
 )
 from harness.orchestrator_tools import (
@@ -104,6 +112,7 @@ from submission import service as submission_service
 from . import drawn_cards
 from . import test_rolling_cards as rolling_scene
 from .resolved_revision import resolved_revision
+from .runner_frames import hold_root
 from .search_results import search_result_parts
 from .test_turn_records import (
     _example_part,
@@ -1733,6 +1742,91 @@ async def test_a_named_series_is_placed_by_the_rows_of_the_frame_the_card_draws(
 
     assert "not_matched" not in card
     assert ("12", 88.0, "2024") in _figures(card)
+
+
+async def _held_per_capita_sides(store: InMemoryMaterialisationStore) -> tuple[FrameRef, FrameRef]:
+    """Aid to Kenya in US dollars and Kenya's population, 2020 to 2022, each held as
+    `get_data` holds a fetched frame."""
+    sides = []
+    for spec, stat_var, unit, values in (
+        (
+            "d",
+            "dcid:OfficialDevelopmentAssistanceNet_Disbursement",
+            "dcid:USDollar",
+            (100.0, 120.0, 150.0),
+        ),
+        ("e", "dcid:Count_Person", None, (50.0, 50.0, 60.0)),
+    ):
+        frame = Frame.build(
+            role_keys=["observationAbout"],
+            rows=[
+                {
+                    "stat_var": stat_var,
+                    "observationAbout": "country/KEN",
+                    "time_period": period,
+                    "value": value,
+                    "unit": unit,
+                }
+                for period, value in zip(("2020", "2021", "2022"), values, strict=True)
+            ],
+        )
+        ref = FrameRef(spec_id="spec_" + spec * 32, content_version="cv_" + spec * 32)
+        await hold_root(
+            store,
+            ref,
+            frame=frame,
+            trace=MaterialisationTrace(
+                upstream_trace={"graph_revision": "rev_test", "facets": []},
+                spec_id=ref.spec_id,
+                content_version=ref.content_version,
+            ),
+        )
+        sides.append(ref)
+    return sides[0], sides[1]
+
+
+async def test_make_charts_names_every_series_of_a_quotient_with_a_composed_unit() -> None:
+    """A quotient's rows carry a composed unit, which dfo-apis serves as the JCS
+    text of its object. make_charts reads those rows to write an empty select as
+    one naming every series, so a quotient it could not decode would be refused
+    as unread."""
+    store = InMemoryMaterialisationStore()
+    set_store(store)
+    try:
+        aid, population = await _held_per_capita_sides(store)
+        result = await analysis_verbs.quotient_of(
+            frame_ref=aid.model_dump(), denominator_frame_ref=population.model_dump()
+        )
+        assert result.is_error is False, result.content[0].text
+        quotient = {
+            "spec_id": result.structured_content["spec_id"],
+            "content_version": result.structured_content["content_version"],
+        }
+        # The quotient sums each side per period, so its one series is its own stat_var.
+        series = f"dcid:{quotient['spec_id']}"
+        view = {"dimensions": [{"name": "stat_var", "values": [series], "plural": False}]}
+        executor = FakeExecutor()
+        tools, ctx = _tools(executor=executor)
+        register_frames(ctx.state, [(quotient, view, None)])
+
+        drawn = await tools["make_charts"](
+            [
+                {
+                    "frame": frame_id_for(quotient),
+                    "type": "line_chart",
+                    "title": "Aid per person",
+                    "select_json": "{}",
+                }
+            ],
+            ctx,
+        )
+    finally:
+        set_store(None)
+
+    (chart,) = drawn["charts"]
+    assert "error" not in chart, chart
+    (write,) = [args["intent"] for tool, args in executor.calls if tool == "write_component"]
+    assert write["select"] == {"stat_var": series}
 
 
 async def test_make_charts_refuses_an_empty_list_and_says_it_cannot_clear_the_canvas():

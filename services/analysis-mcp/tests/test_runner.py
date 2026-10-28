@@ -5,7 +5,7 @@ answer maps to."""
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import httpx2
@@ -16,6 +16,7 @@ from analysis_mcp.summary import VerbSummary
 from common.caller import supplied_caller
 from common.materialisation import (
     AnchorRecord,
+    FrameIntegrityError,
     FrameRef,
     InMemoryMaterialisationStore,
     MintRecord,
@@ -30,6 +31,8 @@ _OPS = "ops_" + "4" * 32
 _OCV = "ocv_" + "5" * 32
 _FRAME = {"spec_id": _SPEC, "content_version": _CV}
 _DERIVED = {"spec_id": _OPS, "content_version": _OCV}
+_OTHER_SPEC = "spec_" + "7" * 32
+_OTHER_FRAME = {"spec_id": _OTHER_SPEC, "content_version": "cv_" + "8" * 32}
 _ADDRESS_CALLER = "ip:" + "a" * 32
 _SUM = {"by": ["time_period"], "op": "sum"}
 _BREAKDOWN = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 1}}
@@ -42,22 +45,31 @@ async def _no_token() -> dict[str, str]:
 
 
 class _Runner:
-    """A runner answering every request with `answer`, keeping each request."""
+    """A runner answering every request with `answer`, or with what `answer` gives
+    for the request's body, keeping each request."""
 
-    def __init__(self, answer: httpx2.Response) -> None:
+    def __init__(
+        self, answer: httpx2.Response | Callable[[dict[str, Any]], httpx2.Response]
+    ) -> None:
         self.answer = answer
         self.requests: list[httpx2.Request] = []
 
     def handle(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
-        return self.answer
+        if isinstance(self.answer, httpx2.Response):
+            return self.answer
+        return self.answer(json.loads(request.content))
 
     @property
     def body(self) -> dict[str, Any]:
         return json.loads(self.requests[-1].content)
 
 
-def _install(answer: httpx2.Response, *, principal: str | None = None) -> _Runner:
+def _install(
+    answer: httpx2.Response | Callable[[dict[str, Any]], httpx2.Response],
+    *,
+    principal: str | None = None,
+) -> _Runner:
     runner = _Runner(answer)
     runner_holder.set(
         RunnerClient(
@@ -146,16 +158,43 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
     store: InMemoryMaterialisationStore,
 ) -> None:
     # The record was resolved over a second root beside the call's own frame, as
-    # over both sides of a pairing whose one side the call grows.
+    # over both sides of a pairing whose one side the call grows. The second was
+    # fetched with columns, which its rendering carries.
+    await store.put_mint_record(
+        MintRecord(
+            frame=FrameRef(**_OTHER_FRAME),
+            dataset=FrameRef(spec_id=_OTHER_SPEC, content_version=_DATASET_CV),
+            options={"format": "parquet", "columns": ["observationAbout_type"]},
+        )
+    )
     record = AnchorRecord(
-        populations=[{"spec_id": _SPEC, "bindings": {}}],
-        roots=(FrameRef(**_FRAME), FrameRef(**_DERIVED)),
+        populations=[
+            {"spec_id": _SPEC, "bindings": {}},
+            {"spec_id": _OTHER_SPEC, "bindings": {}},
+        ],
+        roots=(FrameRef(**_FRAME), FrameRef(**_OTHER_FRAME)),
         rule="half1",
         period="2022",
     )
     await store.put_anchor_record(record)
-    runner = _install(_problem(422, "op_spec_invalid"))
-    await verbs.growth(
+    anchor_roots = [
+        {**_FRAME, "rendering": {"without_party_totals": False, "columns": []}},
+        {
+            "spec_id": _OTHER_SPEC,
+            "content_version": _DATASET_CV,
+            "rendering": {"without_party_totals": False, "columns": ["observationAbout_type"]},
+        },
+    ]
+    ready = _recorded_ready()
+
+    def answer(body: dict[str, Any]) -> httpx2.Response:
+        sent = sorted(body.get("anchor_roots", ()), key=lambda root: root["spec_id"])
+        if sent == anchor_roots:
+            return httpx2.Response(200, json=ready)
+        return _problem(422, "op_spec_invalid")
+
+    runner = _install(answer)
+    result = await verbs.growth(
         frame_ref=_FRAME,
         window_start="2021",
         window_end="2022",
@@ -163,33 +202,56 @@ async def test_a_rolling_call_sends_its_op_spec_and_its_anchor_records_roots(
         anchor_key=record.anchor_key,
     )
 
+    assert result.is_error is False
     tree = runner.body["tree"]
     assert tree["verb"] == "growth"
     assert tree["arguments"]["window_start"] == "2021"
     assert tree["arguments"]["rolling"]["window_end"] == _ROLLING["window_end"]
     assert "anchor_key" not in tree["arguments"]
     assert "frame_ref" not in tree["arguments"]
-    assert runner.body["anchor_roots"] == [
-        _DERIVED,
-        {**_FRAME, "rendering": {"without_party_totals": False, "columns": []}},
-    ]
 
 
-async def test_a_rolling_call_whose_anchor_key_names_no_record_refuses_before_any_call(
+async def _anchor_over_a_derived_root(store: InMemoryMaterialisationStore) -> str:
+    record = AnchorRecord(
+        populations=[{"spec_id": _SPEC, "bindings": {}}],
+        roots=(FrameRef(**_FRAME), FrameRef(**_DERIVED)),
+        rule="half1",
+        period="2022",
+    )
+    await store.put_anchor_record(record)
+    return record.anchor_key
+
+
+async def _no_record(store: InMemoryMaterialisationStore) -> str:
+    return "rak_" + "6" * 32
+
+
+@pytest.mark.parametrize(
+    ("anchor", "detail"),
+    [
+        (_no_record, "anchor_record_missing"),
+        (_anchor_over_a_derived_root, "anchor_record_unreadable"),
+    ],
+    ids=["no-record", "derived-root"],
+)
+async def test_a_rolling_call_whose_anchor_record_cannot_be_sent_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
+    anchor: Callable[[InMemoryMaterialisationStore], Awaitable[str]],
+    detail: str,
 ) -> None:
+    anchor_key = await anchor(store)
     runner = _install(_problem(422, "op_spec_invalid"))
     result = await verbs.growth(
         frame_ref=_FRAME,
         window_start="2021",
         window_end="2022",
         rolling=_ROLLING,
-        anchor_key="rak_" + "6" * 32,
+        anchor_key=anchor_key,
     )
 
     assert result.structured_content is not None
     assert result.structured_content["code"] == "rolling_anchor_unresolved"
-    assert result.structured_content["fix"]["detail"] == "anchor_record_missing"
+    assert result.structured_content["fix"]["detail"] == detail
     assert runner.requests == []
 
 
@@ -248,8 +310,46 @@ def _record(options: dict[str, Any]) -> MintRecord:
                 },
             },
         ),
+        (
+            # data-mcp's flow enrichment order: the type columns, then party_kind,
+            # party_class and party_whole. dfo-apis keeps a root's columns sorted.
+            _record(
+                {
+                    "format": "parquet",
+                    "columns": [
+                        "financingProvider_type",
+                        "financingRecipient_type",
+                        "party_kind",
+                        "party_class",
+                        "party_whole",
+                        "party_kind",
+                    ],
+                    "without_party_totals": True,
+                }
+            ),
+            {
+                "spec_id": _SPEC,
+                "content_version": _DATASET_CV,
+                "rendering": {
+                    "without_party_totals": True,
+                    "columns": [
+                        "financingProvider_type",
+                        "financingRecipient_type",
+                        "party_class",
+                        "party_kind",
+                        "party_whole",
+                    ],
+                },
+            },
+        ),
     ],
-    ids=["no-mint-record", "mint-record", "stat-vars-sum", "breakdown-with-columns"],
+    ids=[
+        "no-mint-record",
+        "mint-record",
+        "stat-vars-sum",
+        "breakdown-with-columns",
+        "flow-columns-sorted",
+    ],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
     store: InMemoryMaterialisationStore, record: MintRecord | None, root: dict[str, Any]
@@ -272,6 +372,43 @@ async def test_a_frame_fetched_with_an_option_the_runner_does_not_read_refuses_b
     assert result.structured_content is not None
     assert result.structured_content["code"] == "rendering_not_recorded"
     assert result.structured_content["fix"]["options"] == ["currency"]
+    assert runner.requests == []
+
+
+class _UnreadableMintRecords(InMemoryMaterialisationStore):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def get_mint_record(self, ref: FrameRef) -> MintRecord | None:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "retry_mode"),
+    [
+        (OSError("store unreachable"), "service_unavailable", "retry_after_delay"),
+        (
+            FrameIntegrityError(FrameRef(**_FRAME), reason="sha256 mismatch"),
+            "frame_integrity_failed",
+            "do_not_retry",
+        ),
+    ],
+    ids=["unreachable", "corrupt"],
+)
+async def test_a_failed_mint_record_read_refuses_before_any_call(
+    error: Exception, code: str, retry_mode: str
+) -> None:
+    set_store(_UnreadableMintRecords(error))
+    try:
+        runner = _install(_problem(422, "op_spec_invalid"))
+        result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+    finally:
+        set_store(None)
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
     assert runner.requests == []
 
 
@@ -430,6 +567,41 @@ async def test_each_runner_answer_maps_to_its_refusal(
     assert (structured["code"], structured["retry_mode"]) == (code, retry_mode)
     if fix is not None:
         assert structured["fix"] == fix
+
+
+@pytest.mark.parametrize("code", ["snapshot_not_found", "recipe_not_found", "artifact_expired"])
+async def test_a_lost_root_behind_a_derived_input_refuses_that_input_unrecoverable(
+    store: InMemoryMaterialisationStore, code: str
+) -> None:
+    # The runner computes the `ops_` input again from its stored recipe, whose
+    # dataset root it no longer holds: the fix names a pair the call never sent.
+    root = {"spec_id": _SPEC, "content_version": _DATASET_CV, "latest": True}
+    _install(_problem(404, code, fix=root))
+    result = await verbs.aggregate(frame_ref=_DERIVED, aggregation="sum")
+
+    structured = result.structured_content
+    assert structured is not None
+    assert (structured["code"], structured["retry_mode"]) == (
+        "derived_input_unrecoverable",
+        "do_not_retry",
+    )
+    assert structured["fix"] == {
+        "frame_refs": [_DERIVED],
+        "root": {"spec_id": _SPEC, "content_version": _DATASET_CV},
+    }
+
+
+@pytest.mark.parametrize(
+    ("operations", "queued"), [(["op_1"], True), ([], False)], ids=["rebuilding", "in-flight"]
+)
+async def test_a_pending_answer_counts_its_rebuilds_only_when_it_names_some(
+    store: InMemoryMaterialisationStore, operations: list[str], queued: bool
+) -> None:
+    body = {"status": "pending", "retry_after_s": 2.0, "operations": operations}
+    _install(httpx2.Response(202, json=body))
+    result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
+
+    assert ("rebuild(s) queued" in result.content[0].text) is queued
 
 
 async def test_an_unreachable_runner_refuses_retryable_upstream_error(

@@ -1349,6 +1349,31 @@ class ToolRefusal:
         )
 
     @classmethod
+    def derived_input_root_lost(
+        cls, *, frame_refs: Sequence[Mapping[str, str]], root: Mapping[str, Any], upstream_code: str
+    ) -> Self:
+        """`frame_refs` are the derived (`ops_`) inputs the call sent, and `root` the
+        dataset version behind one of them that dfo-apis no longer holds
+        (`upstream_code`: `snapshot_not_found`, `recipe_not_found` or
+        `artifact_expired`). dfo-apis computes a derived input again from its
+        stored recipe, so the input is lost with its root."""
+        named = ", ".join(f"{ref['spec_id']}/{ref['content_version']}" for ref in frame_refs)
+        return cls(
+            code=ToolErrorCode.DERIVED_INPUT_UNRECOVERABLE,
+            message=(
+                f"The derived frame {named} was computed from data the analysis service no "
+                f"longer holds ({upstream_code}), so it cannot be computed again, and "
+                "retrying with the same frame_ref reaches the same refusal. Recompute it "
+                "from its sources: call get_data for the data it came from, repeat the "
+                "steps that produced it, and retry with the new frame_ref."
+            ),
+            fix={
+                "frame_refs": [dict(ref) for ref in frame_refs],
+                "root": {key: root[key] for key in ("spec_id", "content_version") if key in root},
+            },
+        )
+
+    @classmethod
     def derived_input_ordinal(cls, *, reason: str) -> Self:
         return cls(
             code=ToolErrorCode.DERIVED_INPUT_ORDINAL,
@@ -1517,15 +1542,33 @@ class ToolRefusal:
         )
 
     @classmethod
-    def analysis_pending(cls, *, retry_after_s: float, operations: Sequence[str]) -> Self:
-        """The runner answered 202: a root dataset of the call is still building,
-        and `operations` are the rebuilds it waits on."""
+    def frame_store_unavailable(
+        cls, *, spec_id: str, content_version: str, retry_after_s: float
+    ) -> Self:
+        """The frame store failed a read of the mint record of a `get_data` frame,
+        which names the dataset version the runner reads it as."""
         return cls(
             code=ToolErrorCode.SERVICE_UNAVAILABLE,
             message=(
-                "The data this call reads is still being prepared upstream "
-                f"({len(operations)} rebuild(s) queued). Retry the same call after "
-                f"{retry_after_s:.1f}s."
+                f"The record of the frame spec_id={spec_id!r}, "
+                f"content_version={content_version!r} could not be read just now. Retry "
+                f"the same call after {retry_after_s:.1f}s."
+            ),
+            fix={"service": "frame-store", "spec_id": spec_id, "content_version": content_version},
+            retry_after_s=retry_after_s,
+        )
+
+    @classmethod
+    def analysis_pending(cls, *, retry_after_s: float, operations: Sequence[str]) -> Self:
+        """The runner answered 202: a root dataset of the call is still building,
+        and `operations` are the rebuilds it waits on, none for a call the runner
+        is already computing."""
+        queued = f" ({len(operations)} rebuild(s) queued)" if operations else ""
+        return cls(
+            code=ToolErrorCode.SERVICE_UNAVAILABLE,
+            message=(
+                f"The data this call reads is still being prepared upstream{queued}. "
+                f"Retry the same call after {retry_after_s:.1f}s."
             ),
             fix={"service": "dfo-apis", "operations": list(operations)},
             retry_after_s=retry_after_s,

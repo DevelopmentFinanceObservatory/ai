@@ -1826,7 +1826,12 @@ def test_a_unit_struct_with_no_currency_still_refuses_invalid_unit() -> None:
     assert excinfo.value.category == "invalid_unit"
 
 
-def _decoded(*, row_group_size: int | None = None, **columns: pa.Array | None) -> Any:
+def _decoded(
+    *,
+    row_group_size: int | None = None,
+    composed_units: bool = False,
+    **columns: pa.Array | None,
+) -> Any:
     """`frame_from_parquet_bytes` over a four-row artifact, each column in `columns`
     replacing (or, as `None`, dropping) the string-typed default of that name."""
     table_columns: dict[str, pa.Array] = {
@@ -1844,7 +1849,9 @@ def _decoded(*, row_group_size: int | None = None, **columns: pa.Array | None) -
             table_columns[name] = column
     buf = io.BytesIO()
     pq.write_table(pa.table(table_columns), buf, row_group_size=row_group_size)
-    return frame_materialisation.frame_from_parquet_bytes(buf.getvalue())
+    return frame_materialisation.frame_from_parquet_bytes(
+        buf.getvalue(), composed_units=composed_units
+    )
 
 
 def _cells(frame: Any, column: str) -> dict[str, object]:
@@ -2107,6 +2114,49 @@ def test_a_text_unit_column_decodes_refs_and_converted_units_as_dfo_apis_writes_
         "country/C2": UnitRequest(currency="USD", prices="constant", base_year=2024),
         "country/C3": None,
     }
+
+
+def test_a_derived_frame_decodes_composed_units_as_the_runner_writes_them() -> None:
+    """The analysis runner writes a quotient's composed unit as the JCS text of its
+    `{numerator, denominator}` object, beside refs and converted units."""
+    unit = pa.array(
+        [
+            '{"denominator":"dcid:Person","numerator":"dcid:USDollar"}',
+            '{"denominator":{"stat_var":"dcid:Count_Person"},'
+            '"numerator":{"base_year":2024,"currency":"USD","prices":"constant"}}',
+            "dcid:USDollar",
+            None,
+        ]
+    )
+
+    frame = _decoded(unit=unit, composed_units=True)
+
+    assert _unit_cells(frame) == {
+        "country/C0": ComposedUnit(numerator="dcid:USDollar", denominator="dcid:Person"),
+        "country/C1": ComposedUnit(
+            numerator=UnitRequest(currency="USD", prices="constant", base_year=2024),
+            denominator=StatVarPart(stat_var="dcid:Count_Person"),
+        ),
+        "country/C2": "dcid:USDollar",
+        "country/C3": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "category"),
+    [
+        ('{"denominator":"dcid:Person"', "schema_violation"),
+        ('{"denominator":"dcid:Person","numerator":"dcid:USDollar","scale":1}', "invalid_unit"),
+        ('{"denominator":"","numerator":"dcid:USDollar"}', "invalid_unit"),
+        ('{"numerator":"dcid:USDollar"}', "invalid_unit"),
+    ],
+    ids=["truncated", "unknown-member", "empty-side", "missing-side"],
+)
+def test_a_derived_frame_refuses_a_malformed_composed_unit(text: str, category: str) -> None:
+    with pytest.raises(FrameError) as raised:
+        _decoded(unit=pa.array([text] * 4), composed_units=True)
+
+    assert raised.value.category == category
 
 
 @pytest.mark.parametrize(

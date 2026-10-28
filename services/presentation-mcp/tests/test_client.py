@@ -1198,6 +1198,35 @@ async def test_publish_call_carries_the_configured_principal_header(
     assert PRINCIPAL_HEADER not in frame_request.headers
 
 
+@pytest.mark.parametrize(
+    ("principal", "sent"),
+    [(_PUBLISH_PRINCIPAL, _PUBLISH_PRINCIPAL), (None, None)],
+    ids=["configured", "unconfigured"],
+)
+@pytest.mark.parametrize("call", ["create", "revise"])
+async def test_a_component_write_carries_the_configured_principal(
+    call: str, principal: str | None, sent: str | None
+) -> None:
+    """apis spends a per-caller card allowance on a create or revise and exempts
+    the publish principal, so both writes name it when one is configured."""
+    requests, handler = _counting_handler(httpx2.Response(200, json=WRITE_BODY))
+    settings = _settings(datasets_first_party_principal=principal)
+
+    async with _assembler(handler, settings=settings) as assembler:
+        if call == "create":
+            reply = await assembler.create_component(intent=INTENT, caller=Caller.EXTERNAL)
+        else:
+            reply = await assembler.revise_component(
+                component_id="cmp_1",
+                patch={"title": "New"},
+                write_token=WRITE_TOKEN,
+                caller=Caller.EXTERNAL,
+            )
+
+    assert isinstance(reply, WriteReply)
+    assert requests[0].headers.get(PRINCIPAL_HEADER) == sent
+
+
 async def test_an_ops_ref_reads_from_the_platform_with_no_principal_configured(
     materialisation_store: InMemoryMaterialisationStore,
 ) -> None:

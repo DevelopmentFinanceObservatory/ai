@@ -16,10 +16,13 @@ stored recipe. A `spec_` pair is a frame `get_data` registered in the
 materialisation store, whose mint record (`common.materialisation.MintRecord`)
 names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
-`columns`, the enrichment columns, `[]` when the frame has none, and `groupby`
+`columns`, the enrichment columns sorted and each listed once, `[]` when the frame
+has none, and `groupby`
 when the frame was fetched with a `breakdown` or a `stat_vars` sum, which the
 dataset of the mint record is already summed for. A `spec_` pair with no mint
-record is sent as a version read with no columns. The runner reads a root with
+record is sent as a version read with no columns. A record that does not decode
+refuses `frame_integrity_failed`, and any other failed read of it
+`service_unavailable`, which a retry may mend. The runner reads a root with
 no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
 `anchor_key` is no part of an op-spec, and the runner checks every rolling
@@ -29,7 +32,8 @@ the anchor route was asked about. A rolling call sends them as the request's
 `anchor_roots` (`Tree.anchor_roots`), each the root node `root_node` gives, so the
 runner takes the latest period over the roots the literals were written from,
 such as both sides of a pairing whose one side the call grows. A key that names
-no readable record refuses `rolling_anchor_unresolved` before any call.
+no readable record, or a record naming a derived (`ops_`) root, refuses
+`rolling_anchor_unresolved` before any call.
 """
 
 from __future__ import annotations
@@ -39,10 +43,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from common.materialisation import AnchorRecordIntegrityError, FrameRef, get_store
+from common.materialisation import (
+    AnchorRecordIntegrityError,
+    FrameIntegrityError,
+    FrameRef,
+    MintRecord,
+    get_store,
+)
 
 from analysis_mcp.identity import OpSpecVariant
 from analysis_mcp.op_spec import Verb
+from analysis_mcp.runner_client import DEFAULT_RETRY_AFTER_S
 from analysis_mcp.tool_errors import ToolRefusal
 
 logger = logging.getLogger(__name__)
@@ -76,30 +87,40 @@ class Tree:
     anchor_roots: tuple[dict[str, Any], ...] = ()
 
 
+async def _mint_record(ref: FrameRef) -> MintRecord | None | ToolRefusal:
+    """The mint record of the `get_data` frame `ref`, or the refusal for a failed read."""
+    try:
+        return await get_store().get_mint_record(ref)
+    except FrameIntegrityError as exc:
+        # A record that does not decode reads the same on every retry.
+        return ToolRefusal.frame_integrity_failed(
+            spec_id=ref.spec_id, content_version=ref.content_version, reason=exc.reason
+        )
+    except Exception:
+        # Broad on purpose, as `presentation_mcp.client._platform_pair` reads it: the
+        # store's failures belong to its backend. Sent as given, the frame pair is
+        # one apis does not hold, which would tell the caller its frame is gone.
+        logger.warning(
+            "mint record of %s/%s unreadable", ref.spec_id, ref.content_version, exc_info=True
+        )
+        return ToolRefusal.frame_store_unavailable(
+            spec_id=ref.spec_id,
+            content_version=ref.content_version,
+            retry_after_s=DEFAULT_RETRY_AFTER_S,
+        )
+
+
 async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
     """The root node of `ref` and the pair it names, or the refusal for a frame the
     runner cannot read. See the module docstring."""
-    if ref.spec_id.startswith("ops_"):
-        if not ref.content_version.startswith("ocv_"):
-            return ToolRefusal.frame_not_held(
-                spec_id=ref.spec_id, content_version=ref.content_version
-            )
-        return ref.model_dump(), (ref.spec_id, ref.content_version)
-    if not ref.content_version.startswith("cv_"):
+    derived = ref.spec_id.startswith("ops_")
+    if not ref.content_version.startswith("ocv_" if derived else "cv_"):
         return ToolRefusal.frame_not_held(spec_id=ref.spec_id, content_version=ref.content_version)
-    try:
-        record = await get_store().get_mint_record(ref)
-    except Exception:
-        # Broad on purpose, as `presentation_mcp.client._platform_pair` reads it: the
-        # store's failures belong to its backend. A derived pair sent as given is one
-        # apis does not hold, which the runner refuses.
-        logger.warning(
-            "mint record of %s/%s unreadable; sending the pair as given",
-            ref.spec_id,
-            ref.content_version,
-            exc_info=True,
-        )
-        record = None
+    if derived:
+        return ref.model_dump(), (ref.spec_id, ref.content_version)
+    record = await _mint_record(ref)
+    if isinstance(record, ToolRefusal):
+        return record
     if record is None:
         node = {**ref.model_dump(), "rendering": {"without_party_totals": False, "columns": []}}
         return node, (ref.spec_id, ref.content_version)
@@ -111,7 +132,10 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
     dataset = record.dataset
     rendering = {
         "without_party_totals": record.options.get("without_party_totals") is True,
-        "columns": list(record.options.get("columns") or ()),
+        # Sorted and listed once, as dfo-apis keeps a root's columns
+        # (`analysis_roots.mint_options`), so the recipe's normal form is the one
+        # dfo-apis computes.
+        "columns": sorted(set(record.options.get("columns") or ())),
     }
     if (groupby := record.options.get("groupby")) is not None:
         rendering["groupby"] = groupby
@@ -150,6 +174,14 @@ async def _anchor_roots(
         )
     nodes: list[dict[str, Any]] = []
     for ref in record.roots:
+        if ref.spec_id.startswith("ops_"):
+            # The runner takes a latest period over dataset roots only, and
+            # `resolve_anchor` stores no record over a derived one.
+            return ToolRefusal.rolling_anchor_unresolved(
+                detail="anchor_record_unreadable",
+                reason=f"the record under {anchor_key} names the derived frame {ref.spec_id}",
+                context={"anchor_key": anchor_key},
+            )
         root = await root_node(ref)
         if isinstance(root, ToolRefusal):
             return root

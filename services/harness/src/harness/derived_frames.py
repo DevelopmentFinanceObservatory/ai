@@ -47,9 +47,10 @@ class DerivedFile:
     def frame(self) -> Frame:
         """The frame the file holds. The runner serves a derived frame as it serves a
         dataset version, in the frame layout whose `unit` is text, which `get_data`
-        decodes the same way (`data_mcp.frame_materialisation`). Decodes the whole
-        file."""
-        return frame_from_parquet_bytes(self.data)
+        decodes the same way (`data_mcp.frame_materialisation`), with a quotient's
+        composed unit as JCS object text beside refs and converted units. Decodes the
+        whole file."""
+        return frame_from_parquet_bytes(self.data, composed_units=True)
 
     def rows(self) -> list[dict[str, Any]]:
         """Every row of `frame`, each as a mapping, as the store's frames give them."""

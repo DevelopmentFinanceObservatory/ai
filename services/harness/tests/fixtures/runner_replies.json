@@ -6530,7 +6530,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7348,7 +7348,7 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -7563,7 +7563,7 @@
       "status": 422,
       "detail": "unit='converted to current prices, euros' is not one of the units this frame declares: ['CurrencyUSD']. Retry with one of these instead.",
       "code": "unit_heterogeneous",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -8344,7 +8344,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; include 'stat_var' in group_by, or narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -13369,7 +13369,7 @@
       "status": 422,
       "detail": "unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -14259,7 +14259,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_a663e9fcc94bcfa76fe5217a5efada16\",\"rendering\":{\"columns\":[\"financingProvider_type\",\"financingRecipient_type\",\"party_kind\",\"party_class\",\"party_whole\"],\"without_party_totals\":false},\"spec_id\":\"spec_512da4bc48ec6ce5ede5e24351afad65\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_a663e9fcc94bcfa76fe5217a5efada16\",\"rendering\":{\"columns\":[\"financingProvider_type\",\"financingRecipient_type\",\"party_class\",\"party_kind\",\"party_whole\"],\"without_party_totals\":false},\"spec_id\":\"spec_512da4bc48ec6ce5ede5e24351afad65\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -14272,8 +14272,8 @@
             "spec": {
               "spec_id": "ops_53a39f09243fbd6d9202160d8b618a69",
               "recipe": {
-                "normal_form_hash": "rnf_5e31b1c9f7d137f064c996c2e5408e05",
-                "replay_key": "rpk_d8f11ab901a97d061f2f6c727dd36d85"
+                "normal_form_hash": "rnf_e5cb7a7c0667ece14816687b1a5f4121",
+                "replay_key": "rpk_5d9177b827ddaed30af515f8ef571620"
               }
             },
             "content_version": "ocv_320a246ae02840be88291902dc4b9925",
@@ -14406,7 +14406,7 @@
       "status": 422,
       "detail": "The financingProvider parties in this frame cannot be pooled or ranked: the frame carries no 'financingProvider_party_kind' column, so its parties cannot be told apart from the group totals that hold them. Retrieve the data again with get_data and place_types=true, which adds 'financingProvider_party_kind', and retry with that frame_ref, or filter the frame to a single financingProvider party.",
       "code": "place_levels_mixed",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -14417,7 +14417,7 @@
     },
     "retry_after": null
   },
-  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_e738086b65591a27b80040bddb156e65\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"aggregate\"}}": {
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[\"time_period\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_e738086b65591a27b80040bddb156e65\",\"rendering\":{\"columns\":[\"party_class\",\"party_kind\",\"party_whole\"],\"without_party_totals\":true},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
       "status": "ready",
@@ -14428,13 +14428,13 @@
             "parts": [],
             "sentence": "Computed by DFO: aggregate.",
             "spec": {
-              "spec_id": "ops_a83fdd9aa2943a4eef12d508049824bc",
+              "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
               "recipe": {
-                "normal_form_hash": "rnf_d9985e86d90647ec3fe0d7c388ec6a6a",
-                "replay_key": "rpk_bbf9b55076b81756c74a65a0fbb925b6"
+                "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
+                "replay_key": "rpk_1ad72ac81b0b9d784258189cee807a07"
               }
             },
-            "content_version": "ocv_6054000bdb0a0eabade882f00112f589",
+            "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
             "output_digest": "out_ce223ade27219813697863feaf24dbf2",
             "roots": [
               {
@@ -14443,7 +14443,8 @@
                 "rendering": {
                   "format": "parquet",
                   "bundle": false,
-                  "layout": "frame"
+                  "layout": "frame",
+                  "without_party_totals": true
                 }
               }
             ],
@@ -14464,8 +14465,8 @@
       "output_digest": "out_ce223ade27219813697863feaf24dbf2",
       "summary": {
         "verb": "aggregate",
-        "spec_id": "ops_a83fdd9aa2943a4eef12d508049824bc",
-        "content_version": "ocv_6054000bdb0a0eabade882f00112f589",
+        "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
+        "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
         "frame_content_version": "cv_74e079db3e2ae7d874a37893b1c2780f",
         "rows": 24,
         "role_keys": [],
@@ -15112,7 +15113,7 @@
       "status": 404,
       "detail": "the frame spec_00000000000000000000000000000000, cv_00000000000000000000000000000000 cannot be read: not held. Run the analysis with latest=True to read its dataset's current version",
       "code": "snapshot_not_found",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -17353,7 +17354,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -18171,7 +18172,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -20929,7 +20930,7 @@
       "status": 422,
       "detail": "numerator_unit or denominator_unit='converted to constant 2024 prices, US dollars' is not one of the units this frame declares: ['converted to current prices, euros']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -21232,6 +21233,197 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_400476f15fb556625cf5ad71161f4b8d\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_dddddddddddddddddddddddddddddddd\"},\"other\":{\"content_version\":\"cv_076022274ca20ed4dd6594efbfb2c951\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}},\"verb\":\"quotient_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: quotient_of.",
+            "spec": {
+              "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
+              "recipe": {
+                "normal_form_hash": "rnf_4ba3a2b1f8e1359fed7e0d48a4766d73",
+                "replay_key": "rpk_109cb37d86a9afd28c48c76578831edf"
+              }
+            },
+            "content_version": "ocv_7bb4679b2d8436f430af9f992a171363",
+            "output_digest": "out_914712663e16bd5935a45638c65875ac",
+            "roots": [
+              {
+                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+                "content_version": "cv_400476f15fb556625cf5ad71161f4b8d",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              },
+              {
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "content_version": "cv_076022274ca20ed4dd6594efbfb2c951",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame"
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:7e154741edd0cb7b8ef784afc5701dae6edb500d61ae8fd4c48119766305acc6",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_884fbcbda008bb81aa8f37035f442c5e",
+      "output_digest": "out_914712663e16bd5935a45638c65875ac",
+      "summary": {
+        "verb": "quotient_of",
+        "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
+        "content_version": "ocv_7bb4679b2d8436f430af9f992a171363",
+        "frame_content_version": "cv_884fbcbda008bb81aa8f37035f442c5e",
+        "rows": 3,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "denominator_by": {},
+          "denominator_entity": {},
+          "denominator_frame_ref": {
+            "content_version": "cv_076022274ca20ed4dd6594efbfb2c951",
+            "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          "denominator_unit": null,
+          "numerator_by": [],
+          "numerator_entity": {},
+          "numerator_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "stat_var": "dcid:ops_149f00b1104db99ee7857bcb7d874d79",
+          "numerator_stat_var": "dcid:OfficialDevelopmentAssistanceNet_Disbursement",
+          "denominator_stat_var": "dcid:Count_Person",
+          "numerator_resolved_unit": "dcid:USDollar",
+          "denominator_resolved_unit": null,
+          "unit": {
+            "numerator": "dcid:USDollar",
+            "denominator": {
+              "stat_var": "dcid:Count_Person"
+            }
+          },
+          "facet_selections": [],
+          "numerator_facet_selections": [],
+          "denominator_facet_selections": [],
+          "warnings": [],
+          "numerator_periods": [
+            "2020",
+            "2021",
+            "2022"
+          ],
+          "denominator_periods": [
+            "2020",
+            "2021",
+            "2022"
+          ],
+          "matched_periods": [
+            "2020",
+            "2021",
+            "2022"
+          ],
+          "numerator_coverage_fraction": 1.0,
+          "denominator_coverage_fraction": 1.0,
+          "period_quotients": [
+            {
+              "time_period": "2020",
+              "numerator_value": 100.0,
+              "denominator_value": 50.0,
+              "quotient": 2.0,
+              "key": []
+            },
+            {
+              "time_period": "2021",
+              "numerator_value": 120.0,
+              "denominator_value": 50.0,
+              "quotient": 2.4,
+              "key": []
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 150.0,
+              "denominator_value": 60.0,
+              "quotient": 2.5,
+              "key": []
+            }
+          ],
+          "unmatched_keys": [],
+          "keys_without_shared_period": [],
+          "keys_with_zero_denominator": [],
+          "zero_denominator_cells": [],
+          "numerator_only_periods": [],
+          "denominator_only_periods": [],
+          "coverage": {
+            "entities": null,
+            "entities_with_fewer_periods": null,
+            "periods": 3,
+            "period_entities": [
+              [
+                "2020",
+                1
+              ],
+              [
+                "2021",
+                1
+              ],
+              [
+                "2022",
+                1
+              ]
+            ]
+          },
+          "exclusions": {
+            "records": []
+          },
+          "numerator_pooled": [],
+          "denominator_pooled": []
+        }
+      },
+      "rows": 3,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"ocv_d3705e69c9eff3d82fe06b09645fc7b4\",\"spec_id\":\"ops_caef3979ed9311624ae1852574b6e72d\"},\"other\":{\"content_version\":\"ocv_087d59afb59277c5b37d37a84f39c7bf\",\"spec_id\":\"ops_ae5857cd8821008b49fc14b3092202dc\"}},\"verb\":\"share_of\"}}": {
     "status": 200,
     "body": {
@@ -21406,7 +21598,7 @@
       "status": 422,
       "detail": "Could not resolve a single StatVar to aggregate: the input frame carries more than one StatVar; narrow the input to a frame_ref that carries only one.",
       "code": "stat_var_unresolved",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -27045,7 +27237,7 @@
       "status": 422,
       "detail": "left_entity names column(s) this frame has no grain for: ['financingProvider']. Available: ['financingProvider', 'financingRecipient', 'stat_var_crsCooperationModality', 'stat_var_crsPurpose', 'stat_var_crsTypeOfFinance', 'stat_var_crsTypeOfFlow'].",
       "code": "role_ambiguous",
-      "trace_id": "4908bafd26c8410584dc11dd1dbdaa19",
+      "trace_id": "872fcea1c8624512a284116650c5ee27",
       "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
@@ -39317,6 +39509,103 @@
     },
     "retry_after": null
   },
+  "GET /api/datasets/derived/ops_0245e8e443c50f53889b72e6cd20870f/ocv_6d390830a20cf1c31279811d27fa3824/file?format=parquet&bundle=false": {
+    "status": 200,
+    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_0245e8e443c50f53889b72e6cd20870f/ocv_6d390830a20cf1c31279811d27fa3824?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
+      "content_version": "ocv_6d390830a20cf1c31279811d27fa3824",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T23:54:19.989594Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_fe59b19ea15bf07c407ecd9a84b840d6",
+        "replay_key": "rpk_1ad72ac81b0b9d784258189cee807a07",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_0245e8e443c50f53889b72e6cd20870f",
+            "content_version": "ocv_6d390830a20cf1c31279811d27fa3824"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01",
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "aggregation": "sum",
+              "group_by": [
+                "time_period"
+              ],
+              "unit": null
+            },
+            "verb": "aggregate"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01"
+              },
+              "root": 0
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_7e3cead718eecfe77e80489cbcde4f01"
+            },
+            "dataset": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_e738086b65591a27b80040bddb156e65"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "columns": [
+                "party_class",
+                "party_kind",
+                "party_whole"
+              ],
+              "without_party_totals": true
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "content_version": "cv_e738086b65591a27b80040bddb156e65",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame",
+            "without_party_totals": true
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
   "GET /api/datasets/derived/ops_0645acbb90d6608ceffc276b01151065/ocv_775803d44d02fac6f0b384058edddacf/file?format=parquet&bundle=false": {
     "status": 200,
     "content": "UEFSMRUEFWwVcEwVAhUAEgAANtQyAAAAZGNpZDpPZmZpY2lhbERldmVsb3BtZW50QXNzaXN0YW5jZU5ldF9EaXNidXJzZW1lbnQVABUSFRYsFQQVEBUGFQYcNgAoMmRjaWQ6T2ZmaWNpYWxEZXZlbG9wbWVudEFzc2lzdGFuY2VOZXRfRGlzYnVyc2VtZW50GDJkY2lkOk9mZmljaWFsRGV2ZWxvcG1lbnRBc3Npc3RhbmNlTmV0X0Rpc2J1cnNlbWVudBERAAAACSACAAAABAEBBAAVBBUwFTRMFQQVABIAABhcCAAAAGRjaWQ6RlJBCAAAAGRjaWQ6R0JSFQAVEhUWLBUEFRAVBhUGHDYAKAhkY2lkOkdCUhgIZGNpZDpGUkEREQAAAAkgAgAAAAQBAQMCFQQVGhUeTBUCFQASAAANMAkAAAAyMDIwLzIwMjMVABUSFRYsFQQVEBUGFQYcNgAoCTIwMjAvMjAyMxgJMjAyMC8yMDIzEREAAAAJIAIAAAAEAQEEABUEFSAVJEwVBBUAEgAAEDwAAAAAAADIP8YYY4wxxrg/FQAVEhUWLBUEFRAVBhUGHBgIAAAAAAAAyD8YCMYYY4wxxrg/FgAoCAAAAAAAAMg/GAjGGGOMMca4PxERAAAACSACAAAABAEBAwIVBBUAFQJMFQAVABIAAAAVABUOFRIsFQQVEBUGFQYcNgQAAAAHGAIAAAAEAAAVBBUAFQJMFQAVABIAAAAVABUOFRIsFQQVEBUGFQYcNgQAAAAHGAIAAAAEAAAVBBUAFQJMFQAVABIAAAAVABUOFRIsFQQVEBUGFQYcNgQAAAAHGAIAAAAEAAAVBBUAFQJMFQAVABIAAAAVABUOFRIsFQQVEBUGFQYcNgQAAAAHGAIAAAAEAAAVBBmcNQAYBnNjaGVtYRUQABUMJQIYCHN0YXRfdmFyJQBMHAAAABUMJQIYCHJlcG9ydGVyJQBMHAAAABUMJQIYC3RpbWVfcGVyaW9kJQBMHAAAABUKJQIYBXZhbHVlABUMJQIYBHVuaXQlAEwcAAAAFQwlAhgRbWVhc3VyZW1lbnRNZXRob2QlAEwcAAAAFQwlAhgKcHJvdmVuYW5jZSUATBwAAAAVDCUCGAZzdGF0dXMlAEwcAAAAFgQZHBmMJgAcFQwZNQAGEBkYCHN0YXRfdmFyFQIWBBaYAxagAyaUASYIHDYAKDJkY2lkOk9mZmljaWFsRGV2ZWxvcG1lbnRBc3Npc3RhbmNlTmV0X0Rpc2J1cnNlbWVudBgyZGNpZDpPZmZpY2lhbERldmVsb3BtZW50QXNzaXN0YW5jZU5ldF9EaXNidXJzZW1lbnQREQAZLBUEFQAVAgAVABUQFQIAPBbIARkGGSYABAAAACYAHBUMGTUABhAZGAhyZXBvcnRlchUCFgQWtAEWvAEm+AMmqAMcNgAoCGRjaWQ6R0JSGAhkY2lkOkZSQRERABksFQQVABUCABUAFRAVAgA8FiAZBhkmAAQAAAAmABwVDBk1AAYQGRgLdGltZV9wZXJpb2QVAhYEFqIBFqoBJp4FJuQEHDYAKAkyMDIwLzIwMjMYCTIwMjAvMjAyMxERABksFQQVABUCABUAFRAVAgA8FiQZBhkmAAQAAAAmABwVChk1AAYQGRgFdmFsdWUVAhYEFswBFtQBJs4GJo4GHBgIAAAAAAAAyD8YCMYYY4wxxrg/FgAoCAAAAAAAAMg/GAjGGGOMMca4PxERABksFQQVABUCABUAFRAVAgA8KQYZJgAEAAAAJgAcFQwZNQAGEBkYBHVuaXQVAhYEFlQWWiaACCbiBxw2BAAZLBUEFQAVAgAVABUQFQIAPBYAGQYZJgQAAAAAJgAcFQwZNQAGEBkYEW1lYXN1cmVtZW50TWV0aG9kFQIWBBZUFlom2ggmvAgcNgQAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYEAAAAACYAHBUMGTUABhAZGApwcm92ZW5hbmNlFQIWBBZUFlomtAkmlgkcNgQAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYEAAAAACYAHBUMGTUABhAZGAZzdGF0dXMVAhYEFlQWWiaOCibwCRw2BAAZLBUEFQAVAgAVABUQFQIAPBYAGQYZJgQAAAAAFooKFgQmCBbCCgAZHBgMQVJST1c6c2NoZW1hGOwELy8vLy84Z0JBQUFRQUFBQUFBQUtBQXdBQmdBRkFBZ0FDZ0FBQUFBQkJBQU1BQUFBQ0FBSUFBQUFCQUFJQUFBQUJBQUFBQWdBQUFCb0FRQUFLQUVBQVBnQUFBREVBQUFBbUFBQUFHQUFBQUF3QUFBQUJBQUFBTWorLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBWUFBQUJ6ZEdGMGRYTUFBTFQrLy8vdy92Ly9BQUFCQlJBQUFBQWNBQUFBQkFBQUFBQUFBQUFLQUFBQWNISnZkbVZ1WVc1alpRQUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFDUUFBQUFFQUFBQUFBQUFBQkVBQUFCdFpXRnpkWEpsYldWdWRFMWxkR2h2WkFBQUFCVC8vLzlRLy8vL0FBQUJCUkFBQUFBWUFBQUFCQUFBQUFBQUFBQUVBQUFBZFc1cGRBQUFBQUE4Ly8vL2VQLy8vd0FBQVFNUUFBQUFIQUFBQUFRQUFBQUFBQUFBQlFBQUFIWmhiSFZsQUFZQUNBQUdBQVlBQUFBQUFBSUFxUC8vL3dBQUFRVVFBQUFBSEFBQUFBUUFBQUFBQUFBQUN3QUFBSFJwYldWZmNHVnlhVzlrQUpqLy8vL1UvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBSUFBQUFjbVZ3YjNKMFpYSUFBQUFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBmMHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAAGsGAABQQVIx",
@@ -39329,7 +39618,7 @@
       "content_version": "ocv_775803d44d02fac6f0b384058edddacf",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.850201Z"
+        "held_until": "2026-11-27T23:54:20.394622Z"
       },
       "citation": {
         "text": "",
@@ -39489,7 +39778,7 @@
       "content_version": "ocv_3c41c8c2e0983278927afc99b7f0d166",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.348132Z"
+        "held_until": "2026-11-27T23:54:19.920128Z"
       },
       "citation": {
         "text": "",
@@ -39583,7 +39872,7 @@
       "content_version": "ocv_d8c520af966a1a3c80a22cadb006df77",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.413584Z"
+        "held_until": "2026-11-27T23:54:19.976731Z"
       },
       "citation": {
         "text": "",
@@ -39690,6 +39979,134 @@
     },
     "retry_after": null
   },
+  "GET /api/datasets/derived/ops_149f00b1104db99ee7857bcb7d874d79/ocv_7bb4679b2d8436f430af9f992a171363/file?format=parquet&bundle=false": {
+    "status": 200,
+    "content": "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QXdBQmdBRkFBZ0FDZ0FBQUFBQkJBQU1BQUFBQ0FBSUFBQUFCQUFJQUFBQUJBQUFBQWNBQUFBNEFRQUErQUFBQU1RQUFBQ1lBQUFBWUFBQUFEQUFBQUFFQUFBQTlQNy8vd0FBQVFVUUFBQUFHQUFBQUFRQUFBQUFBQUFBQmdBQUFITjBZWFIxY3dBQTRQNy8veHovLy84QUFBRUZFQUFBQUJ3QUFBQUVBQUFBQUFBQUFBb0FBQUJ3Y205MlpXNWhibU5sQUFBTS8vLy9TUC8vL3dBQUFRVVFBQUFBSkFBQUFBUUFBQUFBQUFBQUVRQUFBRzFsWVhOMWNtVnRaVzUwVFdWMGFHOWtBQUFBUVAvLy8zei8vLzhBQUFFRkVBQUFBQmdBQUFBRUFBQUFBQUFBQUFRQUFBQjFibWwwQUFBQUFHai8vLytrLy8vL0FBQUJBeEFBQUFBY0FBQUFCQUFBQUFBQUFBQUZBQUFBZG1Gc2RXVUFCZ0FJQUFZQUJnQUFBQUFBQWdEVS8vLy9BQUFCQlJBQUFBQWNBQUFBQkFBQUFBQUFBQUFMQUFBQWRHbHRaVjl3WlhKcGIyUUF4UC8vL3hBQUZBQUlBQVlBQndBTUFBQUFFQUFRQUFBQUFBQUJCUkFBQUFBZ0FBQUFCQUFBQUFBQUFBQUlBQUFBYzNSaGRGOTJZWElBQUFBQUJBQUVBQVFBQUFBPQAYIHBhcnF1ZXQtY3BwLWFycm93IHZlcnNpb24gMjQuMC4wGXwcAAAcAAAcAAAcAAAcAAAcAAAcAAAAPQYAAFBBUjE=",
+    "retry_after": null
+  },
+  "GET /api/datasets/derived/ops_149f00b1104db99ee7857bcb7d874d79/ocv_7bb4679b2d8436f430af9f992a171363?": {
+    "status": 200,
+    "body": {
+      "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
+      "content_version": "ocv_7bb4679b2d8436f430af9f992a171363",
+      "retention": {
+        "pinned": false,
+        "held_until": "2026-11-27T23:54:20.057812Z"
+      },
+      "citation": {
+        "text": "",
+        "sources": []
+      },
+      "recipe": {
+        "normal_form_hash": "rnf_4ba3a2b1f8e1359fed7e0d48a4766d73",
+        "replay_key": "rpk_109cb37d86a9afd28c48c76578831edf",
+        "execution_identity": "0.9.0|1.1.0|0.2.0",
+        "tree": {
+          "frame": {
+            "spec_id": "ops_149f00b1104db99ee7857bcb7d874d79",
+            "content_version": "ocv_7bb4679b2d8436f430af9f992a171363"
+          },
+          "op_spec": {
+            "frame_ref": {
+              "content_version": "cv_400476f15fb556625cf5ad71161f4b8d",
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd"
+            },
+            "identity_version": "ops1",
+            "parameters": {
+              "denominator_by": {},
+              "denominator_entity": {},
+              "denominator_frame_ref": {
+                "content_version": "cv_076022274ca20ed4dd6594efbfb2c951",
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              },
+              "denominator_unit": null,
+              "numerator_by": [],
+              "numerator_entity": {},
+              "numerator_unit": null
+            },
+            "verb": "quotient_of"
+          },
+          "inputs": {
+            "frame_ref": {
+              "frame": {
+                "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+                "content_version": "cv_400476f15fb556625cf5ad71161f4b8d"
+              },
+              "root": 0
+            },
+            "denominator_frame_ref": {
+              "frame": {
+                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "content_version": "cv_076022274ca20ed4dd6594efbfb2c951"
+              },
+              "root": 1
+            }
+          }
+        },
+        "roots": [
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+              "content_version": "cv_400476f15fb556625cf5ad71161f4b8d"
+            },
+            "dataset": {
+              "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+              "content_version": "cv_400476f15fb556625cf5ad71161f4b8d"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          },
+          {
+            "schema_version": 1,
+            "frame": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_076022274ca20ed4dd6594efbfb2c951"
+            },
+            "dataset": {
+              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_version": "cv_076022274ca20ed4dd6594efbfb2c951"
+            },
+            "options": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame"
+            },
+            "scope": {}
+          }
+        ]
+      },
+      "roots": [
+        {
+          "spec_id": "spec_dddddddddddddddddddddddddddddddd",
+          "content_version": "cv_400476f15fb556625cf5ad71161f4b8d",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        },
+        {
+          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "content_version": "cv_076022274ca20ed4dd6594efbfb2c951",
+          "rendering": {
+            "format": "parquet",
+            "bundle": false,
+            "layout": "frame"
+          }
+        }
+      ],
+      "resolved_periods": [],
+      "anchor": null,
+      "left_out": [],
+      "left_out_complete": true
+    },
+    "retry_after": null
+  },
   "GET /api/datasets/derived/ops_1a6538e0db3e16b4e95008b8c94f0fb5/ocv_798126503bf595986385a83f7e7b338a/file?format=parquet&bundle=false": {
     "status": 200,
     "content": "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ABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFgQW6gEW8gEmiAsmtgocNgAoFWRjaWQ6ZGMvYmFzZS9PRUNEX0NSUxgVZGNpZDpkYy9iYXNlL09FQ0RfQ1JTEREAGSwVBBUAFQIAFQAVEBUCADwWVBkGGSYABAAAACYAHBUMGTUABhAZGAZzdGF0dXMVAhYEFlQWWibGDCaoDBw2BAAZLBUEFQAVAgAVABUQFQIAPBYAGQYZJgQAAAAAFrYMFgQmCBb6DAAZHBgMQVJST1c6c2NoZW1hGNgFLy8vLy94Z0NBQUFRQUFBQUFBQUtBQXdBQmdBRkFBZ0FDZ0FBQUFBQkJBQU1BQUFBQ0FBSUFBQUFCQUFJQUFBQUJBQUFBQWtBQUFDMEFRQUFiQUVBQUNnQkFBRDRBQUFBeEFBQUFKZ0FBQUJnQUFBQU1BQUFBQVFBQUFDQS92Ly9BQUFCQlJBQUFBQVlBQUFBQkFBQUFBQUFBQUFHQUFBQWMzUmhkSFZ6QUFCcy92Ly9xUDcvL3dBQUFRVVFBQUFBSEFBQUFBUUFBQUFBQUFBQUNnQUFBSEJ5YjNabGJtRnVZMlVBQUpqKy8vL1Uvdi8vQUFBQkJSQUFBQUFrQUFBQUJBQUFBQUFBQUFBUkFBQUFiV1ZoYzNWeVpXMWxiblJOWlhSb2IyUUFBQURNL3YvL0NQLy8vd0FBQVFVUUFBQUFHQUFBQUFRQUFBQUFBQUFBQkFBQUFIVnVhWFFBQUFBQTlQNy8vekQvLy84QUFBRURFQUFBQUJ3QUFBQUVBQUFBQUFBQUFBVUFBQUIyWVd4MVpRQUdBQWdBQmdBR0FBQUFBQUFDQUdELy8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQXNBQUFCMGFXMWxYM0JsY21sdlpBQlEvLy8valAvLy93QUFBUVVRQUFBQU1BQUFBQVFBQUFBQUFBQUFIUUFBQUdacGJtRnVZMmx1WjFKbFkybHdhV1Z1ZEY5d1lYSjBlVjlyYVc1a0FBQUFrUC8vLzh6Ly8vOEFBQUVGRUFBQUFDUUFBQUFFQUFBQUFBQUFBQklBQUFCbWFXNWhibU5wYm1kU1pXTnBjR2xsYm5RQUFNVC8vLzhRQUJRQUNBQUdBQWNBREFBQUFCQUFFQUFBQUFBQUFRVVFBQUFBSUFBQUFBUUFBQUFBQUFBQUNBQUFBSE4wWVhSZmRtRnlBQUFBQUFRQUJBQUVBQUFBQUFBQUFBPT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBmcHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAHAAAALUHAABQQVIx",
@@ -39702,7 +40119,7 @@
       "content_version": "ocv_798126503bf595986385a83f7e7b338a",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.342007Z"
+        "held_until": "2026-11-27T23:54:19.913879Z"
       },
       "citation": {
         "text": "",
@@ -39792,7 +40209,7 @@
       "content_version": "ocv_571e4b90b6781e9688d96cb25c76d008",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.498584Z"
+        "held_until": "2026-11-27T23:54:20.048083Z"
       },
       "citation": {
         "text": "",
@@ -39894,7 +40311,7 @@
       "content_version": "ocv_6632b36cf57418786f28b6f1de70357a",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.342007Z"
+        "held_until": "2026-11-27T23:54:19.913879Z"
       },
       "citation": {
         "text": "",
@@ -39988,7 +40405,7 @@
       "content_version": "ocv_fa2e11a8c2771d15ce832384b993583f",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.809657Z"
+        "held_until": "2026-11-27T23:54:20.354692Z"
       },
       "citation": {
         "text": "",
@@ -40119,7 +40536,7 @@
       "content_version": "ocv_ebb90309e5bc9a00b8be3a9ca2891bc2",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.784290Z"
+        "held_until": "2026-11-27T23:54:20.329936Z"
       },
       "citation": {
         "text": "",
@@ -40265,7 +40682,7 @@
       "content_version": "ocv_62cbadac570d36ccc047f962fa9a8e75",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.732854Z"
+        "held_until": "2026-11-27T23:54:20.279130Z"
       },
       "citation": {
         "text": "",
@@ -40414,7 +40831,7 @@
       "content_version": "ocv_658d2a677dc1069e19a2911d2671ab21",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.418893Z"
+        "held_until": "2026-11-27T23:54:19.980883Z"
       },
       "citation": {
         "text": "",
@@ -40504,7 +40921,7 @@
       "content_version": "ocv_b8858bf365015ddebf7847473a81b5e5",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.354680Z"
+        "held_until": "2026-11-27T23:54:19.926302Z"
       },
       "citation": {
         "text": "",
@@ -40592,7 +41009,7 @@
       "content_version": "ocv_f747e4743ff2a010600246fe3ca345a8",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.472080Z"
+        "held_until": "2026-11-27T23:54:20.023774Z"
       },
       "citation": {
         "text": "",
@@ -40751,7 +41168,7 @@
       "content_version": "ocv_d6ff589c31538128527c988c051b415d",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.725381Z"
+        "held_until": "2026-11-27T23:54:20.271648Z"
       },
       "citation": {
         "text": "",
@@ -40921,15 +41338,15 @@
       "content_version": "ocv_320a246ae02840be88291902dc4b9925",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.424000Z"
+        "held_until": "2026-11-27T23:54:19.984983Z"
       },
       "citation": {
         "text": "",
         "sources": []
       },
       "recipe": {
-        "normal_form_hash": "rnf_5e31b1c9f7d137f064c996c2e5408e05",
-        "replay_key": "rpk_d8f11ab901a97d061f2f6c727dd36d85",
+        "normal_form_hash": "rnf_e5cb7a7c0667ece14816687b1a5f4121",
+        "replay_key": "rpk_5d9177b827ddaed30af515f8ef571620",
         "execution_identity": "0.9.0|1.1.0|0.2.0",
         "tree": {
           "frame": {
@@ -40979,8 +41396,8 @@
               "columns": [
                 "financingProvider_type",
                 "financingRecipient_type",
-                "party_kind",
                 "party_class",
+                "party_kind",
                 "party_whole"
               ]
             },
@@ -41013,7 +41430,7 @@
       "content_version": "ocv_1c07ec32bc25813c3e54bc4fd1bdacf6",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.844572Z"
+        "held_until": "2026-11-27T23:54:20.389531Z"
       },
       "citation": {
         "text": "",
@@ -41260,7 +41677,7 @@
       "content_version": "ocv_462d24e998b318720fea08cc42866557",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.504472Z"
+        "held_until": "2026-11-27T23:54:20.053161Z"
       },
       "citation": {
         "text": "",
@@ -41360,7 +41777,7 @@
       "content_version": "ocv_0bdef3defcc6fa31f37b58a7bbbcf420",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.774169Z"
+        "held_until": "2026-11-27T23:54:20.319930Z"
       },
       "citation": {
         "text": "",
@@ -41562,7 +41979,7 @@
       "content_version": "ocv_be24d9fc3318a04dd5591e1ac9f17ce9",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.815697Z"
+        "held_until": "2026-11-27T23:54:20.360563Z"
       },
       "citation": {
         "text": "",
@@ -41682,7 +42099,7 @@
       "content_version": "ocv_b8ed741922633af54a54a4b53f9c735b",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.493312Z"
+        "held_until": "2026-11-27T23:54:20.043365Z"
       },
       "citation": {
         "text": "",
@@ -41776,7 +42193,7 @@
       "content_version": "ocv_3d218ec13d449e2d6a6154a1d527a0cd",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.354680Z"
+        "held_until": "2026-11-27T23:54:19.926302Z"
       },
       "citation": {
         "text": "",
@@ -41873,7 +42290,7 @@
       "content_version": "ocv_4e7539adadcd78946696436230cd6a4b",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.718578Z"
+        "held_until": "2026-11-27T23:54:20.264913Z"
       },
       "citation": {
         "text": "",
@@ -41990,96 +42407,6 @@
     },
     "retry_after": null
   },
-  "GET /api/datasets/derived/ops_a83fdd9aa2943a4eef12d508049824bc/ocv_6054000bdb0a0eabade882f00112f589/file?format=parquet&bundle=false": {
-    "status": 200,
-    "content": "UEFSMRUEFRgVHEwVAhUAEgAADCwIAAAAZGNpZDpPZGEVABUSFRYsFTAVEBUGFQYcNgAoCGRjaWQ6T2RhGAhkY2lkOk9kYRERAAAACSACAAAAMAEBMAAVBBWAAxXYAUwVMBUAEgAAwAEcBAAAADIwMDANCAAxDQgAMg0IADMNCAA0DQgANQ0IADYNCAA3DQgAOA0IADkJCAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMQ1QADENUAAxDVAAMg1QADINUCQyMgQAAAAyMDIzFQAVLhUyLBUwFRAVBhUGHDYAKAQyMDIzGAQyMDAwEREAAAAXWAIAAAAwAQUHIIhBijkoqcWaezDKSau9FQQVEBUUTBUCFQASAAAIHAAAAAAAAENAFQAVEhUWLBUwFRAVBhUGHBgIAAAAAAAAQ0AYCAAAAAAAAENAFgAoCAAAAAAAAENAGAgAAAAAAABDQBERAAAACSACAAAAMAEBMAAVBBUOFRJMFQIVABIAAAcYAwAAAHVzZBUAFRIVFiwVMBUQFQYVBhw2ACgDdXNkGAN1c2QREQAAAAkgAgAAADABATAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQVABUCTBUAFQASAAAAFQAVDhUSLBUwFRAVBhUGHDYwAAAABxgCAAAAMAAAFQQZjDUAGAZzY2hlbWEVDgAVDCUCGAhzdGF0X3ZhciUATBwAAAAVDCUCGAt0aW1lX3BlcmlvZCUATBwAAAAVCiUCGAV2YWx1ZQAVDCUCGAR1bml0JQBMHAAAABUMJQIYEW1lYXN1cmVtZW50TWV0aG9kJQBMHAAAABUMJQIYCnByb3ZlbmFuY2UlAEwcAAAAFQwlAhgGc3RhdHVzJQBMHAAAABYwGRwZfCYAHBUMGTUABhAZGAhzdGF0X3ZhchUCFjAWnAEWpAEmQCYIHDYAKAhkY2lkOk9kYRgIZGNpZDpPZGEREQAZLBUEFQAVAgAVABUQFQIAPBaAAxkGGSYAMAAAACYAHBUMGTUABhAZGAt0aW1lX3BlcmlvZBUCFjAWlAQW8AImpAMmrAEcNgAoBDIwMjMYBDIwMDAREQAZLBUEFQAVAgAVABUQFQIAPBbAARkGGSYAMAAAACYAHBUKGTUABhAZGAV2YWx1ZRUCFjAWvAEWxAEmzAQmnAQcGAgAAAAAAABDQBgIAAAAAAAAQ0AWACgIAAAAAAAAQ0AYCAAAAAAAAENAEREAGSwVBBUAFQIAFQAVEBUCADwpBhkmADAAAAAmABwVDBk1AAYQGRgEdW5pdBUCFjAWfhaGASaOBibgBRw2ACgDdXNkGAN1c2QREQAZLBUEFQAVAgAVABUQFQIAPBaQARkGGSYAMAAAACYAHBUMGTUABhAZGBFtZWFzdXJlbWVudE1ldGhvZBUCFjAWVBZaJoQHJuYGHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgKcHJvdmVuYW5jZRUCFjAWVBZaJt4HJsAHHDYwABksFQQVABUCABUAFRAVAgA8FgAZBhkmMAAAAAAmABwVDBk1AAYQGRgGc3RhdHVzFQIWMBZUFlomuAgmmggcNjAAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYwAAAAABbmCRYwJggW7AgAGRwYDEFSUk9XOnNjaGVtYRisBC8vLy8vNWdCQUFBUUFBQUFBQUFLQUF3QUJnQUZBQWdBQ2dBQUFBQUJCQUFNQUFBQUNBQUlBQUFBQkFBSUFBQUFCQUFBQUFjQUFBQTRBUUFBK0FBQUFNUUFBQUNZQUFBQVlBQUFBREFBQUFBRUFBQUE5UDcvL3dBQUFRVVFBQUFBR0FBQUFBUUFBQUFBQUFBQUJnQUFBSE4wWVhSMWN3QUE0UDcvL3h6Ly8vOEFBQUVGRUFBQUFCd0FBQUFFQUFBQUFBQUFBQW9BQUFCd2NtOTJaVzVoYm1ObEFBQU0vLy8vU1AvLy93QUFBUVVRQUFBQUpBQUFBQVFBQUFBQUFBQUFFUUFBQUcxbFlYTjFjbVZ0Wlc1MFRXVjBhRzlrQUFBQVFQLy8vM3ovLy84QUFBRUZFQUFBQUJnQUFBQUVBQUFBQUFBQUFBUUFBQUIxYm1sMEFBQUFBR2ovLy8ray8vLy9BQUFCQXhBQUFBQWNBQUFBQkFBQUFBQUFBQUFGQUFBQWRtRnNkV1VBQmdBSUFBWUFCZ0FBQUFBQUFnRFUvLy8vQUFBQkJSQUFBQUFjQUFBQUJBQUFBQUFBQUFBTEFBQUFkR2x0WlY5d1pYSnBiMlFBeFAvLy94QUFGQUFJQUFZQUJ3QU1BQUFBRUFBUUFBQUFBQUFCQlJBQUFBQWdBQUFBQkFBQUFBQUFBQUFJQUFBQWMzUmhkRjkyWVhJQUFBQUFCQUFFQUFRQUFBQT0AGCBwYXJxdWV0LWNwcC1hcnJvdyB2ZXJzaW9uIDI0LjAuMBl8HAAAHAAAHAAAHAAAHAAAHAAAHAAAAGgFAABQQVIx",
-    "retry_after": null
-  },
-  "GET /api/datasets/derived/ops_a83fdd9aa2943a4eef12d508049824bc/ocv_6054000bdb0a0eabade882f00112f589?": {
-    "status": 200,
-    "body": {
-      "spec_id": "ops_a83fdd9aa2943a4eef12d508049824bc",
-      "content_version": "ocv_6054000bdb0a0eabade882f00112f589",
-      "retention": {
-        "pinned": false,
-        "held_until": "2026-11-27T23:05:00.429560Z"
-      },
-      "citation": {
-        "text": "",
-        "sources": []
-      },
-      "recipe": {
-        "normal_form_hash": "rnf_d9985e86d90647ec3fe0d7c388ec6a6a",
-        "replay_key": "rpk_bbf9b55076b81756c74a65a0fbb925b6",
-        "execution_identity": "0.9.0|1.1.0|0.2.0",
-        "tree": {
-          "frame": {
-            "spec_id": "ops_a83fdd9aa2943a4eef12d508049824bc",
-            "content_version": "ocv_6054000bdb0a0eabade882f00112f589"
-          },
-          "op_spec": {
-            "frame_ref": {
-              "content_version": "cv_e738086b65591a27b80040bddb156e65",
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            },
-            "identity_version": "ops1",
-            "parameters": {
-              "aggregation": "sum",
-              "group_by": [
-                "time_period"
-              ],
-              "unit": null
-            },
-            "verb": "aggregate"
-          },
-          "inputs": {
-            "frame_ref": {
-              "frame": {
-                "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                "content_version": "cv_e738086b65591a27b80040bddb156e65"
-              },
-              "root": 0
-            }
-          }
-        },
-        "roots": [
-          {
-            "schema_version": 1,
-            "frame": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_e738086b65591a27b80040bddb156e65"
-            },
-            "dataset": {
-              "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-              "content_version": "cv_e738086b65591a27b80040bddb156e65"
-            },
-            "options": {
-              "format": "parquet",
-              "bundle": false,
-              "layout": "frame"
-            },
-            "scope": {}
-          }
-        ]
-      },
-      "roots": [
-        {
-          "spec_id": "spec_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-          "content_version": "cv_e738086b65591a27b80040bddb156e65",
-          "rendering": {
-            "format": "parquet",
-            "bundle": false,
-            "layout": "frame"
-          }
-        }
-      ],
-      "resolved_periods": [],
-      "anchor": null,
-      "left_out": [],
-      "left_out_complete": true
-    },
-    "retry_after": null
-  },
   "GET /api/datasets/derived/ops_ae5b9e69ea87992fd1648286c952ad63/ocv_0a3b0493234394d2a4340e21ec146d03/file?format=parquet&bundle=false": {
     "status": 200,
     "content": "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KAhVU0RvbGxhchgIVVNEb2xsYXIREQAZLBUEFQAVAgAVABUQFQIAPBYgGQYZJgAEAAAAJgAcFQwZNQAGEBkYEW1lYXN1cmVtZW50TWV0aG9kFQIWBBZUFlom/gom4AocNgQAGSwVBBUAFQIAFQAVEBUCADwWABkGGSYEAAAAACYAHBUMGTUABhAZGApwcm92ZW5hbmNlFQIWBBa4AhbAAiamDCa6Cxw2ACgiZGMvYmFzZS9Xb3JsZERldmVsb3BtZW50SW5kaWNhdG9ycxgiZGMvYmFzZS9Xb3JsZERldmVsb3BtZW50SW5kaWNhdG9ycxERABksFQQVABUCABUAFRAVAgA8FogBGQYZJgAEAAAAJgAcFQwZNQAGEBkYBnN0YXR1cxUCFgQWVBZaJpgOJvoNHDYEABksFQQVABUCABUAFRAVAgA8FgAZBhkmBAAAAAAWhg4WBCYIFswOABkcGAxBUlJPVzpzY2hlbWEYzAUvLy8vL3hBQ0FBQVFBQUFBQUFBS0FBd0FCZ0FGQUFnQUNnQUFBQUFCQkFBTUFBQUFDQUFJQUFBQUJBQUlBQUFBQkFBQUFBa0FBQUNzQVFBQVpBRUFBQ2dCQUFENEFBQUF4QUFBQUpnQUFBQmdBQUFBTUFBQUFBUUFBQUNJL3YvL0FBQUJCUkFBQUFBWUFBQUFCQUFBQUFBQUFBQUdBQUFBYzNSaGRIVnpBQUIwL3YvL3NQNy8vd0FBQVFVUUFBQUFIQUFBQUFRQUFBQUFBQUFBQ2dBQUFIQnliM1psYm1GdVkyVUFBS0QrLy8vYy92Ly9BQUFCQlJBQUFBQWtBQUFBQkFBQUFBQUFBQUFSQUFBQWJXVmhjM1Z5WlcxbGJuUk5aWFJvYjJRQUFBRFUvdi8vRVAvLy93QUFBUVVRQUFBQUdBQUFBQVFBQUFBQUFBQUFCQUFBQUhWdWFYUUFBQUFBL1A3Ly96ai8vLzhBQUFFREVBQUFBQndBQUFBRUFBQUFBQUFBQUFVQUFBQjJZV3gxWlFBR0FBZ0FCZ0FHQUFBQUFBQUNBR2ovLy84QUFBRUZFQUFBQUJ3QUFBQUVBQUFBQUFBQUFBc0FBQUIwYVcxbFgzQmxjbWx2WkFCWS8vLy9sUC8vL3dBQUFRVVFBQUFBS0FBQUFBUUFBQUFBQUFBQUZRQUFBRzlpYzJWeWRtRjBhVzl1UVdKdmRYUmZkSGx3WlFBQUFKRC8vLy9NLy8vL0FBQUJCUkFBQUFBa0FBQUFCQUFBQUFBQUFBQVFBQUFBYjJKelpYSjJZWFJwYjI1QlltOTFkQUFBQUFERS8vLy9FQUFVQUFnQUJnQUhBQXdBQUFBUUFCQUFBQUFBQUFFRkVBQUFBQ0FBQUFBRUFBQUFBQUFBQUFnQUFBQnpkR0YwWDNaaGNnQUFBQUFFQUFRQUJBQUFBQUFBQUFBPQAYIHBhcnF1ZXQtY3BwLWFycm93IHZlcnNpb24gMjQuMC4wGZwcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAA2wcAAFBBUjE=",
@@ -42092,7 +42419,7 @@
       "content_version": "ocv_0a3b0493234394d2a4340e21ec146d03",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.707613Z"
+        "held_until": "2026-11-27T23:54:20.253886Z"
       },
       "citation": {
         "text": "",
@@ -42210,7 +42537,7 @@
       "content_version": "ocv_3ea86344687661515000d6612d081cd1",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.837161Z"
+        "held_until": "2026-11-27T23:54:20.382560Z"
       },
       "citation": {
         "text": "",
@@ -42480,7 +42807,7 @@
       "content_version": "ocv_a5c9a3c371cf9e32d231cee66e7c6d9a",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.348132Z"
+        "held_until": "2026-11-27T23:54:19.920128Z"
       },
       "citation": {
         "text": "",
@@ -42578,7 +42905,7 @@
       "content_version": "ocv_73e91d9746688d37f20e29b9332514e7",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.657865Z"
+        "held_until": "2026-11-27T23:54:20.204033Z"
       },
       "citation": {
         "text": "",
@@ -42870,7 +43197,7 @@
       "content_version": "ocv_aff2b4246a673e267e8370a79d5b3bc9",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.799807Z"
+        "held_until": "2026-11-27T23:54:20.344633Z"
       },
       "citation": {
         "text": "",
@@ -43217,7 +43544,7 @@
       "content_version": "ocv_ac2a7ace1e64ef218a72a8c20a8c9884",
       "retention": {
         "pinned": false,
-        "held_until": "2026-11-27T23:05:00.450845Z"
+        "held_until": "2026-11-27T23:54:20.005606Z"
       },
       "citation": {
         "text": "",

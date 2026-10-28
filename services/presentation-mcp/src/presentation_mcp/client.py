@@ -95,11 +95,13 @@ _RECIPE_CONFLICT_CONSTRAINTS = frozenset(
     }
 )
 
-# Sent only on the publish call (`_ensure_published_pair`'s own POST to
-# `_PUBLISH_ROUTE`). It is the one apis route this client calls that checks
-# it (`datasets_api.doors.publish`, mirroring the pin door's identical
-# mechanism). Every other route on this surface ignores it, so it is never
-# attached to any other request `request()` issues.
+# Sent on the three calls whose apis route reads it: the publish call
+# (`_ensure_published_pair`'s POST to `_PUBLISH_ROUTE`, which
+# `datasets_api.doors.publish` authorizes by it), and a component create and
+# revise. apis spends one unit of a per-caller daily card allowance on each
+# create and revise, and exempts a principal holding the publish grant, so
+# without it every conversation through this service shares the one client
+# address's allowance. No other route reads it, so no other call carries it.
 PRINCIPAL_HEADER = "x-dfo-principal"
 
 # Sent only on a revise: the component's write token, which apis checks
@@ -482,6 +484,7 @@ class PlatformAssembler:
                 _COMPONENTS_ROUTE,
                 route=_COMPONENTS_ROUTE,
                 json={"intent": dict(intent), "write_token": write_token},
+                principal=self._publish_principal,
             )
         except PlatformError as exc:
             return self._refusal(exc)
@@ -517,6 +520,7 @@ class PlatformAssembler:
                 path,
                 route=_COMPONENT_ROUTE,
                 json={"intent": dict(patch)},
+                principal=self._publish_principal,
                 headers={WRITE_TOKEN_HEADER: write_token},
             )
         except PlatformError as exc:
@@ -968,9 +972,8 @@ class PlatformAssembler:
                 attempt. The publish call sends its body this way.
             params: Query parameters.
             principal: The `x-dfo-principal` header value, or `None` to send
-                none at all. `None` everywhere except `_ensure_published_pair`'s
-                own publish call -- see `PRINCIPAL_HEADER`'s own comment for
-                why no other call needs it.
+                none at all. Set on the publish call and on a component create
+                and revise only; `PRINCIPAL_HEADER`'s comment says why.
             headers: Further request headers, sent on every attempt.
                 `revise_component` sends `WRITE_TOKEN_HEADER` here.
 

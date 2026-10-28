@@ -3,9 +3,10 @@
     uv run --package analysis_mcp python services/analysis-mcp/tests/runner_record/record.py \\
         <dfo-apis checkout> <scratch dir>
 
-Each round runs the analysis-mcp tests with `RUNNER_RECORD` set, so each request
-with no recorded answer is written with the frames its roots name
-(`runner_replay`). The round's new requests join the accumulated ones in the
+The fixture and the scratch dir's requests are emptied first, so every reply is
+recorded from dfo-apis afresh. Each round runs the analysis-mcp tests with
+`RUNNER_RECORD` set, so each request with no recorded answer is written with the
+frames its roots name (`runner_replay`). The round's new requests join the accumulated ones in the
 scratch dir, `answer.py` answers every one of them in the dfo-apis checkout, and
 the answers replace `fixtures/runner_replies.json`. A request that needs the
 answer to an earlier one, such as a call on the frame a call returned, is first
@@ -117,6 +118,11 @@ def main() -> None:
         workers=args.workers,
     )
     scratch.mkdir(parents=True, exist_ok=True)
+    # Every reply is recorded afresh: a request an old reply answers would be sent
+    # with no new answer, and keep a reply dfo-apis no longer gives.
+    for stale in ("requests.json", "replies.json"):
+        (scratch / stale).unlink(missing_ok=True)
+    suite.fixture.write_text("{}\n")
     for number in range(1, _MAX_ROUNDS + 1):
         added = _round(apis, scratch, suite)
         print(f"round {number}: {added} new request(s)")
