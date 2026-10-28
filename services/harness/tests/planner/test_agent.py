@@ -12910,3 +12910,351 @@ async def test_a_double_count_refusal_names_the_wider_figure_by_its_label(
     assert refused["detail"]["basis"]["step_id"] == _SUM
     # Once naming the input, once as the figure that holds the bilateral flows.
     assert refused["message"].count("bilateral plus core contributions to multilaterals") == 2
+
+
+def _education_block(name: str, *, spec_id: str) -> dict[str, Any]:
+    """`US_2023`'s health part `name` bound to CRS 110, education, in place of
+    health, under `spec_id`: the sector its identity, its resolved slot with the
+    codes the code index widens 110 to, and its sector choice name."""
+    block = json.loads(json.dumps(us_2023_block(name)))
+    block["spec_id"] = spec_id
+    resolved = block["resolved"]
+    for slot in resolved["scope_choices"]["base"]["identity"]["slots"]:
+        if slot["property"] == "crsPurpose":
+            slot["binding"] = {"state": "value", "ref": "CRSPurposeCode110"}
+    for slot in resolved["slots"]:
+        if slot["key"].get("property", {}).get("ref") == "crsPurpose":
+            slot["binding"] = {
+                "kind": "value",
+                "value": {"ref": {"ref": "CRSPurposeCode110"}, "value_kind": "enum_value"},
+            }
+            slot["expansion"] = {
+                "added": [{"ref": "CRSPurposeCode111"}, {"ref": "CRSPurposeCode11110"}]
+            }
+    for choice in resolved["scope_choices"]["choices"]:
+        if choice["axis"] == "sector":
+            option = {
+                **choice["options"][0],
+                "option_id": "sector:110",
+                "binding": {
+                    "kind": "slot",
+                    "slot": "crsPurpose",
+                    "state": "value",
+                    "refs": ["CRSPurposeCode110"],
+                },
+            }
+            choice["options"], choice["active"] = [option], "sector:110"
+    return block
+
+
+_EDUCATION, _EDUCATION_INCLUSIVE = (f"spec_{'8' * 32}", f"spec_{'9' * 32}")
+
+
+def _us_dataset(
+    requirement_id: str, measure: str, pin: str | None, whole_of: WholeOf | None = None
+) -> DatasetRequirement:
+    """US aid of `measure` in 2023, pinned to `pin`, declaring `whole_of` when given."""
+    return DatasetRequirement(
+        id=requirement_id,
+        decision_ids=["measure"],
+        measure=measure,
+        entities=[Entity(name="United States", role="donor")],
+        period=Period(start=2023, end=2023),
+        source_spec_id=pin,
+        whole_of=whole_of,
+    )
+
+
+_FLAGGED_LEAD = "The question asks for the inputs as their datasets count them"
+
+
+@pytest.mark.parametrize(
+    ("wholes", "accepts", "pinned", "compiled", "compare_lead"),
+    [
+        pytest.param(
+            ("dac1_contributions", "dac1_contributions"),
+            (True, True),
+            ("dac1_contributions", "dac1_contributions"),
+            False,
+            None,
+            id="both-accepting-over-dac1",
+        ),
+        pytest.param(
+            (None, "dac1_contributions"),
+            (False, False),
+            ("whole", "whole"),
+            True,
+            None,
+            id="declared-whole-beside-dac1",
+        ),
+        pytest.param(
+            (None, "dac1_contributions"),
+            (False, True),
+            ("whole", "dac1_contributions"),
+            True,
+            _FLAGGED_LEAD,
+            id="declared-whole-beside-accepted-dac1",
+        ),
+        pytest.param(
+            ("dac1_contributions", "whole"),
+            (True, False),
+            ("dac1_contributions", "whole"),
+            False,
+            _FLAGGED_LEAD,
+            id="one-accepting-over-dac1",
+        ),
+    ],
+)
+async def test_comparing_two_shares_keeps_each_shares_own_provider_contract(
+    decision: DecisionFactory,
+    wholes: tuple[str | None, str],
+    accepts: tuple[bool, bool],
+    pinned: tuple[str, str],
+    compiled: bool,
+    compare_lead: str | None,
+) -> None:
+    """US health and education aid each as a share of a total, the two shares
+    compared. The comparison counts numerators with numerators and denominators
+    with denominators, and a share's own contract stands.
+
+    Both shares over the DAC1 total, which counts core contributions to
+    multilaterals, each accepting the provider difference: the positions already
+    match, so the DAC1 total keeps its pin though Search offers DAC1 bilateral ODA
+    beside it, nothing is compiled, and the comparison states no provider
+    difference beside each share's own. The health share over a whole declared
+    from its part, beside the education share over the DAC1 total: the declared
+    whole stands in for its bilateral part, so the DAC1 denominator is compiled
+    bilateral, unless the education share accepts the difference, when its DAC1
+    denominator stays and the comparison states the denominators' difference as
+    the user's request. The health share over the DAC1 total accepting the difference,
+    beside the education share over the CRS bilateral total: the accepted
+    contract stands, nothing moves, and the comparison states the denominators'
+    difference as the user's request."""
+    surface = WholeCompiles()
+    ctx = _FakeToolContext()
+    blocks = {name: _us_block(name) for name in {*wholes, *pinned} - {None}}
+    _show_blocks(
+        ctx,
+        us_2023_block("health"),
+        _education_block("health", spec_id=_EDUCATION),
+        *blocks.values(),
+    )
+
+    def total(requirement_id: str, whole: str | None) -> DatasetRequirement:
+        if whole is None:
+            return _us_dataset(
+                requirement_id, "US total ODA", None, WholeOf(part=_PART, axis="sector")
+            )
+        return _us_dataset(requirement_id, "US total ODA", blocks[whole]["spec_id"])
+
+    def share(requirement_id: str, part: str, whole: str, accept: bool) -> ShareOfRequirement:
+        return ShareOfRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=part),
+            denominator=RequirementSide(input_id=whole),
+            accept_provider_difference=accept,
+        )
+
+    result = await _tools_reading(surface)["propose_plan"].func(
+        question="Was a bigger share of US aid spent on health or on education in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _us_dataset(_PART, "US aid to health", us_2023_block("health")["spec_id"]),
+            _us_dataset("education_crs", "US aid to education", _EDUCATION),
+            total(_WHOLE, wholes[0]),
+            total("total_education", wholes[1]),
+            share(_SHARE, _PART, _WHOLE, accepts[0]),
+            share("share_education", "education_crs", "total_education", accepts[1]),
+            ComparisonRequirement(
+                id=_COMPARE,
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id=_SHARE),
+                subtrahend=RequirementSide(input_id="share_education"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result["outcome"] == Outcome.OK.value, result
+    assert bool(surface.calls) is compiled
+    assert _pins(ctx) == [
+        (_PART, us_2023_block("health")["spec_id"]),
+        ("education_crs", _EDUCATION),
+        (_WHOLE, blocks[pinned[0]]["spec_id"]),
+        ("total_education", blocks[pinned[1]]["spec_id"]),
+    ]
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    stated = [
+        d
+        for d in plan.decisions
+        if d.caveat == "providers_differ" and d.slot in plan.requirement(_COMPARE).decision_ids
+    ]
+    assert [d.rationale.startswith(compare_lead) for d in stated] == (
+        [] if compare_lead is None else [True]
+    )
+
+
+def test_comparing_two_quotients_counts_their_numerators_on_one_basis(
+    decision: DecisionFactory,
+) -> None:
+    """US ODA counted gross per person against UK ODA counted net per person: the
+    comparison reads two quotients, so it counts their numerators on one basis,
+    the first's on a tie, and asks for UK ODA compiled gross."""
+    ctx = _FakeToolContext()
+    population = basis_block(f"spec_{'a' * 32}", narrow=False, active="measure_basis:gross")
+    del population["resolved"]["scope_choices"]
+    _show_blocks(
+        ctx,
+        basis_block(HEALTH, narrow=False, active="measure_basis:gross"),
+        basis_block(TOTAL, narrow=False, active="measure_basis:net"),
+        population,
+    )
+
+    def per_person(requirement_id: str, aid: str) -> QuotientRequirement:
+        return QuotientRequirement(
+            id=requirement_id,
+            decision_ids=["measure"],
+            numerator=RequirementSide(input_id=aid),
+            denominator=RequirementSide(input_id="population"),
+        )
+
+    refused = _tools_by_name()["propose_plan"].func(
+        question="Did the US or the UK give more ODA per person in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _us_dataset("us_oda", "US ODA", HEALTH),
+            _us_dataset("uk_oda", "UK ODA", TOTAL),
+            _us_dataset("population", "Population", population["spec_id"]),
+            per_person("us_per_person", "us_oda"),
+            per_person("uk_per_person", "uk_oda"),
+            ComparisonRequirement(
+                id=_COMPARE,
+                decision_ids=["measure"],
+                minuend=RequirementSide(input_id="us_per_person"),
+                subtrahend=RequirementSide(input_id="uk_per_person"),
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert refused["code"] == ProblemCode.BASES_UNALIGNED.value, refused
+    assert refused["detail"]["realign"] == [
+        {
+            "spec_id": TOTAL,
+            "option_ids": ["measure_basis:gross"],
+            "requirement_id": "uk_oda",
+            "step_id": _COMPARE,
+        }
+    ]
+
+
+def _windowed(block: dict[str, Any], start: int, end: int) -> dict[str, Any]:
+    """`block` with its base identity requested over `start` to `end`."""
+    block["resolved"]["scope_choices"]["base"]["identity"]["requested_window"] = {
+        "kind": "range",
+        "start_year": start,
+        "end_year": end,
+    }
+    return block
+
+
+def _to_recipients(block: dict[str, Any], recipients: list[str]) -> dict[str, Any]:
+    """`block` with its base identity bound to `recipients` as its destination."""
+    block["resolved"]["scope_choices"]["base"]["identity"]["entities"]["destination"] = recipients
+    return block
+
+
+def _inclusive_health(spec_id: str) -> dict[str, Any]:
+    """`US_2023`'s inclusive health part under `spec_id`."""
+    block = json.loads(json.dumps(us_2023_block("health_inclusive")))
+    block["spec_id"] = spec_id
+    return block
+
+
+@pytest.mark.parametrize(
+    ("bilateral", "inclusive", "code"),
+    [
+        pytest.param(
+            lambda b: b,
+            lambda: _education_block("health_inclusive", spec_id=_EDUCATION_INCLUSIVE),
+            Outcome.OK.value,
+            id="disjoint-sectors",
+        ),
+        pytest.param(
+            lambda b: _windowed(b, 2015, 2018),
+            lambda: _windowed(_inclusive_health(_EDUCATION_INCLUSIVE), 2020, 2023),
+            Outcome.OK.value,
+            id="disjoint-years",
+        ),
+        pytest.param(
+            lambda b: _to_recipients(b, ["country/KEN"]),
+            lambda: _to_recipients(_inclusive_health(_EDUCATION_INCLUSIVE), ["country/GHA"]),
+            Outcome.OK.value,
+            id="disjoint-recipients",
+        ),
+        pytest.param(
+            lambda b: b,
+            lambda: _inclusive_health(_EDUCATION_INCLUSIVE),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="one-sector",
+        ),
+        pytest.param(
+            lambda b: _windowed(b, 2015, 2020),
+            lambda: _windowed(_inclusive_health(_EDUCATION_INCLUSIVE), 2020, 2023),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="overlapping-years",
+        ),
+        pytest.param(
+            lambda b: _to_recipients(b, ["country/KEN"]),
+            lambda: _to_recipients(_inclusive_health(_EDUCATION_INCLUSIVE), ["africa"]),
+            ProblemCode.OPERATION_UNSUPPORTED.value,
+            id="a-region-holding-the-recipient",
+        ),
+    ],
+)
+def test_a_sum_accepting_a_provider_difference_counts_flows_twice_only_where_they_meet(
+    decision: DecisionFactory,
+    bilateral: Callable[[dict[str, Any]], dict[str, Any]],
+    inclusive: Callable[[], dict[str, Any]],
+    code: str,
+) -> None:
+    """US bilateral health aid plus US aid with imputed multilateral flows, the sum
+    accepting the provider difference. The inclusive figure holds the bilateral
+    flows only where the two meet on every axis: one donor, a sector, a recipient
+    and a year in common. US bilateral health aid plus US inclusive education aid
+    counts no flow twice and is served; so is a sum over years or recipient
+    countries apart. Over one sector, overlapping years or a region holding the
+    recipient, it is refused."""
+    ctx = _FakeToolContext()
+    left = bilateral(json.loads(json.dumps(us_2023_block("health"))))
+    right = inclusive()
+    _show_blocks(ctx, left, right)
+
+    result = _tools_by_name()["propose_plan"].func(
+        question="US bilateral health aid plus US inclusive aid in 2023?",
+        answer_mode=AnswerMode.COMPUTED,
+        decisions=drafts([decision()]),
+        evidence_requirements=[
+            _us_dataset(_PART, "US bilateral aid to health", left["spec_id"]),
+            _us_dataset("other_aid", "US aid with imputed multilateral", right["spec_id"]),
+            SumOfRequirement(
+                id=_SUM,
+                decision_ids=["measure"],
+                left=RequirementSide(input_id=_PART),
+                right=RequirementSide(input_id="other_aid"),
+                accept_provider_difference=True,
+            ),
+        ],
+        tool_context=ctx,
+    )
+
+    assert result.get("outcome") == code or result.get("code") == code, result
+    if code == Outcome.OK.value:
+        assert _pins(ctx) == [(_PART, left["spec_id"]), ("other_aid", right["spec_id"])]
+    else:
+        assert result["detail"]["basis"]["step_id"] == _SUM
+        assert load_plan(ctx.state) is None

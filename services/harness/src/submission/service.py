@@ -50,8 +50,10 @@ from typing import Annotated, Any, NamedTuple, Protocol, cast
 from compiler.evidence import named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
+    countries_apart,
     measure_named_by_query,
     open_entity_axes_of,
+    slot_codes,
     source_from_spec_block,
 )
 from data_mcp.settings import Settings as DataMcpSettings
@@ -3755,8 +3757,7 @@ class _InputBasis:
     choice, or a carried one, the user's choice earlier in the conversation,
     and the origin's block does not mark the axis as the planner's
     (`harness.scope_choices.PLANNER_AXES_BLOCK_KEY`). `rank` is how narrow the origin's part is (`_part_rank`).
-    `providers` are the donors the origin's part binds on its `origin` role,
-    empty for a part counting every provider.
+    `flows` is where the origin's part's flows lie (`_Flows`).
     """
 
     requirement_id: str
@@ -3765,12 +3766,7 @@ class _InputBasis:
     choice: ScopeChoice
     stated: bool
     rank: int
-    providers: frozenset[str]
-
-    def shares_providers(self, other: _InputBasis) -> bool:
-        """Whether this input and `other` can count one provider's flows: a donor both
-        bind, or a part counting every provider beside any other."""
-        return not self.providers or not other.providers or bool(self.providers & other.providers)
+    flows: _Flows
 
     def label(self, option_id: str) -> str:
         """The reader's label of `option_id` on this input, or the id when the choice lists none."""
@@ -3778,6 +3774,69 @@ class _InputBasis:
             (option.label for option in self.choice.options if option.option_id == option_id),
             option_id,
         )
+
+
+@dataclass(frozen=True)
+class _Flows:
+    """Where one part's flows lie, as its scope record binds them.
+
+    `donors` and `recipients` are the entities the part's base identity binds
+    on its `origin` and `destination` roles, empty for a part counting every
+    one. `sector` is the slot the part's sector choice binds (`axis_slot`)
+    with every code it admits, the codes the code index widened its bound
+    codes to included (`compiler.sources.slot_codes`), `None` when the part
+    binds no sector or its codes are unknown. `years` are the first and last
+    year its identity requests, the last `None` for a window open at its end,
+    and `years` is `None` for a window stating no range.
+    """
+
+    donors: frozenset[str]
+    recipients: frozenset[str]
+    sector: tuple[str, frozenset[str]] | None
+    years: tuple[int, int | None] | None
+
+    @classmethod
+    def of(cls, scope: PartScope, block: Mapping[str, Any] | None) -> _Flows:
+        """The flows of the part `scope` records, `block` its spec block."""
+        identity = scope.base.identity
+        entities = identity.get("entities") or {}
+        slot = axis_slot(scope, "sector")
+        codes = (slot_codes((block or {}).get("resolved") or {}) or {}).get(slot or "")
+        window = identity.get("requested_window") or {}
+        start, end = window.get("start_year"), window.get("end_year")
+        return cls(
+            donors=frozenset(entities.get("origin") or ()),
+            recipients=frozenset(entities.get("destination") or ()),
+            sector=(slot, frozenset(codes)) if slot is not None and codes is not None else None,
+            years=(start, end)
+            if window.get("kind") == "range" and isinstance(start, int)
+            else None,
+        )
+
+    def meet(self, other: _Flows) -> bool:
+        """Whether one flow can lie in both parts: no axis keeps them apart.
+
+        Two parts are apart on donors or recipients when both bind countries
+        alone with none in common (`compiler.sources.countries_apart`), on the
+        sector when both bind one slot to codes sharing none, and on years when
+        both request ranges that share none. Anything a part leaves open or does
+        not state keeps them together.
+        """
+        if countries_apart(self.donors, other.donors) or countries_apart(
+            self.recipients, other.recipients
+        ):
+            return False
+        if (
+            self.sector is not None
+            and other.sector is not None
+            and self.sector[0] == other.sector[0]
+            and self.sector[1].isdisjoint(other.sector[1])
+        ):
+            return False
+        if self.years is None or other.years is None:
+            return True
+        (start, end), (other_start, other_end) = self.years, other.years
+        return (end is None or other_start <= end) and (other_end is None or start <= other_end)
 
 
 def _part_rank(identity: Mapping[str, Any]) -> int:
@@ -3827,7 +3886,7 @@ def _input_bases(
             choice=choice,
             stated=choice.provenance != "default" and axis not in planner_axes(block),
             rank=_part_rank(scope.base.identity),
-            providers=frozenset((scope.base.identity.get("entities") or {}).get("origin") or ()),
+            flows=_Flows.of(scope, block),
         )
     return bases
 
@@ -3885,17 +3944,28 @@ def _aligned_bases(
     (`accept_provider_difference`); a join keeps each input's own
     (`_aligns`). Calculations sharing an input, such as a sum read by a
     share, form one group and take one option for every input any of them
-    reaches (`_shared_basis`): the one the user stated on any of them, else
+    combines (`_shared_basis`): the one the user stated on any of them, else
     the one the narrowest part is counted on (`_part_rank`), the first such
     input in plan order on a tie. A group whose inputs the user stated on
     different options has no one option, and each of its calculations takes
     its own. A sum whose inputs the user stated on different provider
     scopes, or one accepting a provider difference whose inputs are on
-    different scopes, is refused where two of them can count one donor's flows (a
-    donor both bind, or a part counting every provider beside any other),
+    different scopes, is refused where two of them can count one flow
+    (`_Flows.meet`: no donor, recipient, sector or year keeps them apart),
     since an inclusive figure already holds the bilateral one and the sum
     would count it twice. A sum over disjoint donors, such as France's
-    bilateral aid plus Germany's inclusive aid, is served as stated.
+    bilateral aid plus Germany's inclusive aid, or over disjoint sectors, such
+    as US bilateral health aid plus US inclusive education aid, is served as
+    stated.
+
+    A calculation aligns each group of inputs it reads (`_input_groups`). A
+    share or quotient beneath another calculation is one figure, its own
+    inputs left on the options it put them on, except that a calculation over
+    ratios alone aligns their numerators with each other and their
+    denominators with each other. It leaves a position's provider scopes as they stand when a ratio
+    supplying it accepts a provider difference, since that ratio's contract
+    stands. So comparing two shares of the DAC1 total that each accept a
+    provider difference keeps both denominators.
 
     An input already on its options keeps its origin pin. Another is pinned
     to the pin compiled from its origin on the options it moves to, one per
@@ -3964,14 +4034,11 @@ def _aligned_bases(
         axis: _input_bases(aligning, shown=shown, origins=origins, axis=axis)
         for axis in _ALIGNED_AXES
     }
-    reads: dict[str, Sequence[str]] = {
-        input_id: () for requirement in requirements for input_id in inputs_of(requirement)
-    }
-    reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
     steps = [step for step in requirements if len(inputs_of(step)) >= 2]
+    groups = _input_groups(requirements)
     unpinned: dict[str, Unpinned] = {}
     for step in steps:
-        under = reached(step.id, reads)
+        under = set().union(*(group.members for group in groups[step.id]))
         if not any(
             bases.keys() & under for axis, bases in by_axis.items() if _reads_on(step, axis)
         ):
@@ -3993,7 +4060,7 @@ def _aligned_bases(
     if unpinned:
         return _basis_unknown(list(unpinned.values()))
     try:
-        targets = _alignment_targets(steps, reads, by_axis, view=view, proposer=proposer)
+        targets = _alignment_targets(steps, groups, by_axis, view=view, proposer=proposer)
         wanted, realigned = _realigned_pins(targets, by_axis, compiled=compiled)
         if wanted:
             raise _Unservable(_bases_unaligned(wanted, by_axis))
@@ -4015,9 +4082,81 @@ def _aligned_bases(
     ]
 
 
+class _InputGroup(NamedTuple):
+    """Inputs one calculation counts on one option (`_input_groups`).
+
+    `members` are requirement ids, the datasets among them the inputs.
+    `accepted` says a ratio beneath the calculation supplying a member accepts a
+    provider difference (`accept_provider_difference`), so the calculation
+    leaves the group's provider scopes as they stand.
+    """
+
+    members: frozenset[str]
+    accepted: bool = False
+
+
+def _input_groups(requirements: Sequence[EvidenceRequirement]) -> dict[str, list[_InputGroup]]:
+    """The groups of requirements each calculation of `requirements` reading two or
+    more inputs counts on one option, by its id.
+
+    A calculation reads one group: what it reads, and what a calculation it
+    reads reads, down to a share or quotient, which it reads as one figure,
+    its inputs counted as the ratio itself settled them, aligned or accepted
+    as different (`accept_provider_difference`). One whose every input is a
+    ratio, read directly or through calculations reading one input each,
+    whose sides hold no ratio, reads the ratios position by position: their
+    numerators as one group and their denominators as another, each
+    `accepted` when any of those ratios accepts a provider difference. So
+    comparing two shares of one total aligns the numerators with each other
+    and leaves each share's own contract between numerator and denominator
+    standing, and comparing gross ODA per person with net ODA per person
+    counts the two ODA figures on one basis.
+    """
+    ratios = {
+        requirement.id: requirement
+        for requirement in requirements
+        if isinstance(requirement, ShareOfRequirement | QuotientRequirement)
+    }
+    # An input the plan does not state reads nothing here, and `Plan` refuses it.
+    reads: dict[str, Sequence[str]] = {
+        input_id: () for requirement in requirements for input_id in inputs_of(requirement)
+    }
+    reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
+    cut = {node: () if node in ratios else inputs for node, inputs in reads.items()}
+
+    def ratio_of(node: str) -> str | None:
+        """The one ratio `node` is, or reads through calculations reading one input each."""
+        below = reached(node, cut)
+        found = below & ratios.keys()
+        chain = all(len(reads[other]) == 1 for other in below - found)
+        return next(iter(found)) if len(found) == 1 and chain else None
+
+    groups: dict[str, list[_InputGroup]] = {}
+    for step in requirements:
+        inputs = inputs_of(step)
+        if len(inputs) < 2:
+            continue
+        under = [ratios[ratio] for input_id in inputs if (ratio := ratio_of(input_id))]
+        sides = [inputs_of(ratio) for ratio in under]
+        if len(sides) == len(inputs) and not any(
+            reached(side, cut) & ratios.keys() for pair in sides for side in pair
+        ):
+            accepted = any(ratio.accept_provider_difference for ratio in under)
+            groups[step.id] = [
+                _InputGroup(
+                    frozenset().union(*(reached(pair[position], cut) for pair in sides)),
+                    accepted,
+                )
+                for position in (0, 1)
+            ]
+        else:
+            groups[step.id] = [_InputGroup(frozenset(reached(step.id, {**cut, step.id: inputs})))]
+    return groups
+
+
 def _alignment_targets(
     steps: Sequence[EvidenceRequirement],
-    reads: Mapping[str, Sequence[str]],
+    input_groups: Mapping[str, Sequence[_InputGroup]],
     by_axis: Mapping[str, Mapping[str, _InputBasis]],
     *,
     view: SessionView,
@@ -4025,7 +4164,7 @@ def _alignment_targets(
 ) -> dict[tuple[str, str], tuple[str, str]]:
     """The option each input of `steps` is counted on, by its requirement id and axis, with the calculation that wants it (`_aligned_bases`).
 
-    On each axis, the calculations whose inputs share one option
+    Each step counts each of its groups of inputs (`_input_groups`) on one option. On each axis, the calculations whose inputs share one option
     (`_shared_basis`) are joined into connected groups by the inputs they
     share, and each takes its group's option, or its own when the group's
     inputs were stated on different options.
@@ -4039,15 +4178,22 @@ def _alignment_targets(
         for step in steps:
             if not _reads_on(step, axis):
                 continue
-            under = reached(step.id, reads)
-            inputs = [basis for requirement_id, basis in bases.items() if requirement_id in under]
-            if len(inputs) < 2:
-                continue
-            own = _shared_basis(inputs) if _aligns(step, axis) else None
-            if own is not None:
-                aligning.append((step, inputs, own))
-            else:
-                _refuse_double_count(step, axis, inputs, view=view, proposer=proposer)
+            for group in input_groups[step.id]:
+                inputs = [
+                    basis
+                    for requirement_id, basis in bases.items()
+                    if requirement_id in group.members
+                ]
+                if len(inputs) < 2:
+                    continue
+                aligns = _aligns(step, axis) and not (axis == _PROVIDER_AXIS and group.accepted)
+                own = _shared_basis(inputs) if aligns else None
+                if own is not None:
+                    aligning.append((step, inputs, own))
+                else:
+                    _refuse_double_count(
+                        step, axis, inputs, aligns=aligns, view=view, proposer=proposer
+                    )
         groups: list[set[str]] = []
         for _, inputs, _ in aligning:
             joined = {basis.requirement_id for basis in inputs}
@@ -4072,21 +4218,20 @@ def _refuse_double_count(
     axis: str,
     inputs: Sequence[_InputBasis],
     *,
+    aligns: bool,
     view: SessionView,
     proposer: Proposer,
 ) -> None:
     """Refuse a sum whose `inputs`, left on their own options of `axis`, count one
-    provider's flows twice (`_double_counted`): of a sum aligning its inputs,
-    those the user stated, and of one accepting a provider difference, every one.
+    provider's flows twice (`_double_counted`): of a sum that `aligns` them,
+    those the user stated, and of one leaving a provider difference, every one.
 
     Raises:
-        _Unservable: When two such inputs can count one donor's flows.
+        _Unservable: When two such inputs can count one flow (`_Flows.meet`).
     """
     if axis != _PROVIDER_AXIS or not isinstance(step, SumOfRequirement):
         return
-    pair = _double_counted(
-        [basis for basis in inputs if basis.stated] if _aligns(step, axis) else inputs
-    )
+    pair = _double_counted([basis for basis in inputs if basis.stated] if aligns else inputs)
     if pair is None:
         return
     first, other = pair
@@ -4249,8 +4394,8 @@ class _Unservable(Exception):  # noqa: N818 -- carries the refusal `_aligned_bas
 
 def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBasis] | None:
     """The first two inputs of `kept`, the inputs of a sum counted on their own options,
-    that are on different options and can count one provider's flows
-    (`_InputBasis.shares_providers`); `None` when none can.
+    that are on different options and can count one flow (`_Flows.meet`), since
+    every provider scope holds the bilateral flows; `None` when none can.
 
     A sum aligning its inputs keeps those the user stated; one accepting a
     provider difference keeps every input (`_alignment_targets`)."""
@@ -4259,7 +4404,7 @@ def _double_counted(kept: Sequence[_InputBasis]) -> tuple[_InputBasis, _InputBas
             (first, other)
             for index, first in enumerate(kept)
             for other in kept[index + 1 :]
-            if first.choice.active != other.choice.active and first.shares_providers(other)
+            if first.choice.active != other.choice.active and first.flows.meet(other.flows)
         ),
         None,
     )
@@ -4616,7 +4761,10 @@ def _provider_difference_decisions(
 
     Every such calculation (`_PROVIDER_ALIGNED`) has an entry, empty when it
     states none, so a calculation the plan carries is restated as one it
-    states (`_scope_decisions`). One accepting a provider difference, the
+    states (`_scope_decisions`). It reads each group of its inputs
+    (`_input_groups`) apart, and names the inputs of every group that differs:
+    a comparison of two shares compares numerators with numerators and
+    denominators with denominators, each share stating its own. One accepting a provider difference, the
     user having asked for its inputs as each dataset counts them
     (`accept_provider_difference`), states one unless every pinned dataset
     input's scope record holds a provider scope and all match
@@ -4624,7 +4772,10 @@ def _provider_difference_decisions(
     states none may count other providers, since nothing says what it
     counts. Any other states one when two inputs' records hold different
     provider scopes, as when the user set its inputs to different scopes
-    (`_aligned_bases`), whatever an input with no such record counts. The
+    (`_aligned_bases`), whatever an input with no such record counts. A group
+    a ratio beneath supplies under an accepted provider difference
+    (`_InputGroup.accepted`) reads as accepted, and a decision naming one is
+    worded as the user's request. The
     decision says so in reader words, one sentence per input naming what it
     counts, or that its dataset does not
     say (`_provider_sentence`); where that passes the rationale's limit,
@@ -4634,33 +4785,37 @@ def _provider_difference_decisions(
     (`Decision.caveat` `providers_differ`), and is cited by the calculation
     (`_scope_decisions`).
     """
-    # An input the plan does not state reads nothing here, and `Plan` refuses it.
-    reads: dict[str, Sequence[str]] = {
-        input_id: () for requirement in requirements for input_id in inputs_of(requirement)
-    }
-    reads |= {requirement.id: inputs_of(requirement) for requirement in requirements}
+    pinned = [
+        (requirement, block, _provider_option(block))
+        for requirement in requirements
+        if isinstance(requirement, DatasetRequirement) and requirement.source_spec_id is not None
+        for block in [_pin_block(requirement.source_spec_id, shown)]
+    ]
+    groups = _input_groups(requirements)
     decisions: dict[str, tuple[Decision, ...]] = {}
     for step in requirements:
         if not isinstance(step, _PROVIDER_ALIGNED):
             continue
         decisions[step.id] = ()
-        under = reached(step.id, reads)
-        inputs = [
-            (requirement, block, _provider_option(block))
-            for requirement in requirements
-            if isinstance(requirement, DatasetRequirement)
-            and requirement.id in under
-            and requirement.source_spec_id is not None
-            for block in [_pin_block(requirement.source_spec_id, shown)]
-        ]
-        scopes = {provider.provider_scope if provider else None for _, _, provider in inputs}
-        differ = len(scopes - {None}) > 1 or (step.accept_provider_difference and None in scopes)
-        if not differ:
+        differing: set[str] = set()
+        flagged = step.accept_provider_difference
+        for group in groups[step.id]:
+            accepted = step.accept_provider_difference or group.accepted
+            scopes = {
+                provider.provider_scope if provider else None
+                for requirement, _, provider in pinned
+                if requirement.id in group.members
+            }
+            if len(scopes - {None}) > 1 or (accepted and None in scopes):
+                differing |= group.members
+                flagged |= group.accepted
+        inputs = [entry for entry in pinned if entry[0].id in differing]
+        if not inputs:
             continue
         lead = (
             "The question asks for the inputs as their datasets count them, so they may "
             "count different providers' spending."
-            if step.accept_provider_difference
+            if flagged
             else "The inputs are set to different provider scopes, so they count "
             "different providers' spending."
         )
