@@ -26,8 +26,8 @@ from typing import Any
 import pyarrow.parquet as pq
 from analysis_mcp.runner_client import read_derived_file, read_derived_manifest
 from common.materialisation import FrameRef
-from common.materialisation.frame_codec import frame_from_verified_parquet_bytes
 from common.recipe import RECIPE_SCHEMA_VERSION
+from data_mcp.frame_materialisation import _frame_from_parquet_bytes
 from dfo_frame_grammar import Frame
 
 __all__ = ["DerivedFile", "derived_file", "derived_recipe", "holds_rank_positions"]
@@ -45,9 +45,11 @@ class DerivedFile:
     rank_positions: bool
 
     def frame(self) -> Frame:
-        """The frame the file holds, in the canonical frame layout the runner stores
-        (`common.materialisation.frame_codec`). Decodes the whole file."""
-        return frame_from_verified_parquet_bytes(self.data)
+        """The frame the file holds. The runner serves a derived frame as it serves a
+        dataset version, in the frame layout whose `unit` is text, which `get_data`
+        decodes the same way (`data_mcp.frame_materialisation`). Decodes the whole
+        file."""
+        return _frame_from_parquet_bytes(self.data)
 
     def rows(self) -> list[dict[str, Any]]:
         """Every row of `frame`, each as a mapping, as the store's frames give them."""

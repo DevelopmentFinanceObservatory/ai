@@ -9,9 +9,11 @@ over one set of stores, so a derived root finds the recipe of the call that
 returned it. A refusal or a pending root is the analysis door's own body.
 
 A root's frame is recorded under its pair and the columns it is read with, and a
-root read with columns is the frame-layout read `analysis_roots` makes: the
-recorded frame, and a mint record naming the frame pair those columns give
-(`analysis_roots.frame_ref_for`, with no enrichment stamp).
+root read with columns or a groupby is the read `analysis_roots` makes: the
+recorded frame, and a mint record naming the frame pair those columns and that
+groupby give (`analysis_roots.frame_ref_for`, with no enrichment stamp). The
+recorded frame of a groupby root is the dataset version apis summed, which a
+mint record names as the root's dataset, so it is read as recorded.
 
 A GET reads what the calls stored, after every call is answered, as the door
 serving its path answers it: a derived frame's manifest and its Parquet file (`doors.derived`),
@@ -68,6 +70,7 @@ from dfo_frame_grammar import Frame
 from dfo_platform.config import PublicSiteSettings
 from materialise.formats import read_canonical_frame
 from tests.datasets_api._analysis_doubles import FakeRootSource, Stores
+from tests.datasets_api._render_inputs import ENRICHMENT
 
 _DERIVED = re.compile(r"/api/datasets/derived/(ops_\w+)/(ocv_\w+)(/file)?")
 _RECIPE = re.compile(r"/api/datasets/frames/(ops_\w+)/(ocv_\w+)/recipe")
@@ -91,16 +94,26 @@ class _RenderedRoots(FakeRootSource):
     ) -> ResolvedRoot:
         resolved = super().resolve(root, latest=latest, trace_id=trace_id)
         columns = tuple(root.rendering.columns or ())
+        groupby = (
+            root.rendering.groupby.model_dump(mode="json", exclude_none=True)
+            if root.rendering.groupby is not None
+            else None
+        )
         dataset = resolved.dataset
-        if not columns:
+        if not columns and groupby is None:
             return resolved
         frame = frame_ref_for(
             spec_id=dataset.spec_id,
             content_version=dataset.content_version,
             columns=columns,
+            groupby=groupby,
             enrichment_stamp=None,
         )
-        options = {**resolved.record["options"], "columns": list(columns)}
+        options = dict(resolved.record["options"])
+        if columns:
+            options["columns"] = list(columns)
+        if groupby is not None:
+            options["groupby"] = groupby
         record = {**resolved.record, "frame": frame.model_dump(), "options": options}
         return replace(
             resolved,
@@ -145,6 +158,7 @@ def _read(entry: dict[str, Any], *, stores: Stores) -> dict[str, Any]:
         snapshot_reader=stores.snapshot_reader,
         artifact_store=stores.artifact_store,
         recipe_reader=stores.recipe_store,
+        enrichment=ENRICHMENT,
         now=lambda: stores.now,
     )
     try:

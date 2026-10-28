@@ -32,10 +32,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:40eaabca2f872ed77595103ce0cc26f5f63e9eb6e5ff24ed267609cfad9b522e",
+              "digest": "sha256:810ac61c910a52f04f8bc7837b24ea366a38ee573abefd08964437c0faaa65bf",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -245,10 +246,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:5977c3321bd4aae731c35f84a371bebdabd504d58f935b325853488c49606d8e",
+              "digest": "sha256:174cb3e48d4ee2b772ae2930983ae858b384181229c6edf32518d98a1a8535e8",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -454,10 +456,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:40eaabca2f872ed77595103ce0cc26f5f63e9eb6e5ff24ed267609cfad9b522e",
+              "digest": "sha256:810ac61c910a52f04f8bc7837b24ea366a38ee573abefd08964437c0faaa65bf",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -668,10 +671,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:5977c3321bd4aae731c35f84a371bebdabd504d58f935b325853488c49606d8e",
+              "digest": "sha256:174cb3e48d4ee2b772ae2930983ae858b384181229c6edf32518d98a1a8535e8",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -878,10 +882,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:807e0e66a37d89c35c32cdfa7f632cd4a9a1774af99a2948a1120f456bddc8bf",
+              "digest": "sha256:3a357bd6ceb98c47479c6a5236d0b71d83c988fd8ff048dc0d939ce731dbd36d",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -1127,10 +1132,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f86d86a5dd58b1fbbc1c9de3eaa24dcc62232d79ad442b5aa76f645c835a1d87",
+              "digest": "sha256:f1ed1bdbaa9a5079cef91c99e4d27c46989c9a967ad67aaddbf3b32bd107e750",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -1334,10 +1340,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:b779867b37d36b50b68d76a286a57f28dbd3076e2701aa42ba288fa748bb43b2",
+              "digest": "sha256:f43eb2f4d5267e45d761621fcc867fbed35ba9166e1d3c815f84236986e4d691",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -1514,8 +1521,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1540,8 +1547,8 @@
       "status": 422,
       "detail": "rank with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1564,8 +1571,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1624,8 +1631,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -1699,10 +1706,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:75435d4ef5c147a82909b67d62204b5f1eccdcb06c251b19e6c333bcc043cc2a",
+              "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -1868,6 +1876,176 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"rank\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: rank.",
+            "spec": {
+              "spec_id": "ops_66f71c491fefed05da0d54f6d92f0c85",
+              "recipe": {
+                "normal_form_hash": "rnf_944207d2dbfff042b9d68c0969cae531",
+                "replay_key": "rpk_142ebecb2767e0759dd6fd4ad4a28b96"
+              }
+            },
+            "content_version": "ocv_f6aba49087aba446b2ac0a8762c5908f",
+            "output_digest": "out_e790a8bfa0cf02f9dce7500883d904a5",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:63e139323e88f57bd57df2fa4facf6cc9d24bbf0c8291a57bbbc4c10c5172d22",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_a9d07eb8a06005831df7c805d299bb29",
+      "output_digest": "out_e790a8bfa0cf02f9dce7500883d904a5",
+      "summary": {
+        "verb": "rank",
+        "spec_id": "ops_66f71c491fefed05da0d54f6d92f0c85",
+        "content_version": "ocv_f6aba49087aba446b2ac0a8762c5908f",
+        "frame_content_version": "cv_a9d07eb8a06005831df7c805d299bb29",
+        "rows": 2,
+        "role_keys": [
+          "reporter"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2021",
+          "end": "2022",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "ascending": false,
+          "per_period": false,
+          "rank_by": [
+            "reporter"
+          ],
+          "unit": null,
+          "window_end": null,
+          "window_start": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "aggregation": "sum",
+          "window_start": null,
+          "window_end": null,
+          "periods_in_window": [
+            "2021",
+            "2022"
+          ],
+          "expected_cell_count": 4,
+          "present_cell_count": 4,
+          "overall_coverage_fraction": 1.0,
+          "entity_ranks": [
+            {
+              "entity_key": [
+                [
+                  "reporter",
+                  "dcid:NGA"
+                ]
+              ],
+              "value": 43.0,
+              "rank": 1,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2021/2022",
+              "period_count": 2
+            },
+            {
+              "entity_key": [
+                [
+                  "reporter",
+                  "dcid:KEN"
+                ]
+              ],
+              "value": 23.0,
+              "rank": 2,
+              "row_count": 2,
+              "coverage_fraction": 1.0,
+              "time_period": "2021/2022",
+              "period_count": 2
+            }
+          ],
+          "per_period": false,
+          "limit": null,
+          "exclusions": {
+            "records": []
+          },
+          "window_period_count": 2,
+          "private_parties": []
+        }
+      },
+      "rows": 2,
+      "role_keys": [
+        "reporter"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2021",
+        "end": "2022",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"ascending\":false,\"per_period\":false,\"rank_by\":[\"reporter\"]},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"rank\"}}": {
     "status": 200,
     "body": {
@@ -1901,10 +2079,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:75435d4ef5c147a82909b67d62204b5f1eccdcb06c251b19e6c333bcc043cc2a",
+              "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -2103,10 +2282,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f86d86a5dd58b1fbbc1c9de3eaa24dcc62232d79ad442b5aa76f645c835a1d87",
+              "digest": "sha256:f1ed1bdbaa9a5079cef91c99e4d27c46989c9a967ad67aaddbf3b32bd107e750",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -2286,8 +2466,8 @@
       "status": 422,
       "detail": "unit='converted to current prices, pounds sterling' is not one of the units this frame declares: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2365,10 +2545,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:b779867b37d36b50b68d76a286a57f28dbd3076e2701aa42ba288fa748bb43b2",
+              "digest": "sha256:f43eb2f4d5267e45d761621fcc867fbed35ba9166e1d3c815f84236986e4d691",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -2546,8 +2727,8 @@
       "status": 422,
       "detail": "unit='dcid:USDollar per dcid:SquareKilometer' is not one of the units this frame declares: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2610,8 +2791,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2636,8 +2817,8 @@
       "status": 422,
       "detail": "aggregate with aggregation=\"sum\" adds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Retry with aggregation=\"mean\", \"max\" or \"min\". For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2660,8 +2841,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2720,8 +2901,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -2795,10 +2976,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:75435d4ef5c147a82909b67d62204b5f1eccdcb06c251b19e6c333bcc043cc2a",
+              "digest": "sha256:82e1747c4c4b072d436b55d743f3906e97d0020b13ba9b3c31fd9f9accb7363d",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -2966,6 +3148,153 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"aggregate\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: aggregate.",
+            "spec": {
+              "spec_id": "ops_a2ed9dea09ad8076845eb96aa0615f3b",
+              "recipe": {
+                "normal_form_hash": "rnf_201e00b288bbd3e04177e96983122b24",
+                "replay_key": "rpk_1e25cdf57a0216aa515d54e182eafc85"
+              }
+            },
+            "content_version": "ocv_e5ce40f93eeb7d640587ad39b1fb1062",
+            "output_digest": "out_e9be942f25497bfea6327e2afd4d5d54",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:b38390d1f15f362a62aac67dd5b5b33f52b42b37acc52164c983e01ce0ad0ec2",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_cbc0b29d9af2b696140d6d0a15383c9f",
+      "output_digest": "out_e9be942f25497bfea6327e2afd4d5d54",
+      "summary": {
+        "verb": "aggregate",
+        "spec_id": "ops_a2ed9dea09ad8076845eb96aa0615f3b",
+        "content_version": "ocv_e5ce40f93eeb7d640587ad39b1fb1062",
+        "frame_content_version": "cv_cbc0b29d9af2b696140d6d0a15383c9f",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2021",
+          "end": "2022",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "aggregation": "sum",
+          "group_by": [],
+          "unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "realised_coverage_fraction": 1.0,
+          "skipped_cell_count": 0,
+          "expected_cell_count": 1,
+          "present_cell_count": 1,
+          "group_summaries": [
+            {
+              "group_key": [],
+              "value": 66.0,
+              "row_count": 4,
+              "time_period_min": "2021",
+              "time_period_max": "2022",
+              "value_period": null
+            }
+          ],
+          "collapsed_periods": [
+            "2021",
+            "2022"
+          ],
+          "period_label": "2021/2022",
+          "entity_count": null,
+          "period_entities": [
+            [
+              "2021",
+              2
+            ],
+            [
+              "2022",
+              2
+            ]
+          ],
+          "exclusions": {
+            "records": []
+          },
+          "pooled_parties": []
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2021",
+        "end": "2022",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"aggregation\":\"sum\",\"group_by\":[]},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"aggregate\"}}": {
     "status": 200,
     "body": {
@@ -2999,10 +3328,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:05542497fa8eced5f82299c05c4278d5ff65f6f0ac0a12579d3615c04b5d6e9f",
+              "digest": "sha256:4d2f357a4a058c838dde0b5261eb5a91c7ffe48f5fb1e9b47893024b551ef5de",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -3140,10 +3470,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:05542497fa8eced5f82299c05c4278d5ff65f6f0ac0a12579d3615c04b5d6e9f",
+              "digest": "sha256:4d2f357a4a058c838dde0b5261eb5a91c7ffe48f5fb1e9b47893024b551ef5de",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -3246,8 +3577,8 @@
       "status": 422,
       "detail": "rank_by names column(s) this frame has no grain for: ['reporter']. Available: ['reporter'].",
       "code": "role_ambiguous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -3295,10 +3626,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f9f2987d4619efb2cb114d02eca5b2a89c1a030102acebe0c33e64e93e81f59b",
+              "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -3493,10 +3825,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f9f2987d4619efb2cb114d02eca5b2a89c1a030102acebe0c33e64e93e81f59b",
+              "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -3689,10 +4022,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f9f2987d4619efb2cb114d02eca5b2a89c1a030102acebe0c33e64e93e81f59b",
+              "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -3893,10 +4227,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f9f2987d4619efb2cb114d02eca5b2a89c1a030102acebe0c33e64e93e81f59b",
+              "digest": "sha256:6caad7f96cca386bc63ba7225afa28426b6010d5d78fec4cb5b5f893c217e213",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -4068,8 +4403,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -4128,8 +4463,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -4210,10 +4545,11 @@
               }
             ],
             "artifact": {
-              "digest": "sha256:d8914ebac2eef5e7d1f4ff4dfdae1391d2ff14958df584a0f81f9d81c697d8d8",
+              "digest": "sha256:6544abcf368ff968b24f433238e920531847cd8609f748971576b867e6f79463",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -4379,10 +4715,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:878922078e537234aa98d8ebe4b19ba6a19e4f433725e90d1305dbddc19770cd",
+              "digest": "sha256:6a5c5a7307e14c1270c629dd18d4c069f9ccbf8436ed71c55a77e26ea40ad470",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -4556,10 +4893,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:d8914ebac2eef5e7d1f4ff4dfdae1391d2ff14958df584a0f81f9d81c697d8d8",
+              "digest": "sha256:6544abcf368ff968b24f433238e920531847cd8609f748971576b867e6f79463",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -4672,6 +5010,140 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"change\":\"relative\",\"entity_by\":[],\"window_end\":\"2022\",\"window_start\":\"2021\"},\"inputs\":{\"data\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"growth\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: growth.",
+            "spec": {
+              "spec_id": "ops_6099760ba49e5eb2cd8a17fe822a1660",
+              "recipe": {
+                "normal_form_hash": "rnf_0dadb8cc836c30b51ec4a8f9f7c40fd2",
+                "replay_key": "rpk_3e2a81763dc85e453e7942b5068c3ed9"
+              }
+            },
+            "content_version": "ocv_b59420cc3217c4d7721e1803c0a669f5",
+            "output_digest": "out_d6ed8d09e6eaad52e0e995b8ef9c32dd",
+            "roots": [
+              {
+                "spec_id": "spec_6ed209c340c80909036a7a8193656307",
+                "content_version": "cv_6ed209c340c80909036a7a8193656307",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period"
+                    ],
+                    "op": "sum"
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:6ae04dff3c7e48aee54303cdbed5d2aafc74df3ea018cae13ae8e2d8610efb83",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_c593c2bc5f651a394abfc5c8c1ec2792",
+      "output_digest": "out_d6ed8d09e6eaad52e0e995b8ef9c32dd",
+      "summary": {
+        "verb": "growth",
+        "spec_id": "ops_6099760ba49e5eb2cd8a17fe822a1660",
+        "content_version": "ocv_b59420cc3217c4d7721e1803c0a669f5",
+        "frame_content_version": "cv_c593c2bc5f651a394abfc5c8c1ec2792",
+        "rows": 1,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "interval",
+          "start": "2021",
+          "end": "2022",
+          "contiguous": true,
+          "absent": [],
+          "absent_count": 0
+        },
+        "parameters": {
+          "change": "relative",
+          "entity_by": [],
+          "unit": null,
+          "window_end": "2022",
+          "window_start": "2021"
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true,
+          "inherited_stat_var": true
+        },
+        "result": {
+          "resolved_unit": "dcid:USDollar",
+          "facet_selections": [],
+          "warnings": [],
+          "window_start": "2021",
+          "window_end": "2022",
+          "entity_growths": [
+            {
+              "entity_key": [],
+              "value_start": 11.0,
+              "value_end": 12.0,
+              "growth_rate": 0.09090909090909091,
+              "realised_coverage_fraction": 1.0
+            }
+          ],
+          "observed_periods": [
+            "2021",
+            "2022"
+          ],
+          "change": "relative",
+          "exclusions": {
+            "records": []
+          },
+          "entities_left_out": {}
+        }
+      },
+      "rows": 1,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [],
+      "time": {
+        "kind": "interval",
+        "start": "2021",
+        "end": "2022",
+        "contiguous": true,
+        "absent": [],
+        "absent_count": 0
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{\"donor\":\"provider\"},\"denominator_entity\":{},\"numerator_by\":[\"donor\"],\"numerator_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_9d2079074f862093b2144eee5b5700a9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_9d2079074f862093b2144eee5b5700a9\"},\"other\":{\"content_version\":\"cv_19d2fc8defa91c4e5b9b8e65e6f5ee3c\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_19d2fc8defa91c4e5b9b8e65e6f5ee3c\"}},\"verb\":\"share_of\"}}": {
     "status": 200,
     "body": {
@@ -4714,10 +5186,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:99eaadf971dee548f96de87e70fe37367e0f3640c035fe64cd13646f8aae320c",
+              "digest": "sha256:040ea87d2ba0b9f5639807c7ab4eb1aefab83d02dd409a717ea5250e9d3091a0",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -4885,10 +5358,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:d5d3addd6a0521292b2ef31ce146e928331d0292b8db2ec447c468bcd4de4e63",
+              "digest": "sha256:2fe70db785a2b903d4d2d505cde6d4c2c56135581be615425673a886a37b854c",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -5213,10 +5687,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:d754a9e73efcce81f7b7ce3e8c75765d25b68b58b8060bd7c13cb08968e83acd",
+              "digest": "sha256:50ba4941ed38c0954a4c035e1aa37438c63692912f149a2a5a9161d61f44e589",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -5533,10 +6008,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f003794b56579930964ed505bd1f98bd7eff865d71d502baa8e9bdf2020b8d55",
+              "digest": "sha256:f8909ce1c82725d231f44b1753e9da3022e4df037e1cfb2e42e0b16cbfe866ba",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -5862,10 +6338,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:147ab5660ed7216ddf9ca7793ffcfb6c0c6f12f098ce64b7f50ee8f219fde970",
+              "digest": "sha256:ff63a39d0988e41a6e04d0e630a41a4d12c30f524f3c6c2caf87e15666908c78",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -6160,8 +6637,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6187,8 +6664,8 @@
       "status": 422,
       "detail": "The numerator resolved to unit 'dcid:USDollar per Count_Person', a quotient already, and a unit of the form 'X per Y' holds one unit on each side, so it cannot be the numerator part of the result's unit. Retry with a numerator frame_ref that holds a measure in a single unit, such as one of the frames the earlier quotient_of call read.",
       "code": "quotient_of_side_unit_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6212,8 +6689,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6272,8 +6749,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -6356,10 +6833,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:0783722bc210a3ee062e685de5c266148a818666f5f3f7479a32433bd471c57d",
+              "digest": "sha256:c93d8de487338d939b0f488919902ad9f324b9781c3a8732005121458a3dd014",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -6597,10 +7075,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:c1ed85b9b804881aab21a14f9c6cb2c288d904ceca0c38444206dec17d03a91d",
+              "digest": "sha256:84347918ce0c0b178e37243baf40fe5fa380829de8324da4b64e87f65dd56c93",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -6880,10 +7359,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:e98e1ebfbd3b8c0120e2fcee21335c7a94685cc10ba886a1399ed1d05b478a61",
+              "digest": "sha256:cc7ab25365b2610473d2059f625bd0b94c3134a1952c954f76ae21ac62b63740",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -7134,8 +7614,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7161,8 +7641,8 @@
       "status": 422,
       "detail": "The denominator side of share_of sums more than one row for a period, with values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Narrow that side to one entity with denominator_entity, or key the share with numerator_by and denominator_by so each key reads one row, or take a mean, max or min of the figures with aggregate first. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7186,8 +7666,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7246,8 +7726,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `numerator_unit or denominator_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -7285,6 +7765,461 @@
           ]
         }
       }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"quotient_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: quotient_of.",
+            "spec": {
+              "spec_id": "ops_42f9d034601da188403cc6ce2c0fc579",
+              "recipe": {
+                "normal_form_hash": "rnf_a1bc1f8574690fed50a822bff85034e4",
+                "replay_key": "rpk_c8a85171a68ca0d12277326beb34c148"
+              }
+            },
+            "content_version": "ocv_c0b0c31d6621be4c6b231ab2f0487cad",
+            "output_digest": "out_3cf512121331d78d67caf4e1af7873f5",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              },
+              {
+                "spec_id": "spec_6ed209c340c80909036a7a8193656307",
+                "content_version": "cv_6ed209c340c80909036a7a8193656307",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period"
+                    ],
+                    "op": "sum"
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:b93e681ac461ddb38afae2b6a5557d237c393c090734a288df12dc0c88071c52",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_d9a699439b31ef69915c1682a1b58895",
+      "output_digest": "out_3cf512121331d78d67caf4e1af7873f5",
+      "summary": {
+        "verb": "quotient_of",
+        "spec_id": "ops_42f9d034601da188403cc6ce2c0fc579",
+        "content_version": "ocv_c0b0c31d6621be4c6b231ab2f0487cad",
+        "frame_content_version": "cv_d9a699439b31ef69915c1682a1b58895",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "entity_not_selected",
+            "rows": 2,
+            "entities": {
+              "reporter": [
+                "dcid:NGA"
+              ]
+            },
+            "entities_truncated": false,
+            "side": "numerator"
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "denominator_by": {},
+          "denominator_entity": {},
+          "denominator_frame_ref": {
+            "content_version": "cv_4f26ddb34d12b5843c42e384b4ca9971",
+            "spec_id": "spec_6ed209c340c80909036a7a8193656307"
+          },
+          "denominator_unit": null,
+          "numerator_by": [],
+          "numerator_entity": {
+            "reporter": "dcid:KEN"
+          },
+          "numerator_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "stat_var": "dcid:ops_42f9d034601da188403cc6ce2c0fc579",
+          "numerator_stat_var": "dcid:Grants",
+          "denominator_stat_var": "dcid:GrantsAndLoans",
+          "numerator_resolved_unit": "dcid:USDollar",
+          "denominator_resolved_unit": "dcid:USDollar",
+          "unit": {
+            "numerator": "dcid:USDollar",
+            "denominator": "dcid:USDollar"
+          },
+          "facet_selections": [],
+          "numerator_facet_selections": [],
+          "denominator_facet_selections": [],
+          "warnings": [],
+          "numerator_periods": [
+            "2021",
+            "2022"
+          ],
+          "denominator_periods": [
+            "2021",
+            "2022"
+          ],
+          "matched_periods": [
+            "2021",
+            "2022"
+          ],
+          "numerator_coverage_fraction": 1.0,
+          "denominator_coverage_fraction": 1.0,
+          "period_quotients": [
+            {
+              "time_period": "2021",
+              "numerator_value": 11.0,
+              "denominator_value": 11.0,
+              "quotient": 1.0,
+              "key": []
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 12.0,
+              "denominator_value": 12.0,
+              "quotient": 1.0,
+              "key": []
+            }
+          ],
+          "unmatched_keys": [],
+          "keys_without_shared_period": [],
+          "keys_with_zero_denominator": [],
+          "zero_denominator_cells": [],
+          "numerator_only_periods": [],
+          "denominator_only_periods": [],
+          "coverage": {
+            "entities": null,
+            "entities_with_fewer_periods": null,
+            "periods": 2,
+            "period_entities": [
+              [
+                "2021",
+                1
+              ],
+              [
+                "2022",
+                1
+              ]
+            ]
+          },
+          "exclusions": {
+            "records": [
+              {
+                "reason": "entity_not_selected",
+                "row_count": 2,
+                "entities": {
+                  "reporter": [
+                    "dcid:NGA"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": "numerator",
+                "parties": null
+              }
+            ]
+          },
+          "numerator_pooled": [],
+          "denominator_pooled": []
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "entity_not_selected",
+          "rows": 2,
+          "entities": {
+            "reporter": [
+              "dcid:NGA"
+            ]
+          },
+          "entities_truncated": false,
+          "side": "numerator"
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"denominator_by\":{},\"denominator_entity\":{},\"numerator_by\":[],\"numerator_entity\":{\"reporter\":\"dcid:KEN\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"share_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: share_of.",
+            "spec": {
+              "spec_id": "ops_ea5ff8e494daf4aa31c611cd2fe412ad",
+              "recipe": {
+                "normal_form_hash": "rnf_555e0f9b296e697bf0ad1a253b8c1b53",
+                "replay_key": "rpk_f7a4039e5cdfbe4becbe40fe7f2b0edd"
+              }
+            },
+            "content_version": "ocv_b93314f259233168803a415b08fc8fec",
+            "output_digest": "out_96555d27def1b2ac17706fe3347716d5",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              },
+              {
+                "spec_id": "spec_6ed209c340c80909036a7a8193656307",
+                "content_version": "cv_6ed209c340c80909036a7a8193656307",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period"
+                    ],
+                    "op": "sum"
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:257f162ebf67647d2b0bc9571962b98c592e19aff8eba891c644bd8343cdbd63",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_8408b1b2dcc3773c83f49d5bcf0c3ee8",
+      "output_digest": "out_96555d27def1b2ac17706fe3347716d5",
+      "summary": {
+        "verb": "share_of",
+        "spec_id": "ops_ea5ff8e494daf4aa31c611cd2fe412ad",
+        "content_version": "ocv_b93314f259233168803a415b08fc8fec",
+        "frame_content_version": "cv_8408b1b2dcc3773c83f49d5bcf0c3ee8",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "entity_not_selected",
+            "rows": 2,
+            "entities": {
+              "reporter": [
+                "dcid:NGA"
+              ]
+            },
+            "entities_truncated": false,
+            "side": "numerator"
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "denominator_by": {},
+          "denominator_entity": {},
+          "denominator_frame_ref": {
+            "content_version": "cv_4f26ddb34d12b5843c42e384b4ca9971",
+            "spec_id": "spec_6ed209c340c80909036a7a8193656307"
+          },
+          "denominator_unit": null,
+          "numerator_by": [],
+          "numerator_entity": {
+            "reporter": "dcid:KEN"
+          },
+          "numerator_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": {
+          "dimensionless": true
+        },
+        "result": {
+          "stat_var": "dcid:ops_ea5ff8e494daf4aa31c611cd2fe412ad",
+          "numerator_stat_var": "dcid:Grants",
+          "denominator_stat_var": "dcid:GrantsAndLoans",
+          "numerator_resolved_unit": "dcid:USDollar",
+          "denominator_resolved_unit": "dcid:USDollar",
+          "numerator_facet_selections": [],
+          "denominator_facet_selections": [],
+          "warnings": [],
+          "numerator_periods": [
+            "2021",
+            "2022"
+          ],
+          "denominator_periods": [
+            "2021",
+            "2022"
+          ],
+          "matched_periods": [
+            "2021",
+            "2022"
+          ],
+          "numerator_coverage_fraction": 1.0,
+          "denominator_coverage_fraction": 1.0,
+          "period_shares": [
+            {
+              "time_period": "2021",
+              "numerator_value": 11.0,
+              "denominator_value": 11.0,
+              "percent": 100.0,
+              "key": []
+            },
+            {
+              "time_period": "2022",
+              "numerator_value": 12.0,
+              "denominator_value": 12.0,
+              "percent": 100.0,
+              "key": []
+            }
+          ],
+          "unmatched_keys": [],
+          "keys_without_shared_period": [],
+          "numerator_only_periods": [],
+          "denominator_only_periods": [],
+          "coverage": {
+            "entities": null,
+            "entities_with_fewer_periods": null,
+            "periods": 2,
+            "period_entities": [
+              [
+                "2021",
+                1
+              ],
+              [
+                "2022",
+                1
+              ]
+            ]
+          },
+          "exclusions": {
+            "records": [
+              {
+                "reason": "entity_not_selected",
+                "row_count": 2,
+                "entities": {
+                  "reporter": [
+                    "dcid:NGA"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": "numerator",
+                "parties": null
+              }
+            ]
+          },
+          "numerator_pooled": [],
+          "denominator_pooled": []
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "entity_not_selected",
+          "rows": 2,
+          "entities": {
+            "reporter": [
+              "dcid:NGA"
+            ]
+          },
+          "entities_truncated": false,
+          "side": "numerator"
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
     },
     "retry_after": null
   },
@@ -7330,10 +8265,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:956503733d880b4b35a0a4a0ac4ba5e40d7ad621c20445d0faf351f30a6c75e4",
+              "digest": "sha256:0e943842d6b8953b2f06500fe422a6f8e6ebaecfd43729b2b83d10164290111a",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -7527,6 +8463,199 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"join_keys\":[\"reporter\"],\"right_keys\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_c2338a62aa994e624f673541c3847001\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_c2338a62aa994e624f673541c3847001\"}},\"verb\":\"join\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: join.",
+            "spec": {
+              "spec_id": "ops_3893f9232e62d73cd6b87f4a30d6a6c0",
+              "recipe": {
+                "normal_form_hash": "rnf_85b044d692fa0419dc29ccebba53cced",
+                "replay_key": "rpk_0527bc95c1093f7953ac0995c6794256"
+              }
+            },
+            "content_version": "ocv_bb564652e7a8e65b23f617bffa279b79",
+            "output_digest": "out_0ad0bfdfba3ec040f0f235f45cfb23b7",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              },
+              {
+                "spec_id": "spec_c2338a62aa994e624f673541c3847001",
+                "content_version": "cv_c2338a62aa994e624f673541c3847001",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:a02e7461d733a55a5fc2496462cefdb450079f5e06dcd02f2d3ecdf0d49bb377",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_238f1fe623f9c224cbe91dc916901309",
+      "output_digest": "out_0ad0bfdfba3ec040f0f235f45cfb23b7",
+      "summary": {
+        "verb": "join",
+        "spec_id": "ops_3893f9232e62d73cd6b87f4a30d6a6c0",
+        "content_version": "ocv_bb564652e7a8e65b23f617bffa279b79",
+        "frame_content_version": "cv_238f1fe623f9c224cbe91dc916901309",
+        "rows": 8,
+        "role_keys": [
+          "reporter"
+        ],
+        "stat_var_count": 2,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "join_keys": [
+            "reporter"
+          ],
+          "left_unit": null,
+          "right_frame_ref": {
+            "content_version": "cv_97bce805fd846725eee1524214e2b9f7",
+            "spec_id": "spec_c2338a62aa994e624f673541c3847001"
+          },
+          "right_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "left_resolved_unit": "dcid:USDollar",
+          "right_resolved_unit": "dcid:USDollar",
+          "left_facet_selections": [],
+          "right_facet_selections": [],
+          "warnings": [],
+          "join_keys": [
+            "reporter"
+          ],
+          "right_key_columns": [
+            "reporter"
+          ],
+          "matched_keys": [
+            {
+              "key": [
+                [
+                  "reporter",
+                  "dcid:KEN"
+                ]
+              ],
+              "time_period": "2021",
+              "left_value": 11.0,
+              "right_value": 11.0
+            },
+            {
+              "key": [
+                [
+                  "reporter",
+                  "dcid:KEN"
+                ]
+              ],
+              "time_period": "2022",
+              "left_value": 12.0,
+              "right_value": 12.0
+            },
+            {
+              "key": [
+                [
+                  "reporter",
+                  "dcid:NGA"
+                ]
+              ],
+              "time_period": "2021",
+              "left_value": 21.0,
+              "right_value": 21.0
+            },
+            {
+              "key": [
+                [
+                  "reporter",
+                  "dcid:NGA"
+                ]
+              ],
+              "time_period": "2022",
+              "left_value": 22.0,
+              "right_value": 22.0
+            }
+          ],
+          "left_dropped_key_count": 0,
+          "right_dropped_key_count": 0,
+          "left_unmatched_entity_count": 0,
+          "right_unmatched_entity_count": 0,
+          "exclusions": {
+            "records": []
+          }
+        }
+      },
+      "rows": 8,
+      "role_keys": [
+        "reporter"
+      ],
+      "stat_var_count": 2,
+      "exclusions": [],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"join_keys\":[],\"left_unit\":{\"base_year\":2020,\"currency\":\"EUR\",\"prices\":\"constant\"},\"right_keys\":{},\"right_unit\":{\"base_year\":2020,\"currency\":\"EUR\",\"prices\":\"constant\"}},\"inputs\":{\"data\":{\"content_version\":\"cv_3614a36ccd94ee0a4b6a8647019c78a6\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_3614a36ccd94ee0a4b6a8647019c78a6\"},\"other\":{\"content_version\":\"cv_450854b1d188ce80305c924305702830\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_450854b1d188ce80305c924305702830\"}},\"verb\":\"join\"}}": {
     "status": 200,
     "body": {
@@ -7569,10 +8698,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:aec2c12d81737f2cc51c9026bc58b892b63b23a0252712c3247a05861c551a6f",
+              "digest": "sha256:a952dd2392674388215b340760dc8d13cb43eff7121d608e7f73bec0790d1784",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -7832,10 +8962,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:1155b7f466604bc93c263b95b9fa0287d96d85766dab57e116e864ff3bf8e89d",
+              "digest": "sha256:77d8eaad05c49d97d62a67a0d35f3ec1d9ea67c052741f03dfa6bb03fa8a88f4",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -8091,10 +9222,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:73c29370414ea996d733b1546d38e84b5d701d3d69dc7aef1bbb4a93a0000956",
+              "digest": "sha256:129aca6246a410f17cda7f30b105c6dff09045143ab8dc38c6c5fe82c25e8a5e",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -8366,10 +9498,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:a7af60f47aad1a2a080bcc95e44474c0965e1a71b10d84259352d7b3898e7da1",
+              "digest": "sha256:49fa543db40120fbbb6f32cc47ce5d943459ce9e1d4a165dfa155fcdf0fc9dbd",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -8599,8 +9732,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -8693,10 +9826,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:7e6bdebe455c884c47850b8ad5d785a52bd97a3f6e3dba2efe365741fdc2cded",
+              "digest": "sha256:5ce2af1933285a0ded9333f7ccd551a649e8e169c5bdf57ca61b5fc0f54e59cb",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -8851,8 +9985,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -8926,10 +10060,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:11280ad4f5fbc445236fd58cc30e0e1d7bac26e17beec9b01777daec4938ba5b",
+              "digest": "sha256:0ca22bc614ceb01aef16df0bd16f901463da1f089d11ba0ec2bd7d820c7243fd",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -9229,10 +10364,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:738de8d1f5ae1e9cea83b219f2485411e05ef5c5958884d12179e4c729c49c9d",
+              "digest": "sha256:7278ccdaa74fa8d149411115441136d6be87b1e34287c5e42ddc32d59e16a0f0",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -9523,10 +10659,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:6f367bded27b799a734d200dc87a7bbc33f6c9037736bc44f13d55f3ea73d655",
+              "digest": "sha256:aedaa7517ca01d762ce507afc8f24daf36b8dd8aa5a0c0efa958427ebd90211d",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -9822,10 +10959,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:f2a60097a53b7d4928660645e7c6e476cafe0fbf5bcb47b8b2a8df51ff50b690",
+              "digest": "sha256:98c0a829cff894265c265158f9d353068fa98e19830ae183a808ab31d8bc07b7",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -10113,10 +11251,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:fbb7a47afc070987355e845e6a8e6aa8e91968c29654ba02e6f6ebf02db54588",
+              "digest": "sha256:ffdd27594993374a9d3c141cd566e335d4deeb0eb0b88cdc3bb0696a2dc2cfe7",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -10403,8 +11542,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'constant 2020 prices, euros per dcid:SquareKilometer', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10455,10 +11594,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:0868ca0e8c97b6197b6ab923af74587229c0a30141597237457229907bf3d0af",
+              "digest": "sha256:bafecff069b91421f0971e2a80c0a097e8c1336b5f7dec01ce1978fc459fb527",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -10737,8 +11877,8 @@
       "status": 422,
       "detail": "The left side of sum_of holds values in unit 'dcid:USDollar per Count_Person', a quotient, and quotients added together are not a quotient in that unit. Take a mean, max or min of the figures with aggregate. For one figure pooled across entities, total each measure across them first, then divide the totals with quotient_of.",
       "code": "composed_unit_sum_unsupported",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10762,8 +11902,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10822,8 +11962,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['constant 2020 prices, euros per dcid:SquareKilometer', 'dcid:USDollar per Count_Person']. Retry with `left_unit or right_unit` set to one of these values: {\"numerator\": {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, \"denominator\": \"dcid:SquareKilometer\"}, {\"numerator\": \"dcid:USDollar\", \"denominator\": {\"stat_var\": \"dcid:Count_Person\"}}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10882,8 +12022,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10932,8 +12072,8 @@
       "status": 422,
       "detail": "The input frame carries more than one unit: ['converted to constant 2020 prices, euros', 'converted to current prices, US dollars']. Retry with `left_unit or right_unit` set to one of these values: {\"currency\": \"EUR\", \"prices\": \"constant\", \"base_year\": 2020}, {\"currency\": \"USD\", \"prices\": \"current\"}.",
       "code": "unit_heterogeneous",
-      "trace_id": "ea1d9abfd329415e9c552cba38bc51e2",
-      "capability_version": "dset_5d3d776f7e05d422",
+      "trace_id": "2030916da8134340a5e4706df5503166",
+      "capability_version": "dset_b69728663b3d0bb6",
       "retryable": false,
       "retry_mode": "correct_and_retry",
       "fix": {
@@ -10971,6 +12111,423 @@
           ]
         }
       }
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"},\"other\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"compare\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: compare.",
+            "spec": {
+              "spec_id": "ops_64d68b0c01697e8b342ac1b184dd1293",
+              "recipe": {
+                "normal_form_hash": "rnf_628fa145bd8fe602fccd90fa21dd773a",
+                "replay_key": "rpk_6e9ec4d966c11e4b931d0b97391c8395"
+              }
+            },
+            "content_version": "ocv_d6175590ff6997bed57c657edb22d119",
+            "output_digest": "out_0b24df68b5bfd8053fb33507c805a676",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              },
+              {
+                "spec_id": "spec_6ed209c340c80909036a7a8193656307",
+                "content_version": "cv_6ed209c340c80909036a7a8193656307",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period"
+                    ],
+                    "op": "sum"
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:4cb8e1ec777c699b1ff38d590bb0f68277d32ef27163b7b9f8942a46765054c0",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_5cffc301418f7852be4042bfd0df5663",
+      "output_digest": "out_0b24df68b5bfd8053fb33507c805a676",
+      "summary": {
+        "verb": "compare",
+        "spec_id": "ops_64d68b0c01697e8b342ac1b184dd1293",
+        "content_version": "ocv_d6175590ff6997bed57c657edb22d119",
+        "frame_content_version": "cv_5cffc301418f7852be4042bfd0df5663",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "entity_not_selected",
+            "rows": 2,
+            "entities": {
+              "reporter": [
+                "dcid:NGA"
+              ]
+            },
+            "entities_truncated": false,
+            "side": "left"
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "left_entity": {
+            "reporter": "dcid:KEN"
+          },
+          "left_unit": null,
+          "right_entity": {},
+          "right_frame_ref": {
+            "content_version": "cv_4f26ddb34d12b5843c42e384b4ca9971",
+            "spec_id": "spec_6ed209c340c80909036a7a8193656307"
+          },
+          "right_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "stat_var": "dcid:ops_64d68b0c01697e8b342ac1b184dd1293",
+          "left_stat_vars": [
+            "dcid:Grants"
+          ],
+          "right_stat_vars": [
+            "dcid:GrantsAndLoans"
+          ],
+          "left_entities": {
+            "reporter": "dcid:KEN"
+          },
+          "right_entities": {},
+          "left_resolved_unit": "dcid:USDollar",
+          "right_resolved_unit": "dcid:USDollar",
+          "left_facet_selections": [],
+          "right_facet_selections": [],
+          "warnings": [],
+          "left_periods": [
+            "2021",
+            "2022"
+          ],
+          "right_periods": [
+            "2021",
+            "2022"
+          ],
+          "intersected_periods": [
+            "2021",
+            "2022"
+          ],
+          "left_coverage_fraction": 1.0,
+          "right_coverage_fraction": 1.0,
+          "period_comparisons": [
+            {
+              "time_period": "2021",
+              "left_value": 11.0,
+              "right_value": 11.0,
+              "delta": 0.0
+            },
+            {
+              "time_period": "2022",
+              "left_value": 12.0,
+              "right_value": 12.0,
+              "delta": 0.0
+            }
+          ],
+          "exclusions": {
+            "records": [
+              {
+                "reason": "entity_not_selected",
+                "row_count": 2,
+                "entities": {
+                  "reporter": [
+                    "dcid:NGA"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": "left",
+                "parties": null
+              }
+            ]
+          }
+        },
+        "sides": {
+          "data": "right",
+          "other": "left"
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "entity_not_selected",
+          "rows": 2,
+          "entities": {
+            "reporter": [
+              "dcid:NGA"
+            ]
+          },
+          "entities_truncated": false,
+          "side": "left"
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"left_entity\":{\"reporter\":\"dcid:KEN\"},\"right_entity\":{}},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"},\"other\":{\"content_version\":\"cv_6ed209c340c80909036a7a8193656307\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\"],\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_6ed209c340c80909036a7a8193656307\"}},\"verb\":\"sum_of\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: sum_of.",
+            "spec": {
+              "spec_id": "ops_24e83b1897a1e90df18e2910010b5d11",
+              "recipe": {
+                "normal_form_hash": "rnf_55e153c50386110affce6762eed04311",
+                "replay_key": "rpk_b8529d8583b6fb079c417151a619f92d"
+              }
+            },
+            "content_version": "ocv_3dcb22b0c2566a6d3066a28ac3a7d6f3",
+            "output_digest": "out_1f25f4fb25f3f0834e3d18c7aeb07fb8",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              },
+              {
+                "spec_id": "spec_6ed209c340c80909036a7a8193656307",
+                "content_version": "cv_6ed209c340c80909036a7a8193656307",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period"
+                    ],
+                    "op": "sum"
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:9a6bd52708086aa37060d4f1c7d5dfdc0b96a4c75e3fe3823f1a34b5b89cdd19",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_442cef47f45c7c3127083d5a825e38d9",
+      "output_digest": "out_1f25f4fb25f3f0834e3d18c7aeb07fb8",
+      "summary": {
+        "verb": "sum_of",
+        "spec_id": "ops_24e83b1897a1e90df18e2910010b5d11",
+        "content_version": "ocv_3dcb22b0c2566a6d3066a28ac3a7d6f3",
+        "frame_content_version": "cv_442cef47f45c7c3127083d5a825e38d9",
+        "rows": 2,
+        "role_keys": [],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "entity_not_selected",
+            "rows": 2,
+            "entities": {
+              "reporter": [
+                "dcid:NGA"
+              ]
+            },
+            "entities_truncated": false,
+            "side": "left"
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "left_entity": {
+            "reporter": "dcid:KEN"
+          },
+          "left_unit": null,
+          "right_entity": {},
+          "right_frame_ref": {
+            "content_version": "cv_4f26ddb34d12b5843c42e384b4ca9971",
+            "spec_id": "spec_6ed209c340c80909036a7a8193656307"
+          },
+          "right_unit": null
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "stat_var": "dcid:ops_24e83b1897a1e90df18e2910010b5d11",
+          "left_stat_vars": [
+            "dcid:Grants"
+          ],
+          "right_stat_vars": [
+            "dcid:GrantsAndLoans"
+          ],
+          "unit": "dcid:USDollar",
+          "facet_selections": [],
+          "left_facet_selections": [],
+          "right_facet_selections": [],
+          "warnings": [],
+          "left_periods": [
+            "2021",
+            "2022"
+          ],
+          "right_periods": [
+            "2021",
+            "2022"
+          ],
+          "intersected_periods": [
+            "2021",
+            "2022"
+          ],
+          "left_coverage_fraction": 1.0,
+          "right_coverage_fraction": 1.0,
+          "period_sums": [
+            {
+              "time_period": "2021",
+              "left_value": 11.0,
+              "right_value": 11.0,
+              "value": 22.0
+            },
+            {
+              "time_period": "2022",
+              "left_value": 12.0,
+              "right_value": 12.0,
+              "value": 24.0
+            }
+          ],
+          "left_out": [],
+          "exclusions": {
+            "records": [
+              {
+                "reason": "entity_not_selected",
+                "row_count": 2,
+                "entities": {
+                  "reporter": [
+                    "dcid:NGA"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": "left",
+                "parties": null
+              }
+            ]
+          }
+        },
+        "sides": {
+          "data": "left",
+          "other": "right"
+        }
+      },
+      "rows": 2,
+      "role_keys": [],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "entity_not_selected",
+          "rows": 2,
+          "entities": {
+            "reporter": [
+              "dcid:NGA"
+            ]
+          },
+          "entities_truncated": false,
+          "side": "left"
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
     },
     "retry_after": null
   },
@@ -11016,10 +12573,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:ecafd23684699d4210e98afca5aab31b7f7d624c7565fa5b675b736bf3d6593f",
+              "digest": "sha256:e37ba52dd570de639d1d1ba0c351481dd346cbe057d0ee1097b3e8956aa8c178",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -11253,10 +12811,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:e8dd2a8c7dffa333ce79e3164e5cc12431f8919eec907b622a13bf80ec2c5e19",
+              "digest": "sha256:60bcf5c1e5e053f0ef447110d6edbb730c6e9f08b06eb2ff692f83fbc6e564ef",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }
@@ -11541,6 +13100,199 @@
     },
     "retry_after": null
   },
+  "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":20}]},\"inputs\":{\"data\":{\"content_version\":\"cv_7325a5b8c89fe832677653a4074c0cb0\",\"rendering\":{\"columns\":[],\"groupby\":{\"by\":[\"time_period\",\"reporter\"],\"levels\":{\"reporter\":1},\"op\":\"sum\"},\"without_party_totals\":false},\"spec_id\":\"spec_7325a5b8c89fe832677653a4074c0cb0\"}},\"verb\":\"filter\"}}": {
+    "status": 200,
+    "body": {
+      "status": "ready",
+      "ref": {
+        "format_version": 2,
+        "members": [
+          {
+            "parts": [],
+            "sentence": "Computed by DFO: filter.",
+            "spec": {
+              "spec_id": "ops_94a6b07daa67cb374ad0d2868715a6ac",
+              "recipe": {
+                "normal_form_hash": "rnf_bb028f516d418ff1401b1b1523cf5271",
+                "replay_key": "rpk_6f566b71e1ede03579a8ae80a0608719"
+              }
+            },
+            "content_version": "ocv_1b629569fb8a054d490126a943a2216d",
+            "output_digest": "out_d1d13bf1767c119e3ccb379ec6f861f7",
+            "roots": [
+              {
+                "spec_id": "spec_7325a5b8c89fe832677653a4074c0cb0",
+                "content_version": "cv_7325a5b8c89fe832677653a4074c0cb0",
+                "rendering": {
+                  "format": "parquet",
+                  "bundle": false,
+                  "layout": "frame",
+                  "groupby": {
+                    "by": [
+                      "time_period",
+                      "reporter"
+                    ],
+                    "op": "sum",
+                    "levels": {
+                      "reporter": 1
+                    }
+                  }
+                }
+              }
+            ],
+            "execution_identity": "0.9.0|1.1.0|0.2.0",
+            "resolved_periods": [],
+            "artifact": {
+              "digest": "sha256:c8a7372ed955108c15c57e2e4bb2cae78e3ac2aa9353936de0662eb56a983e0d",
+              "rendering": {
+                "format": "parquet",
+                "bundle": false,
+                "layout": "frame"
+              }
+            }
+          }
+        ]
+      },
+      "frame_content_version": "cv_773db7bf376540ce2b2a01b68b261904",
+      "output_digest": "out_d1d13bf1767c119e3ccb379ec6f861f7",
+      "summary": {
+        "verb": "filter",
+        "spec_id": "ops_94a6b07daa67cb374ad0d2868715a6ac",
+        "content_version": "ocv_1b629569fb8a054d490126a943a2216d",
+        "frame_content_version": "cv_773db7bf376540ce2b2a01b68b261904",
+        "rows": 2,
+        "role_keys": [
+          "reporter"
+        ],
+        "stat_var_count": 1,
+        "dropped_key_count": 0,
+        "right_dropped_key_count": 0,
+        "ranked_before_limit": null,
+        "exclusions": [
+          {
+            "reason": "predicate",
+            "rows": 2,
+            "entities": {
+              "reporter": [
+                "dcid:KEN"
+              ]
+            },
+            "entities_truncated": false,
+            "side": null
+          }
+        ],
+        "time": {
+          "kind": "observation"
+        },
+        "parameters": {
+          "predicates": [
+            {
+              "column": "value",
+              "kind": "ordered_threshold",
+              "op": "gte",
+              "value": 20
+            }
+          ]
+        },
+        "execution_identity": {
+          "engine_version": "0.9.0",
+          "frame_grammar_version": "1.1.0",
+          "reduction_policy_version": "0.2.0"
+        },
+        "derived": null,
+        "result": {
+          "total_row_count": 4,
+          "kept_row_count": 2,
+          "dropped_row_count": 2,
+          "kept_row_summaries": [
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Grants"
+                ],
+                [
+                  "reporter",
+                  "dcid:NGA"
+                ],
+                [
+                  "time_period",
+                  "2021"
+                ]
+              ],
+              "value": 21.0,
+              "unit": "dcid:USDollar"
+            },
+            {
+              "row_key": [
+                [
+                  "stat_var",
+                  "dcid:Grants"
+                ],
+                [
+                  "reporter",
+                  "dcid:NGA"
+                ],
+                [
+                  "time_period",
+                  "2022"
+                ]
+              ],
+              "value": 22.0,
+              "unit": "dcid:USDollar"
+            }
+          ],
+          "exclusions": {
+            "records": [
+              {
+                "reason": "predicate",
+                "row_count": 2,
+                "entities": {
+                  "reporter": [
+                    "dcid:KEN"
+                  ]
+                },
+                "entities_truncated": false,
+                "side": null,
+                "parties": null
+              }
+            ]
+          },
+          "units": [
+            "dcid:USDollar"
+          ]
+        }
+      },
+      "rows": 2,
+      "role_keys": [
+        "reporter"
+      ],
+      "stat_var_count": 1,
+      "exclusions": [
+        {
+          "reason": "predicate",
+          "rows": 2,
+          "entities": {
+            "reporter": [
+              "dcid:KEN"
+            ]
+          },
+          "entities_truncated": false,
+          "side": null
+        }
+      ],
+      "time": {
+        "kind": "observation"
+      },
+      "execution_identity": {
+        "engine_version": "0.9.0",
+        "frame_grammar_version": "1.1.0",
+        "reduction_policy_version": "0.2.0"
+      },
+      "resolved_periods": []
+    },
+    "retry_after": null
+  },
   "/api/datasets/analysis {\"latest\":false,\"tree\":{\"arguments\":{\"predicates\":[{\"column\":\"value\",\"kind\":\"ordered_threshold\",\"op\":\"gte\",\"value\":50000000000}]},\"inputs\":{\"data\":{\"content_version\":\"cv_fdf343db22646eac2d6e30d8cac9a5f9\",\"rendering\":{\"columns\":[],\"without_party_totals\":false},\"spec_id\":\"spec_fdf343db22646eac2d6e30d8cac9a5f9\"}},\"verb\":\"filter\"}}": {
     "status": 200,
     "body": {
@@ -11574,10 +13326,11 @@
             "execution_identity": "0.9.0|1.1.0|0.2.0",
             "resolved_periods": [],
             "artifact": {
-              "digest": "sha256:87e8093844576d7c67b96d7c9b84d4cbabeed10d7d0e8efc705c890d511274f1",
+              "digest": "sha256:a6c6eb21d8a230f8f94c5aea49cba5c29b63fd2b8c2cb9f112da43cddf1e29f9",
               "rendering": {
                 "format": "parquet",
-                "bundle": false
+                "bundle": false,
+                "layout": "frame"
               }
             }
           }

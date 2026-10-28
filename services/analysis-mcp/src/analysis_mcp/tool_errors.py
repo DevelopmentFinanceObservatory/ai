@@ -189,9 +189,8 @@ fires when a population's periods are not calendar years, which the frames
 do not change between calls, so it is `do_not_retry`.
 
 `rendering_not_recorded` fires when a `spec_` frame was fetched with an option
-the runner does not read a root with, such as a `breakdown` or a `stat_vars`
-sum (`options.groupby`), so no runner call reproduces that frame. It is
-retryable over a frame fetched without the option, summed with `aggregate`.
+the runner does not read a root with, so no runner call reproduces that frame.
+It is retryable over a frame fetched without the option.
 
 `upstream_error` is a runner refusal under a code this module does not
 define, or an answer the runner could not give: `upstream_code` names the
@@ -1542,8 +1541,8 @@ class ToolRefusal:
             message=(
                 f"The frame spec_id={spec_id!r}, content_version={content_version!r} was "
                 f"fetched with {', '.join(options)}, which the analysis service cannot read "
-                "a frame with. Call get_data for the same data without a breakdown or a "
-                "stat_vars sum, sum it with aggregate if needed, and retry with that frame_ref."
+                "a frame with. Call get_data for the same data without those options and "
+                "retry with that frame_ref."
             ),
             fix={"spec_id": spec_id, "content_version": content_version, "options": list(options)},
         )

@@ -16,10 +16,11 @@ stored recipe. A `spec_` pair is a frame `get_data` registered in the
 materialisation store, whose mint record (`common.materialisation.MintRecord`)
 names the dataset version apis holds and the options it was read with. Its root
 is that version with the rendering the options state: `without_party_totals`,
-and `columns`, the enrichment columns, `[]` when the frame has none. A `spec_`
-pair with no mint record is sent as a version read with no columns. The runner
-reads a root with no other option, so a frame fetched with a `groupby` (a
-`breakdown` or a `stat_vars` sum) refuses `rendering_not_recorded` here.
+`columns`, the enrichment columns, `[]` when the frame has none, and `groupby`
+when the frame was fetched with a `breakdown` or a `stat_vars` sum, which the
+dataset of the mint record is already summed for. A `spec_` pair with no mint
+record is sent as a version read with no columns. The runner reads a root with
+no other option, so a frame fetched with one refuses `rendering_not_recorded`.
 
 `anchor_key` is no part of an op-spec, and the runner checks every rolling
 literal against the latest period it finds itself, so no tree carries one.
@@ -50,8 +51,11 @@ _SECOND_SLOT: Mapping[Verb, str] = {
 }
 
 # The mint options a runner root is read with: data-mcp's frame-layout Parquet, its
-# enrichment columns and the party-total cut (dfo-apis `analysis_roots.dataset_root`).
-_READ_OPTIONS = frozenset({"format", "bundle", "layout", "columns", "without_party_totals"})
+# enrichment columns, the party-total cut and the groupby of a breakdown or a sum
+# (dfo-apis `analysis_roots.dataset_root`).
+_READ_OPTIONS = frozenset(
+    {"format", "bundle", "layout", "columns", "without_party_totals", "groupby"}
+)
 
 type Pair = tuple[str, str]
 
@@ -98,13 +102,13 @@ async def root_node(ref: FrameRef) -> tuple[dict[str, Any], Pair] | ToolRefusal:
             spec_id=ref.spec_id, content_version=ref.content_version, options=unread
         )
     dataset = record.dataset
-    node = {
-        **dataset.model_dump(),
-        "rendering": {
-            "without_party_totals": record.options.get("without_party_totals") is True,
-            "columns": list(record.options.get("columns") or ()),
-        },
+    rendering = {
+        "without_party_totals": record.options.get("without_party_totals") is True,
+        "columns": list(record.options.get("columns") or ()),
     }
+    if (groupby := record.options.get("groupby")) is not None:
+        rendering["groupby"] = groupby
+    node = {**dataset.model_dump(), "rendering": rendering}
     return node, (dataset.spec_id, dataset.content_version)
 
 

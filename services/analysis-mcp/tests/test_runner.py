@@ -30,6 +30,8 @@ _OCV = "ocv_" + "5" * 32
 _FRAME = {"spec_id": _SPEC, "content_version": _CV}
 _DERIVED = {"spec_id": _OPS, "content_version": _OCV}
 _ADDRESS_CALLER = "ip:" + "a" * 32
+_SUM = {"by": ["time_period"], "op": "sum"}
+_BREAKDOWN = {"by": ["time_period", "crsPurpose"], "op": "sum", "levels": {"crsPurpose": 1}}
 
 type Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -185,8 +187,34 @@ def _record(options: dict[str, Any]) -> MintRecord:
                 "rendering": {"without_party_totals": True, "columns": ["observationAbout_type"]},
             },
         ),
+        (
+            _record({"format": "parquet", "groupby": _SUM}),
+            {
+                "spec_id": _SPEC,
+                "content_version": _DATASET_CV,
+                "rendering": {"without_party_totals": False, "columns": [], "groupby": _SUM},
+            },
+        ),
+        (
+            _record(
+                {
+                    "format": "parquet",
+                    "columns": ["observationAbout_type"],
+                    "groupby": _BREAKDOWN,
+                }
+            ),
+            {
+                "spec_id": _SPEC,
+                "content_version": _DATASET_CV,
+                "rendering": {
+                    "without_party_totals": False,
+                    "columns": ["observationAbout_type"],
+                    "groupby": _BREAKDOWN,
+                },
+            },
+        ),
     ],
-    ids=["no-mint-record", "mint-record"],
+    ids=["no-mint-record", "mint-record", "stat-vars-sum", "breakdown-with-columns"],
 )
 async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_names(
     store: InMemoryMaterialisationStore, record: MintRecord | None, root: dict[str, Any]
@@ -199,16 +227,16 @@ async def test_a_get_data_frame_is_sent_as_the_dataset_version_its_mint_record_n
     assert runner.body["tree"]["inputs"] == {"data": root}
 
 
-async def test_a_frame_fetched_with_a_groupby_refuses_before_any_call(
+async def test_a_frame_fetched_with_an_option_the_runner_does_not_read_refuses_before_any_call(
     store: InMemoryMaterialisationStore,
 ) -> None:
-    await store.put_mint_record(_record({"format": "parquet", "groupby": {"stat_var": "sum"}}))
+    await store.put_mint_record(_record({"format": "parquet", "currency": "EUR"}))
     runner = _install(_problem(422, "op_spec_invalid"))
     result = await verbs.aggregate(frame_ref=_FRAME, aggregation="sum")
 
     assert result.structured_content is not None
     assert result.structured_content["code"] == "rendering_not_recorded"
-    assert result.structured_content["fix"]["options"] == ["groupby"]
+    assert result.structured_content["fix"]["options"] == ["currency"]
     assert runner.requests == []
 
 
