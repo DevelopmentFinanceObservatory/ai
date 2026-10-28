@@ -33,6 +33,7 @@ from executor.outcomes import (
     MethodChoiceNeeded,
     RefusalKind,
     Refused,
+    failed_step,
 )
 from executor.run import AnchorRead, execute_approved_plan, read_anchors
 from harness.graph.answer import answer_notes
@@ -2777,7 +2778,7 @@ def _left_out(outcome: Accepted) -> list[tuple[JsonValue, str]]:
         (gap.required, gap.severity.value)
         for record in outcome.evidence
         for gap in record.gaps
-        if gap.code.value == "entity_missing"
+        if gap.code.value == "entity_no_series"
     ]
 
 
@@ -2846,7 +2847,12 @@ async def test_a_step_reading_the_left_out_donor_alone_is_refused_before_any_ver
     assert (outcome.step_id, outcome.requirement_id) == (step_id, "oda")
     assert [
         (issue.code.value, issue.required, issue.severity.value) for issue in outcome.issues
-    ] == [("entity_missing", "Germany", "error")]
+    ] == [("entity_no_series", "Germany", "error")]
+    # The approved source resolves Germany, so the user named it right.
+    failed = failed_step(outcome)
+    assert failed["code"] == "entity_no_series"
+    assert "resolves no entity" not in failed["message"]
+    assert "remedy" not in failed
     assert plan.workflow is not None
     assert [name for name, _ in surface.calls] == ["get_data"] * len(
         plan.workflow.evidence_bindings

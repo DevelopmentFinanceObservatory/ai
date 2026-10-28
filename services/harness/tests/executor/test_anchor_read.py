@@ -333,7 +333,7 @@ async def test_a_rolling_step_reading_a_left_out_entity_alone_stops_the_translat
     assert answer["code"] == ProblemCode.RUN_WOULD_STOP.value, answer
     detail = answer["detail"]
     assert (detail["code"], detail["step_id"], detail["requirement_id"]) == (
-        "entity_missing",
+        "entity_no_series",
         "newest",
         "annual_debt_service",
     )
@@ -396,7 +396,7 @@ async def _fails_its_digest(**_kwargs: Any) -> None:
     [
         (_times_out, "country/KEN", "transport_failed", ReferralKind.SURFACE_UNAVAILABLE),
         (_fails_its_digest, "country/KEN", "step_result_unusable", ReferralKind.INTERNAL_FAILURE),
-        (None, "country/UGA", "entity_missing", ReferralKind.REQUIREMENT_UNMEETABLE),
+        (None, "country/UGA", "entity_no_series", ReferralKind.REQUIREMENT_UNMEETABLE),
     ],
     ids=["transport", "malformed", "shortfall"],
 )

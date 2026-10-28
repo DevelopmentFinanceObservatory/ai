@@ -833,6 +833,10 @@ def plan_done_node(
                 )
                 if _give_plan_back(ctx):
                     lead += " A brief that avoids the failure may be planned once more."
+            if "remedy" in result["failed_step"]:
+                lead += (
+                    " Tell the user what they can do about it, as the failed step's remedy says it."
+                )
         elif hand_back.nothing_chartable:
             lead = (
                 "The approved plan ran, but its result cannot be drawn: tell the user what "

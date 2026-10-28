@@ -724,6 +724,7 @@ _CLASS_CODES: Mapping[FailureClass, frozenset[str]] = {
             "default_facet_undefined",
             "coverage_insufficient",
             "coverage_gaps",
+            "entity_no_series",
             "window_short",
             "scope_window_short",
             "scope_entities_unbound",

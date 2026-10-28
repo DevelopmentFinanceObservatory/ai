@@ -145,15 +145,28 @@ members on a role it leaves open or binds in part) goes under the referral's
 referral's `repair` then names the change that keeps that scope, when the
 pinned source held the side to one group or one entity ("name 'Africa' as
 recipient in `entities` and drop 'recipient' from `across`"). That holds
-only while every requirement reading the pinned one sums the side away. Any
-other reader, such as a rank or a filter, reads the side per member, which
-naming one member cannot answer: the pin gives way, and the referral offers
-the sources found as `candidates`. The pin gives way too on a total a
+only while every requirement reading the pinned one sums the side away, or
+ranks over a side the pin holds to one group's members, where the repair
+names the group with `members: true` so the rank orders them. Any other
+reader, such as a filter or a rank over a side held to one member, reads the
+side per member, which naming one member cannot answer: the pin gives way,
+and the referral offers the sources found as `candidates`. A pin set aside
+for leaving open the side a named entity sits on keeps its scope, whatever
+reads the requirement, on each side it closes that the requirement names no
+party on. The fresh search sends those parties, a source that drops them is
+withheld, and the repair names each in `entities` under its role, as Kenya
+named recipient does for "Japan's ODA" pinned to every donor's aid to Kenya
+(`translator.discovery._kept_columns`,
+`translator.referral.kept_scope_repair`). A side the requirement names a party
+on is its own, so Japan named out of the donors the pin binds is offered
+Japan's aid to Kenya. The pin gives way too on a total a
 `share_of` or `quotient_of` divides by, when its source binds the side to the
 numerator's own members and no others, compared by graph ref: "the United
 States' share of ODA to Kenya" with the total pinned to the United States'
 figure would divide the United States by itself, so the referral offers every
-donor's total and states no repair. A total pinned to a group the numerator
+donor's total and states no repair. That holds for a pin set aside for
+leaving a named side open too: a side whose bound parties the numerator
+names is not kept. A total pinned to a group the numerator
 is one member of keeps its scope, as G7 does in "Germany's share of G7 ODA".
 A total pinned to the numerator's own group is not renamed to that group
 either, so "G7's share of ODA to Kenya" keeps the whole

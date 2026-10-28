@@ -93,6 +93,7 @@ import copy
 import json
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -146,6 +147,7 @@ from planner.plan import (
     save_plan_rounds,
     windowed_pins,
 )
+from planner.records import Severity
 from planner.settings import AgentSettings
 from planner.tool_results import Outcome, ProblemCode
 from planner.workflow import ElectedMeasure
@@ -1368,7 +1370,8 @@ class PlannerSeam:
         The question and the amendment are the user's own words, and a refusal
         carries text from the run that failed. Nothing bounds their length on
         the wire, so each renders cut to `MAX_QUESTION_CHARS`
-        (`planner.plan.cut_user_text`), the size `Plan.question` holds.
+        (`planner.plan.cut_user_text`), the size `Plan.question` holds,
+        except a refusal's errors, which render whole (`_refusal_text`).
 
         `prior_plan` is the plan being changed as the model wrote it
         (`_as_authored`), and renders as a digest, through `_plan_context`. The
@@ -1395,7 +1398,7 @@ class PlannerSeam:
             stop = {key: value for key, value in refusal.items() if key != "computed_asks"}
             ask = (
                 f"\n{_failed_run_sentence(refusal.get('computed_asks'))} "
-                f"Refusal: {cut_user_text(json.dumps(stop), MAX_QUESTION_CHARS)}\n"
+                f"Refusal: {_refusal_text(stop)}\n"
                 f"Call {PROPOSE_PLAN} again with a plan that avoids it.{avoid}\n"
             )
         if not fresh:
@@ -1483,6 +1486,137 @@ def _stop_response(refused: Mapping[str, Any]) -> LlmResponse:
             parts=[types.Part(text=f"Stopping this turn: {refusal_sentence(refused)}")],
         )
     )
+
+
+def _refusal_text(refusal: Mapping[str, Any]) -> str:
+    """`refusal`, a failed run's replan payload, as JSON the planner reads, with every kind of error in it.
+
+    Each `issues` list, the refusal's own and each `also_stopped` entry's,
+    lists its errors first. Past `MAX_QUESTION_CHARS`, the issues that are
+    not errors give way to a count of each code under `warnings_left_out`.
+    Still past it, the rest of the refusal is cut to `MAX_QUESTION_CHARS`
+    (`planner.plan.cut_user_text`) and the errors follow it under `Errors:`
+    (`_errors_listed`), so four `window_short` warnings never push the
+    `entity_missing` errors behind them out of the planner's sight.
+    """
+    split = _split(refusal)
+    ordered = _issues_shown(split, warnings=True)
+    if len(text := json.dumps(ordered)) <= MAX_QUESTION_CHARS:
+        return text
+    summarised = _issues_shown(split, warnings=False)
+    if len(text := json.dumps(summarised)) <= MAX_QUESTION_CHARS:
+        return text
+    stopped = [split, *(one for one in split.also_stopped or () if isinstance(one, _Split))]
+    failing = [
+        {key: issue[key] for key in _ERROR_FIELDS if key in issue}
+        for one in stopped
+        for issue in one.failing
+    ]
+    rest = cut_user_text(
+        json.dumps(_issues_shown(split, warnings=False, errors=False)), MAX_QUESTION_CHARS
+    )
+    return f"{rest}\n{_errors_listed(failing)}" if failing else rest
+
+
+# The fields of an evidence error `_refusal_text` keeps when it lists the errors
+# on their own: what failed, where, and what the plan asked for.
+_ERROR_FIELDS = ("code", "requirement_id", "detail", "required")
+
+# The characters past the first error of each requirement and code that
+# `_errors_listed` fills with further errors before it counts the rest. A
+# grain or coverage error comes once per series, so a retrieval over hundreds
+# of series would otherwise put hundreds of errors in one prompt.
+_ERRORS_BUDGET = 2 * MAX_QUESTION_CHARS
+
+
+def _errors_listed(failing: Sequence[Mapping[str, Any]]) -> str:
+    """The `Errors:` lines of `_refusal_text`: each error whole that the bound allows, and the rest counted.
+
+    The first error of each `(requirement_id, code)` is always listed, so
+    every requirement and every kind of error reaches the planner. Further
+    errors follow in order while the list stays within `_ERRORS_BUDGET`
+    characters past those firsts, and the rest are counted by code under
+    `Errors left out:`.
+    """
+    seen: set[tuple[object, object]] = set()
+    firsts: list[int] = []
+    for index, error in enumerate(failing):
+        key = (error.get("requirement_id"), error.get("code"))
+        if key not in seen:
+            seen.add(key)
+            firsts.append(index)
+    kept = set(firsts)
+    room = _ERRORS_BUDGET
+    for index, error in enumerate(failing):
+        if index in kept:
+            continue
+        size = len(json.dumps(error)) + 2
+        if size > room:
+            break
+        kept.add(index)
+        room -= size
+    listed = [error for index, error in enumerate(failing) if index in kept]
+    left_out = Counter(
+        str(error.get("code")) for index, error in enumerate(failing) if index not in kept
+    )
+    text = f"Errors: {json.dumps(listed)}"
+    return f"{text}\nErrors left out: {json.dumps(dict(left_out))}" if left_out else text
+
+
+@dataclass(frozen=True, slots=True)
+class _Split:
+    """A replan refusal with its evidence issues split once by severity, for `_issues_shown`.
+
+    `failing` holds the issues whose severity is `error` and `others` the
+    rest, each in the refusal's order; both are empty when `issues` is not a
+    list. `also_stopped` holds each `also_stopped` entry split the same way,
+    an entry that is not a dict as it is, and is `None` when the refusal's
+    `also_stopped` is not a list.
+    """
+
+    refusal: Mapping[str, Any]
+    failing: list[Mapping[str, Any]]
+    others: list[Mapping[str, Any]]
+    also_stopped: list[_Split | Any] | None
+
+
+def _split(refusal: Mapping[str, Any]) -> _Split:
+    """`refusal` and each of its `also_stopped`, their issues split by severity in one pass."""
+    failing: list[Mapping[str, Any]] = []
+    others: list[Mapping[str, Any]] = []
+    issues = refusal.get("issues")
+    for issue in issues if isinstance(issues, list) else ():
+        if isinstance(issue, dict):
+            (failing if issue.get("severity") == Severity.ERROR.value else others).append(issue)
+    siblings = refusal.get("also_stopped")
+    return _Split(
+        refusal=refusal,
+        failing=failing,
+        others=others,
+        also_stopped=[_split(one) if isinstance(one, dict) else one for one in siblings]
+        if isinstance(siblings, list)
+        else None,
+    )
+
+
+def _issues_shown(split: _Split, *, warnings: bool, errors: bool = True) -> dict[str, Any]:
+    """`split`'s refusal and each of its `also_stopped` with its issues' errors first, then,
+    when `warnings`, the rest; otherwise the rest counted by code under `warnings_left_out`.
+    Without `errors`, the errors are counted by code under `errors_listed` too."""
+    shown = dict(split.refusal)
+    if "issues" in shown:
+        failing, others = split.failing, split.others
+        shown["issues"] = [*(failing if errors else ()), *(others if warnings else ())]
+        if others and not warnings:
+            shown["warnings_left_out"] = dict(Counter(str(issue.get("code")) for issue in others))
+        if failing and not errors:
+            shown["errors_listed"] = dict(Counter(str(issue.get("code")) for issue in failing))
+    if split.also_stopped is not None:
+        shown["also_stopped"] = [
+            _issues_shown(one, warnings=warnings, errors=errors) if isinstance(one, _Split) else one
+            for one in split.also_stopped
+        ]
+    return shown
 
 
 def _failed_run_sentence(computed: Sequence[int] | None) -> str:

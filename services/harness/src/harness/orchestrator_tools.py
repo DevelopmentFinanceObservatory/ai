@@ -1719,7 +1719,11 @@ def build_orchestrator_tools(
         region as one place. All parts go in one call. A flow measure such
         as aid, donors or recipients needs `role` on each entity in
         `entities`, as spoken. Use `to` for a recipient and `from` for a
-        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. A "by
+        donor. Aid to Kenya is `{"text": "Kenya", "role": "to"}`. Names an
+        earlier turn gave as donors or recipients keep that side when the
+        user points back at them ("those donors"): each goes with `from` or
+        `to`, since search refuses names it cannot place on a side
+        (`role_not_resolved`). A "by
         creditor" or "which donors" question leaves that flow side open in
         `open_roles`. A total across a side leaves it out of `open_roles` and
         names the population the user asked for: "aid to Ethiopia from all

@@ -42,6 +42,7 @@ from executor.classify import ToolFailure
 from executor.completion import FramePublished
 from executor.ledger import InMemoryRunLedger
 from executor.outcomes import (
+    ISSUE_REMEDIES,
     Accepted,
     EvidenceRecord,
     MethodChoiceNeeded,
@@ -2746,6 +2747,36 @@ def test_the_replan_refusal_and_failed_step_maps_cover_every_outcome_kind() -> N
         "tool": None,
         "code": "source_unverified",
         "message": "the source states no provenance",
+    }
+
+    # A stop with every donor named missing. The failed step carries what the
+    # user can do about it, since the code alone says only that the names could
+    # not be resolved.
+    refused_names_missing = Refused(
+        revision="rev1",
+        refusal=RefusalKind.REQUIREMENT_UNMET,
+        detail="requirement 'donor_oda' is not met by what 'get_data' returned",
+        step_id="donor_oda",
+        requirement_id="donor_oda",
+        issues=tuple(
+            EvidenceIssue(
+                code=EvidenceIssueCode.ENTITY_MISSING,
+                severity=Severity.ERROR,
+                requirement_id="donor_oda",
+                detail=f"the source resolves no entity named {name!r}",
+                required=name,
+            )
+            for name in ("United States", "Germany")
+        ),
+    )
+    names_missing = _failed_step(refused_names_missing)
+    assert names_missing.pop("remedy") == ISSUE_REMEDIES[EvidenceIssueCode.ENTITY_MISSING]
+    assert names_missing == {
+        "step_id": "donor_oda",
+        "tool": None,
+        "code": "entity_missing",
+        "message": "the source resolves no entity named 'United States'; the source "
+        "resolves no entity named 'Germany'",
     }
 
 

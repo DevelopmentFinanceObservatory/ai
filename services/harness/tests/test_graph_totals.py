@@ -1006,22 +1006,28 @@ def _finding(code: EvidenceIssueCode, required: str) -> EvidenceIssue:
     ("code", "window", "stated"),
     [
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2015, end=2024),
             ["Uganda has no data from 2015 to 2024 and was left out."],
             id="span",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             Period(start=2024, end=2024),
             ["Uganda has no data in 2024 and was left out."],
             id="one-year",
         ),
         pytest.param(
-            EvidenceIssueCode.ENTITY_MISSING,
+            EvidenceIssueCode.ENTITY_NO_SERIES,
             None,
             ["Uganda has no data in the years retrieved and was left out."],
             id="no-window",
+        ),
+        pytest.param(
+            EvidenceIssueCode.ENTITY_MISSING,
+            Period(start=2015, end=2024),
+            ["Uganda has no data from 2015 to 2024 and was left out."],
+            id="stored-entity-missing-warning",
         ),
         pytest.param(EvidenceIssueCode.WINDOW_SHORT, None, [], id="other-gap"),
     ],
@@ -1147,9 +1153,9 @@ async def test_a_pooled_share_states_the_year_a_recipients_series_ends(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D")],
             [
                 "A's series ends in 2020, B's series ends in 2020, C's series ends in 2020, "
-                "and 1 other series ends before 2024."
+                "and D's series ends in 2020."
             ],
-            id="one-counted",
+            id="a-lone-fourth-is-named-not-counted",
         ),
         pytest.param(
             [_short(name, reach=(2015, 2020)) for name in ("A", "B", "C", "D", "E")],

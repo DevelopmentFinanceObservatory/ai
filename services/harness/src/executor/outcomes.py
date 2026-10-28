@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 
 from common.materialisation import FrameRef
-from compiler.evidence import EvidenceIssue, errors
+from compiler.evidence import EvidenceIssue, EvidenceIssueCode, errors
 from planner.plan import SessionState
 from planner.records import Identifier, Period, SpecId, StrictModel
 from planner.workflow import ToolId
@@ -371,12 +371,27 @@ def stop_cause(outcome: Refused) -> StopCause:
     return StopCause.DATA
 
 
+# What the user can do about a run the evidence check stopped, one sentence
+# written for the end user, by the code of its first error (`failed_step`). A
+# run's `entity_missing` names a party the approved source does not resolve
+# on a side it binds, so the name is the user's to correct. A name on a side
+# it leaves open is refused before approval
+# (`compiler.evidence.named_on_open_axes`), so asking without the names would
+# answer another question. `entity_no_series` has no remedy, since the
+# source resolves the name and the retrieval holds no series for it.
+ISSUE_REMEDIES: dict[EvidenceIssueCode, str] = {
+    EvidenceIssueCode.ENTITY_MISSING: "Ask again with each name as the data lists it",
+}
+
+
 def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> dict[str, Any]:
     """The step a stopped run failed at, as its caller is told it: `step_id`, `tool`, `code` and `message`.
 
     `code` is the run's own: a tool's code when one refused, the specific
     `EvidenceIssueCode` when the evidence check did, `rediscovery_needed` for
-    a source to discover again, and the stop's kind otherwise.
+    a source to discover again, and the stop's kind otherwise. A `remedy`
+    says what the user can do: a tool's own (`_refused_step`), or the one
+    `ISSUE_REMEDIES` gives the evidence check's first error.
     """
     if isinstance(outcome, MethodChoiceNeeded):
         return {
@@ -409,12 +424,15 @@ def failed_step(outcome: MethodChoiceNeeded | RediscoveryNeeded | Refused) -> di
         return _refused_step(step_id=outcome.step_id, failure=outcome.payload)
     if outcome.issues:
         failing = errors(list(outcome.issues)) or list(outcome.issues)
-        return {
+        failed: dict[str, Any] = {
             "step_id": outcome.step_id,
             "tool": None,
             "code": failing[0].code.value,
             "message": "; ".join(issue.detail for issue in failing),
         }
+        if (remedy := ISSUE_REMEDIES.get(failing[0].code)) is not None:
+            failed["remedy"] = remedy
+        return failed
     return {
         "step_id": outcome.step_id,
         "tool": None,

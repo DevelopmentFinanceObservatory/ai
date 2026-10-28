@@ -121,6 +121,57 @@ def test_a_source_resolving_no_entities_is_an_error_when_the_requirement_fails_o
     assert issue.code is EvidenceIssueCode.ENTITY_UNVERIFIED
 
 
+_TEN_DONORS = (
+    "United States",
+    "Germany",
+    "EU Institutions",
+    "United Kingdom",
+    "Japan",
+    "France",
+    "Canada",
+    "Netherlands",
+    "Italy",
+    "Turkey",
+)
+
+
+@pytest.mark.parametrize(
+    ("named", "unverified"),
+    [
+        pytest.param(
+            [Entity(name=name, role="donor") for name in _TEN_DONORS], [], id="every-name-on-it"
+        ),
+        pytest.param(
+            [Entity(name="Japan", role="donor"), Entity(name="Kenya", role="recipient")],
+            ["Kenya"],
+            id="a-name-on-a-closed-side-stays-unverified",
+        ),
+    ],
+)
+def test_a_name_on_a_side_the_source_leaves_open_is_an_error(
+    requirement: RequirementFactory,
+    source: SourceFactory,
+    named: list[Entity],
+    unverified: list[str],
+) -> None:
+    """Ten donors named on a DAC1 source holding all 50 providers open, with no entity
+    resolved. The run resolves each name through the approved source, which binds none,
+    so each is refused before the plan reaches the user."""
+    open_donors = source(
+        entities=(), open_entity_axes=(OpenEntityAxis(column="origin", member_count=50),)
+    )
+
+    issues = check_evidence(requirement(entities=named), evidence_from_source(open_donors))
+
+    on_open_side = [entity.name for entity in named if entity.name not in unverified]
+    assert [(issue.code, issue.required) for issue in errors(issues)] == [
+        (EvidenceIssueCode.ENTITY_MISSING, name) for name in on_open_side
+    ]
+    assert [
+        issue.required for issue in issues if issue.code is EvidenceIssueCode.ENTITY_UNVERIFIED
+    ] == ([unverified] if unverified else [])
+
+
 def test_a_source_stating_no_coverage_leaves_its_data_unverified(
     requirement: RequirementFactory, source: SourceFactory
 ) -> None:
@@ -1233,14 +1284,20 @@ _WIDE = (
     ResolvedEntity(role="destination", ref="country/GHA", label="Ghana"),
 )
 _GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
+# A name the approved source never resolved, and one it resolved whose
+# retrieval holds no series.
+_MISSING = EvidenceIssueCode.ENTITY_MISSING
+_NO_SERIES = EvidenceIssueCode.ENTITY_NO_SERIES
 
 
 @pytest.mark.parametrize(
-    ("named", "on_missing", "approved_entities", "held", "severity"),
+    ("named", "on_missing", "approved_entities", "held", "finding"),
     [
         # Ghana's series stopped before the period: Kenya stands for the
         # debtors named, so the run answers for Kenya and leaves Ghana out.
-        pytest.param(_DEBTORS, "report_gaps", "wide", "KEN", Severity.WARNING, id="left-out"),
+        pytest.param(
+            _DEBTORS, "report_gaps", "wide", "KEN", (_NO_SERIES, Severity.WARNING), id="left-out"
+        ),
         # Kenya and Ghana sit on one column of the approved source, whatever
         # the phrases: "recipient" and "debtor" place on one flow side, and
         # "country" and "economy" on none.
@@ -1249,7 +1306,7 @@ _GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
             "report_gaps",
             "wide",
             "KEN",
-            Severity.WARNING,
+            (_NO_SERIES, Severity.WARNING),
             id="same-side",
         ),
         pytest.param(
@@ -1257,13 +1314,20 @@ _GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
             "report_gaps",
             "wide",
             "KEN",
-            Severity.WARNING,
+            (_NO_SERIES, Severity.WARNING),
             id="unplaced-phrases-one-column",
         ),
-        pytest.param(_DEBTORS, "fail", "wide", "KEN", Severity.ERROR, id="fails-on-gaps"),
+        pytest.param(
+            _DEBTORS, "fail", "wide", "KEN", (_NO_SERIES, Severity.ERROR), id="fails-on-gaps"
+        ),
         # No debtor left to answer for.
         pytest.param(
-            (("Ghana", "debtor"),), "report_gaps", "wide", "KEN", Severity.ERROR, id="none-left"
+            (("Ghana", "debtor"),),
+            "report_gaps",
+            "wide",
+            "KEN",
+            (_NO_SERIES, Severity.ERROR),
+            id="none-left",
         ),
         # Germany remains, on another column.
         pytest.param(
@@ -1271,12 +1335,16 @@ _GERMANY = ResolvedEntity(role="origin", ref="country/DEU", label="Germany")
             "report_gaps",
             "with-germany",
             "DEU",
-            Severity.ERROR,
+            (_NO_SERIES, Severity.ERROR),
             id="other-column",
         ),
         # A name the approved source never resolved is no gap in the data.
-        pytest.param(_DEBTORS, "report_gaps", "kenya", "KEN", Severity.ERROR, id="unresolved"),
-        pytest.param(_DEBTORS, "report_gaps", None, "KEN", Severity.ERROR, id="unapproved"),
+        pytest.param(
+            _DEBTORS, "report_gaps", "kenya", "KEN", (_MISSING, Severity.ERROR), id="unresolved"
+        ),
+        pytest.param(
+            _DEBTORS, "report_gaps", None, "KEN", (_MISSING, Severity.ERROR), id="unapproved"
+        ),
     ],
 )
 def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_one_remains(
@@ -1287,7 +1355,7 @@ def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_on
     on_missing: str,
     approved_entities: str | None,
     held: str,
-    severity: Severity,
+    finding: tuple[EvidenceIssueCode, Severity],
 ) -> None:
     approved = {
         "wide": wide_source(),
@@ -1309,10 +1377,10 @@ def test_a_retrieval_holding_no_series_for_a_named_entity_leaves_it_out_while_on
     )
 
     assert [
-        issue.severity
+        (issue.code, issue.severity)
         for issue in issues
-        if issue.code is EvidenceIssueCode.ENTITY_MISSING and issue.required == "Ghana"
-    ] == [severity]
+        if issue.code in (_MISSING, _NO_SERIES) and issue.required == "Ghana"
+    ] == [finding]
 
 
 def test_a_left_out_entity_with_a_role_and_no_dcid_dumps_its_finding_unchanged(
@@ -1332,7 +1400,7 @@ def test_a_left_out_entity_with_a_role_and_no_dcid_dumps_its_finding_unchanged(
 
     assert [issue.model_dump(mode="json") for issue in found.values()] == [
         {
-            "code": "entity_missing",
+            "code": "entity_no_series",
             "severity": "warning",
             "requirement_id": asked.id,
             "detail": "the retrieval holds no series for 'Ghana', so it is left out",
@@ -3305,7 +3373,9 @@ def test_a_retrieval_meets_a_member_by_the_ref_its_name_resolved_to_at_approval(
     )
 
     assert [
-        issue.required for issue in errors(issues) if issue.code is EvidenceIssueCode.ENTITY_MISSING
+        issue.required
+        for issue in errors(issues)
+        if issue.code is EvidenceIssueCode.ENTITY_NO_SERIES
     ] == missing
 
 
@@ -3422,7 +3492,7 @@ def test_a_retrieval_meets_each_entity_written_alike_by_its_own_rows_ref(
     issues = check_evidence(requirement(entities=asked), _g7_retrieval(*refs), approved=approved)
 
     codes = [issue.code for issue in errors(issues)]
-    assert codes.count(EvidenceIssueCode.ENTITY_MISSING) == missing
+    assert codes.count(EvidenceIssueCode.ENTITY_NO_SERIES) == missing
 
 
 @pytest.mark.parametrize(
@@ -3459,7 +3529,7 @@ def test_each_entity_left_out_is_the_one_pinned_to_the_node_the_retrieval_lacks(
 
     issues = check_evidence(asked, _g7_retrieval(*held), approved=approved)
 
-    gaps = [issue for issue in issues if issue.code is EvidenceIssueCode.ENTITY_MISSING]
+    gaps = [issue for issue in issues if issue.code is EvidenceIssueCode.ENTITY_NO_SERIES]
     assert [gap.severity for gap in gaps] == [Severity.WARNING] * len(left_out)
     found = left_out_entities(asked, _g7_retrieval(*held), approved)
     assert [entity.ref for entity in found] == list(left_out)
